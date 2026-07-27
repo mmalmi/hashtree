@@ -120,6 +120,7 @@ fn test_nostr_index_query_args() {
     let Commands::NostrIndex { command } = cli.command else {
         panic!("expected nostr-index command");
     };
+    let command = *command;
     let NostrIndexCommands::Query {
         root,
         filter,
@@ -156,6 +157,7 @@ fn test_nostr_index_import_args() {
     let Commands::NostrIndex { command } = cli.command else {
         panic!("expected nostr-index command");
     };
+    let command = *command;
     let NostrIndexCommands::Import {
         root,
         events_file,
@@ -167,6 +169,116 @@ fn test_nostr_index_import_args() {
     assert!(root.is_none());
     assert_eq!(events_file, PathBuf::from("ratings.json"));
     assert_eq!(out, Some(PathBuf::from("report.json")));
+}
+
+#[test]
+fn test_nostr_bulk_projection_audit_requires_all_trust_pins_and_output() {
+    assert!(Cli::try_parse_from([
+        "htree",
+        "nostr-index",
+        "audit-bulk-projection",
+        "--staging-data-dir",
+        "/stage",
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from([
+        "htree",
+        "nostr-index",
+        "audit-bulk-projection",
+        "--staging-data-dir",
+        "/stage",
+        "--expected-state-sha256",
+        &"a".repeat(64),
+        "--expected-stage-state-sha256",
+        &"b".repeat(64),
+        "--expected-policy-sha256",
+        &"c".repeat(64),
+        "--expected-full-author-count",
+        "101267",
+        "--out",
+        "/evidence/audit.json",
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from([
+        "htree",
+        "nostr-index",
+        "audit-bulk-projection",
+        "--staging-data-dir",
+        "/stage",
+        "--expected-state-sha256",
+        &"a".repeat(64),
+        "--expected-stage-state-sha256",
+        &"b".repeat(64),
+        "--expected-policy-sha256",
+        &"c".repeat(64),
+        "--profile-rank-decisions-file",
+        "/evidence/ranks.jsonl",
+        "--expected-profile-rank-decisions-file-sha256",
+        &"d".repeat(64),
+        "--profile-rank-decisions-report",
+        "/evidence/ranks-report.json",
+        "--expected-profile-rank-decisions-report-sha256",
+        &"e".repeat(64),
+        "--expected-full-author-count",
+        "101267",
+        "--out",
+        "/evidence/audit.json",
+    ])
+    .is_ok());
+
+    let cli = Cli::try_parse_from([
+        "htree",
+        "nostr-index",
+        "audit-bulk-projection",
+        "--staging-data-dir",
+        "/stage",
+        "--expected-state-sha256",
+        &"a".repeat(64),
+        "--expected-stage-state-sha256",
+        &"b".repeat(64),
+        "--expected-policy-sha256",
+        &"c".repeat(64),
+        "--expected-full-author-count",
+        "101267",
+        "--allow-recovery-tranche",
+        "--out",
+        "/evidence/audit.json",
+    ])
+    .unwrap();
+    let Commands::NostrIndex { command } = cli.command else {
+        panic!("expected nostr-index command");
+    };
+    let command = *command;
+    let NostrIndexCommands::AuditBulkProjection {
+        staging_data_dir,
+        expected_state_sha256,
+        expected_stage_state_sha256,
+        expected_policy_sha256,
+        expected_profile_distance_seal_sha256,
+        profile_rank_decisions_file,
+        expected_profile_rank_decisions_file_sha256,
+        profile_rank_decisions_report,
+        expected_profile_rank_decisions_report_sha256,
+        expected_full_author_count,
+        allow_recovery_tranche,
+        out,
+        ..
+    } = command
+    else {
+        panic!("expected audit-bulk-projection command");
+    };
+    assert_eq!(staging_data_dir, PathBuf::from("/stage"));
+    assert_eq!(expected_state_sha256, "a".repeat(64));
+    assert_eq!(expected_stage_state_sha256, "b".repeat(64));
+    assert_eq!(expected_policy_sha256, "c".repeat(64));
+    assert!(expected_profile_distance_seal_sha256.is_none());
+    assert!(profile_rank_decisions_file.is_none());
+    assert!(expected_profile_rank_decisions_file_sha256.is_none());
+    assert!(profile_rank_decisions_report.is_none());
+    assert!(expected_profile_rank_decisions_report_sha256.is_none());
+    assert_eq!(expected_full_author_count, 101_267);
+    assert!(allow_recovery_tranche);
+    assert_eq!(out, PathBuf::from("/evidence/audit.json"));
 }
 
 #[test]

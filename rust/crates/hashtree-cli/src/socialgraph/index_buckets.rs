@@ -11,6 +11,8 @@ pub(super) struct ProfileIndexBucket {
     pub(super) index: BTree<StorageRouter>,
     pub(super) by_pubkey_root_path: PathBuf,
     pub(super) search_root_path: PathBuf,
+    pub(super) root_pair_commit_path: PathBuf,
+    pub(super) root_pair_lock_path: PathBuf,
 }
 
 impl EventIndexBucket {
@@ -22,6 +24,11 @@ impl EventIndexBucket {
     pub(super) fn write_events_root(&self, root: Option<&Cid>) -> Result<()> {
         let _profile = NostrProfileGuard::new("socialgraph.events_root.write");
         write_root_file(&self.root_path, root)
+    }
+
+    pub(super) fn write_events_root_durable(&self, root: Option<&Cid>) -> Result<()> {
+        let _profile = NostrProfileGuard::new("socialgraph.events_root.write_durable");
+        write_root_file_durable(&self.root_path, root)
     }
 
     pub(super) fn events_root_for_write(&self) -> Result<Option<Cid>> {
@@ -45,11 +52,13 @@ impl EventIndexBucket {
 
     pub(super) fn store_event(&self, root: Option<&Cid>, event: &Event) -> Result<Cid> {
         let stored = stored_event_from_nostr_sdk_event(event);
-        let _profile = NostrProfileGuard::new("socialgraph.event_store.add");
-        block_on(self.event_store.add(root, stored)).map_err(map_event_store_error)
+        let _profile = NostrProfileGuard::new("socialgraph.event_store.build_single");
+        block_on(self.event_store.build(root, std::iter::once(stored)))
+            .map_err(map_event_store_error)?
+            .context("single Nostr event did not produce an event root")
     }
 
-    fn load_event_by_id(&self, root: &Cid, event_id: &str) -> Result<Option<Event>> {
+    pub(super) fn load_event_by_id(&self, root: &Cid, event_id: &str) -> Result<Option<Event>> {
         let stored = block_on(self.event_store.get_by_id(Some(root), event_id))
             .map_err(map_event_store_error)?;
         stored.map(stored_event_to_nostr_event).transpose()
@@ -407,24 +416,164 @@ impl EventIndexBucket {
 }
 
 impl ProfileIndexBucket {
-    pub(super) fn by_pubkey_root(&self) -> Result<Option<Cid>> {
-        let _profile = NostrProfileGuard::new("socialgraph.profile_by_pubkey_root.read");
-        read_root_file(&self.by_pubkey_root_path)
+    #[cfg(test)]
+    pub(super) fn roots(&self) -> Result<(Option<Cid>, Option<Cid>)> {
+        let _transaction = self.acquire_exclusive_root_pair_transaction()?;
+        self.recover_pending_root_pair_commit_locked()?;
+        let db_dir = self.root_pair_lock_path.parent().with_context(|| {
+            format!(
+                "{} has no parent directory",
+                self.root_pair_lock_path.display()
+            )
+        })?;
+        require_no_pending_profile_projection(db_dir)?;
+        self.roots_locked()
     }
 
-    pub(super) fn search_root(&self) -> Result<Option<Cid>> {
-        let _profile = NostrProfileGuard::new("socialgraph.profile_search_root.read");
-        read_root_file(&self.search_root_path)
+    pub(super) fn roots_locked(&self) -> Result<(Option<Cid>, Option<Cid>)> {
+        Ok((
+            read_root_file(&self.by_pubkey_root_path)?,
+            read_root_file(&self.search_root_path)?,
+        ))
     }
 
-    pub(super) fn write_by_pubkey_root(&self, root: Option<&Cid>) -> Result<()> {
-        let _profile = NostrProfileGuard::new("socialgraph.profile_by_pubkey_root.write");
-        write_root_file(&self.by_pubkey_root_path, root)
+    pub(super) fn acquire_exclusive_root_pair_transaction(
+        &self,
+    ) -> Result<ProfileRootPairTransactionGuard> {
+        acquire_profile_root_pair_lock(
+            &self.root_pair_lock_path,
+            ProfileRootPairLockMode::Exclusive,
+            true,
+        )
     }
 
-    pub(super) fn write_search_root(&self, root: Option<&Cid>) -> Result<()> {
-        let _profile = NostrProfileGuard::new("socialgraph.profile_search_root.write");
-        write_root_file(&self.search_root_path, root)
+    pub(super) fn acquire_exclusive_root_pair_transaction_with_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<ProfileRootPairTransactionGuard> {
+        acquire_profile_root_pair_lock_with_timeout(
+            &self.root_pair_lock_path,
+            ProfileRootPairLockMode::Exclusive,
+            true,
+            timeout,
+        )
+    }
+
+    pub(super) async fn acquire_exclusive_root_pair_transaction_async(
+        &self,
+    ) -> Result<ProfileRootPairTransactionGuard> {
+        acquire_profile_root_pair_lock_async(
+            &self.root_pair_lock_path,
+            ProfileRootPairLockMode::Exclusive,
+            true,
+        )
+        .await
+    }
+
+    pub(super) fn recover_pending_root_pair_commit_locked(&self) -> Result<()> {
+        let Some(commit) = load_profile_root_pair_commit(&self.root_pair_commit_path)? else {
+            return Ok(());
+        };
+        install_profile_root_pair_commit_with(
+            &self.by_pubkey_root_path,
+            &self.search_root_path,
+            &self.root_pair_commit_path,
+            &commit,
+            || Ok(()),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_roots(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+    ) -> Result<()> {
+        self.write_roots_with_hooks(by_pubkey_root, search_root, || Ok(()), || Ok(()))
+    }
+
+    #[cfg(test)]
+    fn write_roots_with_hooks<F, G>(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+        after_intent: F,
+        after_search: G,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+        G: FnOnce() -> Result<()>,
+    {
+        let _transaction = self.acquire_exclusive_root_pair_transaction()?;
+        self.write_roots_with_hooks_locked(by_pubkey_root, search_root, after_intent, after_search)
+    }
+
+    pub(super) fn write_roots_with_hooks_locked<F, G>(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+        after_intent: F,
+        after_search: G,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+        G: FnOnce() -> Result<()>,
+    {
+        self.recover_pending_root_pair_commit_locked()?;
+        self.store
+            .force_sync()
+            .map_err(|error| anyhow::anyhow!("force-sync profile index blocks: {error}"))?;
+        let old_by_pubkey = read_root_file(&self.by_pubkey_root_path)?;
+        let old_search = read_root_file(&self.search_root_path)?;
+        let commit = ProfileRootPairCommit {
+            version: PROFILE_ROOT_PAIR_COMMIT_VERSION,
+            old_search: old_search.as_ref().map(stored_cid),
+            old_by_pubkey: old_by_pubkey.as_ref().map(stored_cid),
+            new_search: search_root.map(stored_cid),
+            new_by_pubkey: by_pubkey_root.map(stored_cid),
+        };
+        let bytes = profile_root_pair_commit_bytes(&commit)?;
+        replace_file_durable(
+            &self.root_pair_commit_path,
+            &bytes,
+            "profile root-pair commit",
+        )?;
+        after_intent()?;
+        install_profile_root_pair_commit_with(
+            &self.by_pubkey_root_path,
+            &self.search_root_path,
+            &self.root_pair_commit_path,
+            &commit,
+            after_search,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_roots_interrupted_after_intent(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+    ) -> Result<()> {
+        self.write_roots_with_hooks(
+            by_pubkey_root,
+            search_root,
+            || anyhow::bail!("injected interruption after durable profile root-pair intent"),
+            || Ok(()),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_roots_interrupted_after_search(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+    ) -> Result<()> {
+        self.write_roots_with_hooks(
+            by_pubkey_root,
+            search_root,
+            || Ok(()),
+            || anyhow::bail!("injected interruption after durable profile-search root"),
+        )
     }
 
     fn mirror_profile_event(&self, event: &Event) -> Result<Cid> {
@@ -445,10 +594,12 @@ impl ProfileIndexBucket {
         ))
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn profile_event_for_pubkey(&self, pubkey_hex: &str) -> Result<Option<Event>> {
-        let root = self.by_pubkey_root()?;
-        let Some(cid) = block_on(self.index.get_link(root.as_ref(), pubkey_hex))
+    pub(super) fn profile_event_for_pubkey_at_root(
+        &self,
+        root: Option<&Cid>,
+        pubkey_hex: &str,
+    ) -> Result<Option<Event>> {
+        let Some(cid) = block_on(self.index.get_link(root, pubkey_hex))
             .context("read mirrored profile event cid by pubkey")?
         else {
             return Ok(None);
@@ -456,16 +607,13 @@ impl ProfileIndexBucket {
         self.load_profile_event(&cid)
     }
 
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub(super) fn search_entries_for_prefix(
+    pub(super) fn search_entries_for_prefix_at_root(
         &self,
+        root: &Cid,
         prefix: &str,
     ) -> Result<Vec<(String, StoredProfileSearchEntry)>> {
-        let Some(root) = self.search_root()? else {
-            return Ok(Vec::new());
-        };
         let entries =
-            block_on(self.index.prefix(&root, prefix)).context("query profile search prefix")?;
+            block_on(self.index.prefix(root, prefix)).context("query profile search prefix")?;
         entries
             .into_iter()
             .map(|(key, value)| {
@@ -476,7 +624,7 @@ impl ProfileIndexBucket {
             .collect()
     }
 
-    pub(super) fn rebuild_profile_events_with_distances<'a, I, F>(
+    pub(super) fn rebuild_profile_events_with_distances_locked<'a, I, F>(
         &self,
         events: I,
         mut follow_distance_for_event: F,
@@ -513,7 +661,27 @@ impl ProfileIndexBucket {
         Ok((by_pubkey_root, search_root))
     }
 
-    pub(super) async fn rebuild_profile_events_async_with_distances<'a, I, F>(
+    pub(super) fn rebuild_profile_events_and_commit_with_distances_locked<'a, I, F>(
+        &self,
+        events: I,
+        follow_distance_for_event: F,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = &'a Event>,
+        F: FnMut(&Event) -> Result<Option<u32>>,
+    {
+        self.recover_pending_root_pair_commit_locked()?;
+        let (by_pubkey_root, search_root) =
+            self.rebuild_profile_events_with_distances_locked(events, follow_distance_for_event)?;
+        self.write_roots_with_hooks_locked(
+            by_pubkey_root.as_ref(),
+            search_root.as_ref(),
+            || Ok(()),
+            || Ok(()),
+        )
+    }
+
+    pub(super) async fn rebuild_profile_events_async_with_distances_locked<'a, I, F>(
         &self,
         events: I,
         mut follow_distance_for_event: F,
@@ -561,11 +729,57 @@ impl ProfileIndexBucket {
         Ok((by_pubkey_root, search_root))
     }
 
-    pub(super) fn update_profile_events(
+    pub(super) async fn rebuild_profile_events_async_and_commit_with_distances_locked<'a, I, F>(
+        &self,
+        events: I,
+        follow_distance_for_event: F,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = &'a Event>,
+        F: FnMut(&Event) -> Result<Option<u32>>,
+    {
+        self.recover_pending_root_pair_commit_locked()?;
+        let (by_pubkey_root, search_root) = self
+            .rebuild_profile_events_async_with_distances_locked(events, follow_distance_for_event)
+            .await?;
+        self.write_roots_with_hooks_locked(
+            by_pubkey_root.as_ref(),
+            search_root.as_ref(),
+            || Ok(()),
+            || Ok(()),
+        )
+    }
+
+    pub(super) fn update_profile_events_and_commit_locked(
+        &self,
+        updates: &[(&Event, Option<u32>, bool, bool)],
+    ) -> Result<bool> {
+        if updates.is_empty() {
+            return Ok(false);
+        }
+        self.recover_pending_root_pair_commit_locked()?;
+        let (by_pubkey_root, search_root) = self.roots_locked()?;
+        let (next_by_pubkey_root, next_search_root, changed) = self.update_profile_events_locked(
+            by_pubkey_root.as_ref(),
+            search_root.as_ref(),
+            updates,
+        )?;
+        if changed {
+            self.write_roots_with_hooks_locked(
+                next_by_pubkey_root.as_ref(),
+                next_search_root.as_ref(),
+                || Ok(()),
+                || Ok(()),
+            )?;
+        }
+        Ok(changed)
+    }
+
+    pub(super) fn update_profile_events_locked(
         &self,
         by_pubkey_root: Option<&Cid>,
         search_root: Option<&Cid>,
-        updates: &[(&Event, Option<u32>, bool)],
+        updates: &[(&Event, Option<u32>, bool, bool)],
     ) -> Result<(Option<Cid>, Option<Cid>, bool)> {
         if updates.is_empty() {
             return Ok((by_pubkey_root.cloned(), search_root.cloned(), false));
@@ -573,7 +787,7 @@ impl ProfileIndexBucket {
 
         let pubkeys = updates
             .iter()
-            .map(|(event, _, _)| event.pubkey.to_hex())
+            .map(|(event, _, _, _)| event.pubkey.to_hex())
             .collect::<Vec<_>>();
         let existing_cids = block_on(self.index.get_links(by_pubkey_root, pubkeys))
             .context("lookup existing mirrored profile events")?;
@@ -588,7 +802,7 @@ impl ProfileIndexBucket {
         let mut by_pubkey_changes = BTreeMap::<String, Option<Cid>>::new();
         let mut search_changes = BTreeMap::<String, Option<String>>::new();
 
-        for (event, follow_distance, remove) in updates {
+        for (event, follow_distance, remove, force_existing_search_value) in updates {
             let pubkey = event.pubkey.to_hex();
             let existing_event = match existing_cids.get(&pubkey) {
                 Some(cid) => self.load_profile_event(cid)?,
@@ -608,18 +822,28 @@ impl ProfileIndexBucket {
                 continue;
             }
 
-            if existing_event
+            let existing_order = existing_event
                 .as_ref()
-                .is_some_and(|current| compare_nostr_events(event, current).is_le())
+                .map(|current| compare_nostr_events(event, current));
+            if existing_order.is_some_and(std::cmp::Ordering::is_lt)
+                || (existing_order.is_some_and(std::cmp::Ordering::is_eq)
+                    && !force_existing_search_value)
             {
                 continue;
             }
-
-            let bytes = event.as_json().into_bytes();
-            let mirrored_cid = block_on(buffered_tree.put_file(&bytes))
-                .map(|(cid, _size)| cid)
-                .context("buffer mirrored profile event")?;
-            by_pubkey_changes.insert(pubkey.clone(), Some(mirrored_cid.clone()));
+            let mirrored_cid = if existing_order.is_some_and(std::cmp::Ordering::is_eq) {
+                existing_cids
+                    .get(&pubkey)
+                    .cloned()
+                    .context("existing profile event has no mirrored CID")?
+            } else {
+                let bytes = event.as_json().into_bytes();
+                let mirrored_cid = block_on(buffered_tree.put_file(&bytes))
+                    .map(|(cid, _size)| cid)
+                    .context("buffer mirrored profile event")?;
+                by_pubkey_changes.insert(pubkey.clone(), Some(mirrored_cid.clone()));
+                mirrored_cid
+            };
             if let Some(current) = existing_event.as_ref() {
                 for term in profile_search_terms_for_event(current) {
                     search_changes.insert(format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}"), None);
@@ -679,7 +903,7 @@ fn cid_to_nhash(cid: &Cid) -> Result<String> {
     .context("encode mirrored profile event nhash")
 }
 
-fn build_profile_search_entry(
+pub(super) fn build_profile_search_entry(
     event: &Event,
     mirrored_cid: &Cid,
     follow_distance: Option<u32>,

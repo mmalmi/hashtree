@@ -471,7 +471,7 @@ pub(crate) enum Commands {
     /// Query local hashtree-backed Nostr event indexes
     NostrIndex {
         #[command(subcommand)]
-        command: NostrIndexCommands,
+        command: Box<NostrIndexCommands>,
     },
 
     /// Follow a user (adds to your contact list)
@@ -1070,6 +1070,153 @@ pub(crate) enum NostrIndexCommands {
         #[arg(long, default_value_t = 100)]
         limit: usize,
         /// Output path (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
+    /// Exhaustively audit a completed bulk projection using read-only live-data views
+    AuditBulkProjection {
+        /// Durable staging directory whose exact frozen state produced the candidate
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Required CAS pin for nostr-index/bulk-projection-v2/state.json
+        #[arg(long = "expected-state-sha256")]
+        expected_state_sha256: String,
+        /// Required CAS pin for nostr-stage/crawl-state.json
+        #[arg(long = "expected-stage-state-sha256")]
+        expected_stage_state_sha256: String,
+        /// Required SHA-256 of canonical JSON for the trusted crawl policy
+        #[arg(long = "expected-policy-sha256")]
+        expected_policy_sha256: String,
+        /// Optional additional pin for the retained v2 profile-distance seal
+        #[arg(long = "expected-profile-distance-seal-sha256")]
+        expected_profile_distance_seal_sha256: Option<String>,
+        /// Canonical profile-search v3 rank-decisions JSONL
+        #[arg(
+            long = "profile-rank-decisions-file",
+            required_unless_present = "allow_recovery_tranche"
+        )]
+        profile_rank_decisions_file: Option<PathBuf>,
+        /// Exact SHA-256 of the rank-decisions JSONL bytes
+        #[arg(
+            long = "expected-profile-rank-decisions-file-sha256",
+            required_unless_present = "allow_recovery_tranche"
+        )]
+        expected_profile_rank_decisions_file_sha256: Option<String>,
+        /// Profile-search v3 rank-decision provenance report
+        #[arg(
+            long = "profile-rank-decisions-report",
+            required_unless_present = "allow_recovery_tranche"
+        )]
+        profile_rank_decisions_report: Option<PathBuf>,
+        /// Exact SHA-256 of the rank-decision report bytes
+        #[arg(
+            long = "expected-profile-rank-decisions-report-sha256",
+            required_unless_present = "allow_recovery_tranche"
+        )]
+        expected_profile_rank_decisions_report_sha256: Option<String>,
+        /// Trusted complete allowlist author count
+        #[arg(long = "expected-full-author-count")]
+        expected_full_author_count: usize,
+        /// Permit a non-cutover internal recovery-tranche audit
+        #[arg(long = "allow-recovery-tranche")]
+        allow_recovery_tranche: bool,
+        /// B-tree order used by the bulk projection
+        #[arg(long, default_value_t = 64)]
+        btree_order: usize,
+        /// Maximum exact key/CID rows read per parity page
+        #[arg(long, default_value_t = 4096)]
+        page_size: usize,
+        /// Number of real events compared for each deterministic list query
+        #[arg(long, default_value_t = 32)]
+        query_limit: usize,
+        /// New absolute output path outside both audited data trees
+        #[arg(long, short)]
+        out: PathBuf,
+    },
+    /// Pin an audited v2 candidate and rotate into crash-safe v3 append mode
+    PrepareBulkTranche {
+        /// Durable staging directory containing the immutable author segments
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Exact ordered author allowlist used by the pinned crawl policy
+        #[arg(long = "eligible-authors")]
+        eligible_authors: PathBuf,
+        /// Required CAS pin for nostr-index/bulk-projection-v2/state.json
+        #[arg(long = "expected-v2-state-sha256")]
+        expected_v2_state_sha256: String,
+        /// Required CAS pin for nostr-stage/crawl-state.json
+        #[arg(long = "expected-stage-state-sha256")]
+        expected_stage_state_sha256: String,
+        /// Exhaustive audit JSON for the exact terminal v2 candidate
+        #[arg(long = "audit-evidence")]
+        audit_evidence: PathBuf,
+        /// Canonical Iris Social profile rank-decisions JSONL
+        #[arg(long = "profile-rank-decisions-file")]
+        profile_rank_decisions_file: PathBuf,
+        /// Exact SHA-256 of the profile rank-decisions JSONL bytes
+        #[arg(long = "expected-profile-rank-decisions-file-sha256")]
+        expected_profile_rank_decisions_file_sha256: String,
+        /// Canonical Iris Social rank-decisions provenance report
+        #[arg(long = "profile-rank-decisions-report")]
+        profile_rank_decisions_report: PathBuf,
+        /// Exact SHA-256 of the profile rank-decisions report bytes
+        #[arg(long = "expected-profile-rank-decisions-report-sha256")]
+        expected_profile_rank_decisions_report_sha256: String,
+        /// Actual root resolved from the externally serving network event
+        #[arg(long = "serving-root")]
+        serving_root: String,
+        /// Exact signed externally resolved serving event JSON
+        #[arg(long = "serving-event")]
+        serving_event: PathBuf,
+        /// Exact event id returned by the external resolver
+        #[arg(long = "serving-event-id")]
+        serving_event_id: String,
+        /// Authoritative publisher pubkey expected to own the serving pointer
+        #[arg(long = "serving-publisher-pubkey")]
+        serving_publisher_pubkey: String,
+        /// Tree name resolved by the serving event
+        #[arg(long = "serving-tree-name")]
+        serving_tree_name: String,
+        /// B-tree order pinned for subsequent tranche builds
+        #[arg(long, default_value_t = 64)]
+        btree_order: usize,
+        /// Maximum independent B-tree subtree updates pinned for later builds
+        #[arg(long, default_value_t = 4)]
+        btree_update_concurrency: usize,
+        /// Maximum staged events durably replayed before a cursor checkpoint
+        #[arg(long, default_value_t = 8192)]
+        index_commit_batch_size: usize,
+        /// Output path for transition evidence (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
+    /// Replay immutable staged segments into the v3 working spool and stores
+    AppendBulkTranche {
+        /// Durable staging directory containing the immutable author segments
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Required CAS pin for nostr-index/bulk-projection-v3/state.json
+        #[arg(long = "expected-state-sha256")]
+        expected_state_sha256: String,
+        /// Maximum complete staged segments to append in this invocation
+        #[arg(long = "max-segments", default_value_t = 1024)]
+        max_segments: usize,
+        /// Output path for transition evidence (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
+    /// Freeze the exact durable v3 working prefix before index construction
+    FreezeBulkTranche {
+        /// Durable staging directory containing the immutable author segments
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Required CAS pin for nostr-index/bulk-projection-v3/state.json
+        #[arg(long = "expected-state-sha256")]
+        expected_state_sha256: String,
+        /// Exact durable author boundary to freeze
+        #[arg(long = "through-author")]
+        through_author: usize,
+        /// Output path for transition evidence (default stdout; use "-" for stdout)
         #[arg(long, short)]
         out: Option<PathBuf>,
     },

@@ -17,13 +17,22 @@ use index_buckets::{
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::executor::block_on;
-use hashtree_core::{nhash_encode_full, BufferedStore, Cid, HashTree, HashTreeConfig, NHashData};
+use hashtree_core::{
+    nhash_encode_full, sha256, to_hex, BufferedStore, Cid, HashTree, HashTreeConfig, NHashData,
+    Store,
+};
 use hashtree_index::BTree;
 use hashtree_nostr::{
     is_parameterized_replaceable_kind, is_replaceable_kind, stored_event_from_nostr_sdk_event,
@@ -42,23 +51,28 @@ use nostr_social_graph::{
     SocialGraphBackend as NostrSocialGraphBackend,
 };
 use nostr_social_graph_heed::HeedSocialGraph;
+use sha2::{Digest, Sha256};
 
 use crate::managed_env::ManagedEnv;
 use crate::storage::{LocalStore, StorageRouter};
 
-#[cfg(test)]
-use std::sync::OnceLock;
-#[cfg(test)]
-use std::time::Instant;
-
 pub type UserSet = BTreeSet<[u8; 32]>;
 
+const PROFILE_PUBLICATION_FENCE_RELATIVE_PATH: &str =
+    "nostr-index/bulk-projection-v3/profile-publication.fenced";
 const DEFAULT_ROOT_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const EVENTS_ROOT_FILE: &str = "events-root.msgpack";
 const AMBIENT_EVENTS_ROOT_FILE: &str = "events-root-ambient.msgpack";
 const AMBIENT_EVENTS_BLOB_DIR: &str = "ambient-blobs";
 const PROFILE_SEARCH_ROOT_FILE: &str = "profile-search-root.msgpack";
 const PROFILES_BY_PUBKEY_ROOT_FILE: &str = "profiles-by-pubkey-root.msgpack";
+const PROFILE_ROOT_PAIR_COMMIT_FILE: &str = "profile-root-pair.commit.json";
+const PROFILE_PROJECTION_PENDING_FILE: &str = "profile-projection.pending.json";
+const PROFILE_ROOT_PAIR_LOCK_FILE: &str = "profile-root-pair.lock";
+const PROFILE_ROOT_PAIR_COMMIT_VERSION: u32 = 1;
+const PROFILE_PROJECTION_PENDING_VERSION: u32 = 1;
+const PROFILE_ROOT_PAIR_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const PROFILE_ROOT_PAIR_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const UNKNOWN_FOLLOW_DISTANCE: u32 = 1000;
 const DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MIN_SOCIALGRAPH_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024;
@@ -66,6 +80,31 @@ const SOCIALGRAPH_MAX_DBS: u32 = 16;
 const PROFILE_SEARCH_INDEX_ORDER: usize = 64;
 const PROFILE_SEARCH_PREFIX: &str = "p:";
 const PROFILE_NAME_MAX_LENGTH: usize = 100;
+
+pub fn profile_publication_fence_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(PROFILE_PUBLICATION_FENCE_RELATIVE_PATH)
+}
+
+pub fn profile_publication_is_fenced(data_dir: &Path) -> Result<bool> {
+    let path = profile_publication_fence_path(data_dir);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspect profile publication fence {}", path.display())),
+    }
+}
+
+pub fn require_profile_publication_unfenced(data_dir: &Path) -> Result<()> {
+    if profile_publication_is_fenced(data_dir)? {
+        let path = profile_publication_fence_path(data_dir);
+        anyhow::bail!(
+            "profile-root publication is fenced by active v3 tranche marker {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventStorageClass {
@@ -81,10 +120,74 @@ pub(crate) enum EventQueryScope {
     All,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PublicEventsRootApplyOutcome {
+    Applied,
+    Conflict { current_root: Option<Cid> },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredCid {
     hash: [u8; 32],
     key: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileRootPairCommit {
+    version: u32,
+    old_search: Option<StoredCid>,
+    old_by_pubkey: Option<StoredCid>,
+    new_search: Option<StoredCid>,
+    new_by_pubkey: Option<StoredCid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum StoredEventStorageClass {
+    Public,
+    Ambient,
+}
+
+impl From<EventStorageClass> for StoredEventStorageClass {
+    fn from(value: EventStorageClass) -> Self {
+        match value {
+            EventStorageClass::Public => Self::Public,
+            EventStorageClass::Ambient => Self::Ambient,
+        }
+    }
+}
+
+impl From<StoredEventStorageClass> for EventStorageClass {
+    fn from(value: StoredEventStorageClass) -> Self {
+        match value {
+            StoredEventStorageClass::Public => Self::Public,
+            StoredEventStorageClass::Ambient => Self::Ambient,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+enum PendingProfileProjectionMode {
+    Incremental {
+        old_root: Option<StoredCid>,
+        new_root: StoredCid,
+        events: Vec<String>,
+    },
+    RebuildPublicRoot {
+        old_root: Option<StoredCid>,
+        new_root: StoredCid,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingProfileProjection {
+    version: u32,
+    storage_class: StoredEventStorageClass,
+    projection: PendingProfileProjectionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -99,6 +202,339 @@ pub struct StoredProfileSearchEntry {
     pub follow_distance: Option<u32>,
     pub created_at: u64,
     pub event_nhash: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileIndexRoots {
+    pub by_pubkey: Option<Cid>,
+    pub search: Option<Cid>,
+    pub by_pubkey_file_sha256: Option<String>,
+    pub search_file_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileRootPairLockMode {
+    Shared,
+    Exclusive,
+}
+
+struct ProfileRootPairTransactionGuard {
+    _process_read: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    _process_write: Option<tokio::sync::OwnedRwLockWriteGuard<()>>,
+    file: File,
+}
+
+impl Drop for ProfileRootPairTransactionGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn profile_root_pair_process_locks(
+) -> &'static StdMutex<HashMap<PathBuf, Weak<tokio::sync::RwLock<()>>>> {
+    static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Weak<tokio::sync::RwLock<()>>>>> =
+        OnceLock::new();
+    LOCKS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn profile_root_pair_process_lock(
+    root_pair_lock_path: &Path,
+) -> Result<Arc<tokio::sync::RwLock<()>>> {
+    let db_dir = root_pair_lock_path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", root_pair_lock_path.display()))?;
+    let canonical_db_dir = std::fs::canonicalize(db_dir)
+        .with_context(|| format!("canonicalize profile index directory {}", db_dir.display()))?;
+    let mut locks = profile_root_pair_process_locks()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("profile root-pair process lock registry was poisoned"))?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&canonical_db_dir).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(tokio::sync::RwLock::new(()));
+    locks.insert(canonical_db_dir, Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+#[cfg(test)]
+type ProfileRootPairTransactionProbe =
+    Arc<dyn Fn(&Path, ProfileRootPairLockMode) + Send + Sync + 'static>;
+
+#[cfg(test)]
+fn profile_root_pair_transaction_probe(
+) -> &'static StdMutex<Option<ProfileRootPairTransactionProbe>> {
+    static PROBE: OnceLock<StdMutex<Option<ProfileRootPairTransactionProbe>>> = OnceLock::new();
+    PROBE.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+struct ProfileRootPairTransactionProbeGuard;
+
+#[cfg(test)]
+impl Drop for ProfileRootPairTransactionProbeGuard {
+    fn drop(&mut self) {
+        if let Ok(mut probe) = profile_root_pair_transaction_probe().lock() {
+            *probe = None;
+        }
+    }
+}
+
+#[cfg(test)]
+fn install_profile_root_pair_transaction_probe(
+    probe: ProfileRootPairTransactionProbe,
+) -> ProfileRootPairTransactionProbeGuard {
+    *profile_root_pair_transaction_probe()
+        .lock()
+        .expect("profile root-pair transaction probe lock poisoned") = Some(probe);
+    ProfileRootPairTransactionProbeGuard
+}
+
+#[cfg(test)]
+fn run_profile_root_pair_transaction_probe(path: &Path, mode: ProfileRootPairLockMode) {
+    let probe = profile_root_pair_transaction_probe()
+        .lock()
+        .expect("profile root-pair transaction probe lock poisoned")
+        .clone();
+    if let Some(probe) = probe {
+        probe(path, mode);
+    }
+}
+
+#[cfg(test)]
+type PendingProfileProjectionPersistedProbe =
+    Arc<dyn Fn(&Path) -> Result<()> + Send + Sync + 'static>;
+
+#[cfg(test)]
+fn pending_profile_projection_persisted_probe(
+) -> &'static StdMutex<Option<PendingProfileProjectionPersistedProbe>> {
+    static PROBE: OnceLock<StdMutex<Option<PendingProfileProjectionPersistedProbe>>> =
+        OnceLock::new();
+    PROBE.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+struct PendingProfileProjectionPersistedProbeGuard;
+
+#[cfg(test)]
+impl Drop for PendingProfileProjectionPersistedProbeGuard {
+    fn drop(&mut self) {
+        if let Ok(mut probe) = pending_profile_projection_persisted_probe().lock() {
+            *probe = None;
+        }
+    }
+}
+
+#[cfg(test)]
+fn install_pending_profile_projection_persisted_probe(
+    probe: PendingProfileProjectionPersistedProbe,
+) -> PendingProfileProjectionPersistedProbeGuard {
+    *pending_profile_projection_persisted_probe()
+        .lock()
+        .expect("pending profile projection probe lock poisoned") = Some(probe);
+    PendingProfileProjectionPersistedProbeGuard
+}
+
+#[cfg(test)]
+fn run_pending_profile_projection_persisted_probe(path: &Path) -> Result<()> {
+    let probe = pending_profile_projection_persisted_probe()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("pending profile projection probe lock poisoned"))?
+        .clone();
+    if let Some(probe) = probe {
+        probe(path)?;
+    }
+    Ok(())
+}
+
+fn try_open_and_lock_profile_root_pair_file(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+) -> Result<Option<File>> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    if create {
+        options.write(true).create(true).truncate(false);
+    }
+    let file = options.open(root_pair_lock_path).with_context(|| {
+        format!(
+            "open {} profile root-pair transaction lock {}",
+            if create { "writable" } else { "existing" },
+            root_pair_lock_path.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        let operation = match mode {
+            ProfileRootPairLockMode::Shared => libc::LOCK_SH | libc::LOCK_NB,
+            ProfileRootPairLockMode::Exclusive => libc::LOCK_EX | libc::LOCK_NB,
+        };
+        let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
+            return Err(error).with_context(|| {
+                format!(
+                    "lock profile root-pair transaction ({:?}) at {}",
+                    mode,
+                    root_pair_lock_path.display()
+                )
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        anyhow::bail!(
+            "profile root-pair transactions require an operating-system advisory file lock"
+        );
+    }
+
+    Ok(Some(file))
+}
+
+fn profile_root_pair_lock_timeout_error(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    timeout: Duration,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "timed out after {} ms waiting for profile root-pair transaction ({:?}) at {}",
+        timeout.as_millis(),
+        mode,
+        root_pair_lock_path.display()
+    )
+}
+
+fn try_acquire_profile_root_pair_lock_once(
+    process_lock: &Arc<tokio::sync::RwLock<()>>,
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+) -> Result<Option<ProfileRootPairTransactionGuard>> {
+    let (process_read, process_write) = match mode {
+        ProfileRootPairLockMode::Shared => {
+            let Ok(guard) = Arc::clone(process_lock).try_read_owned() else {
+                return Ok(None);
+            };
+            (Some(guard), None)
+        }
+        ProfileRootPairLockMode::Exclusive => {
+            let Ok(guard) = Arc::clone(process_lock).try_write_owned() else {
+                return Ok(None);
+            };
+            (None, Some(guard))
+        }
+    };
+    let Some(file) = try_open_and_lock_profile_root_pair_file(root_pair_lock_path, mode, create)?
+    else {
+        return Ok(None);
+    };
+    let guard = ProfileRootPairTransactionGuard {
+        _process_read: process_read,
+        _process_write: process_write,
+        file,
+    };
+    #[cfg(test)]
+    run_profile_root_pair_transaction_probe(root_pair_lock_path, mode);
+    Ok(Some(guard))
+}
+
+fn acquire_profile_root_pair_lock_with_timeout(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+    timeout: Duration,
+) -> Result<ProfileRootPairTransactionGuard> {
+    let process_lock = profile_root_pair_process_lock(root_pair_lock_path)?;
+    let started = Instant::now();
+    loop {
+        if let Some(guard) = try_acquire_profile_root_pair_lock_once(
+            &process_lock,
+            root_pair_lock_path,
+            mode,
+            create,
+        )? {
+            return Ok(guard);
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return Err(profile_root_pair_lock_timeout_error(
+                root_pair_lock_path,
+                mode,
+                timeout,
+            ));
+        }
+        std::thread::sleep(
+            PROFILE_ROOT_PAIR_LOCK_RETRY_INTERVAL.min(timeout.saturating_sub(elapsed)),
+        );
+    }
+}
+
+fn acquire_profile_root_pair_lock(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+) -> Result<ProfileRootPairTransactionGuard> {
+    acquire_profile_root_pair_lock_with_timeout(
+        root_pair_lock_path,
+        mode,
+        create,
+        PROFILE_ROOT_PAIR_LOCK_TIMEOUT,
+    )
+}
+
+async fn acquire_profile_root_pair_lock_async_with_timeout(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+    timeout: Duration,
+) -> Result<ProfileRootPairTransactionGuard> {
+    let process_lock = profile_root_pair_process_lock(root_pair_lock_path)?;
+    let started = Instant::now();
+    loop {
+        if let Some(guard) = try_acquire_profile_root_pair_lock_once(
+            &process_lock,
+            root_pair_lock_path,
+            mode,
+            create,
+        )? {
+            return Ok(guard);
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return Err(profile_root_pair_lock_timeout_error(
+                root_pair_lock_path,
+                mode,
+                timeout,
+            ));
+        }
+        tokio::time::sleep(
+            PROFILE_ROOT_PAIR_LOCK_RETRY_INTERVAL.min(timeout.saturating_sub(elapsed)),
+        )
+        .await;
+    }
+}
+
+async fn acquire_profile_root_pair_lock_async(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+) -> Result<ProfileRootPairTransactionGuard> {
+    acquire_profile_root_pair_lock_async_with_timeout(
+        root_pair_lock_path,
+        mode,
+        create,
+        PROFILE_ROOT_PAIR_LOCK_TIMEOUT,
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -199,6 +635,125 @@ pub fn test_lock_blocking() -> TestLockGuard {
 
 pub fn open_social_graph_store(data_dir: &Path) -> Result<Arc<SocialGraphStore>> {
     open_social_graph_store_with_mapsize(data_dir, None)
+}
+
+/// Read the two published profile roots without opening the writable social
+/// graph LMDB environment.
+pub fn read_profile_index_roots(data_dir: &Path) -> Result<ProfileIndexRoots> {
+    read_profile_index_roots_with_timeout(data_dir, PROFILE_ROOT_PAIR_LOCK_TIMEOUT)
+}
+
+fn read_profile_index_roots_with_timeout(
+    data_dir: &Path,
+    timeout: Duration,
+) -> Result<ProfileIndexRoots> {
+    let db_dir = data_dir.join("socialgraph");
+    match std::fs::symlink_metadata(&db_dir) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ProfileIndexRoots {
+                by_pubkey: None,
+                search: None,
+                by_pubkey_file_sha256: None,
+                search_file_sha256: None,
+            });
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect profile index directory {}", db_dir.display()));
+        }
+    }
+    let _transaction = acquire_profile_root_pair_lock_with_timeout(
+        &db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE),
+        ProfileRootPairLockMode::Shared,
+        false,
+        timeout,
+    )?;
+    require_no_pending_profile_root_pair_commit(&db_dir)?;
+    require_no_pending_profile_projection(&db_dir)?;
+    let (by_pubkey, by_pubkey_file_sha256) =
+        read_root_file_snapshot(&db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE))?;
+    let (search, search_file_sha256) =
+        read_root_file_snapshot(&db_dir.join(PROFILE_SEARCH_ROOT_FILE))?;
+    Ok(ProfileIndexRoots {
+        by_pubkey,
+        search,
+        by_pubkey_file_sha256,
+        search_file_sha256,
+    })
+}
+
+/// Validate both profile indexes against one real metadata event using only a
+/// caller-provided blob store. This does not open or mutate the social graph.
+pub async fn validate_profile_indexes_read_only<S: Store>(
+    data_dir: &Path,
+    store: Arc<S>,
+    event: &Event,
+) -> Result<StoredProfileSearchEntry> {
+    if event.kind != Kind::Metadata {
+        anyhow::bail!("profile index validation requires a kind-0 metadata event");
+    }
+    let roots = read_profile_index_roots(data_dir)?;
+    let by_pubkey_root = roots
+        .by_pubkey
+        .context("profile-by-pubkey root is missing")?;
+    let search_root = roots.search.context("profile-search root is missing")?;
+    let index = BTree::new(
+        Arc::clone(&store),
+        hashtree_index::BTreeOptions {
+            order: Some(PROFILE_SEARCH_INDEX_ORDER),
+        },
+    );
+    let pubkey = event.pubkey.to_hex();
+    let mirrored_cid = index
+        .get_link(Some(&by_pubkey_root), &pubkey)
+        .await
+        .context("query profile-by-pubkey root")?
+        .with_context(|| format!("profile-by-pubkey omitted {pubkey}"))?;
+    let tree = HashTree::new(HashTreeConfig::new(store));
+    let mirrored_bytes = tree
+        .get(&mirrored_cid, None)
+        .await
+        .context("read mirrored profile event")?
+        .with_context(|| format!("mirrored profile blob for {pubkey} is missing"))?;
+    let mirrored = Event::from_json(
+        String::from_utf8(mirrored_bytes).context("decode mirrored profile event as utf-8")?,
+    )
+    .context("decode mirrored profile event json")?;
+    if mirrored != *event {
+        anyhow::bail!(
+            "profile-by-pubkey returned event {} with different bytes than {} for {pubkey}",
+            mirrored.id,
+            event.id
+        );
+    }
+
+    let term = profile_search_terms_for_event(event)
+        .into_iter()
+        .next()
+        .with_context(|| format!("profile {pubkey} did not produce a search term"))?;
+    let exact_key = format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}");
+    let encoded = index
+        .get(Some(&search_root), &exact_key)
+        .await
+        .context("query profile-search root")?
+        .with_context(|| format!("profile-search omitted exact key {exact_key}"))?;
+    let entry: StoredProfileSearchEntry =
+        serde_json::from_str(&encoded).context("decode stored profile search entry JSON")?;
+    let expected_nhash = nhash_encode_full(&NHashData {
+        hash: mirrored_cid.hash,
+        decrypt_key: mirrored_cid.key,
+    })
+    .context("encode mirrored profile event nhash")?;
+    if entry.pubkey != pubkey
+        || entry.created_at != event.created_at.as_secs()
+        || entry.event_nhash != expected_nhash
+    {
+        anyhow::bail!(
+            "profile-search entry for {exact_key} does not match its profile-by-pubkey event"
+        );
+    }
+    Ok(entry)
 }
 
 pub fn open_social_graph_store_with_mapsize(
@@ -360,6 +915,12 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
     env_flags: EnvFlags,
 ) -> Result<Arc<SocialGraphStore>> {
     std::fs::create_dir_all(db_dir)?;
+    let _root_transaction = acquire_profile_root_pair_lock(
+        &db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE),
+        ProfileRootPairLockMode::Exclusive,
+        true,
+    )?;
+    recover_profile_root_pair_commit_locked(db_dir)?;
     if let Some(size) = mapsize_bytes {
         ensure_social_graph_mapsize_with_env_flags(db_dir, size, env_flags)?;
     }
@@ -383,7 +944,7 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
     let graph_env_lifecycle = unsafe { ManagedEnv::open(&lifecycle_options, db_dir) }
         .context("manage nostr-social-graph heed backend lifecycle")?;
 
-    Ok(Arc::new(SocialGraphStore {
+    let graph_store = Arc::new(SocialGraphStore {
         graph: StdMutex::new(graph),
         _graph_env_lifecycle: graph_env_lifecycle,
         ambient_store: Arc::clone(&ambient_store),
@@ -407,9 +968,13 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
             ),
             by_pubkey_root_path: db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE),
             search_root_path: db_dir.join(PROFILE_SEARCH_ROOT_FILE),
+            root_pair_commit_path: db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE),
+            root_pair_lock_path: db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE),
         },
         profile_index_overmute_threshold: StdMutex::new(1.0),
-    }))
+    });
+    graph_store.recover_pending_profile_projection_locked()?;
+    Ok(graph_store)
 }
 
 pub fn set_social_graph_root(store: &SocialGraphStore, pk_bytes: &[u8; 32]) {
@@ -588,6 +1153,10 @@ impl SocialGraphStore {
     }
 
     fn set_root(&self, root: &[u8; 32]) -> Result<()> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
         let root_hex = hex::encode(root);
         {
             let mut graph = self.graph.lock().unwrap();
@@ -653,14 +1222,22 @@ impl SocialGraphStore {
             .context("check social graph overmute")
     }
 
+    fn recovered_profile_index_roots(&self) -> Result<(Option<Cid>, Option<Cid>)> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        self.profile_index.roots_locked()
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn profile_search_root(&self) -> Result<Option<Cid>> {
-        self.profile_index.search_root()
+        Ok(self.recovered_profile_index_roots()?.1)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn profiles_by_pubkey_root(&self) -> Result<Option<Cid>> {
-        self.profile_index.by_pubkey_root()
+        Ok(self.recovered_profile_index_roots()?.0)
     }
 
     pub fn public_events_root(&self) -> Result<Option<Cid>> {
@@ -669,16 +1246,285 @@ impl SocialGraphStore {
 
     #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn public_events_root_for_write(&self) -> Result<Option<Cid>> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
         self.public_events.events_root_for_write()
     }
 
+    #[cfg(test)]
     pub(crate) fn write_public_events_root(&self, root: Option<&Cid>) -> Result<()> {
         self.public_events.write_events_root(root)
     }
 
+    fn pending_profile_projection_path(&self) -> PathBuf {
+        self.profile_index
+            .root_pair_lock_path
+            .with_file_name(PROFILE_PROJECTION_PENDING_FILE)
+    }
+
+    fn force_sync_event_storage(&self, storage_class: EventStorageClass) -> Result<()> {
+        let store = match storage_class {
+            EventStorageClass::Public => &self.profile_index.store,
+            EventStorageClass::Ambient => &self.ambient_store,
+        };
+        store
+            .force_sync()
+            .map_err(|error| anyhow::anyhow!("force-sync derived event blocks: {error}"))
+    }
+
+    fn force_sync_graph_projection_for_events(&self, events: &[Event]) -> Result<()> {
+        if events.iter().any(|event| is_social_graph_event(event.kind)) {
+            self._graph_env_lifecycle
+                .force_sync()
+                .context("force-sync derived social graph projection")?;
+        }
+        Ok(())
+    }
+
+    fn retained_derived_events_at_root(
+        &self,
+        bucket: &EventIndexBucket,
+        root: &Cid,
+        events: &[Event],
+    ) -> Result<Vec<Event>> {
+        let mut retained = Vec::new();
+        for event in events
+            .iter()
+            .filter(|event| is_derived_projection_event(event.kind))
+        {
+            match bucket.load_event_by_id(root, &event.id.to_hex())? {
+                Some(stored) if stored == *event => retained.push(event.clone()),
+                Some(_) => {
+                    anyhow::bail!(
+                        "derived event {} resolved to different event bytes in candidate root",
+                        event.id
+                    )
+                }
+                None => {}
+            }
+        }
+        Ok(retained)
+    }
+
+    fn load_full_derived_events_at_root(
+        &self,
+        bucket: &EventIndexBucket,
+        root: &Cid,
+    ) -> Result<Vec<Event>> {
+        block_on(bucket.event_store.validate_index_root(Some(root)))
+            .map_err(map_event_store_error)
+            .context("validate full derived-projection event root")?;
+        let mut events = Vec::new();
+        for kind in [Kind::ContactList, Kind::MuteList, Kind::Metadata] {
+            let stored = block_on(bucket.event_store.list_by_kind(
+                Some(root),
+                kind.as_u16() as u32,
+                ListEventsOptions::default(),
+            ))
+            .map_err(map_event_store_error)?;
+            events.extend(
+                stored
+                    .into_iter()
+                    .map(stored_event_to_nostr_event)
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        Ok(events)
+    }
+
+    fn persist_pending_profile_projection_locked(
+        &self,
+        projection: &PendingProfileProjection,
+    ) -> Result<()> {
+        let path = self.pending_profile_projection_path();
+        replace_file_durable(
+            &path,
+            &pending_profile_projection_bytes(projection)?,
+            "pending profile projection",
+        )?;
+        #[cfg(test)]
+        run_pending_profile_projection_persisted_probe(&path)?;
+        Ok(())
+    }
+
+    fn clear_pending_profile_projection_locked(&self) -> Result<()> {
+        remove_file_durable(&self.pending_profile_projection_path())
+    }
+
+    fn recover_profile_transactions_locked(&self) -> Result<()> {
+        self.profile_index
+            .recover_pending_root_pair_commit_locked()?;
+        self.recover_pending_profile_projection_locked()
+    }
+
+    fn recover_pending_profile_projection_locked(&self) -> Result<()> {
+        let path = self.pending_profile_projection_path();
+        let Some(projection) = load_pending_profile_projection(&path)? else {
+            return Ok(());
+        };
+        let storage_class = EventStorageClass::from(projection.storage_class);
+        let bucket = self.bucket(storage_class);
+        let current_root = bucket.events_root()?;
+        let (old_root, new_root) = match &projection.projection {
+            PendingProfileProjectionMode::Incremental {
+                old_root, new_root, ..
+            }
+            | PendingProfileProjectionMode::RebuildPublicRoot { old_root, new_root } => (
+                old_root.clone().map(cid_from_stored),
+                cid_from_stored(new_root.clone()),
+            ),
+        };
+
+        if current_root.as_ref() != Some(&new_root) {
+            if current_root == old_root {
+                return self.clear_pending_profile_projection_locked();
+            }
+            anyhow::bail!(
+                "event root does not match the pre- or post-publication state required by pending profile projection {}",
+                path.display()
+            );
+        }
+
+        match projection.projection {
+            PendingProfileProjectionMode::Incremental { events, .. } => {
+                block_on(bucket.event_store.validate_index_root(Some(&new_root)))
+                    .map_err(map_event_store_error)
+                    .with_context(|| {
+                        format!(
+                            "validate published event root required by pending derived projection {}",
+                            path.display()
+                        )
+                    })?;
+                if events.is_empty() {
+                    anyhow::bail!(
+                        "pending incremental derived projection {} contains no events",
+                        path.display()
+                    );
+                }
+                let events = events
+                    .into_iter()
+                    .map(|json| {
+                        Event::from_json(json).context("decode pending derived projection event")
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                for event in &events {
+                    if !is_derived_projection_event(event.kind) {
+                        anyhow::bail!(
+                            "pending derived projection {} contains unsupported event kind {}",
+                            path.display(),
+                            event.kind.as_u16()
+                        );
+                    }
+                    let stored = bucket
+                        .load_event_by_id(&new_root, &event.id.to_hex())?
+                        .with_context(|| {
+                            format!(
+                                "pending derived event {} is absent from its published event root",
+                                event.id
+                            )
+                        })?;
+                    if stored != *event {
+                        anyhow::bail!(
+                            "pending derived event {} resolved to different event bytes in {}",
+                            event.id,
+                            path.display()
+                        );
+                    }
+                }
+                self.apply_graph_events_only_locked(&events)?;
+                self.update_profile_index_for_events_locked(&events)?;
+                self.force_sync_graph_projection_for_events(&events)?;
+            }
+            PendingProfileProjectionMode::RebuildPublicRoot { .. } => {
+                if storage_class != EventStorageClass::Public {
+                    anyhow::bail!(
+                        "pending full profile rebuild {} must target the public event root",
+                        path.display()
+                    );
+                }
+                let events = self.load_full_derived_events_at_root(bucket, &new_root)?;
+                self.apply_graph_events_only_locked(&events)?;
+                self.rebuild_profile_index_for_events_locked(&events)?;
+                self.force_sync_graph_projection_for_events(&events)?;
+            }
+        }
+        self.clear_pending_profile_projection_locked()
+    }
+
+    pub(crate) fn apply_public_events_root_and_projections(
+        &self,
+        expected_old_root: Option<&Cid>,
+        root: Option<&Cid>,
+        events: &[Event],
+        rebuild_profile_index: bool,
+    ) -> Result<PublicEventsRootApplyOutcome> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        let old_root = self.public_events.events_root_for_write()?;
+        if old_root.as_ref() != expected_old_root {
+            return Ok(PublicEventsRootApplyOutcome::Conflict {
+                current_root: old_root,
+            });
+        }
+        let projection_events = match root {
+            Some(root) if rebuild_profile_index => {
+                self.load_full_derived_events_at_root(&self.public_events, root)?
+            }
+            Some(root) => {
+                self.retained_derived_events_at_root(&self.public_events, root, events)?
+            }
+            None => Vec::new(),
+        };
+        let profile_projection = if rebuild_profile_index || !projection_events.is_empty() {
+            let new_root = root.context("derived projection requires a public event root")?;
+            self.force_sync_event_storage(EventStorageClass::Public)?;
+            Some(PendingProfileProjection {
+                version: PROFILE_PROJECTION_PENDING_VERSION,
+                storage_class: StoredEventStorageClass::Public,
+                projection: if rebuild_profile_index {
+                    PendingProfileProjectionMode::RebuildPublicRoot {
+                        old_root: old_root.as_ref().map(stored_cid),
+                        new_root: stored_cid(new_root),
+                    }
+                } else {
+                    PendingProfileProjectionMode::Incremental {
+                        old_root: old_root.as_ref().map(stored_cid),
+                        new_root: stored_cid(new_root),
+                        events: projection_events.iter().map(JsonUtil::as_json).collect(),
+                    }
+                },
+            })
+        } else {
+            None
+        };
+        if let Some(projection) = profile_projection.as_ref() {
+            self.persist_pending_profile_projection_locked(projection)?;
+            self.public_events.write_events_root_durable(root)?;
+        } else {
+            self.public_events.write_events_root(root)?;
+        }
+        self.apply_graph_events_only_locked(&projection_events)?;
+        if profile_projection.is_some() {
+            if rebuild_profile_index {
+                self.rebuild_profile_index_for_events_locked(&projection_events)?;
+            } else {
+                self.update_profile_index_for_events_locked(&projection_events)?;
+            }
+            self.force_sync_graph_projection_for_events(&projection_events)?;
+            self.clear_pending_profile_projection_locked()?;
+        }
+        Ok(PublicEventsRootApplyOutcome::Applied)
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn latest_profile_event(&self, pubkey_hex: &str) -> Result<Option<Event>> {
-        self.profile_index.profile_event_for_pubkey(pubkey_hex)
+        let (root, _) = self.recovered_profile_index_roots()?;
+        self.profile_index
+            .profile_event_for_pubkey_at_root(root.as_ref(), pubkey_hex)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -686,7 +1532,12 @@ impl SocialGraphStore {
         &self,
         prefix: &str,
     ) -> Result<Vec<(String, StoredProfileSearchEntry)>> {
-        self.profile_index.search_entries_for_prefix(prefix)
+        let (_, root) = self.recovered_profile_index_roots()?;
+        let Some(root) = root else {
+            return Ok(Vec::new());
+        };
+        self.profile_index
+            .search_entries_for_prefix_at_root(&root, prefix)
     }
 
     /// Validate profile-by-pubkey and profile-search semantics against one
@@ -705,10 +1556,9 @@ impl SocialGraphStore {
         }
 
         let pubkey = event.pubkey.to_hex();
-        let by_pubkey_root = self
-            .profile_index
-            .by_pubkey_root()?
-            .context("profile-by-pubkey root is missing")?;
+        let (by_pubkey_root, search_root) = self.recovered_profile_index_roots()?;
+        let by_pubkey_root = by_pubkey_root.context("profile-by-pubkey root is missing")?;
+        let search_root = search_root.context("profile-search root is missing")?;
         let mirrored_cid = block_on(
             self.profile_index
                 .index
@@ -733,14 +1583,11 @@ impl SocialGraphStore {
             .next()
             .with_context(|| format!("profile {pubkey} did not produce a search term"))?;
         let exact_key = format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}");
-        let matches = self
-            .profile_index
-            .search_entries_for_prefix(&exact_key)
-            .context("query profile-search root")?;
-        let entry = matches
-            .into_iter()
-            .find_map(|(key, entry)| (key == exact_key).then_some(entry))
+        let encoded = block_on(self.profile_index.index.get(Some(&search_root), &exact_key))
+            .context("query profile-search root")?
             .with_context(|| format!("profile-search omitted exact key {exact_key}"))?;
+        let entry: StoredProfileSearchEntry =
+            serde_json::from_str(&encoded).context("decode stored profile search entry JSON")?;
         let expected_nhash = nhash_encode_full(&NHashData {
             hash: mirrored_cid.hash,
             decrypt_key: mirrored_cid.key,
@@ -761,42 +1608,68 @@ impl SocialGraphStore {
         self.update_profile_index_for_events(events)
     }
 
-    pub(crate) fn rebuild_profile_index_for_events(&self, events: &[Event]) -> Result<()> {
-        let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
-        let (by_pubkey_root, search_root) = self
-            .profile_index
-            .rebuild_profile_events_with_distances(latest_by_pubkey.into_values(), |event| {
-                self.follow_distance(&event.pubkey.to_bytes())
-            })?;
-        self.profile_index
-            .write_by_pubkey_root(by_pubkey_root.as_ref())?;
-        self.profile_index.write_search_root(search_root.as_ref())?;
-        Ok(())
-    }
-
-    pub(crate) async fn rebuild_profile_index_for_events_async(
+    /// Apply profile updates using an immutable, independently derived rank
+    /// decision for every profile author. `Some(distance)` retains the profile
+    /// with that exact search rank; `None` removes an excluded profile.
+    pub fn sync_profile_index_for_events_with_frozen_distances(
         &self,
         events: &[Event],
+        decisions: &BTreeMap<String, Option<u32>>,
     ) -> Result<()> {
-        let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
-        let (by_pubkey_root, search_root) = self
+        self.update_profile_index_for_events_with(events, true, |event| {
+            let pubkey = event.pubkey.to_hex();
+            match decisions.get(&pubkey) {
+                Some(Some(distance)) => Ok((Some(*distance), false)),
+                Some(None) => Ok((None, true)),
+                None => {
+                    anyhow::bail!("frozen profile rank decisions omitted metadata author {pubkey}")
+                }
+            }
+        })
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn rebuild_profile_index_for_events(&self, events: &[Event]) -> Result<()> {
+        let _transaction = self
             .profile_index
-            .rebuild_profile_events_async_with_distances(latest_by_pubkey.into_values(), |event| {
-                self.follow_distance(&event.pubkey.to_bytes())
-            })
-            .await?;
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        self.rebuild_profile_index_for_events_locked(events)
+    }
+
+    fn rebuild_profile_index_for_events_locked(&self, events: &[Event]) -> Result<()> {
+        let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
         self.profile_index
-            .write_by_pubkey_root(by_pubkey_root.as_ref())?;
-        self.profile_index.write_search_root(search_root.as_ref())?;
-        Ok(())
+            .rebuild_profile_events_and_commit_with_distances_locked(
+                latest_by_pubkey.into_values(),
+                |event| self.follow_distance(&event.pubkey.to_bytes()),
+            )
+    }
+
+    async fn rebuild_profile_index_for_events_async_locked(&self, events: &[Event]) -> Result<()> {
+        let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
+        self.profile_index
+            .rebuild_profile_events_async_and_commit_with_distances_locked(
+                latest_by_pubkey.into_values(),
+                |event| self.follow_distance(&event.pubkey.to_bytes()),
+            )
+            .await
     }
 
     pub fn rebuild_profile_index_from_stored_events(&self) -> Result<usize> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.rebuild_profile_index_from_stored_events_locked()
+    }
+
+    fn rebuild_profile_index_from_stored_events_locked(&self) -> Result<usize> {
+        self.recover_profile_transactions_locked()?;
         let public_events_root = self.public_events.events_root()?;
         let ambient_events_root = self.ambient_events.events_root()?;
         if public_events_root.is_none() && ambient_events_root.is_none() {
-            self.profile_index.write_by_pubkey_root(None)?;
-            self.profile_index.write_search_root(None)?;
+            self.profile_index
+                .write_roots_with_hooks_locked(None, None, || Ok(()), || Ok(()))?;
             return Ok(0);
         }
 
@@ -825,16 +1698,26 @@ impl SocialGraphStore {
         let latest_count = self
             .filtered_latest_metadata_events_by_pubkey(&events)?
             .len();
-        self.rebuild_profile_index_for_events(&events)?;
+        self.rebuild_profile_index_for_events_locked(&events)?;
         Ok(latest_count)
     }
 
     pub async fn rebuild_profile_index_from_stored_events_async(&self) -> Result<usize> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction_async()
+            .await?;
+        self.rebuild_profile_index_from_stored_events_async_locked()
+            .await
+    }
+
+    async fn rebuild_profile_index_from_stored_events_async_locked(&self) -> Result<usize> {
+        self.recover_profile_transactions_locked()?;
         let public_events_root = self.public_events.events_root()?;
         let ambient_events_root = self.ambient_events.events_root()?;
         if public_events_root.is_none() && ambient_events_root.is_none() {
-            self.profile_index.write_by_pubkey_root(None)?;
-            self.profile_index.write_search_root(None)?;
+            self.profile_index
+                .write_roots_with_hooks_locked(None, None, || Ok(()), || Ok(()))?;
             return Ok(0);
         }
 
@@ -866,27 +1749,37 @@ impl SocialGraphStore {
         let latest_count = self
             .filtered_latest_metadata_events_by_pubkey(&events)?
             .len();
-        self.rebuild_profile_index_for_events_async(&events).await?;
+        self.rebuild_profile_index_for_events_async_locked(&events)
+            .await?;
         Ok(latest_count)
     }
 
     pub fn rebuild_event_indexes_from_stored_events(&self) -> Result<(usize, usize)> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
         let public_count =
             self.rebuild_event_index_bucket_from_stored_events(&self.public_events)?;
         let ambient_count =
             self.rebuild_event_index_bucket_from_stored_events(&self.ambient_events)?;
-        self.rebuild_profile_index_from_stored_events()?;
+        self.rebuild_profile_index_from_stored_events_locked()?;
         Ok((public_count, ambient_count))
     }
 
     pub async fn rebuild_event_indexes_from_stored_events_async(&self) -> Result<(usize, usize)> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction_async()
+            .await?;
+        self.recover_profile_transactions_locked()?;
         let public_count = self
             .rebuild_event_index_bucket_from_stored_events_async(&self.public_events)
             .await?;
         let ambient_count = self
             .rebuild_event_index_bucket_from_stored_events_async(&self.ambient_events)
             .await?;
-        self.rebuild_profile_index_from_stored_events_async()
+        self.rebuild_profile_index_from_stored_events_async_locked()
             .await?;
         Ok((public_count, ambient_count))
     }
@@ -983,37 +1876,74 @@ impl SocialGraphStore {
     }
 
     fn update_profile_index_for_events(&self, events: &[Event]) -> Result<()> {
-        let latest_by_pubkey = latest_metadata_events_by_pubkey(events);
-        let threshold = self.profile_index_overmute_threshold();
-
-        if latest_by_pubkey.is_empty() {
+        if !events.iter().any(|event| event.kind == Kind::Metadata) {
             return Ok(());
         }
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        self.update_profile_index_for_events_locked(events)
+    }
 
-        let mut updates = Vec::with_capacity(latest_by_pubkey.len());
-        for event in latest_by_pubkey.into_values() {
+    fn update_profile_index_for_events_locked(&self, events: &[Event]) -> Result<()> {
+        let threshold = self.profile_index_overmute_threshold();
+        self.update_profile_index_for_events_with_locked(events, false, |event| {
             let overmuted = self.is_overmuted_user(&event.pubkey.to_bytes(), threshold)?;
             let follow_distance = if overmuted {
                 None
             } else {
                 self.follow_distance(&event.pubkey.to_bytes())?
             };
-            updates.push((event, follow_distance, overmuted));
+            Ok((follow_distance, overmuted))
+        })
+    }
+
+    fn update_profile_index_for_events_with<F>(
+        &self,
+        events: &[Event],
+        force_existing_search_value: bool,
+        classify: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&Event) -> Result<(Option<u32>, bool)>,
+    {
+        if !events.iter().any(|event| event.kind == Kind::Metadata) {
+            return Ok(());
+        }
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        self.update_profile_index_for_events_with_locked(
+            events,
+            force_existing_search_value,
+            classify,
+        )
+    }
+
+    fn update_profile_index_for_events_with_locked<F>(
+        &self,
+        events: &[Event],
+        force_existing_search_value: bool,
+        mut classify: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&Event) -> Result<(Option<u32>, bool)>,
+    {
+        let latest_by_pubkey = latest_metadata_events_by_pubkey(events);
+        if latest_by_pubkey.is_empty() {
+            return Ok(());
         }
 
-        let by_pubkey_root = self.profile_index.by_pubkey_root()?;
-        let search_root = self.profile_index.search_root()?;
-        let (by_pubkey_root, search_root, changed) = self.profile_index.update_profile_events(
-            by_pubkey_root.as_ref(),
-            search_root.as_ref(),
-            &updates,
-        )?;
-        if changed {
-            self.profile_index
-                .write_by_pubkey_root(by_pubkey_root.as_ref())?;
-            self.profile_index.write_search_root(search_root.as_ref())?;
+        let mut updates = Vec::with_capacity(latest_by_pubkey.len());
+        for event in latest_by_pubkey.into_values() {
+            let (follow_distance, remove) = classify(event)?;
+            updates.push((event, follow_distance, remove, force_existing_search_value));
         }
 
+        self.profile_index
+            .update_profile_events_and_commit_locked(&updates)?;
         Ok(())
     }
 
@@ -1085,6 +2015,17 @@ impl SocialGraphStore {
     }
 
     fn apply_graph_events_only(&self, events: &[Event]) -> Result<()> {
+        if !events.iter().any(|event| is_social_graph_event(event.kind)) {
+            return Ok(());
+        }
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        self.apply_graph_events_only_locked(events)
+    }
+
+    fn apply_graph_events_only_locked(&self, events: &[Event]) -> Result<()> {
         let graph_events = events
             .iter()
             .filter(|event| is_social_graph_event(event.kind))
@@ -1137,24 +2078,52 @@ impl SocialGraphStore {
         event: &Event,
         storage_class: EventStorageClass,
     ) -> Result<()> {
-        let current_root = self.bucket(storage_class).events_root_for_write()?;
-        let next_root = self
-            .bucket(storage_class)
-            .store_event(current_root.as_ref(), event)?;
-        self.bucket(storage_class)
-            .write_events_root(Some(&next_root))?;
+        self.ingest_event_with_storage_class_and_lock_timeout(
+            event,
+            storage_class,
+            PROFILE_ROOT_PAIR_LOCK_TIMEOUT,
+        )
+    }
 
-        if is_social_graph_event(event.kind) {
-            {
-                let mut graph = self.graph.lock().unwrap();
-                graph
-                    .handle_event(&graph_event_from_nostr(event), true, 0.0)
-                    .context("ingest social graph event into nostr-social-graph")?;
-            }
-            self.invalidate_distance_cache();
+    fn ingest_event_with_storage_class_and_lock_timeout(
+        &self,
+        event: &Event,
+        storage_class: EventStorageClass,
+        lock_timeout: Duration,
+    ) -> Result<()> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction_with_timeout(lock_timeout)?;
+        self.recover_profile_transactions_locked()?;
+        let bucket = self.bucket(storage_class);
+        let current_root = bucket.events_root_for_write()?;
+        let next_root = bucket.store_event(current_root.as_ref(), event)?;
+        let projection_events =
+            self.retained_derived_events_at_root(bucket, &next_root, std::slice::from_ref(event))?;
+        let derived_projection =
+            (!projection_events.is_empty()).then(|| PendingProfileProjection {
+                version: PROFILE_PROJECTION_PENDING_VERSION,
+                storage_class: storage_class.into(),
+                projection: PendingProfileProjectionMode::Incremental {
+                    old_root: current_root.as_ref().map(stored_cid),
+                    new_root: stored_cid(&next_root),
+                    events: projection_events.iter().map(JsonUtil::as_json).collect(),
+                },
+            });
+        if let Some(projection) = derived_projection.as_ref() {
+            self.force_sync_event_storage(storage_class)?;
+            self.persist_pending_profile_projection_locked(projection)?;
+            bucket.write_events_root_durable(Some(&next_root))?;
+        } else {
+            bucket.write_events_root(Some(&next_root))?;
         }
 
-        self.update_profile_index_for_events(std::slice::from_ref(event))?;
+        if derived_projection.is_some() {
+            self.apply_graph_events_only_locked(&projection_events)?;
+            self.update_profile_index_for_events_locked(&projection_events)?;
+            self.force_sync_graph_projection_for_events(&projection_events)?;
+            self.clear_pending_profile_projection_locked()?;
+        }
 
         Ok(())
     }
@@ -1168,6 +2137,10 @@ impl SocialGraphStore {
             return Ok(());
         }
 
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
         let bucket = self.bucket(storage_class);
         let current_root = bucket.events_root_for_write()?;
         let stored_events = events
@@ -1180,30 +2153,40 @@ impl SocialGraphStore {
                 .build(current_root.as_ref(), stored_events),
         )
         .map_err(map_event_store_error)?;
-        bucket.write_events_root(next_root.as_ref())?;
-
-        let graph_events = events
-            .iter()
-            .filter(|event| is_social_graph_event(event.kind))
-            .collect::<Vec<_>>();
-        if !graph_events.is_empty() {
-            let mut graph = self.graph.lock().unwrap();
-            let mut snapshot = SocialGraph::from_state(
-                graph
-                    .export_state()
-                    .context("export social graph state for batch ingest")?,
-            )
-            .context("rebuild social graph state for batch ingest")?;
-            for event in graph_events {
-                snapshot.handle_event(&graph_event_from_nostr(event), true, 0.0);
-            }
-            graph
-                .replace_state(&snapshot.export_state())
-                .context("replace batched social graph state")?;
-            self.invalidate_distance_cache();
+        let projection_events = match next_root.as_ref() {
+            Some(root) => self.retained_derived_events_at_root(bucket, root, events)?,
+            None => Vec::new(),
+        };
+        let derived_projection = if projection_events.is_empty() {
+            None
+        } else {
+            let next_root = next_root
+                .as_ref()
+                .context("derived event batch did not produce an event root")?;
+            Some(PendingProfileProjection {
+                version: PROFILE_PROJECTION_PENDING_VERSION,
+                storage_class: storage_class.into(),
+                projection: PendingProfileProjectionMode::Incremental {
+                    old_root: current_root.as_ref().map(stored_cid),
+                    new_root: stored_cid(next_root),
+                    events: projection_events.iter().map(JsonUtil::as_json).collect(),
+                },
+            })
+        };
+        if let Some(projection) = derived_projection.as_ref() {
+            self.force_sync_event_storage(storage_class)?;
+            self.persist_pending_profile_projection_locked(projection)?;
+            bucket.write_events_root_durable(next_root.as_ref())?;
+        } else {
+            bucket.write_events_root(next_root.as_ref())?;
         }
 
-        self.update_profile_index_for_events(events)?;
+        if derived_projection.is_some() {
+            self.apply_graph_events_only_locked(&projection_events)?;
+            self.update_profile_index_for_events_locked(&projection_events)?;
+            self.force_sync_graph_projection_for_events(&projection_events)?;
+            self.clear_pending_profile_projection_locked()?;
+        }
 
         Ok(())
     }
@@ -1326,6 +2309,12 @@ impl NostrSocialGraphBackend for SocialGraphStore {
         allow_unknown_authors: bool,
         overmute_threshold: f64,
     ) -> std::result::Result<(), Self::Error> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()
+            .map_err(|err| UpstreamGraphBackendError(err.to_string()))?;
+        self.recover_profile_transactions_locked()
+            .map_err(|err| UpstreamGraphBackendError(err.to_string()))?;
         {
             let mut graph = self.graph.lock().unwrap();
             graph
@@ -1524,6 +2513,10 @@ fn is_social_graph_event(kind: Kind) -> bool {
     kind == Kind::ContactList || kind == Kind::MuteList
 }
 
+fn is_derived_projection_event(kind: Kind) -> bool {
+    kind == Kind::Metadata || is_social_graph_event(kind)
+}
+
 fn graph_event_from_nostr(event: &Event) -> GraphEvent {
     GraphEvent {
         created_at: event.created_at.as_secs(),
@@ -1555,17 +2548,44 @@ fn encode_cid(cid: &Cid) -> Result<Vec<u8>> {
 fn decode_cid(bytes: &[u8]) -> Result<Option<Cid>> {
     let stored: StoredCid =
         rmp_serde::from_slice(bytes).context("decode social graph events root")?;
-    Ok(Some(Cid {
+    Ok(Some(cid_from_stored(stored)))
+}
+
+fn cid_from_stored(stored: StoredCid) -> Cid {
+    Cid {
         hash: stored.hash,
         key: stored.key,
-    }))
+    }
+}
+
+fn stored_cid(cid: &Cid) -> StoredCid {
+    StoredCid {
+        hash: cid.hash,
+        key: cid.key,
+    }
 }
 
 fn read_root_file(path: &Path) -> Result<Option<Cid>> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return Ok(None);
-    };
-    decode_cid(&bytes)
+    match std::fs::read(path) {
+        Ok(bytes) => decode_cid(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("read profile root file {}", path.display()))
+        }
+    }
+}
+
+fn read_root_file_snapshot(path: &Path) -> Result<(Option<Cid>, Option<String>)> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let digest = to_hex(&sha256(&bytes));
+            Ok((decode_cid(&bytes)?, Some(digest)))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((None, None)),
+        Err(error) => {
+            Err(error).with_context(|| format!("read profile root file {}", path.display()))
+        }
+    }
 }
 
 fn write_root_file(path: &Path, root: Option<&Cid>) -> Result<()> {
@@ -1581,6 +2601,206 @@ fn write_root_file(path: &Path, root: Option<&Cid>) -> Result<()> {
     std::fs::write(&tmp_path, encoded)?;
     std::fs::rename(tmp_path, path)?;
     Ok(())
+}
+
+fn write_root_file_durable(path: &Path, root: Option<&Cid>) -> Result<()> {
+    let Some(root) = root else {
+        return remove_file_durable(path);
+    };
+
+    let encoded = encode_cid(root)?;
+    replace_file_durable(path, &encoded, "durable social graph root")?;
+    Ok(())
+}
+
+fn fsync_parent(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    File::open(parent)
+        .with_context(|| format!("open {} for fsync", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("fsync {}", parent.display()))
+}
+
+fn replace_file_durable(path: &Path, bytes: &[u8], label: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create {} parent {}", label, parent.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .with_context(|| format!("{} path is not valid UTF-8", label))?;
+    let pending = path.with_file_name(format!(".{file_name}.pending"));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&pending)
+        .with_context(|| format!("open pending {} {}", label, pending.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("write pending {} {}", label, pending.display()))?;
+    file.sync_all()
+        .with_context(|| format!("fsync pending {} {}", label, pending.display()))?;
+    drop(file);
+    std::fs::rename(&pending, path)
+        .with_context(|| format!("replace {} {}", label, path.display()))?;
+    fsync_parent(path)
+}
+
+fn remove_file_durable(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => fsync_parent(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+fn profile_root_pair_commit_bytes(commit: &ProfileRootPairCommit) -> Result<Vec<u8>> {
+    let mut bytes =
+        serde_json::to_vec(commit).context("encode canonical profile root-pair commit")?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn pending_profile_projection_bytes(projection: &PendingProfileProjection) -> Result<Vec<u8>> {
+    let mut bytes =
+        serde_json::to_vec(projection).context("encode canonical pending profile projection")?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn load_pending_profile_projection(path: &Path) -> Result<Option<PendingProfileProjection>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read pending profile projection {}", path.display()))
+        }
+    };
+    let projection: PendingProfileProjection = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse pending profile projection {}", path.display()))?;
+    if projection.version != PROFILE_PROJECTION_PENDING_VERSION {
+        anyhow::bail!(
+            "unsupported pending profile projection version {} in {}",
+            projection.version,
+            path.display()
+        );
+    }
+    if pending_profile_projection_bytes(&projection)? != bytes {
+        anyhow::bail!(
+            "pending profile projection {} is not canonical",
+            path.display()
+        );
+    }
+    Ok(Some(projection))
+}
+
+fn load_profile_root_pair_commit(path: &Path) -> Result<Option<ProfileRootPairCommit>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read profile root-pair commit {}", path.display()))
+        }
+    };
+    let commit: ProfileRootPairCommit = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse profile root-pair commit {}", path.display()))?;
+    if commit.version != PROFILE_ROOT_PAIR_COMMIT_VERSION {
+        anyhow::bail!(
+            "unsupported profile root-pair commit version {} in {}",
+            commit.version,
+            path.display()
+        );
+    }
+    if profile_root_pair_commit_bytes(&commit)? != bytes {
+        anyhow::bail!(
+            "profile root-pair commit {} is not canonical",
+            path.display()
+        );
+    }
+    Ok(Some(commit))
+}
+
+fn install_profile_root_pair_commit_with<F>(
+    by_pubkey_path: &Path,
+    search_path: &Path,
+    commit_path: &Path,
+    commit: &ProfileRootPairCommit,
+    after_search: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let current_by_pubkey = read_root_file(by_pubkey_path)?;
+    let current_search = read_root_file(search_path)?;
+    let old_by_pubkey = commit.old_by_pubkey.clone().map(cid_from_stored);
+    let old_search = commit.old_search.clone().map(cid_from_stored);
+    let new_by_pubkey = commit.new_by_pubkey.clone().map(cid_from_stored);
+    let new_search = commit.new_search.clone().map(cid_from_stored);
+    let old_pair = current_by_pubkey == old_by_pubkey && current_search == old_search;
+    let search_first_pair = current_by_pubkey == old_by_pubkey && current_search == new_search;
+    let new_pair = current_by_pubkey == new_by_pubkey && current_search == new_search;
+    if !old_pair && !search_first_pair && !new_pair {
+        anyhow::bail!(
+            "profile root-pair files do not match an allowed forward state for {}",
+            commit_path.display()
+        );
+    }
+
+    // The by-pubkey tree is the replay authority: keeping its old root until
+    // the new search root is durable lets the same metadata batch reconstruct
+    // removals and changed terms after any interruption.
+    write_root_file_durable(search_path, new_search.as_ref())?;
+    after_search()?;
+    write_root_file_durable(by_pubkey_path, new_by_pubkey.as_ref())?;
+    remove_file_durable(commit_path)
+}
+
+fn require_no_pending_profile_root_pair_commit(db_dir: &Path) -> Result<()> {
+    let commit_path = db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE);
+    if load_profile_root_pair_commit(&commit_path)?.is_some() {
+        anyhow::bail!(
+            "profile root-pair commit {} is pending; open the writable social graph store to recover it before read-only audit",
+            commit_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn require_no_pending_profile_projection(db_dir: &Path) -> Result<()> {
+    let path = db_dir.join(PROFILE_PROJECTION_PENDING_FILE);
+    if load_pending_profile_projection(&path)?.is_some() {
+        anyhow::bail!(
+            "profile projection {} is pending; open the writable social graph store to recover it before read-only audit",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn recover_profile_root_pair_commit_locked(db_dir: &Path) -> Result<()> {
+    let commit_path = db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE);
+    let Some(commit) = load_profile_root_pair_commit(&commit_path)? else {
+        return Ok(());
+    };
+    install_profile_root_pair_commit_with(
+        &db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE),
+        &db_dir.join(PROFILE_SEARCH_ROOT_FILE),
+        &commit_path,
+        &commit,
+        || Ok(()),
+    )
+    .with_context(|| {
+        format!(
+            "recover interrupted profile root-pair commit {}",
+            commit_path.display()
+        )
+    })
 }
 
 fn normalize_profile_name(value: &serde_json::Value) -> Option<String> {
@@ -1809,7 +3029,8 @@ fn parse_search_keywords(text: &str) -> Vec<String> {
     keywords
 }
 
-fn profile_search_terms_for_event(event: &Event) -> Vec<String> {
+#[doc(hidden)]
+pub fn profile_search_terms_for_event(event: &Event) -> Vec<String> {
     let profile = match serde_json::from_str::<serde_json::Value>(&event.content) {
         Ok(serde_json::Value::Object(profile)) => profile,
         _ => serde_json::Map::new(),
@@ -1828,6 +3049,53 @@ fn profile_search_terms_for_event(event: &Event) -> Vec<String> {
         parts.extend(names.into_iter().skip(1));
     }
     parse_search_keywords(&parts.join(" "))
+}
+
+#[doc(hidden)]
+pub fn profile_search_keys_for_event(event: &Event) -> Vec<String> {
+    let pubkey = event.pubkey.to_hex();
+    profile_search_terms_for_event(event)
+        .into_iter()
+        .map(|term| format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}"))
+        .collect()
+}
+
+/// Reconstruct the exact value written by the profile-search index builder.
+///
+/// This is exposed for read-only integrity auditors. Callers must supply the
+/// distance sealed into the index at the time the profile was projected; the
+/// current social graph distance is not an equivalent substitute.
+#[doc(hidden)]
+pub fn stored_profile_search_entry_for_event(
+    event: &Event,
+    mirrored_cid: &Cid,
+    follow_distance: Option<u32>,
+) -> Result<StoredProfileSearchEntry> {
+    index_buckets::build_profile_search_entry(event, mirrored_cid, follow_distance)
+}
+
+/// Seal the historic v2 profile-search distances for one complete retained
+/// profile map.
+///
+/// The map key set must be exactly the retained profile-by-pubkey winner set.
+/// `BTreeMap` supplies the required lexicographic UTF-8 pubkey ordering.
+#[doc(hidden)]
+pub fn profile_follow_distance_seal_v2(distances: &BTreeMap<String, Option<u32>>) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"hashtree-profile-follow-distance-seal-v2\0");
+    digest.update((distances.len() as u64).to_be_bytes());
+    for (pubkey, distance) in distances {
+        digest.update((pubkey.len() as u64).to_be_bytes());
+        digest.update(pubkey.as_bytes());
+        match distance {
+            Some(distance) => {
+                digest.update([1]);
+                digest.update(distance.to_be_bytes());
+            }
+            None => digest.update([0]),
+        }
+    }
+    hex::encode(digest.finalize())
 }
 
 fn compare_nostr_events(left: &Event, right: &Event) -> std::cmp::Ordering {

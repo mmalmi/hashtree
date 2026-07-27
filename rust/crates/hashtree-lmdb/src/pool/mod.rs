@@ -9,6 +9,7 @@ mod maintenance_tests;
 mod member;
 mod model;
 mod move_catalog;
+mod read_only;
 mod reader;
 mod temperature;
 mod temperature_balancer;
@@ -25,6 +26,7 @@ pub use self::model::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
     PoolStoreConfig, PoolTemperatureConfig, PoolTemperatureReport,
 };
+pub use self::read_only::{ReadOnlyPoolCatalogAudit, ReadOnlyPoolStore};
 pub use self::reader::PoolStoreReader;
 use self::temperature::TemperatureRuntime;
 use self::temperature_worker::TemperatureWorker;

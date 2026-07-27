@@ -8,6 +8,8 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -25,6 +27,176 @@ macro_rules! event_builder {
 
 const WELLORDER_FIXTURE_URL: &str =
     "https://wellorder.xyz/nostr/nostr-wellorder-early-500k-v1.jsonl.bz2";
+
+struct ProfileTransactionPause {
+    _probe: ProfileRootPairTransactionProbeGuard,
+    entered: Receiver<()>,
+    release: SyncSender<()>,
+}
+
+fn pause_next_exclusive_profile_transaction(
+    expected_lock_path: PathBuf,
+) -> ProfileTransactionPause {
+    let fired = Arc::new(AtomicBool::new(false));
+    let (entered_tx, entered) = mpsc::sync_channel(1);
+    let (release, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let probe = install_profile_root_pair_transaction_probe(Arc::new(move |path, mode| {
+        if mode != ProfileRootPairLockMode::Exclusive || fired.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        assert_eq!(path, expected_lock_path);
+        entered_tx
+            .send(())
+            .expect("report acquired profile transaction");
+        release_rx
+            .lock()
+            .expect("profile transaction release lock")
+            .recv_timeout(Duration::from_secs(10))
+            .expect("release paused profile transaction");
+    }));
+    ProfileTransactionPause {
+        _probe: probe,
+        entered,
+        release,
+    }
+}
+
+fn metadata_event(keys: &Keys, name: &str, created_at: u64) -> Event {
+    EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": name}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(created_at))
+    .sign_with_keys(keys)
+    .unwrap()
+}
+
+fn assert_event_and_profile_visible(
+    graph_store: &SocialGraphStore,
+    event: &Event,
+    search_prefix: &str,
+) {
+    assert_eq!(
+        graph_store
+            .latest_profile_event(&event.pubkey.to_hex())
+            .unwrap()
+            .expect("metadata event must be projected by pubkey")
+            .id,
+        event.id
+    );
+    assert!(
+        graph_store
+            .profile_search_entries_for_prefix(search_prefix)
+            .unwrap()
+            .iter()
+            .any(|(_, entry)| entry.pubkey == event.pubkey.to_hex()),
+        "metadata event must be projected into profile search"
+    );
+    assert!(
+        query_events(graph_store, &Filter::new().id(event.id), 1)
+            .iter()
+            .any(|stored| stored.id == event.id),
+        "metadata event must remain reachable from the event root"
+    );
+}
+
+fn stage_public_derived_projection_crash(
+    graph_store: &SocialGraphStore,
+    events: &[Event],
+    rebuild_profile_index: bool,
+) -> Cid {
+    let transaction = graph_store
+        .profile_index
+        .acquire_exclusive_root_pair_transaction()
+        .unwrap();
+    graph_store.recover_profile_transactions_locked().unwrap();
+    let old_root = graph_store.public_events.events_root_for_write().unwrap();
+    let stored = events
+        .iter()
+        .map(stored_event_from_nostr_sdk_event)
+        .collect::<Vec<_>>();
+    let new_root = block_on(
+        graph_store
+            .public_events
+            .event_store
+            .build(old_root.as_ref(), stored),
+    )
+    .map_err(map_event_store_error)
+    .unwrap()
+    .expect("derived events must produce an event root");
+    graph_store
+        .force_sync_event_storage(EventStorageClass::Public)
+        .unwrap();
+    graph_store
+        .persist_pending_profile_projection_locked(&PendingProfileProjection {
+            version: PROFILE_PROJECTION_PENDING_VERSION,
+            storage_class: StoredEventStorageClass::Public,
+            projection: if rebuild_profile_index {
+                PendingProfileProjectionMode::RebuildPublicRoot {
+                    old_root: old_root.as_ref().map(stored_cid),
+                    new_root: stored_cid(&new_root),
+                }
+            } else {
+                PendingProfileProjectionMode::Incremental {
+                    old_root: old_root.as_ref().map(stored_cid),
+                    new_root: stored_cid(&new_root),
+                    events: events.iter().map(JsonUtil::as_json).collect(),
+                }
+            },
+        })
+        .unwrap();
+    graph_store
+        .public_events
+        .write_events_root_durable(Some(&new_root))
+        .unwrap();
+    drop(transaction);
+    new_root
+}
+
+#[cfg(unix)]
+fn run_derived_recovery_child(
+    data_dir: &Path,
+    mode: &str,
+    expected_pubkey: &str,
+    expected_event_id: Option<&str>,
+) {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .arg("--exact")
+        .arg("socialgraph::tests::derived_projection_recovery_child_helper")
+        .arg("--nocapture")
+        .env("RUST_TEST_THREADS", "1")
+        .env("HASHTREE_DERIVED_RECOVERY_CHILD_DATA_DIR", data_dir)
+        .env("HASHTREE_DERIVED_RECOVERY_CHILD_MODE", mode)
+        .env(
+            "HASHTREE_DERIVED_RECOVERY_CHILD_EXPECTED_PUBKEY",
+            expected_pubkey,
+        );
+    if let Some(event_id) = expected_event_id {
+        command.env(
+            "HASHTREE_DERIVED_RECOVERY_CHILD_EXPECTED_EVENT_ID",
+            event_id,
+        );
+    }
+    let mut child = command.spawn().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("fresh-process derived projection recovery exceeded its deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        status.success(),
+        "fresh-process derived projection recovery failed: {status}"
+    );
+}
 
 #[derive(Debug, Clone, Default)]
 struct ReadTraceSnapshot {
@@ -661,6 +833,69 @@ fn test_profile_search_entries_include_follow_distance() {
 }
 
 #[test]
+fn test_profile_sync_uses_only_frozen_rank_decisions() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let alice_keys = Keys::generate();
+    let excluded_keys = Keys::generate();
+    let missing_keys = Keys::generate();
+    let profile = |keys: &Keys, name: &str, created_at| {
+        event_builder!(
+            Kind::Metadata,
+            serde_json::json!({ "display_name": name }).to_string(),
+            [],
+        )
+        .custom_created_at(Timestamp::from_secs(created_at))
+        .sign_with_keys(keys)
+        .unwrap()
+    };
+    let alice = profile(&alice_keys, "Frozen Alice", 5);
+    let excluded = profile(&excluded_keys, "Excluded Bob", 5);
+
+    graph_store
+        .sync_profile_index_for_events(&[alice.clone(), excluded.clone()])
+        .unwrap();
+    assert!(!graph_store
+        .profile_search_entries_for_prefix("p:excluded")
+        .unwrap()
+        .is_empty());
+
+    let mut decisions = BTreeMap::new();
+    decisions.insert(alice.pubkey.to_hex(), Some(4));
+    decisions.insert(excluded.pubkey.to_hex(), None);
+    graph_store
+        .sync_profile_index_for_events_with_frozen_distances(
+            &[alice.clone(), excluded.clone()],
+            &decisions,
+        )
+        .unwrap();
+
+    let alice_entries = graph_store
+        .profile_search_entries_for_prefix("p:frozen")
+        .unwrap();
+    assert!(alice_entries
+        .iter()
+        .all(|(_, entry)| entry.follow_distance == Some(4)));
+    assert!(graph_store
+        .profile_search_entries_for_prefix("p:excluded")
+        .unwrap()
+        .is_empty());
+    assert!(graph_store
+        .latest_profile_event(&excluded.pubkey.to_hex())
+        .unwrap()
+        .is_none());
+
+    let missing = profile(&missing_keys, "Missing Decision", 6);
+    let error = graph_store
+        .sync_profile_index_for_events_with_frozen_distances(&[missing], &decisions)
+        .expect_err("missing frozen decision must fail closed");
+    assert!(error
+        .to_string()
+        .contains("frozen profile rank decisions omitted metadata author"));
+}
+
+#[test]
 fn test_ambient_metadata_events_are_mirrored_into_public_profile_index() {
     let _guard = test_lock_blocking();
     let tmp = TempDir::new().unwrap();
@@ -790,6 +1025,1384 @@ fn test_profile_search_index_persists_across_reopen() {
     assert_eq!(links[0].1.name, "reopen user");
 }
 
+#[cfg(unix)]
+#[test]
+fn profile_root_pair_transactions_serialize_real_writers_and_coherent_readers() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let alias_parent = TempDir::new().unwrap();
+    let aliased_data_dir = alias_parent.path().join("canonical-data-alias");
+    std::os::unix::fs::symlink(tmp.path(), &aliased_data_dir).unwrap();
+    let first_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let second_store = open_test_social_graph_store(&aliased_data_dir).unwrap();
+    let make_profiles = |side: &str, created_at: u64| {
+        (0..32)
+            .map(|index| {
+                let keys = Keys::generate();
+                EventBuilder::new(
+                    Kind::Metadata,
+                    serde_json::json!({
+                        "display_name": format!("{side} concurrent profile {index}")
+                    })
+                    .to_string(),
+                )
+                .custom_created_at(Timestamp::from_secs(created_at + index))
+                .sign_with_keys(&keys)
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let left_profiles = make_profiles("left", 1_000);
+    let right_profiles = make_profiles("right", 2_000);
+    let expected_pubkeys = left_profiles
+        .iter()
+        .chain(&right_profiles)
+        .map(|event| event.pubkey.to_hex())
+        .collect::<Vec<_>>();
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let stop_reader = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_observations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let left_barrier = Arc::clone(&barrier);
+    let left_writer = std::thread::spawn(move || {
+        left_barrier.wait();
+        first_store.sync_profile_index_for_events(&left_profiles)
+    });
+    let right_barrier = Arc::clone(&barrier);
+    let right_writer = std::thread::spawn(move || {
+        right_barrier.wait();
+        second_store.sync_profile_index_for_events(&right_profiles)
+    });
+    let reader_barrier = barrier;
+    let reader_stop = Arc::clone(&stop_reader);
+    let observations = Arc::clone(&reader_observations);
+    let data_dir = tmp.path().to_path_buf();
+    let reader = std::thread::spawn(move || -> Result<()> {
+        reader_barrier.wait();
+        loop {
+            let roots = read_profile_index_roots(&data_dir)?;
+            if roots.by_pubkey.is_some() != roots.search.is_some()
+                || roots.by_pubkey.is_some() != roots.by_pubkey_file_sha256.is_some()
+                || roots.search.is_some() != roots.search_file_sha256.is_some()
+            {
+                anyhow::bail!("reader observed a split profile root pair");
+            }
+            observations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if reader_stop.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        Ok(())
+    });
+
+    let left_result = left_writer.join();
+    let right_result = right_writer.join();
+    stop_reader.store(true, std::sync::atomic::Ordering::Release);
+    let reader_result = reader.join();
+    left_result.unwrap().unwrap();
+    right_result.unwrap().unwrap();
+    reader_result.unwrap().unwrap();
+    assert!(
+        reader_observations.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the real read-only path must observe at least one coherent snapshot"
+    );
+
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    for pubkey in expected_pubkeys {
+        assert!(
+            reopened.latest_profile_event(&pubkey).unwrap().is_some(),
+            "serialized writers must not lose profile {pubkey}"
+        );
+    }
+}
+
+#[test]
+fn sync_rebuild_holds_transaction_from_source_snapshot_through_commit() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let original = metadata_event(&Keys::generate(), "sync rebuild original", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &original, EventStorageClass::Public)
+        .unwrap();
+    let root_before_update = graph_store.public_events_root().unwrap();
+
+    let pause = pause_next_exclusive_profile_transaction(
+        graph_store.profile_index.root_pair_lock_path.clone(),
+    );
+    let rebuild_store = Arc::clone(&graph_store);
+    let rebuild =
+        std::thread::spawn(move || rebuild_store.rebuild_profile_index_from_stored_events());
+    pause
+        .entered
+        .recv_timeout(Duration::from_secs(5))
+        .expect("rebuild must acquire its transaction before source-root snapshot");
+
+    let concurrent = metadata_event(&Keys::generate(), "sync rebuild concurrent", 2);
+    let concurrent_for_writer = concurrent.clone();
+    let writer_store = Arc::clone(&graph_store);
+    let (writer_started_tx, writer_started_rx) = mpsc::sync_channel(1);
+    let writer = std::thread::spawn(move || {
+        writer_started_tx.send(()).unwrap();
+        ingest_parsed_event_with_storage_class(
+            &writer_store,
+            &concurrent_for_writer,
+            EventStorageClass::Public,
+        )
+    });
+    writer_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("concurrent metadata ingest must start");
+    std::thread::sleep(Duration::from_millis(40));
+    assert!(
+        !writer.is_finished(),
+        "metadata ingest must wait before publishing its event root"
+    );
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        root_before_update,
+        "waiting metadata ingest must not advance the event root"
+    );
+
+    pause.release.send(()).unwrap();
+    assert_eq!(rebuild.join().unwrap().unwrap(), 1);
+    writer.join().unwrap().unwrap();
+    assert_event_and_profile_visible(&graph_store, &original, "p:sync");
+    assert_event_and_profile_visible(&graph_store, &concurrent, "p:sync");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_rebuild_holds_transaction_from_source_snapshot_through_commit() {
+    let _guard = test_lock().await;
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let original = metadata_event(&Keys::generate(), "async rebuild original", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &original, EventStorageClass::Public)
+        .unwrap();
+    let root_before_update = graph_store.public_events_root().unwrap();
+
+    let pause = pause_next_exclusive_profile_transaction(
+        graph_store.profile_index.root_pair_lock_path.clone(),
+    );
+    let ProfileTransactionPause {
+        _probe: probe_guard,
+        entered,
+        release,
+    } = pause;
+    let rebuild_store = Arc::clone(&graph_store);
+    let rebuild = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(rebuild_store.rebuild_profile_index_from_stored_events_async())
+    });
+    tokio::task::spawn_blocking(move || {
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("async rebuild must acquire before source-root snapshot");
+    })
+    .await
+    .unwrap();
+
+    let concurrent = metadata_event(&Keys::generate(), "async rebuild concurrent", 2);
+    let concurrent_for_writer = concurrent.clone();
+    let writer_store = Arc::clone(&graph_store);
+    let (writer_started_tx, writer_started_rx) = mpsc::sync_channel(1);
+    let writer = tokio::task::spawn_blocking(move || {
+        writer_started_tx.send(()).unwrap();
+        ingest_parsed_event_with_storage_class(
+            &writer_store,
+            &concurrent_for_writer,
+            EventStorageClass::Public,
+        )
+    });
+    writer_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("spawn-blocking metadata ingest must start");
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(
+        !writer.is_finished(),
+        "spawn-blocking ingest must wait before event-root durability"
+    );
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        root_before_update,
+        "waiting spawn-blocking ingest must not advance the event root"
+    );
+
+    release.send(()).unwrap();
+    assert_eq!(rebuild.join().unwrap().unwrap(), 1);
+    writer.await.unwrap().unwrap();
+    drop(probe_guard);
+    assert_event_and_profile_visible(&graph_store, &original, "p:async");
+    assert_event_and_profile_visible(&graph_store, &concurrent, "p:async");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tokio_spawn_blocking_ingest_waits_before_event_root_and_projects_after_release() {
+    let _guard = test_lock().await;
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let root_before = graph_store.public_events_root().unwrap();
+    let transaction = graph_store
+        .profile_index
+        .acquire_exclusive_root_pair_transaction_async()
+        .await
+        .unwrap();
+
+    let profile = metadata_event(&Keys::generate(), "spawn blocking profile", 1);
+    let profile_for_writer = profile.clone();
+    let writer_store = Arc::clone(&graph_store);
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let writer = tokio::task::spawn_blocking(move || {
+        started_tx.send(()).unwrap();
+        ingest_parsed_event_with_storage_class(
+            &writer_store,
+            &profile_for_writer,
+            EventStorageClass::Public,
+        )
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("spawn-blocking ingest must start");
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(!writer.is_finished());
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        root_before,
+        "lock contention must be resolved before event-root publication"
+    );
+
+    drop(transaction);
+    writer.await.unwrap().unwrap();
+    assert_event_and_profile_visible(&graph_store, &profile, "p:spawn");
+}
+
+#[test]
+fn profile_root_reads_treat_only_not_found_as_absent() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    drop(open_test_social_graph_store(tmp.path()).unwrap());
+    let root_path = tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    std::fs::create_dir(&root_path).unwrap();
+
+    let error = read_profile_index_roots(tmp.path())
+        .expect_err("a root-file I/O failure must not become absent authority");
+    assert!(format!("{error:#}").contains("read profile root file"));
+}
+
+#[test]
+fn profile_writer_fails_before_intent_when_existing_root_is_unreadable() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let original = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": "durable original"}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(1))
+    .sign_with_keys(&keys)
+    .unwrap();
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&original))
+        .unwrap();
+
+    let db_dir = tmp.path().join("socialgraph");
+    let by_pubkey_path = db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    let search_path = db_dir.join(PROFILE_SEARCH_ROOT_FILE);
+    let search_before = std::fs::read(&search_path).unwrap();
+    std::fs::remove_file(&by_pubkey_path).unwrap();
+    std::fs::create_dir(&by_pubkey_path).unwrap();
+    let replacement = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": "must not commit"}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(2))
+    .sign_with_keys(&keys)
+    .unwrap();
+
+    let error = graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&replacement))
+        .expect_err("writer-side root I/O failure must stop before durable intent");
+    assert!(format!("{error:#}").contains("read profile root file"));
+    assert!(by_pubkey_path.is_dir());
+    assert_eq!(std::fs::read(&search_path).unwrap(), search_before);
+    assert!(
+        !db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).exists(),
+        "failed authority read must not create a root-pair intent"
+    );
+}
+
+#[test]
+fn durable_pre_root_projection_obligation_cancels_and_same_process_retry_converges() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let profile = metadata_event(&Keys::generate(), "durable pre-root retry", 1);
+    let db_dir = tmp.path().join("socialgraph");
+    let pending_path = db_dir.join(PROFILE_PROJECTION_PENDING_FILE);
+    let expected_path = pending_path.clone();
+    let fired = Arc::new(AtomicBool::new(false));
+    let fired_for_probe = Arc::clone(&fired);
+    let probe = install_pending_profile_projection_persisted_probe(Arc::new(move |path| {
+        if path == expected_path && !fired_for_probe.swap(true, Ordering::AcqRel) {
+            anyhow::bail!(
+                "injected interruption after durable projection obligation and before event root"
+            );
+        }
+        Ok(())
+    }));
+    let root_before = graph_store.public_events_root().unwrap();
+
+    let error =
+        ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Public)
+            .expect_err("injected pre-root interruption must stop metadata publication");
+    assert!(format!("{error:#}").contains("injected interruption"));
+    assert!(fired.load(Ordering::Acquire));
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        root_before,
+        "an interruption after obligation fsync must precede event-root publication"
+    );
+    assert!(query_events(&graph_store, &Filter::new().id(profile.id), 1).is_empty());
+    let projection = load_pending_profile_projection(&pending_path)
+        .unwrap()
+        .expect("the durable obligation must be installed");
+    assert_eq!(
+        pending_profile_projection_bytes(&projection).unwrap(),
+        fs::read(&pending_path).unwrap(),
+        "the installed obligation must be complete canonical bytes"
+    );
+    let pending_name = pending_path.file_name().unwrap().to_str().unwrap();
+    assert!(
+        !pending_path
+            .with_file_name(format!(".{pending_name}.pending"))
+            .exists(),
+        "the fsynced rename must not leave a partial temporary obligation"
+    );
+    File::open(&db_dir).unwrap().sync_all().unwrap();
+
+    drop(probe);
+    assert!(graph_store
+        .latest_profile_event(&profile.pubkey.to_hex())
+        .unwrap()
+        .is_none());
+    assert!(
+        !pending_path.exists(),
+        "same-process recovery must durably cancel an obligation whose event root stayed old"
+    );
+    File::open(&db_dir).unwrap().sync_all().unwrap();
+
+    ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Public)
+        .expect("same-process retry must publish event and both profile projections");
+    assert_event_and_profile_visible(&graph_store, &profile, "p:durable");
+}
+
+#[test]
+fn failed_projection_intent_preserves_old_replaceable_root_across_reopen() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let original = metadata_event(&keys, "pre intent original", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &original, EventStorageClass::Public)
+        .unwrap();
+    let old_root = graph_store
+        .public_events_root()
+        .unwrap()
+        .expect("original event root");
+    assert_event_and_profile_visible(&graph_store, &original, "p:pre");
+
+    let pending_path = tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_PROJECTION_PENDING_FILE);
+    let pending_name = pending_path.file_name().unwrap().to_str().unwrap();
+    let pending_temp_path = pending_path.with_file_name(format!(".{pending_name}.pending"));
+    fs::create_dir(&pending_temp_path).unwrap();
+    let replacement = metadata_event(&keys, "pre intent replacement", 2);
+    let error = ingest_parsed_event_with_storage_class(
+        &graph_store,
+        &replacement,
+        EventStorageClass::Public,
+    )
+    .expect_err("a real pending-intent rename failure must stop publication");
+    assert!(
+        format!("{error:#}").contains("open pending pending profile projection"),
+        "unexpected intent persistence error: {error:#}"
+    );
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        Some(old_root.clone())
+    );
+    assert_eq!(
+        query_events(&graph_store, &Filter::new().id(original.id), 1)
+            .into_iter()
+            .map(|event| event.id)
+            .collect::<Vec<_>>(),
+        vec![original.id],
+        "non-destructive staging must leave the old replaceable event readable"
+    );
+    assert!(
+        query_events(&graph_store, &Filter::new().id(replacement.id), 1).is_empty(),
+        "the staged replacement must not become reachable without its durable intent"
+    );
+
+    fs::remove_dir(&pending_temp_path).unwrap();
+    assert_event_and_profile_visible(&graph_store, &original, "p:pre");
+    drop(graph_store);
+
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    assert_eq!(reopened.public_events_root().unwrap(), Some(old_root));
+    assert_event_and_profile_visible(&reopened, &original, "p:pre");
+    assert!(reopened
+        .latest_profile_event(&replacement.pubkey.to_hex())
+        .unwrap()
+        .is_some_and(|event| event.id == original.id));
+}
+
+#[test]
+fn rejected_older_metadata_creates_no_unrecoverable_obligation() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let current = metadata_event(&keys, "Current Winner", 2);
+    let older = metadata_event(&keys, "Rejected Older", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &current, EventStorageClass::Public)
+        .unwrap();
+    let root_before = graph_store.public_events_root().unwrap();
+
+    ingest_parsed_event_with_storage_class(&graph_store, &older, EventStorageClass::Public)
+        .unwrap();
+    assert_eq!(graph_store.public_events_root().unwrap(), root_before);
+    assert!(!tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_PROJECTION_PENDING_FILE)
+        .exists());
+    assert_eq!(
+        graph_store
+            .latest_profile_event(&current.pubkey.to_hex())
+            .unwrap()
+            .expect("current winner")
+            .id,
+        current.id
+    );
+    assert!(query_events(&graph_store, &Filter::new().id(older.id), 1).is_empty());
+    drop(graph_store);
+
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    assert_eq!(reopened.public_events_root().unwrap(), root_before);
+    assert_eq!(
+        reopened
+            .latest_profile_event(&current.pubkey.to_hex())
+            .unwrap()
+            .expect("current winner after reopen")
+            .id,
+        current.id
+    );
+}
+
+#[test]
+fn same_process_read_repairs_post_event_root_profile_io_failure() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let profile = metadata_event(&Keys::generate(), "same process projection retry", 1);
+    let db_dir = tmp.path().join("socialgraph");
+    let by_pubkey_path = db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    fs::create_dir(&by_pubkey_path).unwrap();
+
+    let error =
+        ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Public)
+            .expect_err("profile root I/O failure must leave a durable retry obligation");
+    assert!(format!("{error:#}").contains("read profile root file"));
+    assert!(
+        query_events(&graph_store, &Filter::new().id(profile.id), 1)
+            .iter()
+            .any(|event| event.id == profile.id),
+        "the authoritative event root was already published"
+    );
+    let pending_path = db_dir.join(PROFILE_PROJECTION_PENDING_FILE);
+    assert!(pending_path.is_file());
+
+    fs::remove_dir(&by_pubkey_path).unwrap();
+    assert_event_and_profile_visible(&graph_store, &profile, "p:same");
+    assert!(
+        !pending_path.exists(),
+        "the first same-process profile read must repair and clear the obligation"
+    );
+}
+
+#[test]
+fn mismatched_pending_metadata_root_pair_fails_closed() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let original = metadata_event(&Keys::generate(), "mismatch original", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &original, EventStorageClass::Public)
+        .unwrap();
+    let old_root = graph_store.public_events_root().unwrap().unwrap();
+    let pending = metadata_event(&Keys::generate(), "mismatch pending", 2);
+    let unrelated = EventBuilder::new(Kind::TextNote, "unexpected published root")
+        .custom_created_at(Timestamp::from_secs(3))
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    let pending_root = graph_store
+        .public_events
+        .store_event(Some(&old_root), &pending)
+        .unwrap();
+    let unrelated_root = graph_store
+        .public_events
+        .store_event(Some(&old_root), &unrelated)
+        .unwrap();
+    assert_ne!(pending_root, unrelated_root);
+
+    let transaction = graph_store
+        .profile_index
+        .acquire_exclusive_root_pair_transaction()
+        .unwrap();
+    graph_store
+        .force_sync_event_storage(EventStorageClass::Public)
+        .unwrap();
+    graph_store
+        .persist_pending_profile_projection_locked(&PendingProfileProjection {
+            version: PROFILE_PROJECTION_PENDING_VERSION,
+            storage_class: StoredEventStorageClass::Public,
+            projection: PendingProfileProjectionMode::Incremental {
+                old_root: Some(stored_cid(&old_root)),
+                new_root: stored_cid(&pending_root),
+                events: vec![pending.as_json()],
+            },
+        })
+        .unwrap();
+    graph_store
+        .public_events
+        .write_events_root_durable(Some(&unrelated_root))
+        .unwrap();
+    drop(transaction);
+    drop(graph_store);
+
+    let error = match open_test_social_graph_store(tmp.path()) {
+        Ok(_) => panic!("an event root matching neither side of the obligation must be rejected"),
+        Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains("does not match the pre- or post-publication state"));
+    assert_eq!(
+        read_root_file(&tmp.path().join("socialgraph").join(EVENTS_ROOT_FILE)).unwrap(),
+        Some(unrelated_root)
+    );
+    assert!(
+        tmp.path()
+            .join("socialgraph")
+            .join(PROFILE_PROJECTION_PENDING_FILE)
+            .is_file(),
+        "a mismatched pair must remain available for operator repair"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sync_and_async_profile_lock_waits_have_explicit_deadlines() {
+    let _guard = test_lock().await;
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let lock_path = graph_store.profile_index.root_pair_lock_path.clone();
+    let writer_transaction =
+        acquire_profile_root_pair_lock_async(&lock_path, ProfileRootPairLockMode::Exclusive, true)
+            .await
+            .unwrap();
+
+    let timeout = Duration::from_millis(60);
+    let profile = metadata_event(&Keys::generate(), "deadline profile", 1);
+    let event_root_before = graph_store.public_events_root().unwrap();
+    let error = graph_store
+        .ingest_event_with_storage_class_and_lock_timeout(
+            &profile,
+            EventStorageClass::Public,
+            timeout,
+        )
+        .expect_err("metadata ingest must time out before event-root publication");
+    assert!(error.to_string().contains("timed out"));
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        event_root_before,
+        "timed-out metadata ingest must leave the event root unchanged"
+    );
+    assert!(query_events(&graph_store, &Filter::new().id(profile.id), 1).is_empty());
+
+    let started = std::time::Instant::now();
+    let error = read_profile_index_roots_with_timeout(tmp.path(), timeout)
+        .expect_err("a synchronous reader must stop at its explicit deadline");
+    assert!(error.to_string().contains("timed out"));
+    assert!(
+        started.elapsed() >= timeout && started.elapsed() < Duration::from_millis(500),
+        "synchronous contention must honor its bounded deadline"
+    );
+
+    let started = std::time::Instant::now();
+    let error = match acquire_profile_root_pair_lock_async_with_timeout(
+        &lock_path,
+        ProfileRootPairLockMode::Shared,
+        false,
+        timeout,
+    )
+    .await
+    {
+        Ok(_) => panic!("an asynchronous reader must stop at its explicit deadline"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("timed out"));
+    assert!(
+        started.elapsed() >= timeout && started.elapsed() < Duration::from_millis(500),
+        "asynchronous contention must honor its bounded deadline"
+    );
+
+    drop(writer_transaction);
+    read_profile_index_roots(tmp.path()).unwrap();
+    assert!(graph_store
+        .latest_profile_event(&profile.pubkey.to_hex())
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn full_root_with_no_metadata_durably_clears_stale_profile_indexes() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let old_profile = metadata_event(&Keys::generate(), "VanishingProfile", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &old_profile, EventStorageClass::Public)
+        .unwrap();
+    let old_root = graph_store
+        .public_events_root()
+        .unwrap()
+        .expect("old profile event root");
+    assert_event_and_profile_visible(&graph_store, &old_profile, "p:vanishing");
+
+    let note = EventBuilder::new(Kind::TextNote, "profile-free replacement root")
+        .custom_created_at(Timestamp::from_secs(2))
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    let replacement_root = block_on(graph_store.public_events.event_store.build(
+        None,
+        std::iter::once(stored_event_from_nostr_sdk_event(&note)),
+    ))
+    .map_err(map_event_store_error)
+    .unwrap()
+    .expect("replacement root");
+    let outcome = graph_store
+        .apply_public_events_root_and_projections(
+            Some(&old_root),
+            Some(&replacement_root),
+            std::slice::from_ref(&note),
+            true,
+        )
+        .unwrap();
+    assert_eq!(outcome, PublicEventsRootApplyOutcome::Applied);
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        Some(replacement_root)
+    );
+    assert!(graph_store
+        .latest_profile_event(&old_profile.pubkey.to_hex())
+        .unwrap()
+        .is_none());
+    assert_eq!(graph_store.profiles_by_pubkey_root().unwrap(), None);
+    assert_eq!(graph_store.profile_search_root().unwrap(), None);
+    assert!(query_events(&graph_store, &Filter::new().id(note.id), 1)
+        .iter()
+        .any(|event| event.id == note.id));
+    assert!(!tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_PROJECTION_PENDING_FILE)
+        .exists());
+}
+
+#[test]
+fn full_rebuild_recovery_fails_closed_on_missing_metadata_blob() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let profile = metadata_event(&Keys::generate(), "strict rebuild", 1);
+    let root =
+        stage_public_derived_projection_crash(&graph_store, std::slice::from_ref(&profile), true);
+    let manifest = block_on(
+        graph_store
+            .public_events
+            .event_store
+            .get_manifest(Some(&root)),
+    )
+    .unwrap();
+    let by_id = manifest.by_id.expect("candidate by-id root");
+    let event_cid = block_on(
+        graph_store
+            .profile_index
+            .index
+            .get_link(Some(&by_id), &profile.id.to_hex()),
+    )
+    .unwrap()
+    .expect("candidate metadata event cid");
+    assert!(block_on(graph_store.profile_index.store.delete(&event_cid.hash)).unwrap());
+    graph_store.profile_index.store.force_sync().unwrap();
+    drop(graph_store);
+
+    let error = match open_test_social_graph_store(tmp.path()) {
+        Ok(_) => panic!("full rebuild recovery must reject a missing metadata blob"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("stored nostr event blob is missing"),
+        "unexpected strict recovery error: {error:#}"
+    );
+    assert!(
+        tmp.path()
+            .join("socialgraph")
+            .join(PROFILE_PROJECTION_PENDING_FILE)
+            .is_file(),
+        "strict recovery must retain the obligation for operator repair"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn derived_projection_recovery_child_helper() {
+    let Ok(data_dir) = std::env::var("HASHTREE_DERIVED_RECOVERY_CHILD_DATA_DIR") else {
+        return;
+    };
+    let mode = std::env::var("HASHTREE_DERIVED_RECOVERY_CHILD_MODE")
+        .expect("derived recovery mode must be provided");
+    let expected_pubkey = std::env::var("HASHTREE_DERIVED_RECOVERY_CHILD_EXPECTED_PUBKEY")
+        .expect("derived recovery pubkey must be provided");
+    let graph_store = open_social_graph_store(Path::new(&data_dir))
+        .expect("fresh process open must recover every derived projection");
+    let expected_bytes = nostr::PublicKey::from_hex(&expected_pubkey)
+        .unwrap()
+        .to_bytes();
+    assert_eq!(
+        get_follow_distance(&graph_store, &expected_bytes),
+        Some(1),
+        "graph recovery must precede release of the durable obligation"
+    );
+
+    match mode.as_str() {
+        "graph-only" => {}
+        "graph-before-profile" => {
+            let expected_event_id =
+                std::env::var("HASHTREE_DERIVED_RECOVERY_CHILD_EXPECTED_EVENT_ID")
+                    .expect("profile event id must be provided");
+            let recovered = graph_store
+                .latest_profile_event(&expected_pubkey)
+                .unwrap()
+                .expect("profile must be recovered after its graph dependency");
+            assert_eq!(recovered.id.to_hex(), expected_event_id);
+            let entry = graph_store
+                .profile_search_entries_for_prefix("p:ordered")
+                .unwrap()
+                .into_iter()
+                .find(|(_, entry)| entry.pubkey == expected_pubkey)
+                .map(|(_, entry)| entry)
+                .expect("recovered profile search entry");
+            assert_eq!(
+                entry.follow_distance,
+                Some(1),
+                "profile rank must be computed from the recovered graph state"
+            );
+        }
+        other => panic!("unsupported derived recovery mode {other}"),
+    }
+
+    assert!(
+        !Path::new(&data_dir)
+            .join("socialgraph")
+            .join(PROFILE_PROJECTION_PENDING_FILE)
+            .exists(),
+        "fresh-process recovery must durably clear the complete obligation"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_process_open_recovers_graph_only_batch_after_event_root_crash() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let root_keys = Keys::generate();
+    let followed_keys = Keys::generate();
+    set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
+    graph_store.force_sync().unwrap();
+    let contact = event_builder!(
+        Kind::ContactList,
+        "",
+        vec![Tag::public_key(followed_keys.public_key())],
+    )
+    .custom_created_at(Timestamp::from_secs(10))
+    .sign_with_keys(&root_keys)
+    .unwrap();
+    stage_public_derived_projection_crash(&graph_store, std::slice::from_ref(&contact), false);
+    assert_eq!(
+        get_follow_distance(&graph_store, &followed_keys.public_key().to_bytes()),
+        None,
+        "the simulated crash boundary must precede graph application"
+    );
+    assert!(tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_PROJECTION_PENDING_FILE)
+        .is_file());
+    drop(graph_store);
+
+    run_derived_recovery_child(
+        tmp.path(),
+        "graph-only",
+        &followed_keys.public_key().to_hex(),
+        None,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_process_recovery_applies_graph_before_profile_rank() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let root_keys = Keys::generate();
+    let profile_keys = Keys::generate();
+    set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
+    graph_store.force_sync().unwrap();
+    let contact = event_builder!(
+        Kind::ContactList,
+        "",
+        vec![Tag::public_key(profile_keys.public_key())],
+    )
+    .custom_created_at(Timestamp::from_secs(10))
+    .sign_with_keys(&root_keys)
+    .unwrap();
+    let profile = metadata_event(&profile_keys, "Ordered Profile", 11);
+    stage_public_derived_projection_crash(&graph_store, &[contact, profile.clone()], false);
+    assert_eq!(
+        get_follow_distance(&graph_store, &profile_keys.public_key().to_bytes()),
+        None,
+        "the simulated crash boundary must precede graph application"
+    );
+    drop(graph_store);
+
+    run_derived_recovery_child(
+        tmp.path(),
+        "graph-before-profile",
+        &profile.pubkey.to_hex(),
+        Some(&profile.id.to_hex()),
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn profile_projection_recovery_child_helper() {
+    let Ok(data_dir) = std::env::var("HASHTREE_PROFILE_RECOVERY_CHILD_DATA_DIR") else {
+        return;
+    };
+    let expected_pubkey = std::env::var("HASHTREE_PROFILE_RECOVERY_CHILD_PUBKEY")
+        .expect("child recovery pubkey must be provided");
+    let expected_event_id = std::env::var("HASHTREE_PROFILE_RECOVERY_CHILD_EVENT_ID")
+        .expect("child recovery event id must be provided");
+    let graph_store = open_social_graph_store(Path::new(&data_dir))
+        .expect("fresh process open must recover the profile projection");
+    let recovered = graph_store
+        .latest_profile_event(&expected_pubkey)
+        .unwrap()
+        .expect("fresh process must expose the recovered profile");
+    assert_eq!(recovered.id.to_hex(), expected_event_id);
+    assert!(
+        !Path::new(&data_dir)
+            .join("socialgraph")
+            .join(PROFILE_PROJECTION_PENDING_FILE)
+            .exists(),
+        "fresh process recovery must durably clear the obligation"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_process_open_repairs_post_event_root_profile_io_failure() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let profile = metadata_event(&Keys::generate(), "fresh process projection retry", 1);
+    let db_dir = tmp.path().join("socialgraph");
+    let by_pubkey_path = db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    fs::create_dir(&by_pubkey_path).unwrap();
+
+    let error =
+        ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Public)
+            .expect_err("profile root I/O failure must leave a durable retry obligation");
+    assert!(format!("{error:#}").contains("read profile root file"));
+    assert!(
+        query_events(&graph_store, &Filter::new().id(profile.id), 1)
+            .iter()
+            .any(|event| event.id == profile.id),
+        "the event must be reachable before a fresh process repairs its profile projection"
+    );
+    let pending_path = db_dir.join(PROFILE_PROJECTION_PENDING_FILE);
+    assert!(pending_path.is_file());
+    drop(graph_store);
+    fs::remove_dir(&by_pubkey_path).unwrap();
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("socialgraph::tests::profile_projection_recovery_child_helper")
+        .arg("--nocapture")
+        .env("RUST_TEST_THREADS", "1")
+        .env("HASHTREE_PROFILE_RECOVERY_CHILD_DATA_DIR", tmp.path())
+        .env(
+            "HASHTREE_PROFILE_RECOVERY_CHILD_PUBKEY",
+            profile.pubkey.to_hex(),
+        )
+        .env(
+            "HASHTREE_PROFILE_RECOVERY_CHILD_EVENT_ID",
+            profile.id.to_hex(),
+        )
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("fresh-process profile recovery exceeded its deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "fresh-process recovery failed: {status}");
+    assert!(!pending_path.exists());
+
+    let reopened = open_social_graph_store(tmp.path()).unwrap();
+    assert_event_and_profile_visible(&reopened, &profile, "p:fresh");
+}
+
+#[cfg(unix)]
+#[test]
+fn profile_root_pair_cross_process_writer_helper() {
+    let Ok(data_dir) = std::env::var("HASHTREE_PROFILE_LOCK_CHILD_DATA_DIR") else {
+        return;
+    };
+    let ready_path = PathBuf::from(
+        std::env::var("HASHTREE_PROFILE_LOCK_CHILD_READY")
+            .expect("child ready path must be provided"),
+    );
+    let hold_millis = std::env::var("HASHTREE_PROFILE_LOCK_CHILD_HOLD_MS")
+        .expect("child hold duration must be provided")
+        .parse::<u64>()
+        .expect("child hold duration must be an integer");
+    let graph_store = open_social_graph_store(Path::new(&data_dir)).unwrap();
+    let profile = metadata_event(&Keys::generate(), "child process writer", 1);
+    let pubkey = profile.pubkey.to_hex();
+    let expected_lock_path = graph_store.profile_index.root_pair_lock_path.clone();
+    let fired = Arc::new(AtomicBool::new(false));
+    let _probe = install_profile_root_pair_transaction_probe(Arc::new(move |path, mode| {
+        if mode != ProfileRootPairLockMode::Exclusive || fired.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        assert_eq!(path, expected_lock_path);
+        fs::write(&ready_path, format!("{pubkey}\n")).unwrap();
+        std::thread::sleep(Duration::from_millis(hold_millis));
+    }));
+    ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Public)
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn cross_process_writer_excludes_reader_and_writer_until_real_commit_finishes() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    drop(open_social_graph_store(tmp.path()).unwrap());
+    let ready_path = tmp.path().join("cross-process-profile-writer.ready");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("socialgraph::tests::profile_root_pair_cross_process_writer_helper")
+        .arg("--nocapture")
+        .env("RUST_TEST_THREADS", "1")
+        .env("HASHTREE_PROFILE_LOCK_CHILD_DATA_DIR", tmp.path())
+        .env("HASHTREE_PROFILE_LOCK_CHILD_READY", &ready_path)
+        .env("HASHTREE_PROFILE_LOCK_CHILD_HOLD_MS", "500")
+        .spawn()
+        .unwrap();
+
+    let ready_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !ready_path.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("cross-process writer exited before acquiring the lock: {status}");
+        }
+        assert!(
+            std::time::Instant::now() < ready_deadline,
+            "cross-process writer did not acquire its lock before the deadline"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let child_pubkey = fs::read_to_string(&ready_path).unwrap().trim().to_string();
+    let timeout = Duration::from_millis(60);
+    let read_error = read_profile_index_roots_with_timeout(tmp.path(), timeout)
+        .expect_err("cross-process reader must not observe an in-flight writer");
+    assert!(read_error.to_string().contains("timed out"));
+    let lock_path = tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_ROOT_PAIR_LOCK_FILE);
+    let write_error = match acquire_profile_root_pair_lock_with_timeout(
+        &lock_path,
+        ProfileRootPairLockMode::Exclusive,
+        true,
+        timeout,
+    ) {
+        Ok(_) => panic!("cross-process writer must be excluded by the advisory lock"),
+        Err(error) => error,
+    };
+    assert!(write_error.to_string().contains("timed out"));
+
+    let child_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= child_deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("cross-process writer did not finish before the deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "cross-process writer failed: {status}");
+
+    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    assert!(graph_store
+        .latest_profile_event(&child_pubkey)
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        graph_store
+            .profile_search_entries_for_prefix("p:child")
+            .unwrap()
+            .len(),
+        1
+    );
+    let parent_profile = metadata_event(&Keys::generate(), "parent process writer", 2);
+    ingest_parsed_event_with_storage_class(
+        &graph_store,
+        &parent_profile,
+        EventStorageClass::Public,
+    )
+    .unwrap();
+    assert_event_and_profile_visible(&graph_store, &parent_profile, "p:parent");
+}
+
+#[test]
+fn second_writer_recovers_first_writers_interrupted_pair_before_disjoint_update() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let first_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let first_keys = Keys::generate();
+    let second_keys = Keys::generate();
+    let original = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": "obsolete first writer"}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(1))
+    .sign_with_keys(&first_keys)
+    .unwrap();
+    let replacement = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": "recovered first writer"}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(2))
+    .sign_with_keys(&first_keys)
+    .unwrap();
+    let disjoint = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": "second writer survives"}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(3))
+    .sign_with_keys(&second_keys)
+    .unwrap();
+    first_store
+        .sync_profile_index_for_events(std::slice::from_ref(&original))
+        .unwrap();
+
+    let (old_by_pubkey, old_search) = first_store.profile_index.roots().unwrap();
+    let (next_by_pubkey, next_search, changed) = first_store
+        .profile_index
+        .update_profile_events_locked(
+            old_by_pubkey.as_ref(),
+            old_search.as_ref(),
+            &[(&replacement, Some(1), false, true)],
+        )
+        .unwrap();
+    assert!(changed);
+    first_store
+        .profile_index
+        .write_roots_interrupted_after_search(next_by_pubkey.as_ref(), next_search.as_ref())
+        .expect_err("first writer must leave a durable intermediate root pair");
+    let db_dir = tmp.path().join("socialgraph");
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+
+    let second_store = open_test_social_graph_store(tmp.path())
+        .expect("second writer must recover the first writer's durable intent on open");
+    assert!(!db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).exists());
+    second_store
+        .sync_profile_index_for_events(std::slice::from_ref(&disjoint))
+        .expect("second writer must apply from the recovered pair");
+    drop(second_store);
+    drop(first_store);
+
+    let roots = read_profile_index_roots(tmp.path()).unwrap();
+    assert!(roots.by_pubkey.is_some());
+    assert!(roots.search.is_some());
+    assert!(roots.by_pubkey_file_sha256.is_some());
+    assert!(roots.search_file_sha256.is_some());
+    assert!(!db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).exists());
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    assert_eq!(
+        reopened
+            .latest_profile_event(&first_keys.public_key().to_hex())
+            .unwrap()
+            .expect("recovered first-writer profile")
+            .id,
+        replacement.id
+    );
+    assert_eq!(
+        reopened
+            .latest_profile_event(&second_keys.public_key().to_hex())
+            .unwrap()
+            .expect("disjoint second-writer profile")
+            .id,
+        disjoint.id
+    );
+    assert_eq!(
+        reopened
+            .profile_search_entries_for_prefix("p:recovered")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        reopened
+            .profile_search_entries_for_prefix("p:second")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn interrupted_profile_root_pair_exclusion_recovers_before_replay() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+    let profile = event_builder!(
+        Kind::Metadata,
+        serde_json::json!({ "display_name": "stale exclusion" }).to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(5))
+    .sign_with_keys(&keys)
+    .unwrap();
+
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&profile))
+        .unwrap();
+    let (old_by_pubkey, old_search) = graph_store.profile_index.roots().unwrap();
+    let (next_by_pubkey, next_search, changed) = graph_store
+        .profile_index
+        .update_profile_events_locked(
+            old_by_pubkey.as_ref(),
+            old_search.as_ref(),
+            &[(&profile, None, true, true)],
+        )
+        .unwrap();
+    assert!(changed);
+
+    let error = graph_store
+        .profile_index
+        .write_roots_interrupted_after_intent(next_by_pubkey.as_ref(), next_search.as_ref())
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("injected interruption after durable profile root-pair intent"));
+    let db_dir = tmp.path().join("socialgraph");
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+    assert_eq!(
+        read_root_file(&db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE)).unwrap(),
+        old_by_pubkey,
+        "by-pubkey must remain the replay authority until search is durable"
+    );
+    assert_eq!(
+        read_root_file(&db_dir.join(PROFILE_SEARCH_ROOT_FILE)).unwrap(),
+        old_search,
+        "neither root may move before the durable intent is installed"
+    );
+    let read_only_error = read_profile_index_roots(tmp.path()).unwrap_err();
+    assert!(read_only_error
+        .to_string()
+        .contains("open the writable social graph store to recover"));
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+
+    drop(graph_store);
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    assert!(!db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).exists());
+    assert_eq!(reopened.profile_index.roots().unwrap(), (None, None));
+    assert!(reopened.latest_profile_event(&pubkey).unwrap().is_none());
+    assert!(reopened
+        .profile_search_entries_for_prefix("p:stale")
+        .unwrap()
+        .is_empty());
+
+    let decisions = BTreeMap::from([(pubkey.clone(), None)]);
+    reopened
+        .sync_profile_index_for_events_with_frozen_distances(
+            std::slice::from_ref(&profile),
+            &decisions,
+        )
+        .unwrap();
+    assert!(reopened.latest_profile_event(&pubkey).unwrap().is_none());
+    assert!(reopened
+        .profile_search_entries_for_prefix("p:stale")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn interrupted_profile_root_pair_changed_terms_recovers_before_replay() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+    let old_profile = event_builder!(
+        Kind::Metadata,
+        serde_json::json!({ "display_name": "obsolete crash term" }).to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(5))
+    .sign_with_keys(&keys)
+    .unwrap();
+    let replacement = event_builder!(
+        Kind::Metadata,
+        serde_json::json!({ "display_name": "durable replacement term" }).to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(6))
+    .sign_with_keys(&keys)
+    .unwrap();
+
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&old_profile))
+        .unwrap();
+    let (old_by_pubkey, old_search) = graph_store.profile_index.roots().unwrap();
+    let (next_by_pubkey, next_search, changed) = graph_store
+        .profile_index
+        .update_profile_events_locked(
+            old_by_pubkey.as_ref(),
+            old_search.as_ref(),
+            &[(&replacement, Some(4), false, true)],
+        )
+        .unwrap();
+    assert!(changed);
+
+    graph_store
+        .profile_index
+        .write_roots_interrupted_after_search(next_by_pubkey.as_ref(), next_search.as_ref())
+        .unwrap_err();
+    let db_dir = tmp.path().join("socialgraph");
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+    assert_eq!(
+        read_root_file(&db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE)).unwrap(),
+        old_by_pubkey,
+        "by-pubkey must not move before changed search terms are durable"
+    );
+    assert_eq!(
+        read_root_file(&db_dir.join(PROFILE_SEARCH_ROOT_FILE)).unwrap(),
+        next_search,
+        "replacement search terms must be installed first"
+    );
+    let read_only_error = read_profile_index_roots(tmp.path()).unwrap_err();
+    assert!(read_only_error
+        .to_string()
+        .contains("open the writable social graph store to recover"));
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+
+    write_root_file_durable(&db_dir.join(PROFILE_SEARCH_ROOT_FILE), old_search.as_ref()).unwrap();
+    write_root_file_durable(
+        &db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE),
+        next_by_pubkey.as_ref(),
+    )
+    .unwrap();
+    drop(graph_store);
+    let tamper_error = open_test_social_graph_store(tmp.path())
+        .err()
+        .expect("reverse-order root pair must fail closed");
+    assert!(format!("{tamper_error:#}").contains("do not match an allowed forward state"));
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+    write_root_file_durable(
+        &db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE),
+        old_by_pubkey.as_ref(),
+    )
+    .unwrap();
+    write_root_file_durable(&db_dir.join(PROFILE_SEARCH_ROOT_FILE), next_search.as_ref()).unwrap();
+
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    assert!(!db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).exists());
+    assert_eq!(
+        reopened
+            .latest_profile_event(&pubkey)
+            .unwrap()
+            .expect("recovered replacement profile")
+            .id,
+        replacement.id
+    );
+    assert!(reopened
+        .profile_search_entries_for_prefix("p:obsolete")
+        .unwrap()
+        .is_empty());
+    let replacement_entries = reopened
+        .profile_search_entries_for_prefix("p:durable")
+        .unwrap();
+    assert!(replacement_entries.iter().any(|(key, entry)| {
+        key == &format!("p:durable:{pubkey}")
+            && entry.name == "durable replacement term"
+            && entry.follow_distance == Some(4)
+    }));
+
+    let decisions = BTreeMap::from([(pubkey.clone(), Some(4))]);
+    reopened
+        .sync_profile_index_for_events_with_frozen_distances(
+            std::slice::from_ref(&replacement),
+            &decisions,
+        )
+        .unwrap();
+    assert!(reopened
+        .profile_search_entries_for_prefix("p:obsolete")
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        reopened
+            .latest_profile_event(&pubkey)
+            .unwrap()
+            .expect("replacement after replay")
+            .id,
+        replacement.id
+    );
+}
+
 #[test]
 fn test_profile_search_index_with_shared_hashtree_storage() {
     let _guard = test_lock_blocking();
@@ -913,11 +2526,7 @@ fn test_rebuild_profile_index_from_stored_events_uses_ambient_and_public_metadat
     ingest_parsed_event_with_storage_class(&graph_store, &ambient, EventStorageClass::Ambient)
         .unwrap();
 
-    graph_store
-        .profile_index
-        .write_by_pubkey_root(None)
-        .unwrap();
-    graph_store.profile_index.write_search_root(None).unwrap();
+    graph_store.profile_index.write_roots(None, None).unwrap();
 
     let rebuilt = graph_store
         .rebuild_profile_index_from_stored_events()

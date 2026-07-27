@@ -217,6 +217,13 @@ async fn publish_socialgraph_roots(
     if roots.is_empty() {
         return Ok(());
     }
+    if roots.iter().any(|(tree_name, _)| {
+        tree_name == PUBLISHED_PROFILE_SEARCH_TREE_NAME
+            || tree_name == PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME
+    }) {
+        hashtree_cli::socialgraph::require_profile_publication_unfenced(data_dir)
+            .context("refuse direct socialgraph profile-root publication")?;
+    }
 
     let write_servers = config.blossom.all_write_servers();
     for (tree_name, root) in &roots {
@@ -649,9 +656,13 @@ pub(crate) async fn run_socialgraph_warm(
 
 #[cfg(test)]
 mod tests {
-    use super::format_socialgraph_root;
+    use super::{
+        format_socialgraph_root, publish_socialgraph_roots, Cid, Config, PUBLISHED_EVENT_TREE_NAME,
+        PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME, PUBLISHED_PROFILE_SEARCH_TREE_NAME,
+    };
     use nostr::nips::nip19::ToBech32;
     use nostr::PublicKey;
+    use tempfile::TempDir;
 
     #[test]
     fn formats_hex_socialgraph_root_as_npub() {
@@ -671,5 +682,59 @@ mod tests {
             format_socialgraph_root(Some("not-a-valid-pubkey")),
             "not-a-valid-pubkey"
         );
+    }
+
+    #[tokio::test]
+    async fn all_direct_profile_publication_shapes_fail_closed_while_fenced() {
+        let tmp = TempDir::new().expect("tempdir");
+        let fence_path = hashtree_cli::socialgraph::profile_publication_fence_path(tmp.path());
+        std::fs::create_dir_all(fence_path.parent().expect("fence parent"))
+            .expect("create generated fence directory");
+        std::fs::write(&fence_path, b"generated direct-publish test fence\n")
+            .expect("write generated profile publication fence");
+        let config = Config::default();
+        let profile_search = Some(Cid::public([41; 32]));
+        let profiles_by_pubkey = Some(Cid::public([42; 32]));
+        let public_events = Some(Cid::public([43; 32]));
+        let cases = [
+            (
+                "rebuild-profile",
+                vec![
+                    (PUBLISHED_PROFILE_SEARCH_TREE_NAME, profile_search.clone()),
+                    (
+                        PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME,
+                        profiles_by_pubkey.clone(),
+                    ),
+                ],
+            ),
+            (
+                "publish-profile-indexes",
+                vec![
+                    (PUBLISHED_PROFILE_SEARCH_TREE_NAME, profile_search.clone()),
+                    (
+                        PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME,
+                        profiles_by_pubkey.clone(),
+                    ),
+                ],
+            ),
+            (
+                "rebuild-event-index",
+                vec![
+                    (PUBLISHED_EVENT_TREE_NAME, public_events),
+                    (PUBLISHED_PROFILE_SEARCH_TREE_NAME, profile_search),
+                    (PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME, profiles_by_pubkey),
+                ],
+            ),
+        ];
+
+        for (label, roots) in cases {
+            let error = publish_socialgraph_roots(tmp.path(), &config, &roots)
+                .await
+                .expect_err("fenced direct publication must fail before network I/O");
+            assert!(
+                format!("{error:#}").contains("profile-root publication is fenced"),
+                "{label} returned the wrong fence error: {error:#}"
+            );
+        }
     }
 }

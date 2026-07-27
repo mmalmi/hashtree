@@ -84,6 +84,7 @@ const MIRROR_UPLOAD_STATE_DIR: &str = "nostr-mirror";
 const MIRROR_UPLOADED_ROOT_SUFFIX: &str = ".uploaded-root";
 const NOSTR_INDEX_STATE_DIR: &str = "nostr-index";
 const NOSTR_INDEX_LATEST_ROOT_FILE: &str = "latest-root.txt";
+const HISTORY_ROOT_REBASE_MAX_ATTEMPTS: usize = 8;
 const METADATA_HISTORY_SYNC_PER_AUTHOR_EVENT_LIMIT: usize = 1;
 const METADATA_HISTORY_SYNC_AUTHOR_BATCH_SIZE: usize = 64;
 const DEFAULT_FULL_TEXT_NOTE_HISTORY_FOLLOW_DISTANCE: u32 = 2;
@@ -267,6 +268,7 @@ pub struct BackgroundNostrMirror {
     missing_profile_cursor: Mutex<usize>,
     history_sync_lock: AsyncMutex<()>,
     root_publication_deferrals: AtomicUsize,
+    profile_publication_fence_logged: AtomicBool,
     root_upload_tasks: Mutex<Vec<RootUploadTask>>,
     shutting_down: AtomicBool,
     shutdown_tx: watch::Sender<bool>,
@@ -347,6 +349,7 @@ impl BackgroundNostrMirror {
             missing_profile_cursor: Mutex::new(0),
             history_sync_lock: AsyncMutex::new(()),
             root_publication_deferrals: AtomicUsize::new(0),
+            profile_publication_fence_logged: AtomicBool::new(false),
             root_upload_tasks: Mutex::new(Vec::new()),
             shutting_down: AtomicBool::new(false),
             shutdown_tx,
@@ -1362,7 +1365,7 @@ impl BackgroundNostrMirror {
                 total_chunks,
                 author_count
             );
-            let mut report = match run_chunk(current_root.clone(), author_chunk.clone()).await {
+            let report = match run_chunk(current_root.clone(), author_chunk.clone()).await {
                 Ok(report) => report,
                 Err(err) => {
                     failed_chunks = failed_chunks.saturating_add(1);
@@ -1379,36 +1382,16 @@ impl BackgroundNostrMirror {
                 }
             };
 
-            let latest_root = self.graph_store.public_events_root_for_write()?;
-            if latest_root != current_root {
-                info!(
-                    "Nostr mirror history sync root advanced while chunk was fetching; merging chunk into latest root: chunk={}/{} authors={} events_applied={}",
-                    chunk_index + 1,
-                    total_chunks,
-                    author_count,
-                    report.applied_events.len()
-                );
-                if report.applied_events.is_empty() {
-                    report.root = latest_root.clone();
-                } else {
-                    let event_store = NostrEventStore::new(self.store.store_arc());
-                    report.root = event_store
-                        .build(latest_root.as_ref(), report.applied_events.clone())
-                        .await
-                        .context("merge history chunk into latest mirrored event root")?;
-                }
-                current_root = latest_root;
-            }
-
             if report.root != current_root {
-                self.apply_history_root_with_options(
-                    report.root.as_ref(),
-                    update_profile_and_graph,
-                    false,
-                    Some(&report.applied_events),
-                )
-                .await?;
-                current_root = report.root.clone();
+                current_root = self
+                    .apply_history_root_with_options(
+                        current_root.clone(),
+                        report.root.clone(),
+                        update_profile_and_graph,
+                        false,
+                        Some(&report.applied_events),
+                    )
+                    .await?;
                 info!(
                     "Nostr mirror history sync updated trusted root: chunk={}/{} authors_processed={} events_selected={} events_seen={}",
                     chunk_index + 1,
@@ -1417,6 +1400,8 @@ impl BackgroundNostrMirror {
                     report.events_selected,
                     report.events_seen
                 );
+            } else {
+                current_root = self.graph_store.public_events_root_for_write()?;
             }
             applied_chunks = applied_chunks.saturating_add(1);
             authors_since_publish = authors_since_publish.saturating_add(author_count);
@@ -1550,61 +1535,108 @@ impl BackgroundNostrMirror {
 
     #[cfg(test)]
     async fn apply_history_root(&self, root: Option<&hashtree_core::Cid>) -> Result<()> {
-        self.apply_history_root_with_options(root, true, true, None)
+        let expected_root = self.graph_store.public_events_root_for_write()?;
+        self.apply_history_root_with_options(expected_root, root.cloned(), true, true, None)
             .await
+            .map(|_| ())
     }
 
     async fn apply_history_root_with_options(
         &self,
-        root: Option<&hashtree_core::Cid>,
+        expected_root: Option<hashtree_core::Cid>,
+        root: Option<hashtree_core::Cid>,
         update_profile_and_graph: bool,
         publish_roots: bool,
         applied_events: Option<&[hashtree_nostr::StoredNostrEvent]>,
-    ) -> Result<()> {
-        self.graph_store.write_public_events_root(root)?;
-        let Some(root) = root else {
-            return Ok(());
+    ) -> Result<Option<hashtree_core::Cid>> {
+        let event_store = NostrEventStore::new(self.store.store_arc());
+        let merge_events = match (root.as_ref(), applied_events) {
+            (_, Some(events)) => events.to_vec(),
+            (Some(root), None) => event_store
+                .list_recent(Some(root), ListEventsOptions::default())
+                .await
+                .context("list complete trusted mirrored events for root application")?,
+            (None, None) => Vec::new(),
         };
+        let incremental = applied_events.is_some();
+        let mut expected_root = expected_root;
+        let mut candidate_root = root;
+        let mut applied = false;
 
-        self.note_public_events_root_change()?;
-        if update_profile_and_graph {
-            let events = match applied_events {
-                Some(events) => events
-                    .iter()
-                    .cloned()
+        for attempt in 0..=HISTORY_ROOT_REBASE_MAX_ATTEMPTS {
+            let events = if update_profile_and_graph {
+                let stored = if incremental {
+                    merge_events.clone()
+                } else {
+                    match candidate_root.as_ref() {
+                        Some(root) => event_store
+                            .list_recent(Some(root), ListEventsOptions::default())
+                            .await
+                            .context("list complete rebased mirrored events")?,
+                        None => Vec::new(),
+                    }
+                };
+                stored
+                    .into_iter()
                     .map(socialgraph::stored_event_to_nostr_event)
-                    .collect::<Result<Vec<_>>>()?,
-                None => {
-                    let event_store = NostrEventStore::new(self.store.store_arc());
-                    event_store
-                        .list_recent_lossy(Some(root), ListEventsOptions::default())
-                        .await
-                        .context("list trusted mirrored events")?
-                        .into_iter()
-                        .map(socialgraph::stored_event_to_nostr_event)
-                        .collect::<Result<Vec<_>>>()?
-                }
+                    .collect::<Result<Vec<_>>>()?
+            } else {
+                Vec::new()
             };
 
-            socialgraph::ingest_graph_parsed_events(self.graph_store.as_ref(), &events)
-                .context("sync mirrored social graph state")?;
-            if applied_events.is_some() {
-                self.graph_store
-                    .sync_profile_index_for_events(&events)
-                    .context("update mirrored profile search index")?;
-            } else {
-                self.graph_store
-                    .rebuild_profile_index_for_events(&events)
-                    .context("rebuild mirrored profile search index")?;
+            match self
+                .graph_store
+                .apply_public_events_root_and_projections(
+                    expected_root.as_ref(),
+                    candidate_root.as_ref(),
+                    &events,
+                    update_profile_and_graph && !incremental,
+                )
+                .context("compare-and-apply mirrored event root and derived projections")?
+            {
+                socialgraph::PublicEventsRootApplyOutcome::Applied => {
+                    applied = true;
+                    break;
+                }
+                socialgraph::PublicEventsRootApplyOutcome::Conflict { current_root } => {
+                    if attempt == HISTORY_ROOT_REBASE_MAX_ATTEMPTS {
+                        anyhow::bail!(
+                            "mirrored event root changed during all {} bounded rebase attempts",
+                            HISTORY_ROOT_REBASE_MAX_ATTEMPTS
+                        );
+                    }
+                    info!(
+                        "Nostr mirror history root advanced during candidate application; rebasing without overwriting the newer root: attempt={}/{} events_applied={}",
+                        attempt + 1,
+                        HISTORY_ROOT_REBASE_MAX_ATTEMPTS,
+                        merge_events.len()
+                    );
+                    expected_root = current_root;
+                    if candidate_root.is_none() || merge_events.is_empty() {
+                        candidate_root = expected_root.clone();
+                        break;
+                    }
+                    candidate_root = event_store
+                        .build(expected_root.as_ref(), merge_events.clone())
+                        .await
+                        .context("rebuild history candidate from exact current event root")?;
+                }
             }
+        }
+
+        if !applied {
+            return Ok(candidate_root);
+        }
+        if update_profile_and_graph {
             self.note_profile_search_root_change()?;
             self.note_profiles_by_pubkey_root_change()?;
         }
+        self.note_public_events_root_change()?;
         if !publish_roots {
-            return Ok(());
+            return Ok(candidate_root);
         }
         self.publish_history_roots(update_profile_and_graph).await;
-        Ok(())
+        Ok(candidate_root)
     }
 
     async fn publish_history_roots(&self, update_profile_and_graph: bool) {
@@ -1869,6 +1901,9 @@ impl BackgroundNostrMirror {
     }
 
     async fn maybe_publish_profile_search_root(&self, force: bool) -> Result<()> {
+        if self.defer_profile_publication_while_fenced() {
+            return Ok(());
+        }
         self.maybe_publish_root(
             self.config.published_profile_search_tree_name.as_deref(),
             &self.profile_search_publish_state,
@@ -1880,6 +1915,9 @@ impl BackgroundNostrMirror {
     }
 
     async fn maybe_publish_profiles_by_pubkey_root(&self, force: bool) -> Result<()> {
+        if self.defer_profile_publication_while_fenced() {
+            return Ok(());
+        }
         self.maybe_publish_root(
             self.config
                 .published_profiles_by_pubkey_tree_name
@@ -1890,6 +1928,28 @@ impl BackgroundNostrMirror {
             true,
         )
         .await
+    }
+
+    fn defer_profile_publication_while_fenced(&self) -> bool {
+        match socialgraph::require_profile_publication_unfenced(self.store.base_path()) {
+            Ok(()) => {
+                self.profile_publication_fence_logged
+                    .store(false, Ordering::Release);
+                false
+            }
+            Err(error) => {
+                if !self
+                    .profile_publication_fence_logged
+                    .swap(true, Ordering::AcqRel)
+                {
+                    warn!(
+                        "Nostr mirror deferred all profile-root publication: {:#}",
+                        error
+                    );
+                }
+                true
+            }
+        }
     }
 
     async fn maybe_publish_root(

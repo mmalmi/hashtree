@@ -49,6 +49,15 @@ pub struct BTreeLinkValidation {
     pub last: Option<(String, Cid)>,
 }
 
+/// Exhaustive structural validation report for one string-value B-tree.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BTreeValueValidation {
+    pub nodes: u64,
+    pub entries: u64,
+    pub first: Option<String>,
+    pub last: Option<String>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum BTreeError {
     #[error("hash tree error: {0}")]
@@ -59,6 +68,8 @@ pub enum BTreeError {
     UnsortedInput { previous: String, next: String },
     #[error("invalid CID-link B-tree: {0}")]
     InvalidLinkTree(String),
+    #[error("invalid string-value B-tree: {0}")]
+    InvalidValueTree(String),
 }
 
 #[derive(Debug, Clone)]
@@ -298,6 +309,21 @@ impl<S: Store> BTree<S> {
             return Ok(BTreeLinkValidation::default());
         };
         self.validate_link_tree_recursive(root.clone()).await
+    }
+
+    /// Exhaustively validate every node in a string-value B-tree.
+    ///
+    /// This verifies strict key order, homogeneous node link types, routing
+    /// separators, and exact stored subtree counts. Callers can then traverse
+    /// [`Self::entries`] to validate every value semantically.
+    pub async fn validate_value_tree(
+        &self,
+        root: Option<&Cid>,
+    ) -> Result<BTreeValueValidation, BTreeError> {
+        let Some(root) = root else {
+            return Ok(BTreeValueValidation::default());
+        };
+        self.validate_value_tree_recursive(root.clone()).await
     }
 
     /// Read the stored CID-link count from the root node without scanning.
@@ -1803,6 +1829,99 @@ impl<S: Store> BTree<S> {
                 })?;
                 report.links = report.links.checked_add(child.links).ok_or_else(|| {
                     BTreeError::InvalidLinkTree("link count overflow".to_string())
+                })?;
+                if report.first.is_none() {
+                    report.first = child.first.clone();
+                }
+                report.last = child.last;
+            }
+            Ok(report)
+        })
+    }
+
+    fn validate_value_tree_recursive<'a>(
+        &'a self,
+        node: Cid,
+    ) -> BTreeFuture<'a, BTreeValueValidation> {
+        Box::pin(async move {
+            let entries = sort_entries(self.tree.list_directory(&node).await?);
+            if entries.is_empty() {
+                return Err(BTreeError::InvalidValueTree(format!(
+                    "node {} is empty",
+                    hex::encode(node.hash)
+                )));
+            }
+
+            for pair in entries.windows(2) {
+                let left = unescape_key(&pair[0].name);
+                let right = unescape_key(&pair[1].name);
+                if left >= right {
+                    return Err(BTreeError::InvalidValueTree(format!(
+                        "node {} keys are not strictly ordered: `{left}` then `{right}`",
+                        hex::encode(node.hash)
+                    )));
+                }
+            }
+
+            let all_directories = entries.iter().all(|entry| entry.link_type == LinkType::Dir);
+            let all_values = entries
+                .iter()
+                .all(|entry| entry.link_type == LinkType::Blob);
+            if !all_directories && !all_values {
+                return Err(BTreeError::InvalidValueTree(format!(
+                    "node {} mixes internal and leaf link types",
+                    hex::encode(node.hash)
+                )));
+            }
+
+            if all_values {
+                let first = entries.first().expect("non-empty leaf");
+                let last = entries.last().expect("non-empty leaf");
+                return Ok(BTreeValueValidation {
+                    nodes: 1,
+                    entries: entries.len() as u64,
+                    first: Some(unescape_key(&first.name)),
+                    last: Some(unescape_key(&last.name)),
+                });
+            }
+
+            let mut report = BTreeValueValidation {
+                nodes: 1,
+                ..BTreeValueValidation::default()
+            };
+            for entry in entries {
+                let separator = unescape_key(&entry.name);
+                let child = self
+                    .validate_value_tree_recursive(entry_cid(&entry))
+                    .await?;
+                let child_first = child.first.as_ref().ok_or_else(|| {
+                    BTreeError::InvalidValueTree(format!(
+                        "internal child `{separator}` has no first leaf"
+                    ))
+                })?;
+                if child_first != &separator {
+                    return Err(BTreeError::InvalidValueTree(format!(
+                        "routing separator `{separator}` does not match child first key `{child_first}`"
+                    )));
+                }
+                if entry.size != child.entries {
+                    return Err(BTreeError::InvalidValueTree(format!(
+                        "routing separator `{separator}` stores {} entries but child contains {}",
+                        entry.size, child.entries
+                    )));
+                }
+                if let (Some(previous), Some(next)) = (report.last.as_ref(), child.first.as_ref()) {
+                    if previous >= next {
+                        return Err(BTreeError::InvalidValueTree(format!(
+                            "child ranges overlap or move backwards: `{previous}` then `{next}`"
+                        )));
+                    }
+                }
+                report.nodes = report.nodes.checked_add(child.nodes).ok_or_else(|| {
+                    BTreeError::InvalidValueTree("node count overflow".to_string())
+                })?;
+                report.entries = report.entries.checked_add(child.entries).ok_or_else(|| {
+                    BTreeError::InvalidValueTree("entry count overflow".to_string())
                 })?;
                 if report.first.is_none() {
                     report.first = child.first.clone();
