@@ -250,6 +250,16 @@ struct RootUploadTask {
     drain_after_start: bool,
 }
 
+struct RootUploadJob {
+    store: Arc<HashtreeStore>,
+    root: hashtree_core::Cid,
+    previous_root: Option<hashtree_core::Cid>,
+    servers: Vec<String>,
+    data_dir: PathBuf,
+    profile_publication: bool,
+    log_label: String,
+}
+
 struct RootPublishTask {
     finished: oneshot::Receiver<()>,
     join: std::thread::JoinHandle<()>,
@@ -2490,15 +2500,18 @@ impl BackgroundNostrMirror {
     }
 
     async fn run_root_upload(
-        store: Arc<HashtreeStore>,
-        root: hashtree_core::Cid,
-        previous_root: Option<hashtree_core::Cid>,
-        servers: Vec<String>,
-        data_dir: PathBuf,
-        profile_publication: bool,
+        job: RootUploadJob,
         cancelled: &mut watch::Receiver<bool>,
-        log_label: &str,
     ) -> Result<bool> {
+        let RootUploadJob {
+            store,
+            root,
+            previous_root,
+            servers,
+            data_dir,
+            profile_publication,
+            log_label,
+        } = job;
         // DAG discovery and any missing-local-blob hydration happen before
         // acquiring the external-publication guard and are freely
         // cancellable: they cannot publish a stale profile root.
@@ -2580,14 +2593,16 @@ impl BackgroundNostrMirror {
                 .build()
                 .expect("build nostr mirror root upload runtime");
             let result = runtime.block_on(Self::run_root_upload(
-                Arc::clone(&store),
-                root.clone(),
-                previous_uploaded_root,
-                servers,
-                data_dir,
-                profile_publication,
+                RootUploadJob {
+                    store: Arc::clone(&store),
+                    root: root.clone(),
+                    previous_root: previous_uploaded_root,
+                    servers,
+                    data_dir,
+                    profile_publication,
+                    log_label: log_label.clone(),
+                },
                 &mut cancelled,
-                &log_label,
             ));
             let mut state = publish_state.lock().expect("root publish state");
             if state.upload_in_progress_root.as_ref() == Some(&root) {
