@@ -24,9 +24,12 @@ use super::{
 };
 
 mod audit;
+mod repair;
 mod tranche;
 pub(super) use audit::audit_bulk_projection;
 pub(crate) use audit::BulkProjectionAuditOptions;
+pub(super) use repair::repair_bulk_projection_profiles;
+pub(crate) use repair::BulkProfileRepairOptions;
 pub(super) use tranche::load_bulk_tranche_progress;
 pub(crate) use tranche::{
     append_bulk_tranche, build_bulk_tranche, freeze_bulk_tranche, prepare_bulk_tranche,

@@ -45,8 +45,10 @@ pub use maintenance::{
     compact_lmdb_environments_under, CompactResult, R2ImportOptions, R2ImportResult, VerifyResult,
 };
 pub use retention::{
-    OwnedBlobStats, PinTreeError, PinTreeResult, PinnedItem, RootRetentionReport,
-    StorageByPriority, StorageStats, TreeIndexLimits, TreeMeta,
+    OwnedBlobStats, PinTreeError, PinTreeResult, PinnedItem, ProfileRepairRetentionLease,
+    ProfileRepairRetentionPublicationGuard, RootRetentionReport, StorageByPriority, StorageStats,
+    TreeIndexLimits, TreeMeta, PROFILE_REPAIR_RETENTION_LEASE_FORMAT,
+    PROFILE_REPAIR_RETENTION_LEASE_RELATIVE_PATH,
 };
 
 /// Priority levels for tree eviction
@@ -1939,7 +1941,7 @@ struct OrphanScanState {
     /// Last candidate examined. It need not still exist after cleanup.
     cursor: Option<Hash>,
     sweep: Option<OrphanSweep>,
-    socialgraph_roots: Option<[Option<Hash>; 4]>,
+    socialgraph_roots: Option<Vec<String>>,
     socialgraph_protected: Arc<HashSet<Hash>>,
 }
 

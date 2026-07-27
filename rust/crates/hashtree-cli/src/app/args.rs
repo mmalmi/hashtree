@@ -1158,6 +1158,57 @@ pub(crate) enum NostrIndexCommands {
         #[arg(long, short)]
         out: PathBuf,
     },
+    /// Repair the complete v2 profile root pair from its exact retained spool
+    RepairBulkProjectionProfiles {
+        /// Durable staging directory whose terminal state produced the spool
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Exact SHA-256 of nostr-index/bulk-projection-v2/state.json
+        #[arg(long = "expected-state-sha256")]
+        expected_state_sha256: String,
+        /// Exact SHA-256 of nostr-stage/crawl-state.json
+        #[arg(long = "expected-stage-state-sha256")]
+        expected_stage_state_sha256: String,
+        /// Exact SHA-256 of canonical JSON for the crawl policy
+        #[arg(long = "expected-policy-sha256")]
+        expected_policy_sha256: String,
+        /// Exact SHA-256 of bulk-projection-v2/spool/data.mdb
+        #[arg(long = "expected-spool-data-sha256")]
+        expected_spool_data_sha256: String,
+        /// Canonical Iris Social profile rank-decisions JSONL
+        #[arg(long = "profile-rank-decisions-file")]
+        profile_rank_decisions_file: PathBuf,
+        /// Exact SHA-256 of the rank-decisions JSONL bytes
+        #[arg(long = "expected-profile-rank-decisions-file-sha256")]
+        expected_profile_rank_decisions_file_sha256: String,
+        /// Canonical Iris Social rank-decisions provenance report
+        #[arg(long = "profile-rank-decisions-report")]
+        profile_rank_decisions_report: PathBuf,
+        /// Exact SHA-256 of the rank-decisions report bytes
+        #[arg(long = "expected-profile-rank-decisions-report-sha256")]
+        expected_profile_rank_decisions_report_sha256: String,
+        /// Exact durable author watermark represented by the retained spool
+        #[arg(long = "expected-replayed-author-count")]
+        expected_replayed_author_count: usize,
+        /// Exact complete ordered allowlist author count
+        #[arg(long = "expected-full-author-count")]
+        expected_full_author_count: usize,
+        /// SHA-256 of the pre-repair profiles-by-pubkey root-file bytes
+        #[arg(long = "expected-profiles-by-pubkey-root-file-sha256")]
+        expected_profiles_by_pubkey_root_file_sha256: String,
+        /// SHA-256 of the pre-repair profile-search root-file bytes
+        #[arg(long = "expected-profile-search-root-file-sha256")]
+        expected_profile_search_root_file_sha256: String,
+        /// Pubkey that must be explicitly proven in both repaired roots
+        #[arg(long = "required-profile-pubkey", required = true)]
+        required_profile_pubkeys: Vec<String>,
+        /// B-tree order used by the retained v2 event roots
+        #[arg(long, default_value_t = 64)]
+        btree_order: usize,
+        /// Immutable receipt output path (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
     /// Pin an audited v2 candidate and rotate into crash-safe v3 append mode
     PrepareBulkTranche {
         /// Durable staging directory containing the immutable author segments

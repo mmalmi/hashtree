@@ -27,7 +27,8 @@ use super::run::{
 };
 use super::run::{
     format_cid_for_display, pin_input_target, resolve_cat_target_cid, resolve_info_target,
-    resolve_load_target_cid, root_daemon_override_enabled, stored_published_pin_hash,
+    resolve_load_target_cid, root_daemon_override_enabled, should_spawn_background_update,
+    stored_published_pin_hash,
 };
 use super::storage_stats::{
     classify_storage_bucket, render_storage_inventory, AuthorSummary, PinnedDetail, StorageBucket,
@@ -401,6 +402,141 @@ fn test_nostr_bulk_tranche_build_requires_state_pin_and_parses_bound() {
     assert_eq!(expected_state_sha256, "a".repeat(64));
     assert_eq!(max_indexes, 1);
     assert_eq!(out, Some(PathBuf::from("/evidence/build.json")));
+}
+
+#[test]
+fn test_nostr_bulk_profile_repair_requires_all_authority_pins() {
+    let complete = [
+        "htree",
+        "nostr-index",
+        "repair-bulk-projection-profiles",
+        "--staging-data-dir",
+        "/stage",
+        "--expected-state-sha256",
+        &"a".repeat(64),
+        "--expected-stage-state-sha256",
+        &"b".repeat(64),
+        "--expected-policy-sha256",
+        &"c".repeat(64),
+        "--expected-spool-data-sha256",
+        &"d".repeat(64),
+        "--profile-rank-decisions-file",
+        "/evidence/ranks.jsonl",
+        "--expected-profile-rank-decisions-file-sha256",
+        &"e".repeat(64),
+        "--profile-rank-decisions-report",
+        "/evidence/ranks-report.json",
+        "--expected-profile-rank-decisions-report-sha256",
+        &"f".repeat(64),
+        "--expected-replayed-author-count",
+        "17177",
+        "--expected-full-author-count",
+        "101267",
+        "--expected-profiles-by-pubkey-root-file-sha256",
+        &"1".repeat(64),
+        "--expected-profile-search-root-file-sha256",
+        &"2".repeat(64),
+        "--required-profile-pubkey",
+        &"3".repeat(64),
+        "--required-profile-pubkey",
+        &"4".repeat(64),
+        "--btree-order",
+        "73",
+        "--out",
+        "/evidence/profile-repair.json",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect::<Vec<_>>();
+    for required_flag in [
+        "--staging-data-dir",
+        "--expected-state-sha256",
+        "--expected-stage-state-sha256",
+        "--expected-policy-sha256",
+        "--expected-spool-data-sha256",
+        "--profile-rank-decisions-file",
+        "--expected-profile-rank-decisions-file-sha256",
+        "--profile-rank-decisions-report",
+        "--expected-profile-rank-decisions-report-sha256",
+        "--expected-replayed-author-count",
+        "--expected-full-author-count",
+        "--expected-profiles-by-pubkey-root-file-sha256",
+        "--expected-profile-search-root-file-sha256",
+        "--required-profile-pubkey",
+    ] {
+        let mut missing = complete.clone();
+        let mut removed = false;
+        while let Some(flag_index) = missing
+            .iter()
+            .position(|argument| argument == required_flag)
+        {
+            missing.drain(flag_index..=flag_index + 1);
+            removed = true;
+        }
+        assert!(removed, "test argument list omitted {required_flag}");
+        assert!(
+            Cli::try_parse_from(missing).is_err(),
+            "{required_flag} must be required"
+        );
+    }
+
+    let cli = Cli::try_parse_from(complete).unwrap();
+    assert!(
+        !should_spawn_background_update(&cli),
+        "pinned profile repair must not launch the generic background updater"
+    );
+    let Commands::NostrIndex { command } = cli.command else {
+        panic!("expected nostr-index command");
+    };
+    let NostrIndexCommands::RepairBulkProjectionProfiles {
+        staging_data_dir,
+        expected_state_sha256,
+        expected_stage_state_sha256,
+        expected_policy_sha256,
+        expected_spool_data_sha256,
+        profile_rank_decisions_file,
+        expected_profile_rank_decisions_file_sha256,
+        profile_rank_decisions_report,
+        expected_profile_rank_decisions_report_sha256,
+        expected_replayed_author_count,
+        expected_full_author_count,
+        expected_profiles_by_pubkey_root_file_sha256,
+        expected_profile_search_root_file_sha256,
+        required_profile_pubkeys,
+        btree_order,
+        out,
+    } = *command
+    else {
+        panic!("expected repair-bulk-projection-profiles command");
+    };
+    assert_eq!(staging_data_dir, PathBuf::from("/stage"));
+    assert_eq!(expected_state_sha256, "a".repeat(64));
+    assert_eq!(expected_stage_state_sha256, "b".repeat(64));
+    assert_eq!(expected_policy_sha256, "c".repeat(64));
+    assert_eq!(expected_spool_data_sha256, "d".repeat(64));
+    assert_eq!(
+        profile_rank_decisions_file,
+        PathBuf::from("/evidence/ranks.jsonl")
+    );
+    assert_eq!(expected_profile_rank_decisions_file_sha256, "e".repeat(64));
+    assert_eq!(
+        profile_rank_decisions_report,
+        PathBuf::from("/evidence/ranks-report.json")
+    );
+    assert_eq!(
+        expected_profile_rank_decisions_report_sha256,
+        "f".repeat(64)
+    );
+    assert_eq!(expected_replayed_author_count, 17_177);
+    assert_eq!(expected_full_author_count, 101_267);
+    assert_eq!(expected_profiles_by_pubkey_root_file_sha256, "1".repeat(64));
+    assert_eq!(expected_profile_search_root_file_sha256, "2".repeat(64));
+    assert_eq!(
+        required_profile_pubkeys,
+        vec!["3".repeat(64), "4".repeat(64)]
+    );
+    assert_eq!(btree_order, 73);
+    assert_eq!(out, Some(PathBuf::from("/evidence/profile-repair.json")));
 }
 
 #[test]

@@ -416,6 +416,51 @@ fn bulk_link_build_matches_incremental_entries() {
 }
 
 #[test]
+fn exclusive_link_pagination_preserves_nul_prefixed_successors() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::new());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(4) });
+        let entries = ["a", "a\0x", "a\0y", "b"]
+            .into_iter()
+            .enumerate()
+            .map(|(position, key)| (key.to_string(), Cid::public([position as u8 + 1; 32])))
+            .collect::<Vec<_>>();
+        let root = btree
+            .build_links(entries.clone())
+            .await
+            .unwrap()
+            .expect("generated link root");
+
+        let after_a = btree
+            .range_links_limited_after(&root, Some("a"), None, 2)
+            .await
+            .unwrap();
+        assert_eq!(
+            after_a
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a\0x", "a\0y"]
+        );
+
+        let mut after = None;
+        let mut paged = Vec::new();
+        for _ in 0..=entries.len() {
+            let page = btree
+                .range_links_limited_after(&root, after.as_deref(), None, 1)
+                .await
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            after = Some(page[0].0.clone());
+            paged.extend(page);
+        }
+        assert_eq!(paged, entries);
+    });
+}
+
+#[test]
 fn bulk_link_changes_are_deterministic_and_match_map_semantics() {
     block_on(async {
         let store = Arc::new(MemoryStore::new());

@@ -350,6 +350,7 @@ async fn settle_one_r2_import(
 impl HashtreeStore {
     /// Garbage collect unpinned content
     pub fn gc(&self) -> Result<GcStats> {
+        let retention = self.active_retention_protection()?;
         let rtxn = self.env.read_txn()?;
 
         // Get all pinned hashes as raw bytes
@@ -381,7 +382,7 @@ impl HashtreeStore {
         let mut freed_bytes = 0u64;
 
         for hash in all_hashes {
-            if !pinned.contains(&hash) {
+            if !pinned.contains(&hash) && !retention.contains(&hash) {
                 if let Ok(Some(size)) = self.router.blob_size_sync(&hash) {
                     freed_bytes += size;
                     // Delete locally only - keep S3 as archive

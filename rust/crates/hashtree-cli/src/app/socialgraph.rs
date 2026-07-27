@@ -217,13 +217,19 @@ async fn publish_socialgraph_roots(
     if roots.is_empty() {
         return Ok(());
     }
-    if roots.iter().any(|(tree_name, _)| {
+    let publishes_profile_root = roots.iter().any(|(tree_name, _)| {
         tree_name == PUBLISHED_PROFILE_SEARCH_TREE_NAME
             || tree_name == PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME
-    }) {
-        hashtree_cli::socialgraph::require_profile_publication_unfenced(data_dir)
-            .context("refuse direct socialgraph profile-root publication")?;
-    }
+    });
+    let profile_publication = if publishes_profile_root {
+        Some(
+            hashtree_cli::socialgraph::acquire_profile_publication_guard(data_dir)
+                .await
+                .context("refuse direct socialgraph profile-root publication")?,
+        )
+    } else {
+        None
+    };
 
     let write_servers = config.blossom.all_write_servers();
     for (tree_name, root) in &roots {
@@ -271,6 +277,7 @@ async fn publish_socialgraph_roots(
     }
 
     let _ = resolver.stop().await;
+    drop(profile_publication);
     Ok(())
 }
 
@@ -687,6 +694,8 @@ mod tests {
     #[tokio::test]
     async fn all_direct_profile_publication_shapes_fail_closed_while_fenced() {
         let tmp = TempDir::new().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("socialgraph"))
+            .expect("create generated socialgraph lock directory");
         let fence_path = hashtree_cli::socialgraph::profile_publication_fence_path(tmp.path());
         std::fs::create_dir_all(fence_path.parent().expect("fence parent"))
             .expect("create generated fence directory");

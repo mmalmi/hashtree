@@ -1,11 +1,14 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use futures::executor::block_on as sync_block_on;
 use hashtree_core::store::Store;
 use hashtree_core::{to_hex, types::Hash, Cid, HashTree, HashTreeConfig, HashTreeError, LinkType};
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::collections::{BTreeMap, HashSet};
+use std::fs::{File, OpenOptions};
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,6 +18,125 @@ use super::{BlobMetadata, HashtreeStore, PRIORITY_FOLLOWED, PRIORITY_OWN};
 const MAX_PINNED_TREE_NODES: usize = 10_000_000;
 const MAX_UNBOUNDED_PINNED_TREE_BYTES: u64 = 1 << 50;
 const ORPHAN_SCAN_PAGE_SIZE: usize = 4_096;
+const RETENTION_ROOTS_LOCK_FILE: &str = ".retention-roots.lock";
+const MAX_PROFILE_REPAIR_RETENTION_LEASE_BYTES: u64 = 64 * 1024;
+const MAX_PROFILE_REPAIR_RETENTION_ROOTS: usize = 64;
+
+pub const PROFILE_REPAIR_RETENTION_LEASE_FORMAT: &str =
+    "iris-social/bulk-profile-index-repair-retention@1";
+pub const PROFILE_REPAIR_RETENTION_LEASE_RELATIVE_PATH: &str =
+    "nostr-index/bulk-projection-v2/profile-repair-v1/retention.json";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileRepairRetentionLease {
+    pub format: String,
+    pub authority_sha256: String,
+    pub roots: BTreeMap<String, String>,
+}
+
+impl ProfileRepairRetentionLease {
+    pub fn validate(&self) -> Result<()> {
+        if self.format != PROFILE_REPAIR_RETENTION_LEASE_FORMAT {
+            anyhow::bail!(
+                "profile repair retention lease has unsupported format {}",
+                self.format
+            );
+        }
+        if self.authority_sha256.len() != 64
+            || !self
+                .authority_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            anyhow::bail!(
+                "profile repair retention lease authority must be 64 lowercase hexadecimal characters"
+            );
+        }
+        if self.roots.is_empty() || self.roots.len() > MAX_PROFILE_REPAIR_RETENTION_ROOTS {
+            anyhow::bail!(
+                "profile repair retention lease must contain between 1 and {} roots",
+                MAX_PROFILE_REPAIR_RETENTION_ROOTS
+            );
+        }
+        for (label, encoded) in &self.roots {
+            if label.is_empty()
+                || label.len() > 128
+                || !label
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            {
+                anyhow::bail!("profile repair retention lease has invalid root label {label:?}");
+            }
+            let cid = Cid::parse(encoded)
+                .map_err(|error| anyhow::anyhow!("invalid retained root {label}: {error}"))?;
+            if cid.to_string() != *encoded {
+                anyhow::bail!(
+                    "profile repair retention lease root {label} is not canonical CID text"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn canonical_bytes(&self) -> Result<Vec<u8>> {
+        self.validate()?;
+        let mut bytes =
+            serde_json::to_vec(self).map_err(|error| anyhow::anyhow!("encode lease: {error}"))?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    pub fn sha256(&self) -> Result<String> {
+        Ok(to_hex(&hashtree_core::sha256(&self.canonical_bytes()?)))
+    }
+
+    fn root_cids(&self) -> Result<Vec<Cid>> {
+        self.validate()?;
+        self.roots
+            .iter()
+            .map(|(label, encoded)| {
+                Cid::parse(encoded)
+                    .map_err(|error| anyhow::anyhow!("invalid retained root {label}: {error}"))
+            })
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RetentionRootsLockMode {
+    Shared,
+    Exclusive,
+}
+
+pub struct ProfileRepairRetentionPublicationGuard {
+    file: File,
+}
+
+impl Drop for ProfileRepairRetentionPublicationGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+pub(super) struct ActiveRetentionProtection {
+    _guard: ProfileRepairRetentionPublicationGuard,
+    _profile_roots: Option<crate::socialgraph::ProfileRootSnapshotGuard>,
+    hashes: HashSet<Hash>,
+}
+
+impl ActiveRetentionProtection {
+    pub(super) fn contains(&self, hash: &Hash) -> bool {
+        self.hashes.contains(hash)
+    }
+
+    fn hashes(&self) -> &HashSet<Hash> {
+        &self.hashes
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OrphanCleanupProgress {
@@ -240,6 +362,114 @@ fn unix_timestamp_now() -> u64 {
 }
 
 impl HashtreeStore {
+    fn acquire_retention_roots_lock(
+        &self,
+        mode: RetentionRootsLockMode,
+    ) -> Result<ProfileRepairRetentionPublicationGuard> {
+        let path = self.base_path().join(RETENTION_ROOTS_LOCK_FILE);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("open retention-roots lock {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            let operation = match mode {
+                RetentionRootsLockMode::Shared => libc::LOCK_SH,
+                RetentionRootsLockMode::Exclusive => libc::LOCK_EX,
+            };
+            let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
+            if result != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("acquire retention-roots lock {}", path.display()));
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = mode;
+            anyhow::bail!(
+                "retention-root transactions require an operating-system advisory file lock"
+            );
+        }
+        Ok(ProfileRepairRetentionPublicationGuard { file })
+    }
+
+    /// Serialize publication of the immutable Social repair retention lease
+    /// against every local retention deletion pass. Persist and fsync the
+    /// canonical lease while this guard is alive.
+    pub fn acquire_profile_repair_retention_publication_guard(
+        &self,
+    ) -> Result<ProfileRepairRetentionPublicationGuard> {
+        self.acquire_retention_roots_lock(RetentionRootsLockMode::Exclusive)
+    }
+
+    pub fn profile_repair_retention_lease_path(&self) -> PathBuf {
+        self.base_path()
+            .join(PROFILE_REPAIR_RETENTION_LEASE_RELATIVE_PATH)
+    }
+
+    pub fn validate_profile_repair_retention_lease(
+        &self,
+        expected_sha256: &str,
+    ) -> Result<ProfileRepairRetentionLease> {
+        let path = self.profile_repair_retention_lease_path();
+        let metadata = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("inspect {}", path.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            anyhow::bail!(
+                "profile repair retention lease is not a direct regular file: {}",
+                path.display()
+            );
+        }
+        if metadata.len() > MAX_PROFILE_REPAIR_RETENTION_LEASE_BYTES {
+            anyhow::bail!(
+                "profile repair retention lease exceeds {} bytes: {}",
+                MAX_PROFILE_REPAIR_RETENTION_LEASE_BYTES,
+                path.display()
+            );
+        }
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let actual_sha256 = to_hex(&hashtree_core::sha256(&bytes));
+        if actual_sha256 != expected_sha256 {
+            anyhow::bail!(
+                "profile repair retention lease SHA-256 mismatch: expected {expected_sha256}, found {actual_sha256}"
+            );
+        }
+        let lease: ProfileRepairRetentionLease =
+            serde_json::from_slice(&bytes).with_context(|| format!("decode {}", path.display()))?;
+        if lease.canonical_bytes()? != bytes {
+            anyhow::bail!(
+                "profile repair retention lease is not canonical: {}",
+                path.display()
+            );
+        }
+        Ok(lease)
+    }
+
+    /// Freeze the active immutable repair lease and resolve every full-CID DAG
+    /// it names while holding the shared side of the lease-publication lock.
+    /// Keep this value alive through the complete deletion pass.
+    pub(super) fn active_retention_protection(&self) -> Result<ActiveRetentionProtection> {
+        let guard = self.acquire_retention_roots_lock(RetentionRootsLockMode::Shared)?;
+        let profile_roots =
+            crate::socialgraph::acquire_profile_root_snapshot_guard(self.base_path())?;
+        let mut roots = match profile_roots.as_ref() {
+            Some(profile_roots) => profile_roots.retention_roots()?,
+            None => Vec::new(),
+        };
+        roots.extend(self.profile_repair_retention_roots()?);
+        roots.sort_by_key(Cid::to_string);
+        roots.dedup();
+        let hashes = self.collect_socialgraph_protected(&roots)?;
+        Ok(ActiveRetentionProtection {
+            _guard: guard,
+            _profile_roots: profile_roots,
+            hashes,
+        })
+    }
+
     /// Retain only one Nostr event-index DAG plus explicit pins in the writable
     /// blob store. This is intended for a dedicated, closed-writer index store.
     ///
@@ -247,8 +477,9 @@ impl HashtreeStore {
     /// direct blobs. Traversing directory/fanout links only therefore visits
     /// every index node while avoiding millions of unnecessary event reads.
     pub fn retain_nostr_root(&self, root: &Cid, apply: bool) -> Result<RootRetentionReport> {
+        let retention = self.active_retention_protection()?;
         let tree = HashTree::new(HashTreeConfig::new(self.store_arc()));
-        let reachable = sync_block_on(async {
+        let mut reachable = sync_block_on(async {
             let mut reachable = HashSet::new();
             let mut stack = vec![(root.clone(), "root".to_string())];
             while let Some((cid, path)) = stack.pop() {
@@ -276,6 +507,7 @@ impl HashtreeStore {
             }
             Ok::<_, anyhow::Error>(reachable)
         })?;
+        reachable.extend(retention.hashes().iter().copied());
 
         let rtxn = self.env.read_txn()?;
         let pinned = self
@@ -333,84 +565,78 @@ impl HashtreeStore {
         })
     }
 
-    fn socialgraph_root_files(&self) -> [PathBuf; 4] {
-        let socialgraph = self.base_path().join("socialgraph");
-        [
-            socialgraph.join("events-root.msgpack"),
-            socialgraph.join("events-root-ambient.msgpack"),
-            socialgraph.join("profile-search-root.msgpack"),
-            socialgraph.join("profiles-by-pubkey-root.msgpack"),
-        ]
-    }
-
-    fn read_stored_cid(path: &Path) -> Result<Option<Hash>> {
-        #[derive(Deserialize)]
-        struct StoredCid {
-            hash: [u8; 32],
-            #[allow(dead_code)]
-            key: Option<[u8; 32]>,
-        }
-
-        let Ok(bytes) = std::fs::read(path) else {
-            return Ok(None);
-        };
-        let stored: StoredCid = rmp_serde::from_slice(&bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to decode root file {}: {}", path.display(), e))?;
-        Ok(Some(stored.hash))
-    }
-
     async fn collect_tree_hashes<S: Store>(
         &self,
         tree: &HashTree<S>,
-        root: &Hash,
+        root: &Cid,
+        require_tree_root: bool,
     ) -> Result<HashSet<Hash>> {
         let mut hashes = HashSet::new();
-        let mut stack = vec![*root];
+        let mut stack = vec![(root.clone(), true)];
 
-        while let Some(hash) = stack.pop() {
-            if !hashes.insert(hash) {
+        while let Some((cid, is_root)) = stack.pop() {
+            if !hashes.insert(cid.hash) {
                 continue;
             }
 
-            let is_tree = tree
-                .is_tree(&hash)
+            let node = tree
+                .get_node(&cid)
                 .await
-                .map_err(|e| anyhow::anyhow!("Failed to check tree: {}", e))?;
-
-            if !is_tree {
-                continue;
-            }
-
-            if let Some(node) = tree
-                .get_tree_node(&hash)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to get tree node: {}", e))?
-            {
+                .map_err(|e| anyhow::anyhow!("Failed to get protected tree node: {}", e))?;
+            if let Some(node) = node {
                 for link in &node.links {
-                    stack.push(link.hash);
+                    stack.push((link.to_cid(), false));
                 }
+            } else if is_root && require_tree_root {
+                anyhow::bail!(
+                    "protected retention root {} is missing or is not a tree",
+                    cid
+                );
             }
         }
 
         Ok(hashes)
     }
 
-    fn socialgraph_root_hashes(&self) -> Result<[Option<Hash>; 4]> {
-        let mut roots = [None; 4];
-        for (index, path) in self.socialgraph_root_files().into_iter().enumerate() {
-            roots[index] = Self::read_stored_cid(&path)?;
+    fn profile_repair_retention_roots(&self) -> Result<Vec<Cid>> {
+        let path = self.profile_repair_retention_lease_path();
+        let metadata = match std::fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspect {}", path.display()));
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+            anyhow::bail!(
+                "profile repair retention lease is not a direct regular file: {}",
+                path.display()
+            );
         }
-        Ok(roots)
+        if metadata.len() > MAX_PROFILE_REPAIR_RETENTION_LEASE_BYTES {
+            anyhow::bail!(
+                "profile repair retention lease exceeds {} bytes: {}",
+                MAX_PROFILE_REPAIR_RETENTION_LEASE_BYTES,
+                path.display()
+            );
+        }
+        let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+        let lease: ProfileRepairRetentionLease =
+            serde_json::from_slice(&bytes).with_context(|| format!("decode {}", path.display()))?;
+        if lease.canonical_bytes()? != bytes {
+            anyhow::bail!(
+                "profile repair retention lease is not canonical: {}",
+                path.display()
+            );
+        }
+        lease.root_cids()
     }
 
-    fn collect_socialgraph_protected(&self, roots: &[Option<Hash>; 4]) -> Result<HashSet<Hash>> {
+    fn collect_socialgraph_protected(&self, roots: &[Cid]) -> Result<HashSet<Hash>> {
         let mut protected = HashSet::new();
         let tree = HashTree::new(HashTreeConfig::new(self.store_arc()).public());
-        for root_hash in roots {
-            let Some(root_hash) = root_hash else {
-                continue;
-            };
-            protected.extend(sync_block_on(self.collect_tree_hashes(&tree, root_hash))?);
+        for root in roots {
+            protected.extend(sync_block_on(self.collect_tree_hashes(&tree, root, true))?);
         }
         Ok(protected)
     }
@@ -421,24 +647,24 @@ impl HashtreeStore {
     /// This can temporarily over-protect an old DAG, but can never make either
     /// the old or new root disposable. The union is discarded at the sweep
     /// boundary and rebuilt from the current roots.
-    fn socialgraph_protected_for_orphan_sweep(&self) -> Result<Arc<HashSet<Hash>>> {
-        let roots = self.socialgraph_root_hashes()?;
+    fn socialgraph_protected_for_orphan_sweep(&self, roots: &[Cid]) -> Result<Arc<HashSet<Hash>>> {
+        let root_ids = roots.iter().map(Cid::to_string).collect::<Vec<_>>();
         {
             let state = self
                 .orphan_scan
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if state.socialgraph_roots == Some(roots) {
+            if state.socialgraph_roots.as_ref() == Some(&root_ids) {
                 return Ok(Arc::clone(&state.socialgraph_protected));
             }
         }
 
-        let newly_protected = self.collect_socialgraph_protected(&roots)?;
+        let newly_protected = self.collect_socialgraph_protected(roots)?;
         let mut state = self
             .orphan_scan
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.socialgraph_roots == Some(roots) {
+        if state.socialgraph_roots.as_ref() == Some(&root_ids) {
             return Ok(Arc::clone(&state.socialgraph_protected));
         }
 
@@ -449,7 +675,7 @@ impl HashtreeStore {
         } else {
             newly_protected
         };
-        state.socialgraph_roots = Some(roots);
+        state.socialgraph_roots = Some(root_ids);
         state.socialgraph_protected = Arc::new(protected);
         Ok(Arc::clone(&state.socialgraph_protected))
     }
@@ -487,6 +713,16 @@ impl HashtreeStore {
             anyhow::bail!("orphan cleanup page size must be greater than zero");
         }
 
+        let _retention_roots = self.acquire_retention_roots_lock(RetentionRootsLockMode::Shared)?;
+        let profile_roots =
+            crate::socialgraph::acquire_profile_root_snapshot_guard(self.base_path())?;
+        let mut roots = match profile_roots.as_ref() {
+            Some(profile_roots) => profile_roots.retention_roots()?,
+            None => Vec::new(),
+        };
+        roots.extend(self.profile_repair_retention_roots()?);
+        roots.sort_by_key(Cid::to_string);
+        roots.dedup();
         let stats = self
             .router
             .writable_stats()
@@ -521,7 +757,7 @@ impl HashtreeStore {
             let sweep = state.sweep.expect("orphan sweep initialized");
             (state.cursor, sweep.start_after, sweep.wrapped)
         };
-        let socialgraph_protected = self.socialgraph_protected_for_orphan_sweep()?;
+        let socialgraph_protected = self.socialgraph_protected_for_orphan_sweep(&roots)?;
         let mut candidates = self
             .router
             .scan_writable_hashes_after(after, page_size)
@@ -1272,7 +1508,10 @@ impl HashtreeStore {
             .cache_quota
             .begin_standalone_cleanup()
             .map_err(|denial| anyhow::anyhow!(denial.to_string()))?;
-        let result = self.unindex_tree_raw(root_hash, cleanup.inflight_hashes());
+        let retention = self.active_retention_protection()?;
+        let mut protected = cleanup.inflight_hashes().clone();
+        protected.extend(retention.hashes().iter().copied());
+        let result = self.unindex_tree_raw(root_hash, &protected);
         if result.is_ok() {
             let after_usage = self
                 .router
@@ -1297,7 +1536,8 @@ impl HashtreeStore {
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
         // Walk tree and collect all blob hashes
-        let tracked_hashes = sync_block_on(self.collect_tree_hashes(&tree, root_hash))?;
+        let tracked_hashes =
+            sync_block_on(self.collect_tree_hashes(&tree, &Cid::public(*root_hash), false))?;
 
         let mut wtxn = self.env.write_txn()?;
         let mut freed = 0u64;
@@ -1514,6 +1754,10 @@ impl HashtreeStore {
 
         // Phase 2: Evict trees by priority (lowest first) and access age (least recent first)
         // Own trees CAN be evicted (just last), but PINNED trees are never evicted
+        let retention = self.active_retention_protection()?;
+        let retention_protected = retention.hashes();
+        let mut additional_protected = cleanup.inflight_hashes().clone();
+        additional_protected.extend(retention_protected.iter().copied());
         let evictable = self.get_evictable_trees()?;
 
         for (root_hash, meta) in evictable {
@@ -1527,8 +1771,11 @@ impl HashtreeStore {
             if self.is_pinned(&root_hash)? {
                 continue;
             }
+            if retention_protected.contains(&root_hash) {
+                continue;
+            }
 
-            let tree_freed = self.unindex_tree_raw(&root_hash, cleanup.inflight_hashes())?;
+            let tree_freed = self.unindex_tree_raw(&root_hash, &additional_protected)?;
             freed += tree_freed;
             current_size = current_size.saturating_sub(tree_freed);
 
@@ -1613,6 +1860,9 @@ mod tests {
     use hashtree_config::StorageBackend;
     use hashtree_core::Cid;
     use hashtree_index::{BTree, BTreeOptions};
+    use nostr::{EventBuilder, Keys, Kind, Timestamp};
+    use std::io::Write;
+    use std::path::Path;
     use tempfile::TempDir;
 
     use crate::storage::PRIORITY_OTHER;
@@ -1652,6 +1902,63 @@ mod tests {
         sync_block_on(index.build(entries))
             .expect("build deep btree")
             .expect("non-empty deep root")
+    }
+
+    fn build_generated_encrypted_tree(
+        store: &HashtreeStore,
+        namespace: &str,
+        entry_count: usize,
+    ) -> Cid {
+        let index = BTree::new(store.store_arc(), BTreeOptions { order: Some(4) });
+        let entries: Vec<_> = (0..entry_count)
+            .map(|index| {
+                (
+                    format!("{namespace}-key-{index:04}"),
+                    format!("{namespace}-value-{index:04}"),
+                )
+            })
+            .collect();
+        let root = sync_block_on(index.build(entries))
+            .expect("build generated encrypted btree")
+            .expect("non-empty generated encrypted root");
+        assert!(
+            root.key.is_some(),
+            "generated retention coverage must exercise a full encrypted CID"
+        );
+        root
+    }
+
+    fn generated_tree_hashes(store: &HashtreeStore, root: &Cid) -> HashSet<Hash> {
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+        let hashes = sync_block_on(store.collect_tree_hashes(&tree, root, true))
+            .expect("collect generated encrypted DAG");
+        assert!(hashes.len() > 2, "generated DAG must contain descendants");
+        hashes
+    }
+
+    fn publish_generated_profile_repair_lease(store: &HashtreeStore, label: &str, root: &Cid) {
+        let lease = ProfileRepairRetentionLease {
+            format: PROFILE_REPAIR_RETENTION_LEASE_FORMAT.to_string(),
+            authority_sha256: to_hex(&hashtree_core::sha256(root.to_string().as_bytes())),
+            roots: BTreeMap::from([(label.to_string(), root.to_string())]),
+        };
+        let lease_bytes = lease.canonical_bytes().expect("canonical generated lease");
+        let publication = store
+            .acquire_profile_repair_retention_publication_guard()
+            .expect("exclusive generated retention publication");
+        let lease_path = store.profile_repair_retention_lease_path();
+        std::fs::create_dir_all(lease_path.parent().expect("lease parent"))
+            .expect("create generated lease parent");
+        let mut lease_file = File::create(&lease_path).expect("create generated lease");
+        lease_file
+            .write_all(&lease_bytes)
+            .expect("write generated lease");
+        lease_file.sync_all().expect("sync generated lease");
+        File::open(lease_path.parent().expect("lease parent"))
+            .expect("open generated lease parent")
+            .sync_all()
+            .expect("sync generated lease parent");
+        drop(publication);
     }
 
     #[cfg(feature = "lmdb")]
@@ -1698,7 +2005,7 @@ mod tests {
     fn bounded_orphan_sweep_progresses_and_preserves_all_durable_classes() {
         let temp_dir = TempDir::new().expect("temp dir");
         let store = bounded_lmdb_store(temp_dir.path(), 1024 * 1024);
-        let hashes = put_ordered_hashes(&store, 8);
+        let hashes = put_ordered_hashes(&store, 7);
 
         store.pin(&hashes[0]).expect("pin first hash");
         let mut tree_key = [0u8; 64];
@@ -1713,9 +2020,11 @@ mod tests {
         store
             .set_blob_owner(&hashes[2], &[77; 32])
             .expect("own third hash");
+        let socialgraph_root = build_test_tree(&store);
+        let socialgraph_hashes = generated_tree_hashes(&store, &socialgraph_root);
         write_root_file(
             &temp_dir.path().join("socialgraph/events-root.msgpack"),
-            &Cid::public(hashes[3]),
+            &socialgraph_root,
         );
 
         let mut progress = Vec::new();
@@ -1728,22 +2037,23 @@ mod tests {
             if page.sweep_complete {
                 break;
             }
-            assert!(progress.len() < 10, "bounded sweep did not converge");
+            assert!(progress.len() < 50, "bounded sweep did not converge");
         }
 
-        assert_eq!(progress[0].scanned, 2);
-        assert_eq!(progress[0].freed_bytes, 0);
-        assert!(!progress[0].sweep_complete);
         assert_eq!(progress.iter().map(|page| page.freed_bytes).sum::<u64>(), 4);
-        assert!(
-            progress.len() >= 5,
-            "an exact-size final page must require a bounded end probe"
-        );
-        for hash in &hashes[..4] {
+        assert!(progress.iter().all(|page| page.scanned <= 2));
+        for hash in &hashes[..3] {
             assert!(store.blob_exists(hash).expect("protected blob lookup"));
         }
-        for hash in &hashes[4..] {
+        for hash in &hashes[3..] {
             assert!(!store.blob_exists(hash).expect("orphan blob lookup"));
+        }
+        for hash in socialgraph_hashes {
+            assert!(
+                store.blob_exists(&hash).expect("socialgraph blob lookup"),
+                "bounded sweep deleted generated socialgraph DAG hash {}",
+                to_hex(&hash)
+            );
         }
     }
 
@@ -1752,19 +2062,19 @@ mod tests {
     fn socialgraph_root_change_unions_protection_until_sweep_boundary() {
         let temp_dir = TempDir::new().expect("temp dir");
         let store = bounded_lmdb_store(temp_dir.path(), 1024 * 1024);
-        let hashes = put_ordered_hashes(&store, 3);
-        let old_root = hashes[0];
-        let new_root = hashes[1];
-        let orphan = hashes[2];
+        let old_root = build_generated_encrypted_tree(&store, "old-live-root", 24);
+        let old_hashes = generated_tree_hashes(&store, &old_root);
         let root_path = temp_dir.path().join("socialgraph/events-root.msgpack");
-        write_root_file(&root_path, &Cid::public(old_root));
+        write_root_file(&root_path, &old_root);
 
         let first = store
             .evict_disposable_orphans_page(0, &HashSet::new(), 1)
             .expect("first root page");
         assert_eq!(first.scanned, 1);
         assert_eq!(first.freed_bytes, 0);
-        write_root_file(&root_path, &Cid::public(new_root));
+        let new_root = build_generated_encrypted_tree(&store, "new-live-root", 24);
+        let new_hashes = generated_tree_hashes(&store, &new_root);
+        write_root_file(&root_path, &new_root);
 
         let second = store
             .evict_disposable_orphans_page(0, &HashSet::new(), 1)
@@ -1776,17 +2086,284 @@ mod tests {
                 .orphan_scan
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            assert!(state.socialgraph_protected.contains(&old_root));
-            assert!(state.socialgraph_protected.contains(&new_root));
+            assert!(old_hashes
+                .iter()
+                .all(|hash| state.socialgraph_protected.contains(hash)));
+            assert!(new_hashes
+                .iter()
+                .all(|hash| state.socialgraph_protected.contains(hash)));
         }
 
-        let third = store
-            .evict_disposable_orphans_page(0, &HashSet::new(), 1)
-            .expect("orphan page");
-        assert_eq!(third.freed_bytes, 1);
+        let mut sweep_complete = false;
+        for _ in 0..256 {
+            let page = store
+                .evict_disposable_orphans_page(0, &HashSet::new(), 1)
+                .expect("finish unioned socialgraph sweep");
+            assert_eq!(page.freed_bytes, 0);
+            if page.sweep_complete {
+                sweep_complete = true;
+                break;
+            }
+        }
+        assert!(sweep_complete, "unioned socialgraph sweep did not converge");
+        for hash in old_hashes.iter().chain(new_hashes.iter()) {
+            assert!(
+                store.blob_exists(hash).expect("unioned root lookup"),
+                "active sweep deleted union-protected DAG hash {}",
+                to_hex(hash)
+            );
+        }
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn immutable_profile_repair_lease_preserves_complete_generated_dag() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = bounded_lmdb_store(temp_dir.path(), 64 * 1024 * 1024);
+        let protected_root = build_deep_test_tree(&store);
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+        let protected_hashes =
+            sync_block_on(store.collect_tree_hashes(&tree, &protected_root, true))
+                .expect("collect generated repair DAG");
+        assert!(protected_hashes.len() > 2);
+
+        let orphan_bytes = b"unleased generated orphan";
+        let orphan = hashtree_core::sha256(orphan_bytes);
+        store
+            .router
+            .put_sync(orphan, orphan_bytes)
+            .expect("put generated orphan");
+
+        let lease = ProfileRepairRetentionLease {
+            format: PROFILE_REPAIR_RETENTION_LEASE_FORMAT.to_string(),
+            authority_sha256: "11".repeat(32),
+            roots: BTreeMap::from([("profile-search".to_string(), protected_root.to_string())]),
+        };
+        let lease_bytes = lease.canonical_bytes().expect("canonical lease");
+        let publication = store
+            .acquire_profile_repair_retention_publication_guard()
+            .expect("exclusive retention publication");
+        let lease_path = store.profile_repair_retention_lease_path();
+        std::fs::create_dir_all(lease_path.parent().expect("lease parent"))
+            .expect("create lease parent");
+        let mut lease_file = File::create(&lease_path).expect("create lease");
+        lease_file.write_all(&lease_bytes).expect("write lease");
+        lease_file.sync_all().expect("sync lease");
+        File::open(lease_path.parent().expect("lease parent"))
+            .expect("open lease parent")
+            .sync_all()
+            .expect("sync lease parent");
+        drop(publication);
+
+        loop {
+            let page = store
+                .evict_disposable_orphans_page(0, &HashSet::new(), 31)
+                .expect("lease-protected orphan sweep");
+            if page.sweep_complete {
+                break;
+            }
+        }
+
+        for hash in protected_hashes {
+            assert!(
+                store.blob_exists(&hash).expect("protected blob lookup"),
+                "lease lost generated DAG blob {}",
+                to_hex(&hash)
+            );
+        }
         assert!(!store.blob_exists(&orphan).expect("orphan lookup"));
-        assert!(store.blob_exists(&old_root).expect("old root lookup"));
-        assert!(store.blob_exists(&new_root).expect("new root lookup"));
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn garbage_collection_preserves_leased_generated_encrypted_dag() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = bounded_lmdb_store(temp_dir.path(), 64 * 1024 * 1024);
+        let leased_root = build_generated_encrypted_tree(&store, "gc-leased", 96);
+        let leased_hashes = generated_tree_hashes(&store, &leased_root);
+        let current_root = build_generated_encrypted_tree(&store, "gc-current", 96);
+        let current_hashes = generated_tree_hashes(&store, &current_root);
+        write_root_file(
+            &temp_dir.path().join("socialgraph/events-root.msgpack"),
+            &current_root,
+        );
+        let orphan_bytes = format!("gc-unleased-orphan:{}", leased_root);
+        let orphan_hash = hashtree_core::sha256(orphan_bytes.as_bytes());
+        store
+            .router
+            .put_sync(orphan_hash, orphan_bytes.as_bytes())
+            .expect("put generated GC orphan");
+        publish_generated_profile_repair_lease(&store, "gc-leased", &leased_root);
+
+        let report = store.gc().expect("lease-aware garbage collection");
+
+        assert_eq!(report.deleted_dags, 1);
+        assert!(!store.blob_exists(&orphan_hash).expect("GC orphan lookup"));
+        for hash in leased_hashes.into_iter().chain(current_hashes) {
+            assert!(
+                store.blob_exists(&hash).expect("leased GC hash lookup"),
+                "GC deleted active encrypted DAG hash {}",
+                to_hex(&hash)
+            );
+        }
+    }
+
+    #[test]
+    fn garbage_collection_preserves_generated_pending_profile_root_pair_until_recovery() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = HashtreeStore::with_embedded_options(temp_dir.path(), None, 64 * 1024 * 1024)
+            .expect("embedded generated store");
+        let graph = crate::socialgraph::open_test_social_graph_store_with_storage(
+            temp_dir.path(),
+            store.store_arc(),
+            None,
+        )
+        .expect("open generated social graph");
+
+        let mut profiles = Vec::new();
+        let mut decisions = BTreeMap::new();
+        for index in 0..80 {
+            let keys = Keys::generate();
+            let event = EventBuilder::new(
+                Kind::Metadata,
+                serde_json::json!({
+                    "display_name": format!("pending-profile-{index:04}")
+                })
+                .to_string(),
+            )
+            .custom_created_at(Timestamp::from_secs(index + 1))
+            .sign_with_keys(&keys)
+            .expect("sign generated profile");
+            decisions.insert(event.pubkey.to_hex(), Some(1));
+            profiles.push(event);
+        }
+        let expected_profile = profiles[0].clone();
+        let prepared = graph
+            .build_unpublished_profile_index_repair_with_frozen_distances(&profiles, &decisions)
+            .expect("build generated replacement profile roots");
+        let mut pending_hashes = HashSet::new();
+        for root in [
+            prepared
+                .new_roots()
+                .by_pubkey
+                .as_ref()
+                .expect("generated by-pubkey root"),
+            prepared
+                .new_roots()
+                .search
+                .as_ref()
+                .expect("generated search root"),
+        ] {
+            pending_hashes.extend(generated_tree_hashes(&store, root));
+        }
+
+        let crash = graph
+            .crash_after_prepared_profile_root_pair_intent(&prepared)
+            .expect_err("generated commit must stop after its durable intent");
+        assert!(format!("{crash:#}").contains("injected interruption after durable"));
+        let commit_path = temp_dir
+            .path()
+            .join("socialgraph/profile-root-pair.commit.json");
+        assert!(commit_path.is_file(), "generated commit intent is missing");
+        assert!(
+            !temp_dir
+                .path()
+                .join("socialgraph/profiles-by-pubkey-root.msgpack")
+                .exists(),
+            "crash injection unexpectedly installed by-pubkey root"
+        );
+        assert!(
+            !temp_dir
+                .path()
+                .join("socialgraph/profile-search-root.msgpack")
+                .exists(),
+            "crash injection unexpectedly installed search root"
+        );
+        drop(graph);
+
+        let orphan_bytes = b"pending-root-pair-unrelated-orphan";
+        let orphan_hash = hashtree_core::sha256(orphan_bytes);
+        store
+            .router
+            .put_sync(orphan_hash, orphan_bytes)
+            .expect("put generated orphan");
+
+        let report = store.gc().expect("pending-commit-aware garbage collection");
+        assert_eq!(report.deleted_dags, 1);
+        assert!(!store.blob_exists(&orphan_hash).expect("orphan lookup"));
+        for hash in &pending_hashes {
+            assert!(
+                store.blob_exists(hash).expect("pending DAG lookup"),
+                "GC deleted pending root-pair DAG hash {}",
+                to_hex(hash)
+            );
+        }
+
+        let recovered = crate::socialgraph::open_test_social_graph_store_with_storage(
+            temp_dir.path(),
+            store.store_arc(),
+            None,
+        )
+        .expect("recover generated pending root pair");
+        assert!(!commit_path.exists(), "pending commit was not recovered");
+        assert_eq!(
+            recovered
+                .latest_profile_event(&expected_profile.pubkey.to_hex())
+                .expect("read recovered profile")
+                .expect("recovered profile is missing")
+                .id,
+            expected_profile.id
+        );
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn applied_root_retention_preserves_leased_generated_encrypted_dag() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let store = bounded_lmdb_store(temp_dir.path(), 64 * 1024 * 1024);
+        let retained_root = build_generated_encrypted_tree(&store, "retained-target", 96);
+        let leased_root = build_generated_encrypted_tree(&store, "retention-leased", 96);
+        let leased_hashes = generated_tree_hashes(&store, &leased_root);
+        let current_root = build_generated_encrypted_tree(&store, "retention-current", 96);
+        let current_hashes = generated_tree_hashes(&store, &current_root);
+        write_root_file(
+            &temp_dir
+                .path()
+                .join("socialgraph/profile-search-root.msgpack"),
+            &current_root,
+        );
+        let orphan_bytes = format!("retention-unleased-orphan:{}", leased_root);
+        let orphan_hash = hashtree_core::sha256(orphan_bytes.as_bytes());
+        store
+            .router
+            .put_sync(orphan_hash, orphan_bytes.as_bytes())
+            .expect("put generated retention orphan");
+        publish_generated_profile_repair_lease(&store, "retention-leased", &leased_root);
+
+        let report = store
+            .retain_nostr_root(&retained_root, true)
+            .expect("lease-aware apply retention");
+
+        assert_eq!(report.candidate_hashes, 1);
+        assert_eq!(report.deleted_hashes, 1);
+        assert!(!store
+            .blob_exists(&orphan_hash)
+            .expect("retention orphan lookup"));
+        for hash in leased_hashes.into_iter().chain(current_hashes) {
+            assert!(
+                store
+                    .blob_exists(&hash)
+                    .expect("leased retention hash lookup"),
+                "apply retention deleted active encrypted DAG hash {}",
+                to_hex(&hash)
+            );
+        }
+        let leased_index = BTree::new(store.store_arc(), BTreeOptions { order: Some(4) });
+        assert_eq!(
+            sync_block_on(leased_index.get(Some(&leased_root), "retention-leased-key-0095"))
+                .expect("read leased encrypted DAG after retention"),
+            Some("retention-leased-value-0095".to_string())
+        );
     }
 
     #[cfg(feature = "lmdb")]

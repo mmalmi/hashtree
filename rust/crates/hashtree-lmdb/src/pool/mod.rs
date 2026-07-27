@@ -232,6 +232,15 @@ impl PoolStore {
         )
     }
 
+    /// Stop this process's background temperature balancer.
+    ///
+    /// Exact maintenance and recovery commands use this before taking
+    /// catalog snapshots so the same Pool handle cannot relocate blobs behind
+    /// their authority checks.
+    pub fn stop_temperature_worker(&self) -> Result<(), StoreError> {
+        self.temperature_worker.stop()
+    }
+
     pub fn add_member(&self, config: PoolMemberConfig) -> Result<PoolMemberId, StoreError> {
         self.add_member_inner(config, false)?
             .ok_or_else(|| StoreError::Other("pool member was not added".into()))

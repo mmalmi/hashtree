@@ -45,6 +45,7 @@ const BULK_PROJECTION_AUDIT_FORMAT_VERSION: u32 = 4;
 const DEFAULT_AUDIT_BTREE_ORDER: usize = 64;
 const FULL_POLICY_CUTOVER_AUDIT_MODE: &str = "full-policy-cutover";
 const RECOVERY_TRANCHE_AUDIT_MODE: &str = "recovery-tranche-internal-non-cutover";
+const EXACT_INDEX_PARITY_FORMAT: &str = "hashtree/nostr-bulk-projection-exact-index-parity@1";
 
 #[derive(Debug, Clone)]
 pub(crate) struct BulkProjectionAuditOptions {
@@ -175,6 +176,29 @@ struct BulkProjectionIndexAudit {
     last_key: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BulkProjectionExactIndexParityRoot {
+    pub(super) index: String,
+    pub(super) stable_id: u8,
+    pub(super) root: String,
+    pub(super) nodes: u64,
+    pub(super) entries: u64,
+    pub(super) durable_values_validated: u64,
+    pub(super) ordered_entries_sha256: String,
+    pub(super) retained_set_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct BulkProjectionExactIndexParityEvidence {
+    pub(super) format: String,
+    pub(super) btree_order: usize,
+    pub(super) spool_event_records: u64,
+    pub(super) indexes: Vec<BulkProjectionExactIndexParityRoot>,
+    pub(super) evidence_sha256: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct BulkProjectionQueryAudit {
     query: String,
@@ -189,23 +213,23 @@ struct BulkProjectionBlockEvidence {
     sha256: String,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct BulkProjectionProfileAudit {
-    by_pubkey_root: String,
-    by_pubkey_root_file_sha256: String,
-    by_pubkey_nodes: u64,
-    by_pubkey_links: u64,
-    by_pubkey_entries_sha256: String,
-    search_root: String,
-    search_root_file_sha256: String,
-    search_nodes: u64,
-    search_entries: u64,
-    search_entries_sha256: String,
-    sample_pubkey: String,
-    sample_event_id: String,
-    sample_name: String,
-    follow_distance_binding: String,
-    follow_distance_seal_sha256: String,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(super) struct BulkProjectionProfileAudit {
+    pub(super) by_pubkey_root: String,
+    pub(super) by_pubkey_root_file_sha256: String,
+    pub(super) by_pubkey_nodes: u64,
+    pub(super) by_pubkey_links: u64,
+    pub(super) by_pubkey_entries_sha256: String,
+    pub(super) search_root: String,
+    pub(super) search_root_file_sha256: String,
+    pub(super) search_nodes: u64,
+    pub(super) search_entries: u64,
+    pub(super) search_entries_sha256: String,
+    pub(super) sample_pubkey: String,
+    pub(super) sample_event_id: String,
+    pub(super) sample_name: String,
+    pub(super) follow_distance_binding: String,
+    pub(super) follow_distance_seal_sha256: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -466,7 +490,7 @@ impl BulkProjectionSpool {
         Ok(count)
     }
 
-    fn retained_profile_records(&self) -> Result<BTreeMap<String, SpoolEventRecord>> {
+    pub(super) fn retained_profile_records(&self) -> Result<BTreeMap<String, SpoolEventRecord>> {
         let rtxn = self.env.read_txn()?;
         let mut profiles = BTreeMap::new();
         for item in self.events.iter(&rtxn)? {
@@ -1153,14 +1177,14 @@ async fn audit_index_root(
         .validate_link_tree(Some(root))
         .await
         .with_context(|| format!("exhaustively validate {} link tree", index.name()))?;
-    let mut start = None::<String>;
+    let mut after = None::<String>;
     let mut links = 0u64;
     let mut durable_values_validated = 0u64;
     let mut first_key = None;
     let mut last_key = None;
     loop {
         let page = btree
-            .range_links_limited(root, start.as_deref(), None, page_size)
+            .range_links_limited_after(root, after.as_deref(), None, page_size)
             .await
             .with_context(|| format!("read {} root parity page", index.name()))?;
         if page.is_empty() {
@@ -1234,10 +1258,7 @@ async fn audit_index_root(
                 .checked_add(1)
                 .context("bulk index parity link count overflow")?;
         }
-        start = Some(format!(
-            "{}\0",
-            page.last().expect("non-empty index parity page").0
-        ));
+        after = Some(page.last().expect("non-empty index parity page").0.clone());
         if page.len() < page_size {
             break;
         }
@@ -1269,6 +1290,184 @@ async fn audit_index_root(
         },
         retained_set,
     ))
+}
+
+fn exact_index_parity_evidence_sha256(
+    btree_order: usize,
+    spool_event_records: u64,
+    indexes: &[BulkProjectionExactIndexParityRoot],
+) -> Result<String> {
+    let encoded = serde_json::to_vec(&(
+        EXACT_INDEX_PARITY_FORMAT,
+        btree_order,
+        spool_event_records,
+        indexes,
+    ))
+    .context("encode exact event-index parity evidence")?;
+    Ok(bytes_sha256(&encoded))
+}
+
+pub(super) fn validate_exact_event_index_parity_evidence(
+    evidence: &BulkProjectionExactIndexParityEvidence,
+    built_roots: &BTreeMap<u8, String>,
+    btree_order: usize,
+) -> Result<()> {
+    validate_complete_built_roots("exact parity authority", built_roots)?;
+    if evidence.format != EXACT_INDEX_PARITY_FORMAT
+        || evidence.btree_order != btree_order
+        || evidence.indexes.len() != NostrEventIndex::ALL.len()
+    {
+        anyhow::bail!("exact event-index parity evidence has invalid format or dimensions");
+    }
+    for (position, index) in NostrEventIndex::ALL.iter().copied().enumerate() {
+        let root = built_roots
+            .get(&index.stable_id())
+            .expect("all exact parity roots checked");
+        let audited = &evidence.indexes[position];
+        if audited.index != index.name()
+            || audited.stable_id != index.stable_id()
+            || &audited.root != root
+        {
+            anyhow::bail!(
+                "exact event-index parity evidence differs for {}",
+                index.name()
+            );
+        }
+        require_sha256_text(
+            &format!("{} ordered-entry evidence", index.name()),
+            &audited.ordered_entries_sha256,
+        )?;
+        require_sha256_text(
+            &format!("{} retained-set evidence", index.name()),
+            &audited.retained_set_sha256,
+        )?;
+    }
+    if evidence.spool_event_records
+        != evidence
+            .indexes
+            .first()
+            .context("exact parity evidence omitted by-id index")?
+            .durable_values_validated
+    {
+        anyhow::bail!("exact parity spool event count differs from durable by-id validation count");
+    }
+    let expected_sha256 = exact_index_parity_evidence_sha256(
+        evidence.btree_order,
+        evidence.spool_event_records,
+        &evidence.indexes,
+    )?;
+    if evidence.evidence_sha256 != expected_sha256 {
+        anyhow::bail!("exact event-index parity evidence SHA-256 is invalid");
+    }
+    Ok(())
+}
+
+async fn audit_exact_event_index_parity_with_details(
+    spool: &BulkProjectionSpool,
+    store: Arc<ReadOnlyPoolStore>,
+    built_roots: &BTreeMap<u8, String>,
+    btree_order: usize,
+    page_size: usize,
+) -> Result<(
+    BulkProjectionExactIndexParityEvidence,
+    Vec<BulkProjectionIndexAudit>,
+)> {
+    if btree_order < 2 {
+        anyhow::bail!("exact event-index parity requires B-tree order at least 2");
+    }
+    if page_size == 0 {
+        anyhow::bail!("exact event-index parity page size must be non-zero");
+    }
+    validate_complete_built_roots("exact parity authority", built_roots)?;
+    if NostrEventIndex::ALL.first().copied() != Some(NostrEventIndex::ById) {
+        anyhow::bail!("exact event-index parity requires by-id to be the first canonical index");
+    }
+    let target = NostrEventStore::new(Arc::clone(&store));
+    let btree = BTree::new(
+        store,
+        BTreeOptions {
+            order: Some(btree_order),
+        },
+    );
+    let mut expected_entries = [EntrySetProof::default(); 9];
+    let mut details = Vec::with_capacity(NostrEventIndex::ALL.len());
+    let mut indexes = Vec::with_capacity(NostrEventIndex::ALL.len());
+    for index in NostrEventIndex::ALL {
+        let encoded = built_roots
+            .get(&index.stable_id())
+            .expect("all exact parity roots checked");
+        let root = parse_root_text(encoded)
+            .with_context(|| format!("parse exact parity {} root", index.name()))?;
+        let (audit, retained_set) = audit_index_root(
+            spool,
+            &target,
+            &btree,
+            index,
+            Some(&root),
+            page_size,
+            &mut expected_entries,
+        )
+        .await?;
+        let expected = expected_entries[index.stable_id() as usize];
+        if retained_set != expected {
+            anyhow::bail!(
+                "{} root/spool entries do not exactly match the retained by-id event set: \
+                 actual_count={} expected_count={} actual_digest={} expected_digest={}",
+                index.name(),
+                retained_set.count,
+                expected.count,
+                retained_set.evidence_sha256(),
+                expected.evidence_sha256()
+            );
+        }
+        indexes.push(BulkProjectionExactIndexParityRoot {
+            index: index.name().to_string(),
+            stable_id: index.stable_id(),
+            root: encoded.clone(),
+            nodes: audit.nodes,
+            entries: audit.links,
+            durable_values_validated: audit.durable_values_validated,
+            ordered_entries_sha256: audit.entries_sha256.clone(),
+            retained_set_sha256: audit.retained_set_sha256.clone(),
+        });
+        details.push(audit);
+    }
+    let spool_event_records = spool.event_record_count()?;
+    if spool_event_records != indexes[0].durable_values_validated {
+        anyhow::bail!(
+            "bulk spool contains {spool_event_records} event records but by-id validated {}",
+            indexes[0].durable_values_validated
+        );
+    }
+    let evidence_sha256 =
+        exact_index_parity_evidence_sha256(btree_order, spool_event_records, &indexes)?;
+    let evidence = BulkProjectionExactIndexParityEvidence {
+        format: EXACT_INDEX_PARITY_FORMAT.to_string(),
+        btree_order,
+        spool_event_records,
+        indexes,
+        evidence_sha256,
+    };
+    validate_exact_event_index_parity_evidence(&evidence, built_roots, btree_order)?;
+    Ok((evidence, details))
+}
+
+pub(super) async fn audit_exact_event_index_parity(
+    spool: &BulkProjectionSpool,
+    store: Arc<ReadOnlyPoolStore>,
+    built_roots: &BTreeMap<u8, String>,
+    btree_order: usize,
+    page_size: usize,
+) -> Result<BulkProjectionExactIndexParityEvidence> {
+    Ok(audit_exact_event_index_parity_with_details(
+        spool,
+        store,
+        built_roots,
+        btree_order,
+        page_size,
+    )
+    .await?
+    .0)
 }
 
 async fn load_spool_prefix_events(
@@ -1639,17 +1838,12 @@ fn validate_bound_profile_distances(
     Ok(())
 }
 
-async fn audit_profile_indexes(
-    data_dir: &Path,
+pub(super) async fn audit_profile_indexes_at_roots<S: Store>(
     spool: &BulkProjectionSpool,
-    store: Arc<ReadOnlyPoolStore>,
+    store: Arc<S>,
+    roots_before: &hashtree_cli::socialgraph::ProfileIndexRoots,
     trusted_rank_decisions: Option<&BTreeMap<String, Option<u32>>>,
-) -> Result<(
-    BulkProjectionProfileAudit,
-    Vec<Cid>,
-    hashtree_cli::socialgraph::ProfileIndexRoots,
-)> {
-    let roots_before = hashtree_cli::socialgraph::read_profile_index_roots(data_dir)?;
+) -> Result<(BulkProjectionProfileAudit, Vec<Cid>)> {
     let by_pubkey_root = roots_before
         .by_pubkey
         .clone()
@@ -1807,12 +2001,14 @@ async fn audit_profile_indexes(
         hashtree_cli::socialgraph::profile_follow_distance_seal_v2(&bound_distances);
     let (sample_pubkey, sample_event_id, sample_name) =
         sample.context("profile-search root contains no entries")?;
-    let roots_after = hashtree_cli::socialgraph::read_profile_index_roots(data_dir)?;
-    if roots_after != roots_before {
-        anyhow::bail!("profile index root files changed during read-only audit");
-    }
     let representative_profile_cid =
         representative_profile_cid.context("profile-by-pubkey root contains no entries")?;
+    let follow_distance_binding = if trusted_rank_decisions.is_some() {
+        "independently-pinned-complete-rank-decisions@1"
+    } else {
+        "opaque-historic-v2-first-observed-per-pubkey; \
+         v3-requires-deterministic-or-attested-distance"
+    };
     Ok((
         BulkProjectionProfileAudit {
             by_pubkey_root: cid_to_nhash(&by_pubkey_root)?,
@@ -1828,14 +2024,31 @@ async fn audit_profile_indexes(
             sample_pubkey,
             sample_event_id,
             sample_name,
-            follow_distance_binding:
-                "opaque-historic-v2-first-observed-per-pubkey; v3-requires-deterministic-or-attested-distance"
-                    .to_string(),
+            follow_distance_binding: follow_distance_binding.to_string(),
             follow_distance_seal_sha256,
         },
         vec![by_pubkey_root, search_root, representative_profile_cid],
-        roots_before,
     ))
+}
+
+async fn audit_profile_indexes(
+    data_dir: &Path,
+    spool: &BulkProjectionSpool,
+    store: Arc<ReadOnlyPoolStore>,
+    trusted_rank_decisions: Option<&BTreeMap<String, Option<u32>>>,
+) -> Result<(
+    BulkProjectionProfileAudit,
+    Vec<Cid>,
+    hashtree_cli::socialgraph::ProfileIndexRoots,
+)> {
+    let roots_before = hashtree_cli::socialgraph::read_profile_index_roots(data_dir)?;
+    let (audit, cids) =
+        audit_profile_indexes_at_roots(spool, store, &roots_before, trusted_rank_decisions).await?;
+    let roots_after = hashtree_cli::socialgraph::read_profile_index_roots(data_dir)?;
+    if roots_after != roots_before {
+        anyhow::bail!("profile index root files changed during read-only audit");
+    }
+    Ok((audit, cids, roots_before))
 }
 
 #[derive(Debug)]
@@ -2364,15 +2577,7 @@ async fn audit_loaded_subject(
         .context("validate exact canonical bulk projection manifest")?;
     let manifest = canonical_manifest.manifest;
     let manifest_metadata = canonical_manifest.metadata_cid;
-    let btree = BTree::new(
-        Arc::clone(&store),
-        BTreeOptions {
-            order: Some(subject.btree_order),
-        },
-    );
 
-    let mut indexes = Vec::with_capacity(NostrEventIndex::ALL.len());
-    let mut expected_entries = [EntrySetProof::default(); 9];
     let mut representative_cids = vec![subject.candidate_root.clone(), manifest_metadata];
     for index in NostrEventIndex::ALL {
         let encoded = subject
@@ -2396,40 +2601,18 @@ async fn audit_loaded_subject(
                 index.name()
             );
         }
-        let (audit, retained_set) = audit_index_root(
-            &spool,
-            &target,
-            &btree,
-            index,
-            manifest_root,
-            options.page_size,
-            &mut expected_entries,
-        )
-        .await?;
-        let expected = expected_entries[index.stable_id() as usize];
-        if retained_set != expected {
-            anyhow::bail!(
-                "{} root/spool entries do not exactly match the retained by-id event set: \
-                 actual_count={} expected_count={} actual_digest={} expected_digest={}",
-                index.name(),
-                retained_set.count,
-                expected.count,
-                retained_set.evidence_sha256(),
-                expected.evidence_sha256()
-            );
-        }
-        indexes.push(audit);
         if let Some(root) = manifest_root {
             representative_cids.push(root.clone());
         }
     }
-    let event_records = spool.event_record_count()?;
-    if event_records != indexes[0].durable_values_validated {
-        anyhow::bail!(
-            "bulk spool contains {event_records} event records but by-id validated {}",
-            indexes[0].durable_values_validated
-        );
-    }
+    let (_exact_index_parity, indexes) = audit_exact_event_index_parity_with_details(
+        &spool,
+        Arc::clone(&store),
+        &subject.built_roots,
+        subject.btree_order,
+        options.page_size,
+    )
+    .await?;
 
     let (profile, profile_cids, profile_roots_before) = audit_profile_indexes(
         data_dir,
@@ -3240,7 +3423,13 @@ mod tests {
             .custom_created_at(Timestamp::from_secs(30))
             .sign_with_keys(&keys)
             .unwrap();
-        let stored = [&profile, &note, &parameterized]
+        let parameterized_nul =
+            EventBuilder::new(Kind::Custom(30_000), "real NUL-key parameterized event")
+                .tags([Tag::identifier("audit-article\0suffix")])
+                .custom_created_at(Timestamp::from_secs(31))
+                .sign_with_keys(&keys)
+                .unwrap();
+        let stored = [&profile, &note, &parameterized, &parameterized_nul]
             .into_iter()
             .map(stored_event_from_nostr_sdk_event)
             .collect::<Vec<_>>();
@@ -3294,8 +3483,8 @@ mod tests {
             policy: policy.clone(),
             next_author: 17_177,
             segment_event_offset: 0,
-            events_seen: 3,
-            events_selected: 3,
+            events_seen: 4,
+            events_selected: 4,
             live_bytes_selected: 123,
             built_roots: roots
                 .iter()
@@ -3345,6 +3534,54 @@ mod tests {
         drop(spool);
         spool_closing.wait();
         drop(store);
+
+        let exact_spool = BulkProjectionSpool::open_read_only(&spool_path).unwrap();
+        let exact_store =
+            Arc::new(ReadOnlyPoolStore::open(data_dir.join(SHARED_BLOB_POOL_DIR_NAME)).unwrap());
+        let exact = audit_exact_event_index_parity(
+            &exact_spool,
+            Arc::clone(&exact_store),
+            &state.built_roots,
+            8,
+            1,
+        )
+        .await
+        .unwrap();
+        assert_eq!(exact.format, EXACT_INDEX_PARITY_FORMAT);
+        assert_eq!(exact.spool_event_records, 4);
+        assert_eq!(exact.indexes.len(), 9);
+        for (position, index) in NostrEventIndex::ALL.iter().copied().enumerate() {
+            assert_eq!(exact.indexes[position].index, index.name());
+            assert_eq!(exact.indexes[position].stable_id, index.stable_id());
+            assert_eq!(
+                exact.indexes[position].root,
+                state.built_roots[&index.stable_id()]
+            );
+            assert_eq!(
+                exact.indexes[position].durable_values_validated,
+                if index == NostrEventIndex::ById { 4 } else { 0 }
+            );
+        }
+        validate_exact_event_index_parity_evidence(&exact, &state.built_roots, 8).unwrap();
+        let mut substituted_roots = state.built_roots.clone();
+        substituted_roots.insert(1, substituted_roots[&0].clone());
+        let substitution_error = audit_exact_event_index_parity(
+            &exact_spool,
+            Arc::clone(&exact_store),
+            &substituted_roots,
+            8,
+            1,
+        )
+        .await
+        .expect_err("substituting one structurally valid root must fail exact spool parity");
+        assert!(
+            format!("{substitution_error:#}").contains("mismatch"),
+            "unexpected substituted-root error: {substitution_error:#}"
+        );
+        let exact_spool_closing = exact_spool.env.clone().prepare_for_closing();
+        drop(exact_spool);
+        exact_spool_closing.wait();
+        drop(exact_store);
 
         let state_sha256 = bytes_sha256(&std::fs::read(&state_path).unwrap());
         let stage_path = staging_data_dir.join(STAGE_DIR).join(STAGE_STATE_FILE);
@@ -3462,7 +3699,7 @@ mod tests {
         assert_eq!(output["authors_processed"], 17_177);
         assert_eq!(output["authors_total"], 101_267);
         assert_eq!(output["indexes"].as_array().unwrap().len(), 9);
-        assert_eq!(output["indexes"][0]["durable_values_validated"], 3);
+        assert_eq!(output["indexes"][0]["durable_values_validated"], 4);
         assert_eq!(output["profile"]["by_pubkey_links"], 1);
         assert!(output["profile"]["search_entries"].as_u64().unwrap() >= 1);
         assert_eq!(

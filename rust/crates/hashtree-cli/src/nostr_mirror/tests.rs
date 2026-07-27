@@ -889,6 +889,158 @@ async fn apply_history_root_uploads_profile_search_root_to_blossom_before_publis
 }
 
 #[tokio::test]
+async fn detached_profile_upload_drains_before_exclusive_publication_fence() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock().await;
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+
+    let profile_keys = nostr::Keys::generate();
+    set_social_graph_root(&graph_store, &profile_keys.public_key().to_bytes());
+    let first_profile = event_builder!(Kind::Metadata, r#"{"name":"Paused Upload"}"#)
+        .custom_created_at(Timestamp::from(11))
+        .sign_with_keys(&profile_keys)
+        .expect("first profile");
+    socialgraph::ingest_parsed_event(graph_store.as_ref(), &first_profile)?;
+    let first_root = graph_store
+        .profile_search_root()?
+        .expect("first profile-search root");
+
+    let blossom = TestBlossom::new().await;
+    let first_root_hash = hex::encode(first_root.hash);
+    blossom.hold_put(&first_root_hash);
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig {
+            blossom_write_servers: vec![blossom.base_url()],
+            history_sync_on_start: false,
+            published_profile_search_tree_name: Some("profile-search".to_string()),
+            ..NostrMirrorConfig::default()
+        },
+        Arc::clone(&store),
+        graph_store.clone(),
+        None,
+    )
+    .await?;
+
+    mirror.note_profile_search_root_change()?;
+    mirror.maybe_publish_profile_search_root(true).await?;
+    wait_until(
+        "paused detached profile upload",
+        Duration::from_secs(5),
+        || blossom.put_started(&first_root_hash),
+    )
+    .await;
+    {
+        let tasks = mirror.root_upload_tasks.lock().expect("root upload tasks");
+        assert_eq!(tasks.len(), 1);
+        let _ = tasks[0].cancel.send(true);
+    }
+
+    let fence = crate::socialgraph::acquire_profile_publication_fence_guard(tmp.path());
+    tokio::pin!(fence);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut fence)
+            .await
+            .is_err(),
+        "cancelling an in-flight PUT must not release its shared publication guard"
+    );
+    let fence_path = crate::socialgraph::profile_publication_fence_path(tmp.path());
+    assert!(
+        !fence_path.exists(),
+        "the durable fence cannot become visible while the profile upload is in flight"
+    );
+
+    blossom.release_put(&first_root_hash);
+    let fence_guard = tokio::time::timeout(Duration::from_secs(5), &mut fence)
+        .await
+        .expect("exclusive repair fence must acquire after the upload drains")?;
+    std::fs::create_dir_all(fence_path.parent().expect("fence parent"))?;
+    std::fs::write(&fence_path, b"generated durable repair fence\n")?;
+    drop(fence_guard);
+
+    wait_until(
+        "completed detached profile upload",
+        Duration::from_secs(5),
+        || {
+            mirror
+                .profile_search_publish_state
+                .lock()
+                .expect("profile-search publish state")
+                .last_uploaded_root
+                .as_ref()
+                == Some(&first_root)
+        },
+    )
+    .await;
+    assert!(blossom.has_hash(&first_root_hash));
+
+    // Exercise the other scheduling outcome directly: if the exclusive
+    // repair transaction installs its permanent fence before a detached task
+    // acquires its own shared guard, that task must fail before touching
+    // Blossom.
+    let second_profile = event_builder!(Kind::Metadata, r#"{"name":"Fenced Upload"}"#)
+        .custom_created_at(Timestamp::from(12))
+        .sign_with_keys(&profile_keys)
+        .expect("second profile");
+    socialgraph::ingest_parsed_event(graph_store.as_ref(), &second_profile)?;
+    let second_root = graph_store
+        .profile_search_root()?
+        .expect("second profile-search root");
+    assert_ne!(second_root, first_root);
+    let second_root_hash = hex::encode(second_root.hash);
+    mirror.note_profile_search_root_change()?;
+    assert!(mirror.maybe_start_background_root_upload(
+        "profile-search",
+        &second_root,
+        &mirror.profile_search_publish_state,
+        "profile search root",
+        true,
+    ));
+    wait_until(
+        "fenced detached profile upload",
+        Duration::from_secs(5),
+        || {
+            let state = mirror
+                .profile_search_publish_state
+                .lock()
+                .expect("profile-search publish state");
+            state.upload_in_progress_root.is_none()
+                && (state.last_upload_error.is_some()
+                    || state.last_uploaded_root.as_ref() == Some(&second_root))
+        },
+    )
+    .await;
+    {
+        let state = mirror
+            .profile_search_publish_state
+            .lock()
+            .expect("profile-search publish state");
+        assert_eq!(state.last_uploaded_root.as_ref(), Some(&first_root));
+        assert!(
+            state
+                .last_upload_error
+                .as_deref()
+                .is_some_and(|error| error.contains("profile-root publication is fenced")),
+            "fenced detached upload must expose the publication-fence failure: {:?}",
+            state.last_upload_error
+        );
+    }
+    assert!(
+        !blossom.put_started(&second_root_hash),
+        "a detached profile upload must not issue network requests after the durable fence appears"
+    );
+
+    std::fs::remove_file(&fence_path)?;
+    mirror.shutdown();
+    mirror.finish_root_upload_tasks().await;
+    Ok(())
+}
+
+#[tokio::test]
 async fn apply_history_root_holds_event_root_until_event_upload_finishes() -> Result<()> {
     let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");
@@ -1099,10 +1251,24 @@ async fn uploaded_event_root_state_is_reused_after_restart() -> Result<()> {
     mirror.apply_history_root(Some(&root)).await?;
     let state_path =
         BackgroundNostrMirror::uploaded_root_state_path(store.base_path(), "nostr-event-index");
-    wait_until("uploaded root state", Duration::from_secs(5), || {
-        state_path.exists() && blossom.has_hash(&hex::encode(root.hash))
-    })
-    .await;
+    let upload_task = {
+        let mut tasks = mirror.root_upload_tasks.lock().expect("root upload tasks");
+        assert_eq!(tasks.len(), 1, "exactly one event-root upload must run");
+        tasks.pop().expect("event-root upload task")
+    };
+    let RootUploadTask {
+        cancel: upload_lifetime,
+        join,
+        ..
+    } = upload_task;
+    join.await.context("join event-root upload task")?;
+    drop(upload_lifetime);
+    assert!(blossom.has_hash(&hex::encode(root.hash)));
+    assert_eq!(
+        BackgroundNostrMirror::read_uploaded_root_state(&state_path, "event root").as_ref(),
+        Some(&root),
+        "completed upload must atomically publish its durable root witness"
+    );
 
     let restarted = BackgroundNostrMirror::new(config, store, graph_store, None).await?;
     assert_eq!(

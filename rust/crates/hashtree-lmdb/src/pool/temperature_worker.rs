@@ -79,6 +79,30 @@ impl TemperatureWorker {
         );
         Ok(())
     }
+
+    pub(super) fn stop(&self) -> Result<(), StoreError> {
+        {
+            let mut stopped =
+                self.signal.stopped.lock().map_err(|_| {
+                    StoreError::Other("pool temperature signal lock poisoned".into())
+                })?;
+            *stopped = true;
+            self.signal.wake.notify_all();
+        }
+        let handle = self
+            .handle
+            .lock()
+            .map_err(|_| StoreError::Other("pool temperature worker lock poisoned".into()))?
+            .take();
+        if let Some(handle) = handle {
+            if handle.thread().id() != thread::current().id() {
+                handle.join().map_err(|_| {
+                    StoreError::Other("pool temperature worker panicked while stopping".into())
+                })?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Drop for TemperatureWorker {

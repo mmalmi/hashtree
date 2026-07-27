@@ -38,13 +38,14 @@ use super::mount_target::{
 };
 use super::mounts::print_active_mounts;
 use super::nostr_index::{
-    run_nostr_bulk_projection_audit, run_nostr_bulk_tranche_append, run_nostr_bulk_tranche_build,
-    run_nostr_bulk_tranche_freeze, run_nostr_bulk_tranche_prepare, run_nostr_index_import,
-    run_nostr_index_query, run_nostr_replaceable_repair, run_nostr_time_repair_preparation,
-    run_socialgraph_index_from_cli, BulkProjectionAuditOptions, BulkTrancheAppendOptions,
-    BulkTrancheBuildOptions, BulkTrancheFreezeOptions, BulkTranchePrepareOptions,
-    NostrIndexImportOptions, NostrIndexQueryOptions, NostrReplaceableRepairOptions,
-    NostrTimeRepairPreparationOptions, SocialGraphIndexOptions,
+    run_nostr_bulk_profile_repair, run_nostr_bulk_projection_audit, run_nostr_bulk_tranche_append,
+    run_nostr_bulk_tranche_build, run_nostr_bulk_tranche_freeze, run_nostr_bulk_tranche_prepare,
+    run_nostr_index_import, run_nostr_index_query, run_nostr_replaceable_repair,
+    run_nostr_time_repair_preparation, run_socialgraph_index_from_cli, BulkProfileRepairOptions,
+    BulkProjectionAuditOptions, BulkTrancheAppendOptions, BulkTrancheBuildOptions,
+    BulkTrancheFreezeOptions, BulkTranchePrepareOptions, NostrIndexImportOptions,
+    NostrIndexQueryOptions, NostrReplaceableRepairOptions, NostrTimeRepairPreparationOptions,
+    SocialGraphIndexOptions,
 };
 use super::peers::list_peers;
 use super::pwa::run_export;
@@ -291,6 +292,20 @@ pub(crate) async fn pin_input_target(
     Ok(target_cid)
 }
 
+pub(crate) fn should_spawn_background_update(cli: &Cli) -> bool {
+    if matches!(&cli.command, Commands::Update { .. } | Commands::BgCheck) {
+        return false;
+    }
+    !matches!(
+        &cli.command,
+        Commands::NostrIndex { command }
+            if matches!(
+                command.as_ref(),
+                NostrIndexCommands::RepairBulkProjectionProfiles { .. }
+            )
+    )
+}
+
 pub(crate) async fn run() -> Result<()> {
     // Install rustls crypto provider (required for TLS connections)
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -312,8 +327,11 @@ pub(crate) async fn run() -> Result<()> {
     //   2) If interval elapsed, fork a detached child that writes a fresh
     //      result. Detached so it survives short commands like `htree user`.
     // Skipped for `htree update` (user already has it covered) and the
-    // internal `__bg_check` subcommand itself (don't recursively fork).
-    if !matches!(cli.command, Commands::Update { .. } | Commands::BgCheck) {
+    // internal `__bg_check` subcommand itself (don't recursively fork). The
+    // profile repair also skips it: its pinned, single-writer recovery
+    // boundary must not create a concurrent process before locks and
+    // authority checks are established.
+    if should_spawn_background_update(&cli) {
         super::update::print_cached_update_notification(&data_dir);
         super::update::spawn_detached_bg_check(&data_dir);
     }
@@ -1129,6 +1147,47 @@ pub(crate) async fn run() -> Result<()> {
                         btree_order,
                         page_size,
                         query_limit,
+                        out,
+                    },
+                )
+                .await?;
+            }
+            NostrIndexCommands::RepairBulkProjectionProfiles {
+                staging_data_dir,
+                expected_state_sha256,
+                expected_stage_state_sha256,
+                expected_policy_sha256,
+                expected_spool_data_sha256,
+                profile_rank_decisions_file,
+                expected_profile_rank_decisions_file_sha256,
+                profile_rank_decisions_report,
+                expected_profile_rank_decisions_report_sha256,
+                expected_replayed_author_count,
+                expected_full_author_count,
+                expected_profiles_by_pubkey_root_file_sha256,
+                expected_profile_search_root_file_sha256,
+                required_profile_pubkeys,
+                btree_order,
+                out,
+            } => {
+                run_nostr_bulk_profile_repair(
+                    data_dir,
+                    BulkProfileRepairOptions {
+                        staging_data_dir,
+                        expected_state_sha256,
+                        expected_stage_state_sha256,
+                        expected_policy_sha256,
+                        expected_spool_data_sha256,
+                        profile_rank_decisions_file,
+                        expected_profile_rank_decisions_file_sha256,
+                        profile_rank_decisions_report,
+                        expected_profile_rank_decisions_report_sha256,
+                        expected_replayed_author_count,
+                        expected_full_author_count,
+                        expected_profiles_by_pubkey_root_file_sha256,
+                        expected_profile_search_root_file_sha256,
+                        required_profile_pubkeys,
+                        btree_order,
                         out,
                     },
                 )

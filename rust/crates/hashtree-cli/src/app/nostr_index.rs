@@ -31,8 +31,9 @@ use hashtree_cli::{Config, HashtreeStore};
 
 mod bulk_projection;
 pub(crate) use bulk_projection::{
-    BulkProjectionAuditOptions, BulkTrancheAppendOptions, BulkTrancheBuildOptions,
-    BulkTrancheFreezeOptions, BulkTranchePrepareOptions, BulkTrancheTransitionOutput,
+    BulkProfileRepairOptions, BulkProjectionAuditOptions, BulkTrancheAppendOptions,
+    BulkTrancheBuildOptions, BulkTrancheFreezeOptions, BulkTranchePrepareOptions,
+    BulkTrancheTransitionOutput,
 };
 
 const INDEX_DIR: &str = "nostr-index";
@@ -506,6 +507,124 @@ pub(crate) async fn run_nostr_bulk_tranche_build(
     .context("initialize social graph store for v3 tranche build")?;
     graph.set_profile_index_overmute_threshold(config.nostr.overmute_threshold);
     bulk_projection::build_bulk_tranche(&durable_store, graph.as_ref(), &data_dir, options).await
+}
+
+pub(crate) async fn run_nostr_bulk_profile_repair(
+    data_dir: PathBuf,
+    options: BulkProfileRepairOptions,
+) -> Result<()> {
+    for variable in ["HTREE_LMDB_NO_SYNC", "HTREE_LMDB_NO_META_SYNC"] {
+        require_durable_profile_repair_lmdb_value(variable, std::env::var_os(variable).as_deref())?;
+    }
+    require_durable_external_blob_sync_value(
+        "HTREE_LMDB_EXTERNAL_BLOB_SYNC",
+        std::env::var_os("HTREE_LMDB_EXTERNAL_BLOB_SYNC").as_deref(),
+    )?;
+    require_writable_profile_repair_pool_value(
+        hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV,
+        std::env::var_os(hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV).as_deref(),
+    )?;
+    let _stage_lock = CrawlStateLock::acquire_stage_shared(&options.staging_data_dir)?;
+    let _projection_lock = CrawlStateLock::acquire(&data_dir)?;
+    let mut writer_config = None;
+    let open_writer = || {
+        if writer_config.is_none() {
+            writer_config = Some(Config::load()?);
+        }
+        let config = writer_config
+            .as_ref()
+            .context("profile repair writer configuration was not captured")?;
+        let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
+        let durable_store = HashtreeStore::with_options_and_backend(
+            &data_dir,
+            None,
+            max_size_bytes,
+            config.storage.evict_orphans,
+            &hashtree_config::StorageBackend::Lmdb,
+        )?;
+        let local_store = durable_store.router().local_store();
+        let hashtree_cli::storage::LocalStore::Pool(pool) = local_store.as_ref() else {
+            anyhow::bail!("profile repair requires the exact writable native PoolStore backend");
+        };
+        pool.stop_temperature_worker()
+            .context("stop PoolStore temperature balancing for exact profile repair")?;
+        for member in pool
+            .members()
+            .context("inspect exact profile repair Pool members")?
+        {
+            if member.external_blob_dir.is_some() && !member.external_blob_sync {
+                anyhow::bail!("Pool member {} has external_blob_sync disabled", member.id);
+            }
+            if !member.available {
+                anyhow::bail!(
+                    "Pool member {} is unavailable: {}",
+                    member.id,
+                    member.last_error.as_deref().unwrap_or("unknown error")
+                );
+            }
+        }
+        drop(local_store);
+        let graph = socialgraph::open_social_graph_store_with_storage(
+            &data_dir,
+            durable_store.store_arc(),
+            Some(
+                config
+                    .nostr
+                    .db_max_size_gb
+                    .saturating_mul(1024 * 1024 * 1024),
+            ),
+        )
+        .context("initialize social graph store for v2 profile repair")?;
+        graph.set_profile_index_overmute_threshold(config.nostr.overmute_threshold);
+        Ok((durable_store, graph))
+    };
+    bulk_projection::repair_bulk_projection_profiles(&data_dir, options, open_writer).await
+}
+
+fn require_durable_profile_repair_lmdb_value(
+    variable: &str,
+    value: Option<&std::ffi::OsStr>,
+) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let value = value
+        .to_str()
+        .with_context(|| format!("{variable} is not valid UTF-8"))?;
+    if !matches!(value, "0" | "false" | "FALSE") {
+        anyhow::bail!("{variable} must be unset or explicitly false for durable profile repair");
+    }
+    Ok(())
+}
+
+fn require_durable_external_blob_sync_value(
+    variable: &str,
+    value: Option<&std::ffi::OsStr>,
+) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let value = value
+        .to_str()
+        .with_context(|| format!("{variable} is not valid UTF-8"))?
+        .trim();
+    if value != "1" && !value.eq_ignore_ascii_case("true") && !value.eq_ignore_ascii_case("yes") {
+        anyhow::bail!("{variable} must be unset or explicitly true for durable profile repair");
+    }
+    Ok(())
+}
+
+fn require_writable_profile_repair_pool_value(
+    variable: &str,
+    value: Option<&std::ffi::OsStr>,
+) -> Result<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value == std::ffi::OsStr::new("0") {
+        return Ok(());
+    }
+    anyhow::bail!("{variable} must be unset or exactly 0 for writable profile repair");
 }
 
 #[derive(Debug, Clone)]
@@ -3350,6 +3469,138 @@ mod tests {
         ($kind:expr, $content:expr, $tags:expr $(,)?) => {
             EventBuilder::new($kind, $content).tags($tags)
         };
+    }
+
+    #[test]
+    fn durable_profile_repair_rejects_unsafe_or_ambiguous_lmdb_sync_values() {
+        let variable = "HTREE_LMDB_NO_SYNC";
+        assert!(require_durable_profile_repair_lmdb_value(variable, None).is_ok());
+        for value in ["0", "false", "FALSE"] {
+            assert!(require_durable_profile_repair_lmdb_value(
+                variable,
+                Some(std::ffi::OsStr::new(value))
+            )
+            .is_ok());
+        }
+        for value in ["", "1", "true", "False", "yes"] {
+            let error = require_durable_profile_repair_lmdb_value(
+                variable,
+                Some(std::ffi::OsStr::new(value)),
+            )
+            .expect_err("unsafe or ambiguous LMDB durability value must fail closed");
+            assert!(error.to_string().contains(variable));
+        }
+
+        let external = "HTREE_LMDB_EXTERNAL_BLOB_SYNC";
+        assert!(require_durable_external_blob_sync_value(external, None).is_ok());
+        for value in ["1", "true", "TRUE", "yes", " YES "] {
+            assert!(require_durable_external_blob_sync_value(
+                external,
+                Some(std::ffi::OsStr::new(value))
+            )
+            .is_ok());
+        }
+        for value in ["", "0", "false", "no", "maybe"] {
+            let error = require_durable_external_blob_sync_value(
+                external,
+                Some(std::ffi::OsStr::new(value)),
+            )
+            .expect_err("disabled or ambiguous external-blob sync must fail closed");
+            assert!(error.to_string().contains(external));
+        }
+
+        let audit_read_only = hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV;
+        assert!(require_writable_profile_repair_pool_value(audit_read_only, None).is_ok());
+        assert!(require_writable_profile_repair_pool_value(
+            audit_read_only,
+            Some(std::ffi::OsStr::new("0"))
+        )
+        .is_ok());
+        for value in ["", "1", "false", "true", "yes", " 0 "] {
+            let error = require_writable_profile_repair_pool_value(
+                audit_read_only,
+                Some(std::ffi::OsStr::new(value)),
+            )
+            .expect_err("read-only or ambiguous Pool mode must fail closed");
+            assert!(error.to_string().contains(audit_read_only));
+        }
+    }
+
+    #[test]
+    fn durable_profile_repair_command_rejects_unsafe_env_before_mutation() {
+        const CHILD_ENV: &str = "HTREE_TEST_UNSAFE_PROFILE_REPAIR_CHILD";
+        const EXPECTED_VARIABLE_ENV: &str = "HTREE_TEST_UNSAFE_PROFILE_REPAIR_EXPECTED_VARIABLE";
+        const TEST_NAME: &str =
+            "app::nostr_index::tests::durable_profile_repair_command_rejects_unsafe_env_before_mutation";
+        if let Some(base) = std::env::var_os(CHILD_ENV) {
+            let base = PathBuf::from(base);
+            let data_dir = base.join("projection-must-not-exist");
+            let staging_data_dir = base.join("staging-must-not-exist");
+            let out = base.join("receipt-must-not-exist.json");
+            let error = tokio::runtime::Runtime::new()
+                .unwrap()
+                .block_on(run_nostr_bulk_profile_repair(
+                    data_dir.clone(),
+                    BulkProfileRepairOptions {
+                        staging_data_dir: staging_data_dir.clone(),
+                        expected_state_sha256: "a".repeat(64),
+                        expected_stage_state_sha256: "b".repeat(64),
+                        expected_policy_sha256: "c".repeat(64),
+                        expected_spool_data_sha256: "d".repeat(64),
+                        profile_rank_decisions_file: base.join("ranks-must-not-exist.jsonl"),
+                        expected_profile_rank_decisions_file_sha256: "e".repeat(64),
+                        profile_rank_decisions_report: base.join("rank-report-must-not-exist.json"),
+                        expected_profile_rank_decisions_report_sha256: "f".repeat(64),
+                        expected_replayed_author_count: 1,
+                        expected_full_author_count: 1,
+                        expected_profiles_by_pubkey_root_file_sha256: "1".repeat(64),
+                        expected_profile_search_root_file_sha256: "2".repeat(64),
+                        required_profile_pubkeys: vec!["3".repeat(64)],
+                        btree_order: 64,
+                        out: Some(out.clone()),
+                    },
+                ))
+                .expect_err("unsafe LMDB environment must reject the production repair wrapper");
+            let expected_variable = std::env::var(EXPECTED_VARIABLE_ENV).unwrap();
+            assert!(format!("{error:#}").contains(&expected_variable));
+            assert!(!data_dir.exists());
+            assert!(!staging_data_dir.exists());
+            assert!(!out.exists());
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        for (case, variable, value) in [
+            ("no-sync", "HTREE_LMDB_NO_SYNC", "1"),
+            ("no-meta-sync", "HTREE_LMDB_NO_META_SYNC", "true"),
+            ("external-sync", "HTREE_LMDB_EXTERNAL_BLOB_SYNC", "0"),
+            (
+                "pool-read-only",
+                hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV,
+                "1",
+            ),
+            (
+                "pool-read-only-invalid",
+                hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV,
+                "invalid",
+            ),
+        ] {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_ENV, temp.path().join(case))
+                .env(EXPECTED_VARIABLE_ENV, variable)
+                .env_remove("HTREE_LMDB_NO_SYNC")
+                .env_remove("HTREE_LMDB_NO_META_SYNC")
+                .env_remove("HTREE_LMDB_EXTERNAL_BLOB_SYNC")
+                .env_remove(hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV)
+                .env(variable, value)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "unsafe-environment repair child failed for {variable}={value}"
+            );
+        }
     }
 
     fn checkpoint_test_options(

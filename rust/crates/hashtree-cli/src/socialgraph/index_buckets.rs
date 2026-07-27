@@ -473,9 +473,31 @@ impl ProfileIndexBucket {
     }
 
     pub(super) fn recover_pending_root_pair_commit_locked(&self) -> Result<()> {
+        require_no_incomplete_profile_repair_for_root_write(&self.root_pair_lock_path)?;
         let Some(commit) = load_profile_root_pair_commit(&self.root_pair_commit_path)? else {
             return Ok(());
         };
+        install_profile_root_pair_commit_with(
+            &self.by_pubkey_root_path,
+            &self.search_root_path,
+            &self.root_pair_commit_path,
+            &commit,
+            || Ok(()),
+        )
+    }
+
+    pub(super) fn recover_pending_root_pair_commit_locked_for_repair(
+        &self,
+        authority: &ProfileIndexRepairAuthority,
+    ) -> Result<()> {
+        let Some(commit) = load_profile_root_pair_commit(&self.root_pair_commit_path)? else {
+            return Ok(());
+        };
+        authority.require_pending_commit(
+            &commit,
+            &self.by_pubkey_root_path,
+            &self.search_root_path,
+        )?;
         install_profile_root_pair_commit_with(
             &self.by_pubkey_root_path,
             &self.search_root_path,
@@ -521,7 +543,53 @@ impl ProfileIndexBucket {
         F: FnOnce() -> Result<()>,
         G: FnOnce() -> Result<()>,
     {
+        require_no_incomplete_profile_repair_for_root_write(&self.root_pair_lock_path)?;
         self.recover_pending_root_pair_commit_locked()?;
+        self.write_roots_with_hooks_locked_unchecked(
+            by_pubkey_root,
+            search_root,
+            after_intent,
+            after_search,
+        )
+    }
+
+    pub(super) fn write_roots_with_hooks_locked_for_repair<F, G>(
+        &self,
+        authority: &ProfileIndexRepairAuthority,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+        after_intent: F,
+        after_search: G,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+        G: FnOnce() -> Result<()>,
+    {
+        self.recover_pending_root_pair_commit_locked_for_repair(authority)?;
+        let current = read_profile_index_root_pair_snapshot(
+            &self.by_pubkey_root_path,
+            &self.search_root_path,
+        )?;
+        authority.require_write_target(by_pubkey_root, search_root, &current)?;
+        self.write_roots_with_hooks_locked_unchecked(
+            by_pubkey_root,
+            search_root,
+            after_intent,
+            after_search,
+        )
+    }
+
+    fn write_roots_with_hooks_locked_unchecked<F, G>(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+        after_intent: F,
+        after_search: G,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+        G: FnOnce() -> Result<()>,
+    {
         self.store
             .force_sync()
             .map_err(|error| anyhow::anyhow!("force-sync profile index blocks: {error}"))?;
@@ -672,6 +740,7 @@ impl ProfileIndexBucket {
         I: IntoIterator<Item = &'a Event>,
         F: FnMut(&Event) -> Result<Option<u32>>,
     {
+        require_no_incomplete_profile_repair_for_root_write(&self.root_pair_lock_path)?;
         self.recover_pending_root_pair_commit_locked()?;
         let (by_pubkey_root, search_root) =
             self.rebuild_profile_events_with_distances_locked(events, follow_distance_for_event)?;
@@ -740,6 +809,7 @@ impl ProfileIndexBucket {
         I: IntoIterator<Item = &'a Event>,
         F: FnMut(&Event) -> Result<Option<u32>>,
     {
+        require_no_incomplete_profile_repair_for_root_write(&self.root_pair_lock_path)?;
         self.recover_pending_root_pair_commit_locked()?;
         let (by_pubkey_root, search_root) = self
             .rebuild_profile_events_async_with_distances_locked(events, follow_distance_for_event)
@@ -759,6 +829,7 @@ impl ProfileIndexBucket {
         if updates.is_empty() {
             return Ok(false);
         }
+        require_no_incomplete_profile_repair_for_root_write(&self.root_pair_lock_path)?;
         self.recover_pending_root_pair_commit_locked()?;
         let (by_pubkey_root, search_root) = self.roots_locked()?;
         let (next_by_pubkey_root, next_search_root, changed) = self.update_profile_events_locked(

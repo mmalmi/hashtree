@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -237,6 +238,7 @@ struct RootPublishState {
 struct RootUploadTask {
     cancel: watch::Sender<bool>,
     join: tokio::task::JoinHandle<()>,
+    drain_after_start: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,6 +272,7 @@ pub struct BackgroundNostrMirror {
     root_publication_deferrals: AtomicUsize,
     profile_publication_fence_logged: AtomicBool,
     root_upload_tasks: Mutex<Vec<RootUploadTask>>,
+    root_publish_task: Mutex<Option<std::thread::JoinHandle<()>>>,
     shutting_down: AtomicBool,
     shutdown_tx: watch::Sender<bool>,
     shutdown_rx: watch::Receiver<bool>,
@@ -351,6 +354,7 @@ impl BackgroundNostrMirror {
             root_publication_deferrals: AtomicUsize::new(0),
             profile_publication_fence_logged: AtomicBool::new(false),
             root_upload_tasks: Mutex::new(Vec::new()),
+            root_publish_task: Mutex::new(None),
             shutting_down: AtomicBool::new(false),
             shutdown_tx,
             shutdown_rx,
@@ -432,12 +436,47 @@ impl BackgroundNostrMirror {
         root: &hashtree_core::Cid,
         log_label: &str,
     ) -> Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("create {}", parent.display()))?;
+        let parent = path
+            .parent()
+            .context("uploaded root state path has no parent directory")?;
+        let parent_was_present = parent.exists();
+        std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("uploaded root state path has no UTF-8 file name")?;
+        let mut temporary = tempfile::Builder::new()
+            .prefix(&format!(".{file_name}."))
+            .suffix(".tmp")
+            .tempfile_in(parent)
+            .with_context(|| format!("create temporary uploaded {log_label} state"))?;
+        temporary
+            .write_all(format!("{root}\n").as_bytes())
+            .with_context(|| format!("write temporary uploaded {log_label} state"))?;
+        temporary
+            .as_file()
+            .sync_all()
+            .with_context(|| format!("fsync temporary uploaded {log_label} state"))?;
+        temporary
+            .persist(path)
+            .map_err(|error| error.error)
+            .with_context(|| format!("replace uploaded {log_label} state {}", path.display()))?;
+        #[cfg(unix)]
+        {
+            std::fs::File::open(parent)
+                .with_context(|| format!("open {} for fsync", parent.display()))?
+                .sync_all()
+                .with_context(|| format!("fsync {}", parent.display()))?;
+            if !parent_was_present {
+                if let Some(grandparent) = parent.parent() {
+                    std::fs::File::open(grandparent)
+                        .with_context(|| format!("open {} for fsync", grandparent.display()))?
+                        .sync_all()
+                        .with_context(|| format!("fsync {}", grandparent.display()))?;
+                }
+            }
         }
-        std::fs::write(path, format!("{root}\n"))
-            .with_context(|| format!("write uploaded {log_label} state {}", path.display()))
+        Ok(())
     }
 
     fn write_latest_event_root_state(
@@ -491,7 +530,11 @@ impl BackgroundNostrMirror {
         };
         for mut task in tasks {
             let _ = task.cancel.send(true);
-            if tokio::time::timeout(Duration::from_secs(3), &mut task.join)
+            if task.drain_after_start {
+                if let Err(error) = task.join.await {
+                    warn!("Nostr mirror guarded root upload task failed during shutdown: {error}");
+                }
+            } else if tokio::time::timeout(Duration::from_secs(3), &mut task.join)
                 .await
                 .is_err()
             {
@@ -519,6 +562,69 @@ impl BackgroundNostrMirror {
             self.maybe_publish_profile_search_root(force_profile_search),
             self.maybe_publish_profiles_by_pubkey_root(force_profiles_by_pubkey),
         )
+    }
+
+    fn spawn_pending_root_publish(
+        self: &Arc<Self>,
+        force_event: bool,
+        force_profile_search: bool,
+        force_profiles_by_pubkey: bool,
+        priority: bool,
+    ) {
+        let mut task = self.root_publish_task.lock().expect("root publish task");
+        if task.as_ref().is_some_and(|task| !task.is_finished()) {
+            return;
+        }
+        let mirror = Arc::clone(self);
+        *task = Some(std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build Nostr root publication runtime");
+            runtime.block_on(async move {
+                let (event_result, profile_search_result, profiles_by_pubkey_result) = if priority {
+                    mirror
+                        .publish_priority_roots(
+                            force_event,
+                            force_profile_search,
+                            force_profiles_by_pubkey,
+                        )
+                        .await
+                } else {
+                    mirror
+                        .publish_pending_roots(
+                            force_event,
+                            force_profile_search,
+                            force_profiles_by_pubkey,
+                        )
+                        .await
+                };
+                if let Err(error) = event_result {
+                    warn!("Nostr mirror event-root publish failed: {error:#}");
+                }
+                if let Err(error) = profile_search_result {
+                    warn!("Nostr mirror profile-search publish failed: {error:#}");
+                }
+                if let Err(error) = profiles_by_pubkey_result {
+                    warn!("Nostr mirror profiles-by-pubkey publish failed: {error:#}");
+                }
+            });
+        }));
+    }
+
+    async fn finish_pending_root_publish_task(&self) {
+        let task = self
+            .root_publish_task
+            .lock()
+            .expect("root publish task")
+            .take();
+        if let Some(task) = task {
+            match tokio::task::spawn_blocking(move || task.join()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => warn!("Nostr mirror root publication thread panicked"),
+                Err(error) => warn!("Nostr mirror root publication join failed: {error}"),
+            }
+        }
     }
 
     async fn publish_priority_roots(
@@ -575,26 +681,7 @@ impl BackgroundNostrMirror {
         tokio::time::sleep(MIRROR_CONNECT_SETTLE_DELAY).await;
         let live_since = Timestamp::now();
         self.sync_publish_roots_from_store()?;
-        let (event_result, profile_search_result, profiles_by_pubkey_result) =
-            self.publish_priority_roots(true, true, true).await;
-        if let Err(err) = event_result {
-            warn!(
-                "Nostr mirror event-root publish failed on startup: {:#}",
-                err
-            );
-        }
-        if let Err(err) = profile_search_result {
-            warn!(
-                "Nostr mirror profile-search publish failed on startup: {:#}",
-                err
-            );
-        }
-        if let Err(err) = profiles_by_pubkey_result {
-            warn!(
-                "Nostr mirror profiles-by-pubkey publish failed on startup: {:#}",
-                err
-            );
-        }
+        self.spawn_pending_root_publish(true, true, true, true);
 
         let initial_authors = self.collect_authors()?;
         if initial_authors.is_empty() {
@@ -701,18 +788,7 @@ impl BackgroundNostrMirror {
                     if let Err(err) = self.flush_live_events().await {
                         warn!("Nostr mirror live event flush failed: {:#}", err);
                     }
-                    let (event_result, profile_search_result, profiles_by_pubkey_result) = self
-                        .publish_pending_roots(false, false, false)
-                        .await;
-                    if let Err(err) = event_result {
-                        warn!("Nostr mirror event-root publish failed: {:#}", err);
-                    }
-                    if let Err(err) = profile_search_result {
-                        warn!("Nostr mirror profile-search publish failed: {:#}", err);
-                    }
-                    if let Err(err) = profiles_by_pubkey_result {
-                        warn!("Nostr mirror profiles-by-pubkey publish failed: {:#}", err);
-                    }
+                    self.spawn_pending_root_publish(false, false, false, false);
                 }
                 notification = notifications.recv() => {
                     match notification {
@@ -730,6 +806,7 @@ impl BackgroundNostrMirror {
             }
         }
 
+        self.finish_pending_root_publish_task().await;
         if let Err(err) = self.flush_live_events().await {
             warn!(
                 "Nostr mirror live event flush failed during shutdown: {:#}",
@@ -1754,15 +1831,6 @@ impl BackgroundNostrMirror {
         if profiles_by_pubkey_root_changed {
             self.note_profiles_by_pubkey_root_change()?;
         }
-        if profile_search_root_changed {
-            self.maybe_publish_profile_search_root(false).await?;
-        }
-        if profiles_by_pubkey_root_changed {
-            self.maybe_publish_profiles_by_pubkey_root(false).await?;
-        }
-        if event_root_changed {
-            self.maybe_publish_event_root(false).await?;
-        }
         info!(
             "Nostr mirror flushed live events: events={} event_root_changed={} profile_search_root_changed={} profiles_by_pubkey_root_changed={}",
             event_count,
@@ -1843,6 +1911,7 @@ impl BackgroundNostrMirror {
                 "event root",
                 force,
                 false,
+                false,
             )
             .await;
         let Err(error) = result else {
@@ -1896,46 +1965,57 @@ impl BackgroundNostrMirror {
             "event root",
             force,
             false,
+            false,
         )
         .await
     }
 
     async fn maybe_publish_profile_search_root(&self, force: bool) -> Result<()> {
-        if self.defer_profile_publication_while_fenced() {
+        let Some(publication) = self.acquire_profile_publication_or_defer().await else {
             return Ok(());
-        }
-        self.maybe_publish_root(
-            self.config.published_profile_search_tree_name.as_deref(),
-            &self.profile_search_publish_state,
-            "profile search root",
-            force,
-            true,
-        )
-        .await
+        };
+        let result = self
+            .maybe_publish_root(
+                self.config.published_profile_search_tree_name.as_deref(),
+                &self.profile_search_publish_state,
+                "profile search root",
+                force,
+                true,
+                true,
+            )
+            .await;
+        drop(publication);
+        result
     }
 
     async fn maybe_publish_profiles_by_pubkey_root(&self, force: bool) -> Result<()> {
-        if self.defer_profile_publication_while_fenced() {
+        let Some(publication) = self.acquire_profile_publication_or_defer().await else {
             return Ok(());
-        }
-        self.maybe_publish_root(
-            self.config
-                .published_profiles_by_pubkey_tree_name
-                .as_deref(),
-            &self.profiles_by_pubkey_publish_state,
-            "profiles-by-pubkey root",
-            force,
-            true,
-        )
-        .await
+        };
+        let result = self
+            .maybe_publish_root(
+                self.config
+                    .published_profiles_by_pubkey_tree_name
+                    .as_deref(),
+                &self.profiles_by_pubkey_publish_state,
+                "profiles-by-pubkey root",
+                force,
+                true,
+                true,
+            )
+            .await;
+        drop(publication);
+        result
     }
 
-    fn defer_profile_publication_while_fenced(&self) -> bool {
-        match socialgraph::require_profile_publication_unfenced(self.store.base_path()) {
-            Ok(()) => {
+    async fn acquire_profile_publication_or_defer(
+        &self,
+    ) -> Option<socialgraph::ProfilePublicationGuard> {
+        match socialgraph::acquire_profile_publication_guard(self.store.base_path()).await {
+            Ok(publication) => {
                 self.profile_publication_fence_logged
                     .store(false, Ordering::Release);
-                false
+                Some(publication)
             }
             Err(error) => {
                 if !self
@@ -1947,7 +2027,7 @@ impl BackgroundNostrMirror {
                         error
                     );
                 }
-                true
+                None
             }
         }
     }
@@ -1959,6 +2039,7 @@ impl BackgroundNostrMirror {
         log_label: &str,
         force: bool,
         publish_before_upload_ready_on_force: bool,
+        profile_publication: bool,
     ) -> Result<()> {
         if !force && self.root_publication_deferrals.load(Ordering::Acquire) > 0 {
             return Ok(());
@@ -1992,6 +2073,7 @@ impl BackgroundNostrMirror {
             &pending_root,
             publish_state,
             log_label,
+            profile_publication,
         );
         let upload_required = !self.config.blossom_write_servers.is_empty();
         let (upload_ready, publish_root) = {
@@ -2139,6 +2221,7 @@ impl BackgroundNostrMirror {
         pending_root: &hashtree_core::Cid,
         publish_state: &Arc<Mutex<RootPublishState>>,
         log_label: &str,
+        profile_publication: bool,
     ) -> bool {
         if self.config.blossom_write_servers.is_empty()
             || self.shutting_down.load(Ordering::Acquire)
@@ -2169,6 +2252,7 @@ impl BackgroundNostrMirror {
         let root = pending_root.clone();
         let publish_state = Arc::clone(publish_state);
         let log_label = log_label.to_string();
+        let data_dir = store.base_path().to_path_buf();
         let (cancel, mut cancelled) = watch::channel(false);
         let task = tokio::task::spawn_blocking(move || {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2176,14 +2260,47 @@ impl BackgroundNostrMirror {
                 .build()
                 .expect("build nostr mirror root upload runtime");
             let result = runtime.block_on(async {
-                tokio::select! {
-                    result = background_blossom_push_incremental_with_store(
+                if profile_publication {
+                    // Cancellation may win while this detached task is still
+                    // waiting to enter the publication transaction. Once the
+                    // shared guard is acquired, however, await the real PUT:
+                    // dropping an in-flight HTTP future would release the
+                    // fence while the remote side may still commit it.
+                    let profile_publication = tokio::select! {
+                        result = socialgraph::acquire_profile_publication_guard(&data_dir) => {
+                            match result {
+                                Ok(guard) => guard,
+                                Err(error) => {
+                                    return Some(Err(error).with_context(|| {
+                                        format!(
+                                            "acquire detached {log_label} Blossom publication guard"
+                                        )
+                                    }));
+                                }
+                            }
+                        }
+                        _ = cancelled.changed() => return None,
+                    };
+                    let result = background_blossom_push_incremental_with_store(
                         store,
                         root.clone(),
                         previous_uploaded_root,
                         &servers,
-                    ) => Some(result),
-                    _ = cancelled.changed() => None,
+                    )
+                    .await;
+                    drop(profile_publication);
+                    Some(result)
+                } else {
+                    let upload = background_blossom_push_incremental_with_store(
+                        store,
+                        root.clone(),
+                        previous_uploaded_root,
+                        &servers,
+                    );
+                    tokio::select! {
+                        result = upload => Some(result),
+                        _ = cancelled.changed() => None,
+                    }
                 }
             });
             let mut state = publish_state.lock().expect("root publish state");
@@ -2233,7 +2350,11 @@ impl BackgroundNostrMirror {
         });
         let mut tasks = self.root_upload_tasks.lock().expect("root upload tasks");
         tasks.retain(|task| !task.join.is_finished());
-        let task = RootUploadTask { cancel, join: task };
+        let task = RootUploadTask {
+            cancel,
+            join: task,
+            drain_after_start: profile_publication,
+        };
         if self.shutting_down.load(Ordering::Acquire) {
             let _ = task.cancel.send(true);
         }

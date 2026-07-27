@@ -773,8 +773,12 @@ mod tests {
 
     #[tokio::test]
     async fn daemon_blob_resolver_advertises_and_serves_storage_router() {
-        let provider_endpoint = local_only_endpoint("htree-provider-test").await;
-        let observer_endpoint = local_only_endpoint("iris-drive-observer-test").await;
+        let rendezvous_addr = reserve_local_rendezvous_addr();
+        let test_id = uuid::Uuid::new_v4();
+        let provider_scope = format!("htree-provider-test-{test_id}");
+        let observer_scope = format!("iris-drive-observer-test-{test_id}");
+        let provider_endpoint = local_only_endpoint(rendezvous_addr, &provider_scope).await;
+        let observer_endpoint = local_only_endpoint(rendezvous_addr, &observer_scope).await;
         let temp = tempfile::tempdir().unwrap();
         let store = Arc::new(HashtreeStore::new(temp.path()).unwrap());
         let data = b"served directly from htree StorageRouter".to_vec();
@@ -1001,7 +1005,10 @@ mod tests {
             })
     }
 
-    async fn local_only_endpoint(scope: &str) -> hashtree_fips_transport::BoundFipsEndpoint {
+    async fn local_only_endpoint(
+        rendezvous_addr: std::net::SocketAddrV4,
+        scope: &str,
+    ) -> hashtree_fips_transport::BoundFipsEndpoint {
         let keys = nostr::Keys::generate();
         let mut options = FipsEndpointOptions::new(keys.secret_key().to_bech32().unwrap());
         options.discovery_scope = scope.to_string();
@@ -1010,7 +1017,9 @@ mod tests {
         options.enable_local_rendezvous = true;
         options.enable_lan_discovery = false;
         options.share_local_candidates = false;
-        bind_fips_endpoint(options).await.unwrap()
+        bind_fips_endpoint_at_local_rendezvous(options, rendezvous_addr)
+            .await
+            .unwrap()
     }
 
     async fn udp_endpoint(scope: &str) -> (BoundFipsEndpoint, String) {
@@ -1031,6 +1040,14 @@ mod tests {
     fn reserve_udp_addr() -> String {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         socket.local_addr().unwrap().to_string()
+    }
+
+    fn reserve_local_rendezvous_addr() -> std::net::SocketAddrV4 {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        match socket.local_addr().unwrap() {
+            std::net::SocketAddr::V4(addr) => addr,
+            std::net::SocketAddr::V6(_) => unreachable!("loopback IPv4 bind returned IPv6"),
+        }
     }
 
     #[cfg(feature = "experimental-decentralized-pubsub")]

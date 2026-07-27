@@ -72,6 +72,89 @@ fn metadata_event(keys: &Keys, name: &str, created_at: u64) -> Event {
     .unwrap()
 }
 
+fn generated_format_only_profile_repair_gate_bytes() -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let mut intent =
+        serde_json::to_vec(&serde_json::json!({"format": PROFILE_REPAIR_FORMAT})).unwrap();
+    intent.push(b'\n');
+    let mut receipt = serde_json::to_vec(&serde_json::json!({
+        "format": PROFILE_REPAIR_RECEIPT_FORMAT,
+        "intent_sha256": profile_repair_sha256(&intent),
+    }))
+    .unwrap();
+    receipt.push(b'\n');
+    let completion = profile_repair_completion_witness_bytes(&intent, &receipt).unwrap();
+    (intent, receipt, completion)
+}
+
+fn generated_profile_repair_gate_bytes(
+    data_dir: &Path,
+    roots: &ProfileIndexRoots,
+) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+    let pin = profile_repair_root_pair_pin(roots).unwrap();
+    let mut intent = serde_json::to_vec(&serde_json::json!({
+        "format": PROFILE_REPAIR_FORMAT,
+        "data_dir": data_dir.canonicalize().unwrap().to_string_lossy(),
+        "old_roots": pin.clone(),
+        "new_roots": pin.clone(),
+    }))
+    .unwrap();
+    intent.push(b'\n');
+    let mut receipt = serde_json::to_vec(&serde_json::json!({
+        "format": PROFILE_REPAIR_RECEIPT_FORMAT,
+        "intent_sha256": profile_repair_sha256(&intent),
+        "installed_roots": pin,
+    }))
+    .unwrap();
+    receipt.push(b'\n');
+    let completion = profile_repair_completion_witness_bytes(&intent, &receipt).unwrap();
+    (intent, receipt, completion)
+}
+
+fn persist_generated_profile_repair_intent(
+    data_dir: &Path,
+    prepared: &PreparedProfileIndexRepair,
+) -> Vec<u8> {
+    let intent = serde_json::json!({
+        "format": PROFILE_REPAIR_FORMAT,
+        "data_dir": data_dir.canonicalize().unwrap().to_string_lossy(),
+        "old_roots": profile_repair_root_pair_pin(prepared.old_roots()).unwrap(),
+        "new_roots": profile_repair_root_pair_pin(prepared.new_roots()).unwrap(),
+    });
+    let mut bytes = serde_json::to_vec(&intent).unwrap();
+    bytes.push(b'\n');
+    let (intent_path, _) = profile_repair_evidence_paths(data_dir);
+    fs::create_dir_all(intent_path.parent().unwrap()).unwrap();
+    fs::write(&intent_path, &bytes).unwrap();
+    File::open(&intent_path).unwrap().sync_all().unwrap();
+    File::open(intent_path.parent().unwrap())
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    bytes
+}
+
+fn persist_generated_profile_repair_receipt(
+    data_dir: &Path,
+    prepared: &PreparedProfileIndexRepair,
+    intent_bytes: &[u8],
+) -> Vec<u8> {
+    let receipt = serde_json::json!({
+        "format": PROFILE_REPAIR_RECEIPT_FORMAT,
+        "intent_sha256": profile_repair_sha256(intent_bytes),
+        "installed_roots": profile_repair_root_pair_pin(prepared.new_roots()).unwrap(),
+    });
+    let mut bytes = serde_json::to_vec(&receipt).unwrap();
+    bytes.push(b'\n');
+    let (_, receipt_path) = profile_repair_evidence_paths(data_dir);
+    fs::write(&receipt_path, &bytes).unwrap();
+    File::open(&receipt_path).unwrap().sync_all().unwrap();
+    File::open(receipt_path.parent().unwrap())
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    bytes
+}
+
 fn assert_event_and_profile_visible(
     graph_store: &SocialGraphStore,
     event: &Event,
@@ -195,6 +278,52 @@ fn run_derived_recovery_child(
     assert!(
         status.success(),
         "fresh-process derived projection recovery failed: {status}"
+    );
+}
+
+#[cfg(unix)]
+fn run_incomplete_repair_recovery_child(
+    data_dir: &Path,
+    mode: &str,
+    expected_root: &Cid,
+    staged_profile: &Event,
+) {
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("socialgraph::tests::incomplete_repair_projection_recovery_child_helper")
+        .arg("--nocapture")
+        .env("RUST_TEST_THREADS", "1")
+        .env("HASHTREE_REPAIR_RECOVERY_CHILD_DATA_DIR", data_dir)
+        .env("HASHTREE_REPAIR_RECOVERY_CHILD_MODE", mode)
+        .env(
+            "HASHTREE_REPAIR_RECOVERY_CHILD_EVENT_ROOT",
+            expected_root.to_string(),
+        )
+        .env(
+            "HASHTREE_REPAIR_RECOVERY_CHILD_PROFILE_PUBKEY",
+            staged_profile.pubkey.to_hex(),
+        )
+        .env(
+            "HASHTREE_REPAIR_RECOVERY_CHILD_EVENT_ID",
+            staged_profile.id.to_hex(),
+        )
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("fresh-process incomplete-repair recovery exceeded its deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        status.success(),
+        "fresh-process incomplete-repair recovery failed: {status}"
     );
 }
 
@@ -1020,6 +1149,129 @@ fn test_profile_sync_uses_only_frozen_rank_decisions() {
 }
 
 #[test]
+fn complete_frozen_profile_repair_builds_unpublished_then_commits_exact_pair() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let alice = metadata_event(&Keys::generate(), "Repair Alice", 5);
+    let bob = metadata_event(&Keys::generate(), "Repair Bob", 6);
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&alice))
+        .unwrap();
+    let old_roots = read_profile_index_roots(tmp.path()).unwrap();
+    let decisions = BTreeMap::from([
+        (alice.pubkey.to_hex(), Some(2)),
+        (bob.pubkey.to_hex(), Some(4)),
+    ]);
+
+    let prepared = graph_store
+        .build_unpublished_profile_index_repair_with_frozen_distances(
+            &[alice.clone(), bob.clone()],
+            &decisions,
+        )
+        .unwrap();
+    assert_eq!(prepared.old_roots(), &old_roots);
+    assert_ne!(prepared.new_roots(), &old_roots);
+    assert_eq!(
+        read_profile_index_roots(tmp.path()).unwrap(),
+        old_roots,
+        "building and force-syncing replacement DAGs must not publish either root"
+    );
+
+    let intent_bytes = persist_generated_profile_repair_intent(tmp.path(), &prepared);
+    let authority = graph_store
+        .authorize_prepared_profile_index_repair(&prepared, &intent_bytes)
+        .unwrap();
+    assert_eq!(
+        graph_store
+            .commit_prepared_profile_index_repair(&prepared, authority)
+            .unwrap(),
+        ProfileIndexRepairCommitOutcome::Applied
+    );
+    assert_eq!(
+        read_profile_index_roots(tmp.path()).unwrap(),
+        *prepared.new_roots()
+    );
+    assert_eq!(
+        graph_store
+            .latest_profile_event(&bob.pubkey.to_hex())
+            .unwrap()
+            .expect("repaired by-pubkey entry")
+            .id,
+        bob.id
+    );
+    let bob_entries = graph_store
+        .profile_search_entries_for_prefix("p:bob")
+        .unwrap();
+    assert!(bob_entries.iter().any(|(_, entry)| {
+        entry.pubkey == bob.pubkey.to_hex() && entry.follow_distance == Some(4)
+    }));
+    let authority = graph_store
+        .authorize_prepared_profile_index_repair(&prepared, &intent_bytes)
+        .unwrap();
+    assert_eq!(
+        graph_store
+            .commit_prepared_profile_index_repair(&prepared, authority)
+            .unwrap(),
+        ProfileIndexRepairCommitOutcome::AlreadyApplied,
+        "an exact recovered new pair must be an idempotent success"
+    );
+}
+
+#[test]
+fn complete_frozen_profile_repair_rejects_rank_gaps_and_root_cas_conflicts() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let alice = metadata_event(&Keys::generate(), "CAS Alice", 5);
+    let bob = metadata_event(&Keys::generate(), "CAS Bob", 6);
+    let carol = metadata_event(&Keys::generate(), "CAS Carol", 7);
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&alice))
+        .unwrap();
+
+    let excluded = BTreeMap::from([
+        (alice.pubkey.to_hex(), Some(1)),
+        (bob.pubkey.to_hex(), None),
+    ]);
+    let error = graph_store
+        .build_unpublished_profile_index_repair_with_frozen_distances(
+            &[alice.clone(), bob.clone()],
+            &excluded,
+        )
+        .expect_err("a retained excluded author must fail closed");
+    assert!(error
+        .to_string()
+        .contains("retained excluded metadata author"));
+
+    let decisions = BTreeMap::from([
+        (alice.pubkey.to_hex(), Some(1)),
+        (bob.pubkey.to_hex(), Some(2)),
+    ]);
+    let prepared = graph_store
+        .build_unpublished_profile_index_repair_with_frozen_distances(
+            &[alice.clone(), bob],
+            &decisions,
+        )
+        .unwrap();
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&carol))
+        .unwrap();
+    let intent_bytes = persist_generated_profile_repair_intent(tmp.path(), &prepared);
+    let authority = graph_store
+        .authorize_prepared_profile_index_repair(&prepared, &intent_bytes)
+        .unwrap();
+    let error = graph_store
+        .commit_prepared_profile_index_repair(&prepared, authority)
+        .expect_err("a concurrent published-root change must fail the repair CAS");
+    assert!(error.to_string().contains("refusing non-CAS commit"));
+    assert!(graph_store
+        .latest_profile_event(&carol.pubkey.to_hex())
+        .unwrap()
+        .is_some());
+}
+
+#[test]
 fn test_ambient_metadata_events_are_mirrored_into_public_profile_index() {
     let _guard = test_lock_blocking();
     let tmp = TempDir::new().unwrap();
@@ -1401,6 +1653,219 @@ async fn tokio_spawn_blocking_ingest_waits_before_event_root_and_projects_after_
     drop(transaction);
     writer.await.unwrap().unwrap();
     assert_event_and_profile_visible(&graph_store, &profile, "p:spawn");
+}
+
+#[tokio::test]
+async fn publication_fence_drains_inflight_shared_guard_before_becoming_visible() {
+    let _guard = test_lock().await;
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let publication = acquire_profile_publication_guard(tmp.path()).await.unwrap();
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&metadata_event(
+            &Keys::generate(),
+            "local writes do not wait for network publication",
+            1,
+        )))
+        .expect("publication fence lock must be independent from local profile-root writes");
+    let fence = acquire_profile_publication_fence_guard(tmp.path());
+    tokio::pin!(fence);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(40), &mut fence)
+            .await
+            .is_err(),
+        "exclusive fence installation must wait for an in-flight publisher"
+    );
+    let fence_path = profile_publication_fence_path(tmp.path());
+    assert!(!fence_path.exists());
+
+    drop(publication);
+    let fence_guard = tokio::time::timeout(Duration::from_secs(2), &mut fence)
+        .await
+        .expect("fence lock must acquire after publisher drains")
+        .unwrap();
+    std::fs::create_dir_all(fence_path.parent().unwrap()).unwrap();
+    std::fs::write(&fence_path, b"generated durable fence\n").unwrap();
+    drop(fence_guard);
+
+    let error = match acquire_profile_publication_guard(tmp.path()).await {
+        Ok(_) => panic!("new publisher must observe the fence under its shared transaction"),
+        Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains("profile-root publication is fenced"));
+}
+
+#[cfg(unix)]
+#[test]
+fn profile_publication_cross_process_guard_helper() {
+    let Ok(data_dir) = std::env::var("HASHTREE_PUBLICATION_LOCK_CHILD_DATA_DIR") else {
+        return;
+    };
+    let ready_path = PathBuf::from(
+        std::env::var("HASHTREE_PUBLICATION_LOCK_CHILD_READY")
+            .expect("publication child ready path"),
+    );
+    let release_path = PathBuf::from(
+        std::env::var("HASHTREE_PUBLICATION_LOCK_CHILD_RELEASE")
+            .expect("publication child release path"),
+    );
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let publication = runtime
+        .block_on(acquire_profile_publication_guard(Path::new(&data_dir)))
+        .unwrap();
+    fs::write(&ready_path, b"shared publication guard acquired\n").unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !release_path.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "publication child release exceeded its deadline"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    drop(publication);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn publication_fence_waits_for_real_cross_process_shared_guard() {
+    let _guard = test_lock().await;
+    let tmp = TempDir::new().unwrap();
+    drop(open_test_social_graph_store(tmp.path()).unwrap());
+    let ready_path = tmp.path().join("publication-child.ready");
+    let release_path = tmp.path().join("publication-child.release");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("socialgraph::tests::profile_publication_cross_process_guard_helper")
+        .arg("--nocapture")
+        .env("RUST_TEST_THREADS", "1")
+        .env("HASHTREE_PUBLICATION_LOCK_CHILD_DATA_DIR", tmp.path())
+        .env("HASHTREE_PUBLICATION_LOCK_CHILD_READY", &ready_path)
+        .env("HASHTREE_PUBLICATION_LOCK_CHILD_RELEASE", &release_path)
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !ready_path.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("publication guard child exited before readiness: {status}");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "cross-process publication guard did not become ready"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let fence = acquire_profile_publication_fence_guard(tmp.path());
+    tokio::pin!(fence);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), &mut fence)
+            .await
+            .is_err(),
+        "exclusive fence must wait for a shared guard held by another process"
+    );
+    fs::write(&release_path, b"release\n").unwrap();
+    let fence_guard = tokio::time::timeout(Duration::from_secs(5), &mut fence)
+        .await
+        .expect("cross-process shared guard must drain")
+        .unwrap();
+    drop(fence_guard);
+    let status = child.wait().unwrap();
+    assert!(status.success(), "publication guard child failed: {status}");
+}
+
+#[test]
+fn incomplete_durable_profile_repair_blocks_ordinary_root_writer() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let original = metadata_event(&keys, "before durable repair", 1);
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&original))
+        .unwrap();
+    let roots_before = read_profile_index_roots(tmp.path()).unwrap();
+
+    let (intent_path, receipt_path) = profile_repair_evidence_paths(tmp.path());
+    let completion_path = profile_repair_completion_path(tmp.path());
+    let (intent_bytes, receipt_bytes, completion_bytes) =
+        generated_profile_repair_gate_bytes(tmp.path(), &roots_before);
+    std::fs::create_dir_all(intent_path.parent().unwrap()).unwrap();
+    std::fs::write(&intent_path, &intent_bytes).unwrap();
+    let replacement = metadata_event(&keys, "blocked during durable repair", 2);
+    let error = graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&replacement))
+        .expect_err("ordinary writer must not advance roots while repair intent is incomplete");
+    assert!(format!("{error:#}").contains("incomplete durable repair intent"));
+    assert_eq!(read_profile_index_roots(tmp.path()).unwrap(), roots_before);
+
+    std::fs::write(&receipt_path, &receipt_bytes).unwrap();
+    let error = graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&replacement))
+        .expect_err("a receipt without its completion witness must keep writers blocked");
+    assert!(format!("{error:#}").contains("incomplete durable repair intent"));
+    assert_eq!(read_profile_index_roots(tmp.path()).unwrap(), roots_before);
+
+    std::fs::write(&completion_path, &completion_bytes).unwrap();
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&replacement))
+        .expect("durably completed repair must release ordinary root writers");
+    assert_ne!(read_profile_index_roots(tmp.path()).unwrap(), roots_before);
+}
+
+#[test]
+fn stale_or_malformed_profile_repair_completion_never_releases_writers() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let (intent_path, receipt_path) = profile_repair_evidence_paths(tmp.path());
+    let completion_path = profile_repair_completion_path(tmp.path());
+    let (intent_bytes, receipt_bytes, completion_bytes) =
+        generated_format_only_profile_repair_gate_bytes();
+    fs::create_dir_all(intent_path.parent().unwrap()).unwrap();
+    fs::write(&intent_path, &intent_bytes).unwrap();
+    fs::write(&receipt_path, &receipt_bytes).unwrap();
+    fs::write(&completion_path, &completion_bytes).unwrap();
+    let replacement = metadata_event(&Keys::generate(), "must remain blocked", 1);
+    let error = graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&replacement))
+        .expect_err("format-only completion evidence must not release the repair gate");
+    assert!(
+        format!("{error:#}").contains("invalid repair completion"),
+        "{error:#}"
+    );
+
+    let receipt_bytes = b"not-json\n".to_vec();
+    fs::write(&receipt_path, &receipt_bytes).unwrap();
+    fs::write(
+        &completion_path,
+        profile_repair_completion_witness_bytes(&intent_bytes, &receipt_bytes).unwrap(),
+    )
+    .unwrap();
+
+    let error = graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&replacement))
+        .expect_err("malformed receipt must not release the repair gate");
+    assert!(
+        format!("{error:#}").contains("invalid repair completion"),
+        "{error:#}"
+    );
+
+    let (_, valid_receipt, _) = generated_format_only_profile_repair_gate_bytes();
+    fs::write(&receipt_path, &valid_receipt).unwrap();
+    let stale_completion =
+        profile_repair_completion_witness_bytes(b"different intent\n", &valid_receipt).unwrap();
+    fs::write(&completion_path, stale_completion).unwrap();
+    let error = graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&replacement))
+        .expect_err("stale completion must not release the repair gate");
+    assert!(
+        format!("{error:#}").contains("invalid repair completion"),
+        "{error:#}"
+    );
 }
 
 #[test]
@@ -1953,6 +2418,222 @@ fn derived_projection_recovery_child_helper() {
 
 #[cfg(unix)]
 #[test]
+fn incomplete_repair_projection_recovery_child_helper() {
+    let Ok(data_dir) = std::env::var("HASHTREE_REPAIR_RECOVERY_CHILD_DATA_DIR") else {
+        return;
+    };
+    let mode = std::env::var("HASHTREE_REPAIR_RECOVERY_CHILD_MODE")
+        .expect("repair recovery mode must be provided");
+    let expected_root = Cid::parse(
+        &std::env::var("HASHTREE_REPAIR_RECOVERY_CHILD_EVENT_ROOT")
+            .expect("repair recovery root must be provided"),
+    )
+    .expect("parse expected repair recovery root");
+    let expected_pubkey = std::env::var("HASHTREE_REPAIR_RECOVERY_CHILD_PROFILE_PUBKEY")
+        .expect("repair recovery profile pubkey must be provided");
+    let expected_event_id = std::env::var("HASHTREE_REPAIR_RECOVERY_CHILD_EVENT_ID")
+        .expect("repair recovery event id must be provided");
+    let data_dir = Path::new(&data_dir);
+    let pending_path = data_dir
+        .join("socialgraph")
+        .join(PROFILE_PROJECTION_PENDING_FILE);
+    let by_pubkey_path = data_dir
+        .join("socialgraph")
+        .join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    let search_path = data_dir.join("socialgraph").join(PROFILE_SEARCH_ROOT_FILE);
+    let graph_store = open_social_graph_store(data_dir)
+        .expect("fresh process must open while repair intent is incomplete");
+
+    match mode.as_str() {
+        "defer" => {
+            let pending_before = fs::read(&pending_path)
+                .expect("incomplete repair must preserve pending projection");
+            let by_pubkey_before =
+                fs::read(&by_pubkey_path).expect("read pre-repair by-pubkey root");
+            let search_before = fs::read(&search_path).expect("read pre-repair search root");
+            assert_eq!(
+                graph_store.public_events_root().unwrap(),
+                Some(expected_root.clone())
+            );
+            assert!(
+                graph_store
+                    .latest_profile_event(&expected_pubkey)
+                    .unwrap()
+                    .is_none(),
+                "profile projection must remain deferred under incomplete intent"
+            );
+            assert!(
+                query_events(
+                    &graph_store,
+                    &Filter::new().author(
+                        nostr::PublicKey::from_hex(&expected_pubkey).expect("parse staged pubkey")
+                    ),
+                    16,
+                )
+                .iter()
+                .any(|event| event.id.to_hex() == expected_event_id),
+                "the already-published event root must remain readable while projection is deferred"
+            );
+
+            let assert_unchanged = || {
+                assert_eq!(
+                    graph_store.public_events_root().unwrap(),
+                    Some(expected_root.clone())
+                );
+                assert_eq!(fs::read(&pending_path).unwrap(), pending_before);
+                assert_eq!(fs::read(&by_pubkey_path).unwrap(), by_pubkey_before);
+                assert_eq!(fs::read(&search_path).unwrap(), search_before);
+            };
+            let single = metadata_event(&Keys::generate(), "blocked single ingest", 100);
+            let error = ingest_parsed_event_with_storage_class(
+                &graph_store,
+                &single,
+                EventStorageClass::Public,
+            )
+            .expect_err("incomplete repair must block single ingest before mutation");
+            assert!(format!("{error:#}").contains("incomplete durable repair intent"));
+            assert_unchanged();
+
+            let batch = metadata_event(&Keys::generate(), "blocked batch ingest", 101);
+            let error = ingest_parsed_events_with_storage_class(
+                &graph_store,
+                std::slice::from_ref(&batch),
+                EventStorageClass::Public,
+            )
+            .expect_err("incomplete repair must block batch ingest before mutation");
+            assert!(format!("{error:#}").contains("incomplete durable repair intent"));
+            assert_unchanged();
+
+            let error = graph_store
+                .public_events_root_for_write()
+                .expect_err("incomplete repair must block the mirror's writable root accessor");
+            assert!(format!("{error:#}").contains("incomplete durable repair intent"));
+            assert_unchanged();
+
+            let graph_only = event_builder!(
+                Kind::ContactList,
+                "",
+                vec![Tag::public_key(Keys::generate().public_key())],
+            )
+            .custom_created_at(Timestamp::from_secs(101))
+            .sign_with_keys(&Keys::generate())
+            .unwrap();
+            let error = graph_store
+                .apply_graph_events_only(std::slice::from_ref(&graph_only))
+                .expect_err("incomplete repair must block graph-only derived-state mutation");
+            assert!(format!("{error:#}").contains("incomplete durable repair intent"));
+            assert_unchanged();
+
+            let apply_event = EventBuilder::new(Kind::TextNote, "blocked root apply")
+                .custom_created_at(Timestamp::from_secs(102))
+                .sign_with_keys(&Keys::generate())
+                .unwrap();
+            let apply_root = graph_store
+                .public_events
+                .store_event(Some(&expected_root), &apply_event)
+                .expect("build a distinct valid candidate event root");
+            assert_ne!(apply_root, expected_root);
+            let error = graph_store
+                .apply_public_events_root_and_projections(
+                    Some(&expected_root),
+                    Some(&apply_root),
+                    std::slice::from_ref(&apply_event),
+                    false,
+                )
+                .expect_err("incomplete repair must block root apply before mutation");
+            assert!(format!("{error:#}").contains("incomplete durable repair intent"));
+            assert_unchanged();
+        }
+        "recover" => {
+            assert!(
+                !pending_path.exists(),
+                "completed intent must recover and clear the deferred projection"
+            );
+            assert_eq!(
+                graph_store.public_events_root().unwrap(),
+                Some(expected_root)
+            );
+            let recovered = graph_store
+                .latest_profile_event(&expected_pubkey)
+                .unwrap()
+                .expect("completed repair must recover staged profile");
+            assert_eq!(recovered.id.to_hex(), expected_event_id);
+        }
+        other => panic!("unsupported repair recovery mode {other}"),
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn incomplete_repair_defers_pending_projection_and_blocks_all_event_root_writers() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let original = metadata_event(&Keys::generate(), "original visible profile", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &original, EventStorageClass::Public)
+        .unwrap();
+    assert_event_and_profile_visible(&graph_store, &original, "p:original");
+    let repair_roots_before = read_profile_index_roots(tmp.path()).unwrap();
+
+    let by_pubkey_path = tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    let search_path = tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_SEARCH_ROOT_FILE);
+    let by_pubkey_before = fs::read(&by_pubkey_path).unwrap();
+    let search_before = fs::read(&search_path).unwrap();
+    let staged = metadata_event(&Keys::generate(), "deferred repair profile", 2);
+    let staged_root =
+        stage_public_derived_projection_crash(&graph_store, std::slice::from_ref(&staged), false);
+    let pending_path = tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_PROJECTION_PENDING_FILE);
+    let pending_before = fs::read(&pending_path).unwrap();
+    let (intent_path, receipt_path) = profile_repair_evidence_paths(tmp.path());
+    let completion_path = profile_repair_completion_path(tmp.path());
+    let (intent_bytes, receipt_bytes, completion_bytes) =
+        generated_profile_repair_gate_bytes(tmp.path(), &repair_roots_before);
+    fs::create_dir_all(intent_path.parent().unwrap()).unwrap();
+    fs::write(&intent_path, &intent_bytes).unwrap();
+    File::open(&intent_path).unwrap().sync_all().unwrap();
+    File::open(intent_path.parent().unwrap())
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    drop(graph_store);
+
+    run_incomplete_repair_recovery_child(tmp.path(), "defer", &staged_root, &staged);
+    assert_eq!(fs::read(&pending_path).unwrap(), pending_before);
+    assert_eq!(fs::read(&by_pubkey_path).unwrap(), by_pubkey_before);
+    assert_eq!(fs::read(&search_path).unwrap(), search_before);
+
+    fs::write(&receipt_path, &receipt_bytes).unwrap();
+    File::open(&receipt_path).unwrap().sync_all().unwrap();
+    File::open(receipt_path.parent().unwrap())
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    run_incomplete_repair_recovery_child(tmp.path(), "defer", &staged_root, &staged);
+    fs::write(&completion_path, &completion_bytes).unwrap();
+    File::open(&completion_path).unwrap().sync_all().unwrap();
+    File::open(completion_path.parent().unwrap())
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    run_incomplete_repair_recovery_child(tmp.path(), "recover", &staged_root, &staged);
+
+    let reopened = open_social_graph_store(tmp.path()).unwrap();
+    assert_eq!(reopened.public_events_root().unwrap(), Some(staged_root));
+    assert_event_and_profile_visible(&reopened, &staged, "p:deferred");
+    assert!(!pending_path.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn fresh_process_open_recovers_graph_only_batch_after_event_root_crash() {
     let _guard = test_lock_blocking();
     let tmp = TempDir::new().unwrap();
@@ -2136,7 +2817,9 @@ fn profile_root_pair_cross_process_writer_helper() {
             return;
         }
         assert_eq!(path, expected_lock_path);
-        fs::write(&ready_path, format!("{pubkey}\n")).unwrap();
+        let ready_tmp_path = ready_path.with_extension("tmp");
+        fs::write(&ready_tmp_path, format!("{pubkey}\n")).unwrap();
+        fs::rename(&ready_tmp_path, &ready_path).unwrap();
         std::thread::sleep(Duration::from_millis(hold_millis));
     }));
     ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Public)
@@ -2173,6 +2856,13 @@ fn cross_process_writer_excludes_reader_and_writer_until_real_commit_finishes() 
         std::thread::sleep(Duration::from_millis(10));
     }
     let child_pubkey = fs::read_to_string(&ready_path).unwrap().trim().to_string();
+    assert!(
+        child_pubkey.len() == 64
+            && child_pubkey
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)),
+        "cross-process ready marker did not contain one complete lowercase pubkey: {child_pubkey:?}"
+    );
     let timeout = Duration::from_millis(60);
     let read_error = read_profile_index_roots_with_timeout(tmp.path(), timeout)
         .expect_err("cross-process reader must not observe an in-flight writer");
@@ -2323,6 +3013,201 @@ fn second_writer_recovers_first_writers_interrupted_pair_before_disjoint_update(
             .len(),
         1
     );
+}
+
+#[test]
+fn ordinary_open_defers_low_level_root_pair_recovery_under_repair_intent() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let original = metadata_event(&keys, "before interrupted repair pair", 1);
+    let replacement = metadata_event(&keys, "after interrupted repair pair", 2);
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&original))
+        .unwrap();
+    let (old_by_pubkey, old_search) = graph_store.profile_index.roots().unwrap();
+    let (next_by_pubkey, next_search, changed) = graph_store
+        .profile_index
+        .update_profile_events_locked(
+            old_by_pubkey.as_ref(),
+            old_search.as_ref(),
+            &[(&replacement, Some(1), false, true)],
+        )
+        .unwrap();
+    assert!(changed);
+    let prepared = PreparedProfileIndexRepair::from_roots(
+        profile_index_roots_from_cids(old_by_pubkey.clone(), old_search.clone()).unwrap(),
+        profile_index_roots_from_cids(next_by_pubkey.clone(), next_search.clone()).unwrap(),
+    );
+    graph_store
+        .profile_index
+        .write_roots_interrupted_after_search(next_by_pubkey.as_ref(), next_search.as_ref())
+        .expect_err("generated low-level repair pair must stop after one root");
+
+    let db_dir = tmp.path().join("socialgraph");
+    let commit_path = db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE);
+    let by_pubkey_path = db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    let search_path = db_dir.join(PROFILE_SEARCH_ROOT_FILE);
+    let commit_before = fs::read(&commit_path).unwrap();
+    let by_pubkey_before = fs::read(&by_pubkey_path).unwrap();
+    let search_before = fs::read(&search_path).unwrap();
+    let intent_bytes = persist_generated_profile_repair_intent(tmp.path(), &prepared);
+    drop(graph_store);
+
+    let reopened = open_test_social_graph_store(tmp.path())
+        .expect("ordinary open must defer rather than mutate an incomplete repair");
+    assert_eq!(fs::read(&commit_path).unwrap(), commit_before);
+    assert_eq!(fs::read(&by_pubkey_path).unwrap(), by_pubkey_before);
+    assert_eq!(fs::read(&search_path).unwrap(), search_before);
+    let blocked = metadata_event(&Keys::generate(), "ordinary update remains blocked", 3);
+    let error = reopened
+        .sync_profile_index_for_events(std::slice::from_ref(&blocked))
+        .expect_err("ordinary profile rebuild must not recover a pending repair pair");
+    assert!(format!("{error:#}").contains("incomplete durable repair intent"));
+    assert_eq!(fs::read(&commit_path).unwrap(), commit_before);
+    assert_eq!(fs::read(&by_pubkey_path).unwrap(), by_pubkey_before);
+    assert_eq!(fs::read(&search_path).unwrap(), search_before);
+
+    let authority = reopened
+        .authorize_prepared_profile_index_repair(&prepared, &intent_bytes)
+        .unwrap();
+    assert_eq!(
+        reopened
+            .commit_prepared_profile_index_repair(&prepared, authority)
+            .expect("the privileged repair recovery path must roll forward its own pair"),
+        ProfileIndexRepairCommitOutcome::AlreadyApplied
+    );
+    assert!(!commit_path.exists());
+}
+
+#[test]
+fn mismatched_pending_root_pair_cannot_use_exact_repair_authority() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let original = metadata_event(&keys, "mismatched repair original", 1);
+    let authorized_replacement = metadata_event(&keys, "authorized replacement", 2);
+    let foreign_replacement = metadata_event(&keys, "foreign replacement", 3);
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&original))
+        .unwrap();
+
+    let (old_by_pubkey, old_search) = graph_store.profile_index.roots().unwrap();
+    let (authorized_by_pubkey, authorized_search, authorized_changed) = graph_store
+        .profile_index
+        .update_profile_events_locked(
+            old_by_pubkey.as_ref(),
+            old_search.as_ref(),
+            &[(&authorized_replacement, Some(1), false, true)],
+        )
+        .unwrap();
+    assert!(authorized_changed);
+    let (foreign_by_pubkey, foreign_search, foreign_changed) = graph_store
+        .profile_index
+        .update_profile_events_locked(
+            old_by_pubkey.as_ref(),
+            old_search.as_ref(),
+            &[(&foreign_replacement, Some(1), false, true)],
+        )
+        .unwrap();
+    assert!(foreign_changed);
+    let prepared = PreparedProfileIndexRepair::from_roots(
+        profile_index_roots_from_cids(old_by_pubkey, old_search).unwrap(),
+        profile_index_roots_from_cids(authorized_by_pubkey, authorized_search).unwrap(),
+    );
+    assert_ne!(
+        prepared.new_roots(),
+        &profile_index_roots_from_cids(foreign_by_pubkey.clone(), foreign_search.clone()).unwrap()
+    );
+
+    graph_store
+        .profile_index
+        .write_roots_interrupted_after_search(foreign_by_pubkey.as_ref(), foreign_search.as_ref())
+        .expect_err("generated foreign root pair must stop after its search root");
+    let db_dir = tmp.path().join("socialgraph");
+    let commit_path = db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE);
+    let by_pubkey_path = db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    let search_path = db_dir.join(PROFILE_SEARCH_ROOT_FILE);
+    let commit_before = fs::read(&commit_path).unwrap();
+    let by_pubkey_before = fs::read(&by_pubkey_path).unwrap();
+    let search_before = fs::read(&search_path).unwrap();
+
+    let intent_bytes = persist_generated_profile_repair_intent(tmp.path(), &prepared);
+    let authority = graph_store
+        .authorize_prepared_profile_index_repair(&prepared, &intent_bytes)
+        .unwrap();
+    let error = graph_store
+        .commit_prepared_profile_index_repair(&prepared, authority)
+        .expect_err("foreign pending pair must not use an exact repair authority");
+    assert!(
+        format!("{error:#}").contains("not bound to the authorized repair roots"),
+        "{error:#}"
+    );
+    assert_eq!(fs::read(&commit_path).unwrap(), commit_before);
+    assert_eq!(fs::read(&by_pubkey_path).unwrap(), by_pubkey_before);
+    assert_eq!(fs::read(&search_path).unwrap(), search_before);
+}
+
+#[test]
+fn completion_receipt_never_authorizes_pending_root_pair_recovery() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let original = metadata_event(&keys, "completion original", 1);
+    let replacement = metadata_event(&keys, "completion replacement", 2);
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&original))
+        .unwrap();
+
+    let (old_by_pubkey, old_search) = graph_store.profile_index.roots().unwrap();
+    let (next_by_pubkey, next_search, changed) = graph_store
+        .profile_index
+        .update_profile_events_locked(
+            old_by_pubkey.as_ref(),
+            old_search.as_ref(),
+            &[(&replacement, Some(1), false, true)],
+        )
+        .unwrap();
+    assert!(changed);
+    let prepared = PreparedProfileIndexRepair::from_roots(
+        profile_index_roots_from_cids(old_by_pubkey, old_search).unwrap(),
+        profile_index_roots_from_cids(next_by_pubkey.clone(), next_search.clone()).unwrap(),
+    );
+    graph_store
+        .profile_index
+        .write_roots_interrupted_after_search(next_by_pubkey.as_ref(), next_search.as_ref())
+        .expect_err("generated completion pair must stop after its search root");
+
+    let db_dir = tmp.path().join("socialgraph");
+    let commit_path = db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE);
+    let by_pubkey_path = db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    let search_path = db_dir.join(PROFILE_SEARCH_ROOT_FILE);
+    let commit_before = fs::read(&commit_path).unwrap();
+    let by_pubkey_before = fs::read(&by_pubkey_path).unwrap();
+    let search_before = fs::read(&search_path).unwrap();
+
+    let intent_bytes = persist_generated_profile_repair_intent(tmp.path(), &prepared);
+    let receipt_bytes =
+        persist_generated_profile_repair_receipt(tmp.path(), &prepared, &intent_bytes);
+    let authority = graph_store
+        .authorize_completed_profile_index_repair(&prepared, &intent_bytes, &receipt_bytes)
+        .unwrap();
+    let error = graph_store
+        .hold_completed_profile_index_repair(&prepared, authority)
+        .err()
+        .expect("a completion receipt must fail closed while any root-pair journal is pending");
+    assert!(
+        format!("{error:#}").contains("profile root-pair commit")
+            && format!("{error:#}").contains("is pending"),
+        "{error:#}"
+    );
+    assert_eq!(fs::read(&commit_path).unwrap(), commit_before);
+    assert_eq!(fs::read(&by_pubkey_path).unwrap(), by_pubkey_before);
+    assert_eq!(fs::read(&search_path).unwrap(), search_before);
+    assert!(!profile_repair_completion_path(tmp.path()).exists());
 }
 
 #[test]

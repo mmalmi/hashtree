@@ -4,6 +4,18 @@
 
 ### Added
 
+- `nostr-index repair-bulk-projection-profiles` now rebuilds a complete v2
+  profile root pair from an exactly pinned retained spool and rank authority.
+  It verifies every retained profile signature, exhaustively reconciles all
+  nine pinned event roots with the spool from the exact read-only PoolStore,
+  audits unpublished profile roots exhaustively, force-syncs their blocks,
+  and publishes the pair through a durable compare-and-swap protocol with
+  crash-safe, idempotent intent, receipt, and completion records. An immutable
+  retention lease and root-snapshot transaction protect every encrypted
+  event/profile DAG from all local deletion paths across process death;
+  incomplete intents fence ordinary event, graph, and profile writers before
+  mutation; and profile-root Blossom/relay publication now drains safely in a
+  dedicated lane without blocking local ingestion.
 - `nostr-index build-bulk-tranche` now advances a sealed v3 bulk projection
   from its exact Freeze boundary through crash-resumable index construction to
   Candidate. It reattests the frozen stage, spool, profile-distance, and rank

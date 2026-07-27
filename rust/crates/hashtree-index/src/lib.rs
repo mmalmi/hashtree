@@ -399,8 +399,9 @@ impl<S: Store> BTree<S> {
 
     /// Read a bounded page of CID-link entries in key order.
     ///
-    /// `start` is inclusive and `end` is exclusive. Callers paging forward can
-    /// append `\0` to the final key from the previous page to exclude it.
+    /// `start` is inclusive and `end` is exclusive. Use
+    /// [`Self::range_links_limited_after`] for forward pagination; synthesizing
+    /// an exclusive bound by appending a character can skip valid keys.
     pub async fn range_links_limited(
         &self,
         root: &Cid,
@@ -418,6 +419,36 @@ impl<S: Store> BTree<S> {
             limit,
         )
         .await
+    }
+
+    /// Read a bounded page strictly after `after`, with an exclusive `end`.
+    ///
+    /// This remains correct for arbitrary string keys, including keys that
+    /// contain NUL characters or have the prior key as a prefix.
+    pub async fn range_links_limited_after(
+        &self,
+        root: &Cid,
+        after: Option<&str>,
+        end: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<(String, Cid)>, BTreeError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let fetch_limit = limit.checked_add(1).unwrap_or(usize::MAX);
+        let page = self
+            .range_link_traverse_limited(
+                root.clone(),
+                after.map(ToOwned::to_owned),
+                end.map(ToOwned::to_owned),
+                fetch_limit,
+            )
+            .await?;
+        Ok(page
+            .into_iter()
+            .filter(|(key, _)| after.is_none_or(|after| key.as_str() > after))
+            .take(limit)
+            .collect())
     }
 
     pub async fn delete(&self, root: &Cid, key: &str) -> Result<Option<Cid>, BTreeError> {

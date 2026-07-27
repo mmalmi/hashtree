@@ -30,8 +30,8 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::executor::block_on;
 use hashtree_core::{
-    nhash_encode_full, sha256, to_hex, BufferedStore, Cid, HashTree, HashTreeConfig, NHashData,
-    Store,
+    nhash_decode, nhash_encode_full, sha256, to_hex, BufferedStore, Cid, HashTree, HashTreeConfig,
+    NHashData, Store,
 };
 use hashtree_index::BTree;
 use hashtree_nostr::{
@@ -69,6 +69,14 @@ const PROFILES_BY_PUBKEY_ROOT_FILE: &str = "profiles-by-pubkey-root.msgpack";
 const PROFILE_ROOT_PAIR_COMMIT_FILE: &str = "profile-root-pair.commit.json";
 const PROFILE_PROJECTION_PENDING_FILE: &str = "profile-projection.pending.json";
 const PROFILE_ROOT_PAIR_LOCK_FILE: &str = "profile-root-pair.lock";
+const PROFILE_PUBLICATION_LOCK_FILE: &str = "profile-publication.lock";
+const PROFILE_REPAIR_EVIDENCE_RELATIVE_DIR: &str =
+    "nostr-index/bulk-projection-v2/profile-repair-v1";
+const PROFILE_REPAIR_COMPLETION_FILE: &str = "completion.json";
+pub const PROFILE_REPAIR_FORMAT: &str = "iris-social/bulk-profile-index-repair@1";
+pub const PROFILE_REPAIR_RECEIPT_FORMAT: &str = "iris-social/bulk-profile-index-repair-receipt@1";
+pub const PROFILE_REPAIR_COMPLETION_FORMAT: &str =
+    "iris-social/bulk-profile-index-repair-completion@1";
 const PROFILE_ROOT_PAIR_COMMIT_VERSION: u32 = 1;
 const PROFILE_PROJECTION_PENDING_VERSION: u32 = 1;
 const PROFILE_ROOT_PAIR_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
@@ -83,6 +91,92 @@ const PROFILE_NAME_MAX_LENGTH: usize = 100;
 
 pub fn profile_publication_fence_path(data_dir: &Path) -> PathBuf {
     data_dir.join(PROFILE_PUBLICATION_FENCE_RELATIVE_PATH)
+}
+
+pub fn profile_repair_evidence_paths(data_dir: &Path) -> (PathBuf, PathBuf) {
+    let directory = data_dir.join(PROFILE_REPAIR_EVIDENCE_RELATIVE_DIR);
+    (
+        directory.join("intent.json"),
+        directory.join("receipt.json"),
+    )
+}
+
+pub fn profile_repair_completion_path(data_dir: &Path) -> PathBuf {
+    data_dir
+        .join(PROFILE_REPAIR_EVIDENCE_RELATIVE_DIR)
+        .join(PROFILE_REPAIR_COMPLETION_FILE)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileRepairCompletionWitness {
+    format: String,
+    intent_sha256: String,
+    receipt_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileRepairRootPairPin {
+    by_pubkey: String,
+    by_pubkey_file_sha256: String,
+    search: String,
+    search_file_sha256: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ProfileRepairAuthorizationIntent {
+    format: String,
+    data_dir: String,
+    old_roots: ProfileRepairRootPairPin,
+    new_roots: ProfileRepairRootPairPin,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ProfileRepairAuthorizationReceipt {
+    format: String,
+    intent_sha256: String,
+    installed_roots: ProfileRepairRootPairPin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileIndexRepairAuthorityPhase {
+    Commit,
+    Completion,
+}
+
+/// Opaque proof that the exact prepared root pair is bound to the durable
+/// high-level repair evidence in this store.
+///
+/// The fields intentionally remain private: privileged low-level recovery and
+/// publication APIs consume this value and revalidate its evidence while
+/// holding the root-pair transaction.
+pub struct ProfileIndexRepairAuthority {
+    root_pair_lock_path: PathBuf,
+    intent_sha256: String,
+    receipt_sha256: Option<String>,
+    old_roots: ProfileIndexRoots,
+    new_roots: ProfileIndexRoots,
+    phase: ProfileIndexRepairAuthorityPhase,
+}
+
+fn profile_repair_sha256(bytes: &[u8]) -> String {
+    to_hex(&sha256(bytes))
+}
+
+pub fn profile_repair_completion_witness_bytes(
+    intent_bytes: &[u8],
+    receipt_bytes: &[u8],
+) -> Result<Vec<u8>> {
+    let witness = ProfileRepairCompletionWitness {
+        format: PROFILE_REPAIR_COMPLETION_FORMAT.to_string(),
+        intent_sha256: profile_repair_sha256(intent_bytes),
+        receipt_sha256: profile_repair_sha256(receipt_bytes),
+    };
+    let mut bytes =
+        serde_json::to_vec(&witness).context("encode canonical profile repair completion")?;
+    bytes.push(b'\n');
+    Ok(bytes)
 }
 
 pub fn profile_publication_is_fenced(data_dir: &Path) -> Result<bool> {
@@ -101,6 +195,435 @@ pub fn require_profile_publication_unfenced(data_dir: &Path) -> Result<()> {
         anyhow::bail!(
             "profile-root publication is fenced by active v3 tranche marker {}",
             path.display()
+        );
+    }
+    Ok(())
+}
+
+pub struct ProfilePublicationGuard {
+    _transaction: ProfileRootPairTransactionGuard,
+}
+
+pub struct ProfilePublicationFenceGuard {
+    _transaction: ProfileRootPairTransactionGuard,
+}
+
+pub struct ProfileRootSnapshotGuard {
+    db_dir: PathBuf,
+    _transaction: ProfileRootPairTransactionGuard,
+}
+
+impl ProfileRootSnapshotGuard {
+    /// Return every root whose DAG can still be needed after recovery while
+    /// this guard freezes profile/event-root publication. A durable root-pair
+    /// commit is a roll-forward obligation, so its not-yet-installed roots are
+    /// retention roots just as much as the currently installed files.
+    pub(crate) fn retention_roots(&self) -> Result<Vec<Cid>> {
+        let mut roots = Vec::new();
+        for file_name in [
+            EVENTS_ROOT_FILE,
+            AMBIENT_EVENTS_ROOT_FILE,
+            PROFILE_SEARCH_ROOT_FILE,
+            PROFILES_BY_PUBKEY_ROOT_FILE,
+        ] {
+            if let Some(root) = read_root_file(&self.db_dir.join(file_name))? {
+                roots.push(root);
+            }
+        }
+        if let Some(commit) =
+            load_profile_root_pair_commit(&self.db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE))?
+        {
+            roots.extend(
+                [
+                    commit.old_search,
+                    commit.old_by_pubkey,
+                    commit.new_search,
+                    commit.new_by_pubkey,
+                ]
+                .into_iter()
+                .flatten()
+                .map(cid_from_stored),
+            );
+        }
+        roots.sort_by_key(Cid::to_string);
+        roots.dedup();
+        Ok(roots)
+    }
+}
+
+fn profile_publication_lock_path(data_dir: &Path) -> PathBuf {
+    data_dir
+        .join("socialgraph")
+        .join(PROFILE_PUBLICATION_LOCK_FILE)
+}
+
+/// Hold the shared side of the profile/event-root transaction while a storage
+/// retention pass snapshots and traverses every currently published root.
+/// Returning `None` is valid only when the data directory has no socialgraph
+/// database yet.
+pub fn acquire_profile_root_snapshot_guard(
+    data_dir: &Path,
+) -> Result<Option<ProfileRootSnapshotGuard>> {
+    let db_dir = data_dir.join("socialgraph");
+    match std::fs::symlink_metadata(&db_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => anyhow::bail!(
+            "socialgraph database is not a direct directory: {}",
+            db_dir.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect socialgraph database {}", db_dir.display()));
+        }
+    }
+    let transaction = acquire_profile_root_pair_lock(
+        &db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE),
+        ProfileRootPairLockMode::Shared,
+        true,
+    )?;
+    Ok(Some(ProfileRootSnapshotGuard {
+        db_dir,
+        _transaction: transaction,
+    }))
+}
+
+/// Acquire a shared transaction before checking the durable profile
+/// publication fence. Keep the returned guard alive through the complete
+/// external upload/sign/publish operation so fence installation drains every
+/// attempt that already passed the check.
+pub async fn acquire_profile_publication_guard(data_dir: &Path) -> Result<ProfilePublicationGuard> {
+    let transaction = acquire_profile_root_pair_lock_async(
+        &profile_publication_lock_path(data_dir),
+        ProfileRootPairLockMode::Shared,
+        true,
+    )
+    .await?;
+    require_profile_publication_unfenced(data_dir)?;
+    Ok(ProfilePublicationGuard {
+        _transaction: transaction,
+    })
+}
+
+/// Acquire the exclusive side of the external profile-publication
+/// transaction. Persist the durable fence while this guard is held; after it
+/// is released, later publishers acquire the shared side and observe the
+/// fence, while every publisher that observed the unfenced state has already
+/// drained.
+pub async fn acquire_profile_publication_fence_guard(
+    data_dir: &Path,
+) -> Result<ProfilePublicationFenceGuard> {
+    let transaction = acquire_profile_root_pair_lock_async(
+        &profile_publication_lock_path(data_dir),
+        ProfileRootPairLockMode::Exclusive,
+        true,
+    )
+    .await?;
+    Ok(ProfilePublicationFenceGuard {
+        _transaction: transaction,
+    })
+}
+
+fn direct_regular_file_exists(path: &Path, label: &str) -> Result<bool> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.file_type().is_file() {
+                anyhow::bail!("{label} is not a direct regular file: {}", path.display());
+            }
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error).with_context(|| format!("inspect {label} {}", path.display())),
+    }
+}
+
+fn profile_repair_data_dir_from_lock_path(root_pair_lock_path: &Path) -> Result<&Path> {
+    let profile_db_dir = root_pair_lock_path.parent().with_context(|| {
+        format!(
+            "{} has no profile database parent",
+            root_pair_lock_path.display()
+        )
+    })?;
+    profile_db_dir
+        .parent()
+        .with_context(|| format!("{} has no data-directory parent", profile_db_dir.display()))
+}
+
+fn profile_repair_root_pair_pin(roots: &ProfileIndexRoots) -> Result<ProfileRepairRootPairPin> {
+    let by_pubkey = roots
+        .by_pubkey
+        .as_ref()
+        .context("profile-by-pubkey repair root is missing")?;
+    let search = roots
+        .search
+        .as_ref()
+        .context("profile-search repair root is missing")?;
+    let by_pubkey_file_sha256 = roots
+        .by_pubkey_file_sha256
+        .clone()
+        .context("profile-by-pubkey repair root-file SHA-256 is missing")?;
+    let search_file_sha256 = roots
+        .search_file_sha256
+        .clone()
+        .context("profile-search repair root-file SHA-256 is missing")?;
+    if by_pubkey_file_sha256 != profile_index_root_file_sha256(by_pubkey)?
+        || search_file_sha256 != profile_index_root_file_sha256(search)?
+    {
+        anyhow::bail!("profile repair root-file digest does not match its CID");
+    }
+    Ok(ProfileRepairRootPairPin {
+        by_pubkey: nhash_encode_full(&NHashData {
+            hash: by_pubkey.hash,
+            decrypt_key: by_pubkey.key,
+        })
+        .context("encode profile-by-pubkey repair root")?,
+        by_pubkey_file_sha256,
+        search: nhash_encode_full(&NHashData {
+            hash: search.hash,
+            decrypt_key: search.key,
+        })
+        .context("encode profile-search repair root")?,
+        search_file_sha256,
+    })
+}
+
+fn profile_repair_root_pair_from_pin(pin: &ProfileRepairRootPairPin) -> Result<ProfileIndexRoots> {
+    fn parse_root(value: &str, label: &str) -> Result<Cid> {
+        let decoded =
+            nhash_decode(value).with_context(|| format!("decode pinned {label} repair root"))?;
+        if nhash_encode_full(&decoded).context("re-encode pinned repair root")? != value {
+            anyhow::bail!("pinned {label} repair root is not canonical");
+        }
+        Ok(Cid {
+            hash: decoded.hash,
+            key: decoded.decrypt_key,
+        })
+    }
+
+    let by_pubkey = parse_root(&pin.by_pubkey, "profile-by-pubkey")?;
+    let search = parse_root(&pin.search, "profile-search")?;
+    let roots = ProfileIndexRoots {
+        by_pubkey: Some(by_pubkey),
+        search: Some(search),
+        by_pubkey_file_sha256: Some(pin.by_pubkey_file_sha256.clone()),
+        search_file_sha256: Some(pin.search_file_sha256.clone()),
+    };
+    profile_repair_root_pair_pin(&roots)?;
+    Ok(roots)
+}
+
+fn load_profile_index_repair_authority(
+    root_pair_lock_path: &Path,
+    prepared: &PreparedProfileIndexRepair,
+    phase: ProfileIndexRepairAuthorityPhase,
+    expected_intent_bytes: Option<&[u8]>,
+    expected_receipt_bytes: Option<&[u8]>,
+) -> Result<ProfileIndexRepairAuthority> {
+    let data_dir = profile_repair_data_dir_from_lock_path(root_pair_lock_path)?;
+    let (intent_path, receipt_path) = profile_repair_evidence_paths(data_dir);
+    let completion_path = profile_repair_completion_path(data_dir);
+    let intent_exists = direct_regular_file_exists(&intent_path, "profile repair intent")?;
+    let receipt_exists = direct_regular_file_exists(&receipt_path, "profile repair receipt")?;
+    let completion_exists =
+        direct_regular_file_exists(&completion_path, "profile repair completion")?;
+    let expected_state = match phase {
+        ProfileIndexRepairAuthorityPhase::Commit => (true, false, false),
+        ProfileIndexRepairAuthorityPhase::Completion => (true, true, false),
+    };
+    if (intent_exists, receipt_exists, completion_exists) != expected_state {
+        anyhow::bail!(
+            "profile-index repair authority requires evidence state {:?}, found intent={} receipt={} completion={}",
+            phase,
+            intent_exists,
+            receipt_exists,
+            completion_exists
+        );
+    }
+
+    let intent_bytes = std::fs::read(&intent_path)
+        .with_context(|| format!("read profile repair intent {}", intent_path.display()))?;
+    if expected_intent_bytes.is_some_and(|expected| expected != intent_bytes.as_slice()) {
+        anyhow::bail!("profile repair intent differs from the fully validated canonical bytes");
+    }
+    let intent: ProfileRepairAuthorizationIntent =
+        serde_json::from_slice(&intent_bytes).context("decode profile repair authority intent")?;
+    if intent.format != PROFILE_REPAIR_FORMAT {
+        anyhow::bail!("profile repair intent has an unsupported format");
+    }
+    let canonical_data_dir = data_dir
+        .canonicalize()
+        .context("canonicalize profile repair authority data directory")?
+        .to_string_lossy()
+        .into_owned();
+    if intent.data_dir != canonical_data_dir {
+        anyhow::bail!("profile repair intent is bound to a different data directory");
+    }
+    if intent.old_roots != profile_repair_root_pair_pin(&prepared.old_roots)?
+        || intent.new_roots != profile_repair_root_pair_pin(&prepared.new_roots)?
+    {
+        anyhow::bail!("profile repair intent does not bind the exact prepared root pair");
+    }
+    let intent_sha256 = profile_repair_sha256(&intent_bytes);
+
+    let receipt_sha256 = if phase == ProfileIndexRepairAuthorityPhase::Completion {
+        let receipt_bytes = std::fs::read(&receipt_path)
+            .with_context(|| format!("read profile repair receipt {}", receipt_path.display()))?;
+        if expected_receipt_bytes.is_some_and(|expected| expected != receipt_bytes.as_slice()) {
+            anyhow::bail!(
+                "profile repair receipt differs from the fully validated canonical bytes"
+            );
+        }
+        let receipt: ProfileRepairAuthorizationReceipt = serde_json::from_slice(&receipt_bytes)
+            .context("decode profile repair authority receipt")?;
+        if receipt.format != PROFILE_REPAIR_RECEIPT_FORMAT
+            || receipt.intent_sha256 != intent_sha256
+            || receipt.installed_roots != profile_repair_root_pair_pin(&prepared.new_roots)?
+        {
+            anyhow::bail!(
+                "profile repair receipt does not bind the exact intent and installed root pair"
+            );
+        }
+        Some(profile_repair_sha256(&receipt_bytes))
+    } else {
+        if expected_receipt_bytes.is_some() {
+            anyhow::bail!("commit-phase repair authority cannot bind receipt bytes");
+        }
+        None
+    };
+
+    Ok(ProfileIndexRepairAuthority {
+        root_pair_lock_path: root_pair_lock_path.to_path_buf(),
+        intent_sha256,
+        receipt_sha256,
+        old_roots: prepared.old_roots.clone(),
+        new_roots: prepared.new_roots.clone(),
+        phase,
+    })
+}
+
+fn revalidate_profile_index_repair_authority(
+    authority: &ProfileIndexRepairAuthority,
+    root_pair_lock_path: &Path,
+    prepared: &PreparedProfileIndexRepair,
+    phase: ProfileIndexRepairAuthorityPhase,
+) -> Result<()> {
+    if authority.root_pair_lock_path != root_pair_lock_path
+        || authority.old_roots != prepared.old_roots
+        || authority.new_roots != prepared.new_roots
+        || authority.phase != phase
+    {
+        anyhow::bail!("profile-index repair authority belongs to a different transaction");
+    }
+    let current =
+        load_profile_index_repair_authority(root_pair_lock_path, prepared, phase, None, None)?;
+    if current.intent_sha256 != authority.intent_sha256
+        || current.receipt_sha256 != authority.receipt_sha256
+    {
+        anyhow::bail!("profile-index repair authority evidence changed before publication");
+    }
+    Ok(())
+}
+
+fn validate_profile_repair_completion(
+    data_dir: &Path,
+    intent_path: &Path,
+    receipt_path: &Path,
+    completion_path: &Path,
+) -> Result<()> {
+    let intent_bytes = std::fs::read(intent_path)
+        .with_context(|| format!("read profile repair intent {}", intent_path.display()))?;
+    let receipt_bytes = std::fs::read(receipt_path)
+        .with_context(|| format!("read profile repair receipt {}", receipt_path.display()))?;
+    let completion_bytes = std::fs::read(completion_path).with_context(|| {
+        format!(
+            "read profile repair completion {}",
+            completion_path.display()
+        )
+    })?;
+
+    let intent: ProfileRepairAuthorizationIntent =
+        serde_json::from_slice(&intent_bytes).context("decode profile repair intent")?;
+    let receipt: ProfileRepairAuthorizationReceipt =
+        serde_json::from_slice(&receipt_bytes).context("decode profile repair receipt")?;
+    if intent.format != PROFILE_REPAIR_FORMAT {
+        anyhow::bail!("profile repair intent has an unsupported format");
+    }
+    if receipt.format != PROFILE_REPAIR_RECEIPT_FORMAT {
+        anyhow::bail!("profile repair receipt has an unsupported format");
+    }
+    let canonical_data_dir = data_dir
+        .canonicalize()
+        .context("canonicalize completed profile repair data directory")?
+        .to_string_lossy()
+        .into_owned();
+    if intent.data_dir != canonical_data_dir {
+        anyhow::bail!("profile repair intent is bound to a different data directory");
+    }
+    profile_repair_root_pair_from_pin(&intent.old_roots)?;
+    let new_roots = profile_repair_root_pair_from_pin(&intent.new_roots)?;
+    let installed_roots = profile_repair_root_pair_from_pin(&receipt.installed_roots)?;
+    if installed_roots != new_roots {
+        anyhow::bail!("profile repair receipt does not bind the intended installed root pair");
+    }
+    let intent_sha256 = profile_repair_sha256(&intent_bytes);
+    if receipt.intent_sha256 != intent_sha256 {
+        anyhow::bail!("profile repair receipt does not bind the durable intent");
+    }
+
+    let completion: ProfileRepairCompletionWitness =
+        serde_json::from_slice(&completion_bytes).context("decode profile repair completion")?;
+    let canonical = profile_repair_completion_witness_bytes(&intent_bytes, &receipt_bytes)?;
+    if completion_bytes != canonical
+        || completion.format != PROFILE_REPAIR_COMPLETION_FORMAT
+        || completion.intent_sha256 != intent_sha256
+        || completion.receipt_sha256 != profile_repair_sha256(&receipt_bytes)
+    {
+        anyhow::bail!("profile repair completion does not bind the exact intent and receipt");
+    }
+    Ok(())
+}
+
+fn incomplete_profile_repair_intent_path(root_pair_lock_path: &Path) -> Result<Option<PathBuf>> {
+    let data_dir = profile_repair_data_dir_from_lock_path(root_pair_lock_path)?;
+    let (intent_path, receipt_path) = profile_repair_evidence_paths(data_dir);
+    let completion_path = profile_repair_completion_path(data_dir);
+    let intent_exists = direct_regular_file_exists(&intent_path, "profile repair intent")?;
+    let receipt_exists = direct_regular_file_exists(&receipt_path, "profile repair receipt")?;
+    let completion_exists =
+        direct_regular_file_exists(&completion_path, "profile repair completion")?;
+    match (intent_exists, receipt_exists, completion_exists) {
+        (false, false, false) => Ok(None),
+        (true, false, false) | (true, true, false) => Ok(Some(intent_path)),
+        (true, true, true) => {
+            validate_profile_repair_completion(
+                data_dir,
+                &intent_path,
+                &receipt_path,
+                &completion_path,
+            )
+            .context("profile root write is blocked by invalid repair completion")?;
+            Ok(None)
+        }
+        (false, true, _) => anyhow::bail!(
+            "profile root write is blocked by receipt without repair intent: {}",
+            receipt_path.display()
+        ),
+        (false, false, true) => anyhow::bail!(
+            "profile root write is blocked by completion without repair intent: {}",
+            completion_path.display()
+        ),
+        (true, false, true) => anyhow::bail!(
+            "profile root write is blocked by completion without repair receipt: {}",
+            completion_path.display()
+        ),
+    }
+}
+
+fn require_no_incomplete_profile_repair_for_root_write(root_pair_lock_path: &Path) -> Result<()> {
+    if let Some(intent_path) = incomplete_profile_repair_intent_path(root_pair_lock_path)? {
+        anyhow::bail!(
+            "profile root write is blocked by incomplete durable repair intent {}",
+            intent_path.display()
         );
     }
     Ok(())
@@ -212,6 +735,153 @@ pub struct ProfileIndexRoots {
     pub search_file_sha256: Option<String>,
 }
 
+fn profile_index_roots_from_cids(
+    by_pubkey: Option<Cid>,
+    search: Option<Cid>,
+) -> Result<ProfileIndexRoots> {
+    Ok(ProfileIndexRoots {
+        by_pubkey_file_sha256: by_pubkey
+            .as_ref()
+            .map(profile_index_root_file_sha256)
+            .transpose()?,
+        search_file_sha256: search
+            .as_ref()
+            .map(profile_index_root_file_sha256)
+            .transpose()?,
+        by_pubkey,
+        search,
+    })
+}
+
+fn read_profile_index_root_pair_snapshot(
+    by_pubkey_path: &Path,
+    search_path: &Path,
+) -> Result<ProfileIndexRoots> {
+    let (by_pubkey, by_pubkey_file_sha256) = read_root_file_snapshot(by_pubkey_path)?;
+    let (search, search_file_sha256) = read_root_file_snapshot(search_path)?;
+    Ok(ProfileIndexRoots {
+        by_pubkey,
+        search,
+        by_pubkey_file_sha256,
+        search_file_sha256,
+    })
+}
+
+impl ProfileIndexRepairAuthority {
+    fn require_pending_commit(
+        &self,
+        commit: &ProfileRootPairCommit,
+        by_pubkey_path: &Path,
+        search_path: &Path,
+    ) -> Result<()> {
+        let old_roots = profile_index_roots_from_cids(
+            commit.old_by_pubkey.clone().map(cid_from_stored),
+            commit.old_search.clone().map(cid_from_stored),
+        )?;
+        let new_roots = profile_index_roots_from_cids(
+            commit.new_by_pubkey.clone().map(cid_from_stored),
+            commit.new_search.clone().map(cid_from_stored),
+        )?;
+        if old_roots != self.old_roots || new_roots != self.new_roots {
+            anyhow::bail!(
+                "pending profile root-pair commit is not bound to the authorized repair roots"
+            );
+        }
+
+        let current = read_profile_index_root_pair_snapshot(by_pubkey_path, search_path)?;
+        let search_first = profile_index_roots_from_cids(
+            self.old_roots.by_pubkey.clone(),
+            self.new_roots.search.clone(),
+        )?;
+        if current != self.old_roots && current != search_first && current != self.new_roots {
+            anyhow::bail!("profile root-pair files are not an authorized repair forward state");
+        }
+        Ok(())
+    }
+
+    fn require_write_target(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+        current: &ProfileIndexRoots,
+    ) -> Result<()> {
+        let target = profile_index_roots_from_cids(by_pubkey_root.cloned(), search_root.cloned())?;
+        if self.phase != ProfileIndexRepairAuthorityPhase::Commit
+            || target != self.new_roots
+            || *current != self.old_roots
+        {
+            anyhow::bail!("profile root-pair write is not the exact authorized repair transition");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PreparedProfileIndexRepair {
+    old_roots: ProfileIndexRoots,
+    new_roots: ProfileIndexRoots,
+}
+
+impl PreparedProfileIndexRepair {
+    /// Reconstitute an unpublished repair pair from already validated durable
+    /// intent pins. Publication still requires an opaque authority minted from
+    /// the exact on-disk evidence.
+    pub fn from_roots(old_roots: ProfileIndexRoots, new_roots: ProfileIndexRoots) -> Self {
+        Self {
+            old_roots,
+            new_roots,
+        }
+    }
+
+    pub fn old_roots(&self) -> &ProfileIndexRoots {
+        &self.old_roots
+    }
+
+    pub fn new_roots(&self) -> &ProfileIndexRoots {
+        &self.new_roots
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProfileIndexRepairCommitOutcome {
+    Applied,
+    AlreadyApplied,
+}
+
+pub struct ProfileIndexRepairPublicationGuard {
+    by_pubkey_root_path: PathBuf,
+    search_root_path: PathBuf,
+    installed_roots: ProfileIndexRoots,
+    outcome: ProfileIndexRepairCommitOutcome,
+    _transaction: ProfileRootPairTransactionGuard,
+}
+
+impl ProfileIndexRepairPublicationGuard {
+    pub fn outcome(&self) -> ProfileIndexRepairCommitOutcome {
+        self.outcome
+    }
+
+    pub fn installed_roots(&self) -> &ProfileIndexRoots {
+        &self.installed_roots
+    }
+
+    pub fn require_unchanged(&self) -> Result<()> {
+        let (by_pubkey, by_pubkey_file_sha256) =
+            read_root_file_snapshot(&self.by_pubkey_root_path)?;
+        let (search, search_file_sha256) = read_root_file_snapshot(&self.search_root_path)?;
+        let current = ProfileIndexRoots {
+            by_pubkey,
+            search,
+            by_pubkey_file_sha256,
+            search_file_sha256,
+        };
+        if current != self.installed_roots {
+            anyhow::bail!("published profile roots changed while repair publication was locked");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProfileRootPairLockMode {
     Shared,
@@ -248,15 +918,22 @@ fn profile_root_pair_process_lock(
         .with_context(|| format!("{} has no parent directory", root_pair_lock_path.display()))?;
     let canonical_db_dir = std::fs::canonicalize(db_dir)
         .with_context(|| format!("canonicalize profile index directory {}", db_dir.display()))?;
+    let lock_file_name = root_pair_lock_path.file_name().with_context(|| {
+        format!(
+            "{} has no profile transaction lock file name",
+            root_pair_lock_path.display()
+        )
+    })?;
+    let canonical_lock_path = canonical_db_dir.join(lock_file_name);
     let mut locks = profile_root_pair_process_locks()
         .lock()
         .map_err(|_| anyhow::anyhow!("profile root-pair process lock registry was poisoned"))?;
     locks.retain(|_, lock| lock.strong_count() > 0);
-    if let Some(lock) = locks.get(&canonical_db_dir).and_then(Weak::upgrade) {
+    if let Some(lock) = locks.get(&canonical_lock_path).and_then(Weak::upgrade) {
         return Ok(lock);
     }
     let lock = Arc::new(tokio::sync::RwLock::new(()));
-    locks.insert(canonical_db_dir, Arc::downgrade(&lock));
+    locks.insert(canonical_lock_path, Arc::downgrade(&lock));
     Ok(lock)
 }
 
@@ -643,6 +1320,10 @@ pub fn read_profile_index_roots(data_dir: &Path) -> Result<ProfileIndexRoots> {
     read_profile_index_roots_with_timeout(data_dir, PROFILE_ROOT_PAIR_LOCK_TIMEOUT)
 }
 
+pub fn profile_index_root_file_sha256(root: &Cid) -> Result<String> {
+    Ok(to_hex(&sha256(&encode_cid(root)?)))
+}
+
 fn read_profile_index_roots_with_timeout(
     data_dir: &Path,
     timeout: Duration,
@@ -690,14 +1371,29 @@ pub async fn validate_profile_indexes_read_only<S: Store>(
     store: Arc<S>,
     event: &Event,
 ) -> Result<StoredProfileSearchEntry> {
+    let roots = read_profile_index_roots(data_dir)?;
+    validate_profile_indexes_at_roots(store, &roots, event).await
+}
+
+/// Validate both profile indexes against one metadata event at an explicitly
+/// pinned root pair. This variant never reads the mutable root files, so it is
+/// safe to use while a repair publication guard holds their exclusive lock.
+pub async fn validate_profile_indexes_at_roots<S: Store>(
+    store: Arc<S>,
+    roots: &ProfileIndexRoots,
+    event: &Event,
+) -> Result<StoredProfileSearchEntry> {
     if event.kind != Kind::Metadata {
         anyhow::bail!("profile index validation requires a kind-0 metadata event");
     }
-    let roots = read_profile_index_roots(data_dir)?;
     let by_pubkey_root = roots
         .by_pubkey
+        .clone()
         .context("profile-by-pubkey root is missing")?;
-    let search_root = roots.search.context("profile-search root is missing")?;
+    let search_root = roots
+        .search
+        .clone()
+        .context("profile-search root is missing")?;
     let index = BTree::new(
         Arc::clone(&store),
         hashtree_index::BTreeOptions {
@@ -920,7 +1616,9 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
         ProfileRootPairLockMode::Exclusive,
         true,
     )?;
-    recover_profile_root_pair_commit_locked(db_dir)?;
+    if incomplete_profile_repair_intent_path(&db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE))?.is_none() {
+        recover_profile_root_pair_commit_locked(db_dir)?;
+    }
     if let Some(size) = mapsize_bytes {
         ensure_social_graph_mapsize_with_env_flags(db_dir, size, env_flags)?;
     }
@@ -1156,6 +1854,9 @@ impl SocialGraphStore {
         let _transaction = self
             .profile_index
             .acquire_exclusive_root_pair_transaction()?;
+        require_no_incomplete_profile_repair_for_root_write(
+            &self.profile_index.root_pair_lock_path,
+        )?;
         self.recover_profile_transactions_locked()?;
         let root_hex = hex::encode(root);
         {
@@ -1249,6 +1950,9 @@ impl SocialGraphStore {
         let _transaction = self
             .profile_index
             .acquire_exclusive_root_pair_transaction()?;
+        require_no_incomplete_profile_repair_for_root_write(
+            &self.profile_index.root_pair_lock_path,
+        )?;
         self.recover_profile_transactions_locked()?;
         self.public_events.events_root_for_write()
     }
@@ -1341,6 +2045,9 @@ impl SocialGraphStore {
         &self,
         projection: &PendingProfileProjection,
     ) -> Result<()> {
+        require_no_incomplete_profile_repair_for_root_write(
+            &self.profile_index.root_pair_lock_path,
+        )?;
         let path = self.pending_profile_projection_path();
         replace_file_durable(
             &path,
@@ -1357,12 +2064,34 @@ impl SocialGraphStore {
     }
 
     fn recover_profile_transactions_locked(&self) -> Result<()> {
+        if incomplete_profile_repair_intent_path(&self.profile_index.root_pair_lock_path)?.is_some()
+        {
+            return Ok(());
+        }
         self.profile_index
             .recover_pending_root_pair_commit_locked()?;
         self.recover_pending_profile_projection_locked()
     }
 
+    fn recover_profile_transactions_locked_for_repair(
+        &self,
+        authority: &ProfileIndexRepairAuthority,
+    ) -> Result<()> {
+        let db_dir = self
+            .profile_index
+            .root_pair_lock_path
+            .parent()
+            .context("profile root-pair lock has no database parent")?;
+        require_no_pending_profile_projection(db_dir)?;
+        self.profile_index
+            .recover_pending_root_pair_commit_locked_for_repair(authority)
+    }
+
     fn recover_pending_profile_projection_locked(&self) -> Result<()> {
+        if incomplete_profile_repair_intent_path(&self.profile_index.root_pair_lock_path)?.is_some()
+        {
+            return Ok(());
+        }
         let path = self.pending_profile_projection_path();
         let Some(projection) = load_pending_profile_projection(&path)? else {
             return Ok(());
@@ -1475,6 +2204,9 @@ impl SocialGraphStore {
         let _transaction = self
             .profile_index
             .acquire_exclusive_root_pair_transaction()?;
+        require_no_incomplete_profile_repair_for_root_write(
+            &self.profile_index.root_pair_lock_path,
+        )?;
         self.recover_profile_transactions_locked()?;
         let old_root = self.public_events.events_root_for_write()?;
         if old_root.as_ref() != expected_old_root {
@@ -1640,6 +2372,288 @@ impl SocialGraphStore {
         })
     }
 
+    /// Build a complete replacement profile-index pair without publishing
+    /// either root file. Every input must be the retained kind-0 winner for a
+    /// distinct author and must have an independently pinned eligible rank.
+    ///
+    /// The returned blocks are force-synced before this function returns.
+    /// Callers can therefore exhaustively validate both unpublished roots and
+    /// durably record their own provenance intent before committing the pair.
+    pub fn build_unpublished_profile_index_repair_with_frozen_distances(
+        &self,
+        events: &[Event],
+        decisions: &BTreeMap<String, Option<u32>>,
+    ) -> Result<PreparedProfileIndexRepair> {
+        if events.is_empty() {
+            anyhow::bail!("profile-index repair requires retained kind-0 winners");
+        }
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        let old_roots = self.profile_index_roots_locked()?;
+        let latest_by_pubkey = latest_metadata_events_by_pubkey(events);
+        if latest_by_pubkey.len() != events.len() {
+            anyhow::bail!(
+                "profile-index repair inputs must contain exactly one kind-0 winner per pubkey"
+            );
+        }
+        for (pubkey, event) in &latest_by_pubkey {
+            if event.pubkey.to_hex() != *pubkey || event.kind != Kind::Metadata {
+                anyhow::bail!("profile-index repair input for {pubkey} is not canonical metadata");
+            }
+            event.verify().with_context(|| {
+                format!("verify retained profile-index repair event for {pubkey}")
+            })?;
+            match decisions.get(pubkey) {
+                Some(Some(_)) => {}
+                Some(None) => {
+                    anyhow::bail!("profile-index repair retained excluded metadata author {pubkey}")
+                }
+                None => anyhow::bail!(
+                    "profile-index repair rank decisions omitted metadata author {pubkey}"
+                ),
+            }
+        }
+        let (by_pubkey, search) = self
+            .profile_index
+            .rebuild_profile_events_with_distances_locked(
+                latest_by_pubkey.into_values(),
+                |event| {
+                    decisions
+                        .get(&event.pubkey.to_hex())
+                        .copied()
+                        .flatten()
+                        .map(Some)
+                        .context("eligible profile-index repair rank disappeared")
+                },
+            )?;
+        let by_pubkey = by_pubkey.context("profile-index repair built an empty by-pubkey root")?;
+        let search = search.context("profile-index repair built an empty search root")?;
+        self.profile_index
+            .store
+            .force_sync()
+            .map_err(|error| anyhow::anyhow!("force-sync unpublished profile repair: {error}"))?;
+        let new_roots = ProfileIndexRoots {
+            by_pubkey_file_sha256: Some(profile_index_root_file_sha256(&by_pubkey)?),
+            search_file_sha256: Some(profile_index_root_file_sha256(&search)?),
+            by_pubkey: Some(by_pubkey),
+            search: Some(search),
+        };
+        Ok(PreparedProfileIndexRepair {
+            old_roots,
+            new_roots,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn crash_after_prepared_profile_root_pair_intent(
+        &self,
+        prepared: &PreparedProfileIndexRepair,
+    ) -> Result<()> {
+        let current = self.recovered_profile_index_roots()?;
+        let current = ProfileIndexRoots {
+            by_pubkey_file_sha256: current
+                .0
+                .as_ref()
+                .map(profile_index_root_file_sha256)
+                .transpose()?,
+            search_file_sha256: current
+                .1
+                .as_ref()
+                .map(profile_index_root_file_sha256)
+                .transpose()?,
+            by_pubkey: current.0,
+            search: current.1,
+        };
+        if current != prepared.old_roots {
+            anyhow::bail!("generated crash requires the exact prepared old root pair");
+        }
+        self.profile_index.write_roots_interrupted_after_intent(
+            prepared.new_roots.by_pubkey.as_ref(),
+            prepared.new_roots.search.as_ref(),
+        )
+    }
+
+    /// Atomically publish an exhaustively validated repair pair iff the
+    /// currently published pair is still the exact pair observed during
+    /// preparation. Interrupted low-level commits roll forward on open; an
+    /// already-installed exact replacement is therefore an idempotent success.
+    pub fn commit_prepared_profile_index_repair(
+        &self,
+        prepared: &PreparedProfileIndexRepair,
+        authority: ProfileIndexRepairAuthority,
+    ) -> Result<ProfileIndexRepairCommitOutcome> {
+        Ok(self
+            .commit_prepared_profile_index_repair_held(prepared, authority)?
+            .outcome())
+    }
+
+    /// Mint an opaque commit capability only when the durable high-level
+    /// intent exists, is bound to this store, and names this exact root pair.
+    pub fn authorize_prepared_profile_index_repair(
+        &self,
+        prepared: &PreparedProfileIndexRepair,
+        validated_intent_bytes: &[u8],
+    ) -> Result<ProfileIndexRepairAuthority> {
+        load_profile_index_repair_authority(
+            &self.profile_index.root_pair_lock_path,
+            prepared,
+            ProfileIndexRepairAuthorityPhase::Commit,
+            Some(validated_intent_bytes),
+            None,
+        )
+    }
+
+    /// Mint an opaque completion-recovery capability only when an exact
+    /// intent-bound receipt exists but its completion witness does not.
+    pub fn authorize_completed_profile_index_repair(
+        &self,
+        prepared: &PreparedProfileIndexRepair,
+        validated_intent_bytes: &[u8],
+        validated_receipt_bytes: &[u8],
+    ) -> Result<ProfileIndexRepairAuthority> {
+        load_profile_index_repair_authority(
+            &self.profile_index.root_pair_lock_path,
+            prepared,
+            ProfileIndexRepairAuthorityPhase::Completion,
+            Some(validated_intent_bytes),
+            Some(validated_receipt_bytes),
+        )
+    }
+
+    /// Publish an exact prepared pair and retain the exclusive root-pair lock
+    /// until the returned guard is dropped. Recovery callers use this form to
+    /// audit the installed roots and persist their receipt without a
+    /// post-commit writer race.
+    pub fn commit_prepared_profile_index_repair_held(
+        &self,
+        prepared: &PreparedProfileIndexRepair,
+        authority: ProfileIndexRepairAuthority,
+    ) -> Result<ProfileIndexRepairPublicationGuard> {
+        self.commit_prepared_profile_index_repair_held_with(prepared, || Ok(authority))
+    }
+
+    /// As [`Self::commit_prepared_profile_index_repair_held`], but run one
+    /// durable high-level intent callback while the exclusive pair lock is
+    /// held. The callback must return the opaque capability minted from that
+    /// exact durable intent before privileged recovery or publication begins.
+    pub fn commit_prepared_profile_index_repair_held_with<F>(
+        &self,
+        prepared: &PreparedProfileIndexRepair,
+        before_commit: F,
+    ) -> Result<ProfileIndexRepairPublicationGuard>
+    where
+        F: FnOnce() -> Result<ProfileIndexRepairAuthority>,
+    {
+        let transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        let intent_preexisting =
+            incomplete_profile_repair_intent_path(&self.profile_index.root_pair_lock_path)?
+                .is_some();
+        if !intent_preexisting {
+            self.recover_profile_transactions_locked()?;
+            let current = self.profile_index_roots_locked()?;
+            if current != prepared.old_roots {
+                anyhow::bail!(
+                    "published profile roots changed after repair preparation; refusing non-CAS commit"
+                );
+            }
+        }
+        let authority = before_commit()?;
+        revalidate_profile_index_repair_authority(
+            &authority,
+            &self.profile_index.root_pair_lock_path,
+            prepared,
+            ProfileIndexRepairAuthorityPhase::Commit,
+        )?;
+        self.recover_profile_transactions_locked_for_repair(&authority)?;
+        let current = self.profile_index_roots_locked()?;
+        if current != prepared.old_roots && current != prepared.new_roots {
+            anyhow::bail!(
+                "published profile roots changed after repair preparation; refusing non-CAS commit"
+            );
+        }
+        let outcome = if current == prepared.new_roots {
+            ProfileIndexRepairCommitOutcome::AlreadyApplied
+        } else {
+            self.profile_index
+                .write_roots_with_hooks_locked_for_repair(
+                    &authority,
+                    prepared.new_roots.by_pubkey.as_ref(),
+                    prepared.new_roots.search.as_ref(),
+                    || Ok(()),
+                    || Ok(()),
+                )?;
+            ProfileIndexRepairCommitOutcome::Applied
+        };
+        let installed = self.profile_index_roots_locked()?;
+        if installed != prepared.new_roots {
+            anyhow::bail!("profile-index repair commit did not install the exact prepared pair");
+        }
+        Ok(ProfileIndexRepairPublicationGuard {
+            by_pubkey_root_path: self.profile_index.by_pubkey_root_path.clone(),
+            search_root_path: self.profile_index.search_root_path.clone(),
+            installed_roots: installed,
+            outcome,
+            _transaction: transaction,
+        })
+    }
+
+    /// Hold the profile-root transaction after proving a previously completed
+    /// repair still has its exact installed pair. Crash recovery uses this
+    /// boundary to publish a missing completion witness without racing an
+    /// ordinary writer after the final verification.
+    pub fn hold_completed_profile_index_repair(
+        &self,
+        prepared: &PreparedProfileIndexRepair,
+        authority: ProfileIndexRepairAuthority,
+    ) -> Result<ProfileIndexRepairPublicationGuard> {
+        let transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        revalidate_profile_index_repair_authority(
+            &authority,
+            &self.profile_index.root_pair_lock_path,
+            prepared,
+            ProfileIndexRepairAuthorityPhase::Completion,
+        )?;
+        let db_dir = self
+            .profile_index
+            .root_pair_lock_path
+            .parent()
+            .context("profile root-pair lock has no database parent")?;
+        require_no_pending_profile_root_pair_commit(db_dir)?;
+        require_no_pending_profile_projection(db_dir)?;
+        let installed = self.profile_index_roots_locked()?;
+        if installed != prepared.new_roots {
+            anyhow::bail!(
+                "completed profile repair roots differ from the exact installed repair pair"
+            );
+        }
+        Ok(ProfileIndexRepairPublicationGuard {
+            by_pubkey_root_path: self.profile_index.by_pubkey_root_path.clone(),
+            search_root_path: self.profile_index.search_root_path.clone(),
+            installed_roots: installed,
+            outcome: ProfileIndexRepairCommitOutcome::AlreadyApplied,
+            _transaction: transaction,
+        })
+    }
+
+    fn profile_index_roots_locked(&self) -> Result<ProfileIndexRoots> {
+        let (by_pubkey, by_pubkey_file_sha256) =
+            read_root_file_snapshot(&self.profile_index.by_pubkey_root_path)?;
+        let (search, search_file_sha256) =
+            read_root_file_snapshot(&self.profile_index.search_root_path)?;
+        Ok(ProfileIndexRoots {
+            by_pubkey,
+            search,
+            by_pubkey_file_sha256,
+            search_file_sha256,
+        })
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn rebuild_profile_index_for_events(&self, events: &[Event]) -> Result<()> {
         let _transaction = self
@@ -1770,6 +2784,9 @@ impl SocialGraphStore {
         let _transaction = self
             .profile_index
             .acquire_exclusive_root_pair_transaction()?;
+        require_no_incomplete_profile_repair_for_root_write(
+            &self.profile_index.root_pair_lock_path,
+        )?;
         self.recover_profile_transactions_locked()?;
         let public_count =
             self.rebuild_event_index_bucket_from_stored_events(&self.public_events)?;
@@ -1784,6 +2801,9 @@ impl SocialGraphStore {
             .profile_index
             .acquire_exclusive_root_pair_transaction_async()
             .await?;
+        require_no_incomplete_profile_repair_for_root_write(
+            &self.profile_index.root_pair_lock_path,
+        )?;
         self.recover_profile_transactions_locked()?;
         let public_count = self
             .rebuild_event_index_bucket_from_stored_events_async(&self.public_events)
@@ -2033,6 +3053,9 @@ impl SocialGraphStore {
         let _transaction = self
             .profile_index
             .acquire_exclusive_root_pair_transaction()?;
+        require_no_incomplete_profile_repair_for_root_write(
+            &self.profile_index.root_pair_lock_path,
+        )?;
         self.recover_profile_transactions_locked()?;
         self.apply_graph_events_only_locked(events)
     }
@@ -2106,6 +3129,9 @@ impl SocialGraphStore {
         let _transaction = self
             .profile_index
             .acquire_exclusive_root_pair_transaction_with_timeout(lock_timeout)?;
+        require_no_incomplete_profile_repair_for_root_write(
+            &self.profile_index.root_pair_lock_path,
+        )?;
         self.recover_profile_transactions_locked()?;
         let bucket = self.bucket(storage_class);
         let current_root = bucket.events_root_for_write()?;
@@ -2152,6 +3178,9 @@ impl SocialGraphStore {
         let _transaction = self
             .profile_index
             .acquire_exclusive_root_pair_transaction()?;
+        require_no_incomplete_profile_repair_for_root_write(
+            &self.profile_index.root_pair_lock_path,
+        )?;
         self.recover_profile_transactions_locked()?;
         let bucket = self.bucket(storage_class);
         let current_root = bucket.events_root_for_write()?;
@@ -2325,6 +3354,10 @@ impl NostrSocialGraphBackend for SocialGraphStore {
             .profile_index
             .acquire_exclusive_root_pair_transaction()
             .map_err(|err| UpstreamGraphBackendError(err.to_string()))?;
+        require_no_incomplete_profile_repair_for_root_write(
+            &self.profile_index.root_pair_lock_path,
+        )
+        .map_err(|err| UpstreamGraphBackendError(err.to_string()))?;
         self.recover_profile_transactions_locked()
             .map_err(|err| UpstreamGraphBackendError(err.to_string()))?;
         {
@@ -2805,6 +3838,7 @@ fn require_no_pending_profile_projection(db_dir: &Path) -> Result<()> {
 }
 
 fn recover_profile_root_pair_commit_locked(db_dir: &Path) -> Result<()> {
+    require_no_incomplete_profile_repair_for_root_write(&db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE))?;
     let commit_path = db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE);
     let Some(commit) = load_profile_root_pair_commit(&commit_path)? else {
         return Ok(());

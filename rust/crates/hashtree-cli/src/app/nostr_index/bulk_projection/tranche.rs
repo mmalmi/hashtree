@@ -40,7 +40,7 @@ const TRANCHE_SEALS_DIR: &str = "seals";
 const TRANCHE_EVIDENCE_DIR: &str = "evidence";
 const TRANCHE_SERVING_EVENTS_DIR: &str = "serving-events";
 const TRANCHE_SPOOL_IDENTITY_FILE: &str = "spool-identity.json";
-const PROFILE_PUBLICATION_FENCE_BYTES: &[u8] =
+pub(super) const PROFILE_PUBLICATION_FENCE_BYTES: &[u8] =
     b"{\"format\":\"hashtree-profile-publication-fence\",\"version\":3}\n";
 const PREFIX_CHAIN_DOMAIN: &[u8] = b"hashtree-nostr-tranche-prefix-chain-v3\0";
 const CID_CHAIN_DOMAIN: &[u8] = b"hashtree-nostr-tranche-prefix-cid-chain-v3\0";

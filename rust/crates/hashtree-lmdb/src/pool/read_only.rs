@@ -190,6 +190,22 @@ impl ReadOnlyPoolStore {
         })
     }
 
+    /// Require every member that stores external blobs to fsync those files
+    /// before committing its catalog location. LMDB environment sync alone
+    /// cannot make an external file durable when this manifest flag is false.
+    pub fn require_durable_external_blob_writes(&self) -> Result<(), StoreError> {
+        let manifest = decode_manifest(&self.inner.opened_manifest_bytes)?;
+        for member in manifest.members {
+            if member.config.external_blob_dir.is_some() && !member.config.external_blob_sync {
+                return Err(StoreError::Other(format!(
+                    "pool member {} has external_blob_sync disabled",
+                    member.id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     pub fn get_sync(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         let Some(location) = self.read_location(hash)? else {
             return Ok(None);
@@ -425,6 +441,9 @@ mod tests {
         let catalog_mtime_before = file_modified(&catalog_data);
         let member_mtime_before = file_modified(&member_data);
         let reader = ReadOnlyPoolStore::open(&catalog).expect("open read-only pool");
+        reader
+            .require_durable_external_blob_writes()
+            .expect("ordinary pool members use durable external writes");
         let audit = reader
             .validate_committed_catalog()
             .expect("validate catalog");
@@ -453,6 +472,28 @@ mod tests {
         assert_eq!(file_sha256(&member_data), member_before);
         assert_eq!(file_modified(&catalog_data), catalog_mtime_before);
         assert_eq!(file_modified(&member_data), member_mtime_before);
+    }
+
+    #[test]
+    fn durable_writer_check_rejects_unsynced_external_pool_members() {
+        let temp = TempDir::new().expect("temp dir");
+        let catalog = temp.path().join("catalog");
+        let member = temp.path().join("member");
+        let external = temp.path().join("external");
+        let pool = PoolStore::open(&catalog, pool_config()).expect("open pool");
+        pool.add_member(
+            PoolMemberConfig::new(member, 1024 * 1024)
+                .with_external_blobs(external, 1, false, None),
+        )
+        .expect("add unsynced external member");
+        pool.force_sync().expect("sync pool manifest");
+        drop(pool);
+
+        let reader = ReadOnlyPoolStore::open(&catalog).expect("open read-only pool");
+        let error = reader
+            .require_durable_external_blob_writes()
+            .expect_err("unsynced external member must fail durable writer validation");
+        assert!(error.to_string().contains("external_blob_sync disabled"));
     }
 
     #[test]

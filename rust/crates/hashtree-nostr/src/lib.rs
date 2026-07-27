@@ -1793,7 +1793,7 @@ impl<S: Store> NostrEventStore<S> {
             )
         })?;
 
-        let mut start = None;
+        let mut after = None;
         let mut entries_scanned = 0u64;
         let mut last_slot = None;
         let mut replaceable = Vec::new();
@@ -1802,7 +1802,7 @@ impl<S: Store> NostrEventStore<S> {
         loop {
             let page = self
                 .index
-                .range_links_limited(author_kind_time, start.as_deref(), None, page_size)
+                .range_links_limited_after(author_kind_time, after.as_deref(), None, page_size)
                 .await?;
             if page.is_empty() {
                 break;
@@ -1851,7 +1851,7 @@ impl<S: Store> NostrEventStore<S> {
             }
 
             let last_key = page.last().map(|(key, _)| key).expect("non-empty page");
-            start = Some(format!("{last_key}\0"));
+            after = Some(last_key.clone());
             if page.len() < page_size {
                 break;
             }
@@ -1952,13 +1952,13 @@ impl<S: Store> NostrEventStore<S> {
                 "Nostr manifest has no by-author-kind-time index".to_string(),
             )
         })?;
-        let mut start = None;
+        let mut after = None;
         let mut entries_scanned = 0u64;
         let mut rebuilt_root = None;
         loop {
             let page = self
                 .index
-                .range_links_limited(author_kind_time, start.as_deref(), None, page_size)
+                .range_links_limited_after(author_kind_time, after.as_deref(), None, page_size)
                 .await?;
             if page.is_empty() {
                 break;
@@ -1983,7 +1983,7 @@ impl<S: Store> NostrEventStore<S> {
                 .await?;
 
             let last_key = page.last().map(|(key, _)| key).expect("non-empty page");
-            start = Some(format!("{last_key}\0"));
+            after = Some(last_key.clone());
             if page.len() < page_size {
                 break;
             }
@@ -2033,7 +2033,7 @@ impl<S: Store> NostrEventStore<S> {
             ..NostrEventManifest::default()
         };
         let started = Instant::now();
-        let mut start = None;
+        let mut after = None;
         let mut entries_scanned = 0u64;
         let mut replaceable_entries = 0usize;
         let mut parameterized_replaceable_entries = 0usize;
@@ -2041,7 +2041,7 @@ impl<S: Store> NostrEventStore<S> {
         loop {
             let page = self
                 .index
-                .range_links_limited(&author_kind_time, start.as_deref(), None, page_size)
+                .range_links_limited_after(&author_kind_time, after.as_deref(), None, page_size)
                 .await?;
             if page.is_empty() {
                 break;
@@ -2117,7 +2117,7 @@ impl<S: Store> NostrEventStore<S> {
                 entries_scanned as f64 / elapsed,
             );
             let last_key = page.last().map(|(key, _)| key).expect("non-empty page");
-            start = Some(format!("{last_key}\0"));
+            after = Some(last_key.clone());
             if page.len() < page_size {
                 break;
             }
