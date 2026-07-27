@@ -20,7 +20,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -53,8 +56,6 @@ use crate::managed_env::ManagedEnv;
 use crate::storage::{LocalStore, StorageRouter};
 
 #[cfg(test)]
-use std::sync::OnceLock;
-#[cfg(test)]
 use std::time::Instant;
 
 pub type UserSet = BTreeSet<[u8; 32]>;
@@ -68,6 +69,7 @@ const AMBIENT_EVENTS_BLOB_DIR: &str = "ambient-blobs";
 const PROFILE_SEARCH_ROOT_FILE: &str = "profile-search-root.msgpack";
 const PROFILES_BY_PUBKEY_ROOT_FILE: &str = "profiles-by-pubkey-root.msgpack";
 const PROFILE_ROOT_PAIR_COMMIT_FILE: &str = "profile-root-pair.commit.json";
+const PROFILE_ROOT_PAIR_LOCK_FILE: &str = "profile-root-pair.lock";
 const PROFILE_ROOT_PAIR_COMMIT_VERSION: u32 = 1;
 const UNKNOWN_FOLLOW_DISTANCE: u32 = 1000;
 const DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
@@ -153,6 +155,155 @@ pub struct ProfileIndexRoots {
     pub search: Option<Cid>,
     pub by_pubkey_file_sha256: Option<String>,
     pub search_file_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ProfileRootPairLockMode {
+    Shared,
+    Exclusive,
+}
+
+struct ProfileRootPairTransactionGuard {
+    _process_read: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    _process_write: Option<tokio::sync::OwnedRwLockWriteGuard<()>>,
+    file: File,
+}
+
+impl Drop for ProfileRootPairTransactionGuard {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        unsafe {
+            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+        }
+    }
+}
+
+fn profile_root_pair_process_locks(
+) -> &'static StdMutex<HashMap<PathBuf, Weak<tokio::sync::RwLock<()>>>> {
+    static LOCKS: OnceLock<StdMutex<HashMap<PathBuf, Weak<tokio::sync::RwLock<()>>>>> =
+        OnceLock::new();
+    LOCKS.get_or_init(|| StdMutex::new(HashMap::new()))
+}
+
+fn profile_root_pair_process_lock(
+    root_pair_lock_path: &Path,
+) -> Result<Arc<tokio::sync::RwLock<()>>> {
+    let db_dir = root_pair_lock_path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", root_pair_lock_path.display()))?;
+    let canonical_db_dir = std::fs::canonicalize(db_dir)
+        .with_context(|| format!("canonicalize profile index directory {}", db_dir.display()))?;
+    let mut locks = profile_root_pair_process_locks()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("profile root-pair process lock registry was poisoned"))?;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&canonical_db_dir).and_then(Weak::upgrade) {
+        return Ok(lock);
+    }
+    let lock = Arc::new(tokio::sync::RwLock::new(()));
+    locks.insert(canonical_db_dir, Arc::downgrade(&lock));
+    Ok(lock)
+}
+
+fn open_and_lock_profile_root_pair_file(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+) -> Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    if create {
+        options.write(true).create(true).truncate(false);
+    }
+    let file = options.open(root_pair_lock_path).with_context(|| {
+        format!(
+            "open {} profile root-pair transaction lock {}",
+            if create { "writable" } else { "existing" },
+            root_pair_lock_path.display()
+        )
+    })?;
+
+    #[cfg(unix)]
+    {
+        let operation = match mode {
+            ProfileRootPairLockMode::Shared => libc::LOCK_SH | libc::LOCK_NB,
+            ProfileRootPairLockMode::Exclusive => libc::LOCK_EX | libc::LOCK_NB,
+        };
+        let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            return Err(error).with_context(|| {
+                format!(
+                    "profile root-pair transaction is busy ({:?}) at {}",
+                    mode,
+                    root_pair_lock_path.display()
+                )
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        anyhow::bail!(
+            "profile root-pair transactions require an operating-system advisory file lock"
+        );
+    }
+
+    Ok(file)
+}
+
+fn acquire_profile_root_pair_lock(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+) -> Result<ProfileRootPairTransactionGuard> {
+    let process_lock = profile_root_pair_process_lock(root_pair_lock_path)?;
+    let inside_tokio_runtime = tokio::runtime::Handle::try_current().is_ok();
+    let (process_read, process_write) =
+        match (mode, inside_tokio_runtime) {
+            (ProfileRootPairLockMode::Shared, true) => (
+                Some(process_lock.try_read_owned().map_err(|_| {
+                    anyhow::anyhow!("profile root-pair transaction is busy (Shared)")
+                })?),
+                None,
+            ),
+            (ProfileRootPairLockMode::Exclusive, true) => (
+                None,
+                Some(process_lock.try_write_owned().map_err(|_| {
+                    anyhow::anyhow!("profile root-pair transaction is busy (Exclusive)")
+                })?),
+            ),
+            (ProfileRootPairLockMode::Shared, false) => {
+                (Some(block_on(process_lock.read_owned())), None)
+            }
+            (ProfileRootPairLockMode::Exclusive, false) => {
+                (None, Some(block_on(process_lock.write_owned())))
+            }
+        };
+    let file = open_and_lock_profile_root_pair_file(root_pair_lock_path, mode, create)?;
+    Ok(ProfileRootPairTransactionGuard {
+        _process_read: process_read,
+        _process_write: process_write,
+        file,
+    })
+}
+
+async fn acquire_profile_root_pair_lock_async(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+) -> Result<ProfileRootPairTransactionGuard> {
+    let process_lock = profile_root_pair_process_lock(root_pair_lock_path)?;
+    let (process_read, process_write) = match mode {
+        ProfileRootPairLockMode::Shared => (Some(process_lock.read_owned().await), None),
+        ProfileRootPairLockMode::Exclusive => (None, Some(process_lock.write_owned().await)),
+    };
+    let file = open_and_lock_profile_root_pair_file(root_pair_lock_path, mode, create)?;
+    Ok(ProfileRootPairTransactionGuard {
+        _process_read: process_read,
+        _process_write: process_write,
+        file,
+    })
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -259,6 +410,26 @@ pub fn open_social_graph_store(data_dir: &Path) -> Result<Arc<SocialGraphStore>>
 /// graph LMDB environment.
 pub fn read_profile_index_roots(data_dir: &Path) -> Result<ProfileIndexRoots> {
     let db_dir = data_dir.join("socialgraph");
+    match std::fs::symlink_metadata(&db_dir) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ProfileIndexRoots {
+                by_pubkey: None,
+                search: None,
+                by_pubkey_file_sha256: None,
+                search_file_sha256: None,
+            });
+        }
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect profile index directory {}", db_dir.display()));
+        }
+    }
+    let _transaction = acquire_profile_root_pair_lock(
+        &db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE),
+        ProfileRootPairLockMode::Shared,
+        false,
+    )?;
     require_no_pending_profile_root_pair_commit(&db_dir)?;
     let (by_pubkey, by_pubkey_file_sha256) =
         read_root_file_snapshot(&db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE))?;
@@ -504,7 +675,12 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
     env_flags: EnvFlags,
 ) -> Result<Arc<SocialGraphStore>> {
     std::fs::create_dir_all(db_dir)?;
-    recover_profile_root_pair_commit(db_dir)?;
+    let _root_transaction = acquire_profile_root_pair_lock(
+        &db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE),
+        ProfileRootPairLockMode::Exclusive,
+        true,
+    )?;
+    recover_profile_root_pair_commit_locked(db_dir)?;
     if let Some(size) = mapsize_bytes {
         ensure_social_graph_mapsize_with_env_flags(db_dir, size, env_flags)?;
     }
@@ -553,6 +729,7 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
             by_pubkey_root_path: db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE),
             search_root_path: db_dir.join(PROFILE_SEARCH_ROOT_FILE),
             root_pair_commit_path: db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE),
+            root_pair_lock_path: db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE),
         },
         profile_index_overmute_threshold: StdMutex::new(1.0),
     }))
@@ -851,10 +1028,9 @@ impl SocialGraphStore {
         }
 
         let pubkey = event.pubkey.to_hex();
-        let by_pubkey_root = self
-            .profile_index
-            .by_pubkey_root()?
-            .context("profile-by-pubkey root is missing")?;
+        let (by_pubkey_root, search_root) = self.profile_index.roots()?;
+        let by_pubkey_root = by_pubkey_root.context("profile-by-pubkey root is missing")?;
+        let search_root = search_root.context("profile-search root is missing")?;
         let mirrored_cid = block_on(
             self.profile_index
                 .index
@@ -879,14 +1055,11 @@ impl SocialGraphStore {
             .next()
             .with_context(|| format!("profile {pubkey} did not produce a search term"))?;
         let exact_key = format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}");
-        let matches = self
-            .profile_index
-            .search_entries_for_prefix(&exact_key)
-            .context("query profile-search root")?;
-        let entry = matches
-            .into_iter()
-            .find_map(|(key, entry)| (key == exact_key).then_some(entry))
+        let encoded = block_on(self.profile_index.index.get(Some(&search_root), &exact_key))
+            .context("query profile-search root")?
             .with_context(|| format!("profile-search omitted exact key {exact_key}"))?;
+        let entry: StoredProfileSearchEntry =
+            serde_json::from_str(&encoded).context("decode stored profile search entry JSON")?;
         let expected_nhash = nhash_encode_full(&NHashData {
             hash: mirrored_cid.hash,
             decrypt_key: mirrored_cid.key,
@@ -929,14 +1102,11 @@ impl SocialGraphStore {
 
     pub(crate) fn rebuild_profile_index_for_events(&self, events: &[Event]) -> Result<()> {
         let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
-        let (by_pubkey_root, search_root) = self
-            .profile_index
-            .rebuild_profile_events_with_distances(latest_by_pubkey.into_values(), |event| {
-                self.follow_distance(&event.pubkey.to_bytes())
-            })?;
         self.profile_index
-            .write_roots(by_pubkey_root.as_ref(), search_root.as_ref())?;
-        Ok(())
+            .rebuild_profile_events_and_commit_with_distances(
+                latest_by_pubkey.into_values(),
+                |event| self.follow_distance(&event.pubkey.to_bytes()),
+            )
     }
 
     pub(crate) async fn rebuild_profile_index_for_events_async(
@@ -944,15 +1114,12 @@ impl SocialGraphStore {
         events: &[Event],
     ) -> Result<()> {
         let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
-        let (by_pubkey_root, search_root) = self
-            .profile_index
-            .rebuild_profile_events_async_with_distances(latest_by_pubkey.into_values(), |event| {
-                self.follow_distance(&event.pubkey.to_bytes())
-            })
-            .await?;
         self.profile_index
-            .write_roots(by_pubkey_root.as_ref(), search_root.as_ref())?;
-        Ok(())
+            .rebuild_profile_events_async_and_commit_with_distances(
+                latest_by_pubkey.into_values(),
+                |event| self.follow_distance(&event.pubkey.to_bytes()),
+            )
+            .await
     }
 
     pub fn rebuild_profile_index_from_stored_events(&self) -> Result<usize> {
@@ -1177,17 +1344,8 @@ impl SocialGraphStore {
             updates.push((event, follow_distance, remove, force_existing_search_value));
         }
 
-        let (by_pubkey_root, search_root) = self.profile_index.roots()?;
-        let (by_pubkey_root, search_root, changed) = self.profile_index.update_profile_events(
-            by_pubkey_root.as_ref(),
-            search_root.as_ref(),
-            &updates,
-        )?;
-        if changed {
-            self.profile_index
-                .write_roots(by_pubkey_root.as_ref(), search_root.as_ref())?;
-        }
-
+        self.profile_index
+            .update_profile_events_and_commit(&updates)?;
         Ok(())
     }
 
@@ -1747,10 +1905,13 @@ fn stored_cid(cid: &Cid) -> StoredCid {
 }
 
 fn read_root_file(path: &Path) -> Result<Option<Cid>> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return Ok(None);
-    };
-    decode_cid(&bytes)
+    match std::fs::read(path) {
+        Ok(bytes) => decode_cid(&bytes),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            Err(error).with_context(|| format!("read profile root file {}", path.display()))
+        }
+    }
 }
 
 fn read_root_file_snapshot(path: &Path) -> Result<(Option<Cid>, Option<String>)> {
@@ -1916,7 +2077,7 @@ fn require_no_pending_profile_root_pair_commit(db_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn recover_profile_root_pair_commit(db_dir: &Path) -> Result<()> {
+fn recover_profile_root_pair_commit_locked(db_dir: &Path) -> Result<()> {
     let commit_path = db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE);
     let Some(commit) = load_profile_root_pair_commit(&commit_path)? else {
         return Ok(());

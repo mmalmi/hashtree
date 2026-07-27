@@ -12,6 +12,7 @@ pub(super) struct ProfileIndexBucket {
     pub(super) by_pubkey_root_path: PathBuf,
     pub(super) search_root_path: PathBuf,
     pub(super) root_pair_commit_path: PathBuf,
+    pub(super) root_pair_lock_path: PathBuf,
 }
 
 impl EventIndexBucket {
@@ -409,11 +410,35 @@ impl EventIndexBucket {
 
 impl ProfileIndexBucket {
     pub(super) fn roots(&self) -> Result<(Option<Cid>, Option<Cid>)> {
-        self.recover_pending_root_pair_commit()?;
+        let _transaction = self.acquire_exclusive_root_pair_transaction()?;
+        self.recover_pending_root_pair_commit_locked()?;
+        self.roots_locked()
+    }
+
+    fn roots_locked(&self) -> Result<(Option<Cid>, Option<Cid>)> {
         Ok((
             read_root_file(&self.by_pubkey_root_path)?,
             read_root_file(&self.search_root_path)?,
         ))
+    }
+
+    fn acquire_exclusive_root_pair_transaction(&self) -> Result<ProfileRootPairTransactionGuard> {
+        acquire_profile_root_pair_lock(
+            &self.root_pair_lock_path,
+            ProfileRootPairLockMode::Exclusive,
+            true,
+        )
+    }
+
+    async fn acquire_exclusive_root_pair_transaction_async(
+        &self,
+    ) -> Result<ProfileRootPairTransactionGuard> {
+        acquire_profile_root_pair_lock_async(
+            &self.root_pair_lock_path,
+            ProfileRootPairLockMode::Exclusive,
+            true,
+        )
+        .await
     }
 
     pub(super) fn by_pubkey_root(&self) -> Result<Option<Cid>> {
@@ -426,7 +451,7 @@ impl ProfileIndexBucket {
         Ok(self.roots()?.1)
     }
 
-    fn recover_pending_root_pair_commit(&self) -> Result<()> {
+    fn recover_pending_root_pair_commit_locked(&self) -> Result<()> {
         let Some(commit) = load_profile_root_pair_commit(&self.root_pair_commit_path)? else {
             return Ok(());
         };
@@ -458,7 +483,22 @@ impl ProfileIndexBucket {
         F: FnOnce() -> Result<()>,
         G: FnOnce() -> Result<()>,
     {
-        self.recover_pending_root_pair_commit()?;
+        let _transaction = self.acquire_exclusive_root_pair_transaction()?;
+        self.write_roots_with_hooks_locked(by_pubkey_root, search_root, after_intent, after_search)
+    }
+
+    fn write_roots_with_hooks_locked<F, G>(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+        after_intent: F,
+        after_search: G,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+        G: FnOnce() -> Result<()>,
+    {
+        self.recover_pending_root_pair_commit_locked()?;
         self.store
             .force_sync()
             .map_err(|error| anyhow::anyhow!("force-sync profile index blocks: {error}"))?;
@@ -564,7 +604,7 @@ impl ProfileIndexBucket {
             .collect()
     }
 
-    pub(super) fn rebuild_profile_events_with_distances<'a, I, F>(
+    pub(super) fn rebuild_profile_events_with_distances_locked<'a, I, F>(
         &self,
         events: I,
         mut follow_distance_for_event: F,
@@ -601,7 +641,28 @@ impl ProfileIndexBucket {
         Ok((by_pubkey_root, search_root))
     }
 
-    pub(super) async fn rebuild_profile_events_async_with_distances<'a, I, F>(
+    pub(super) fn rebuild_profile_events_and_commit_with_distances<'a, I, F>(
+        &self,
+        events: I,
+        follow_distance_for_event: F,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = &'a Event>,
+        F: FnMut(&Event) -> Result<Option<u32>>,
+    {
+        let _transaction = self.acquire_exclusive_root_pair_transaction()?;
+        self.recover_pending_root_pair_commit_locked()?;
+        let (by_pubkey_root, search_root) =
+            self.rebuild_profile_events_with_distances_locked(events, follow_distance_for_event)?;
+        self.write_roots_with_hooks_locked(
+            by_pubkey_root.as_ref(),
+            search_root.as_ref(),
+            || Ok(()),
+            || Ok(()),
+        )
+    }
+
+    pub(super) async fn rebuild_profile_events_async_with_distances_locked<'a, I, F>(
         &self,
         events: I,
         mut follow_distance_for_event: F,
@@ -649,7 +710,55 @@ impl ProfileIndexBucket {
         Ok((by_pubkey_root, search_root))
     }
 
-    pub(super) fn update_profile_events(
+    pub(super) async fn rebuild_profile_events_async_and_commit_with_distances<'a, I, F>(
+        &self,
+        events: I,
+        follow_distance_for_event: F,
+    ) -> Result<()>
+    where
+        I: IntoIterator<Item = &'a Event>,
+        F: FnMut(&Event) -> Result<Option<u32>>,
+    {
+        let _transaction = self.acquire_exclusive_root_pair_transaction_async().await?;
+        self.recover_pending_root_pair_commit_locked()?;
+        let (by_pubkey_root, search_root) = self
+            .rebuild_profile_events_async_with_distances_locked(events, follow_distance_for_event)
+            .await?;
+        self.write_roots_with_hooks_locked(
+            by_pubkey_root.as_ref(),
+            search_root.as_ref(),
+            || Ok(()),
+            || Ok(()),
+        )
+    }
+
+    pub(super) fn update_profile_events_and_commit(
+        &self,
+        updates: &[(&Event, Option<u32>, bool, bool)],
+    ) -> Result<bool> {
+        if updates.is_empty() {
+            return Ok(false);
+        }
+        let _transaction = self.acquire_exclusive_root_pair_transaction()?;
+        self.recover_pending_root_pair_commit_locked()?;
+        let (by_pubkey_root, search_root) = self.roots_locked()?;
+        let (next_by_pubkey_root, next_search_root, changed) = self.update_profile_events_locked(
+            by_pubkey_root.as_ref(),
+            search_root.as_ref(),
+            updates,
+        )?;
+        if changed {
+            self.write_roots_with_hooks_locked(
+                next_by_pubkey_root.as_ref(),
+                next_search_root.as_ref(),
+                || Ok(()),
+                || Ok(()),
+            )?;
+        }
+        Ok(changed)
+    }
+
+    pub(super) fn update_profile_events_locked(
         &self,
         by_pubkey_root: Option<&Cid>,
         search_root: Option<&Cid>,

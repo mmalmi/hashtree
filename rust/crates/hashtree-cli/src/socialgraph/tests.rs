@@ -853,6 +853,278 @@ fn test_profile_search_index_persists_across_reopen() {
     assert_eq!(links[0].1.name, "reopen user");
 }
 
+#[cfg(unix)]
+#[test]
+fn profile_root_pair_transactions_serialize_real_writers_and_coherent_readers() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let alias_parent = TempDir::new().unwrap();
+    let aliased_data_dir = alias_parent.path().join("canonical-data-alias");
+    std::os::unix::fs::symlink(tmp.path(), &aliased_data_dir).unwrap();
+    let first_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let second_store = open_test_social_graph_store(&aliased_data_dir).unwrap();
+    let make_profiles = |side: &str, created_at: u64| {
+        (0..32)
+            .map(|index| {
+                let keys = Keys::generate();
+                EventBuilder::new(
+                    Kind::Metadata,
+                    serde_json::json!({
+                        "display_name": format!("{side} concurrent profile {index}")
+                    })
+                    .to_string(),
+                )
+                .custom_created_at(Timestamp::from_secs(created_at + index))
+                .sign_with_keys(&keys)
+                .unwrap()
+            })
+            .collect::<Vec<_>>()
+    };
+    let left_profiles = make_profiles("left", 1_000);
+    let right_profiles = make_profiles("right", 2_000);
+    let expected_pubkeys = left_profiles
+        .iter()
+        .chain(&right_profiles)
+        .map(|event| event.pubkey.to_hex())
+        .collect::<Vec<_>>();
+    let barrier = Arc::new(std::sync::Barrier::new(3));
+    let stop_reader = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader_observations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let left_barrier = Arc::clone(&barrier);
+    let left_writer = std::thread::spawn(move || {
+        left_barrier.wait();
+        first_store.sync_profile_index_for_events(&left_profiles)
+    });
+    let right_barrier = Arc::clone(&barrier);
+    let right_writer = std::thread::spawn(move || {
+        right_barrier.wait();
+        second_store.sync_profile_index_for_events(&right_profiles)
+    });
+    let reader_barrier = barrier;
+    let reader_stop = Arc::clone(&stop_reader);
+    let observations = Arc::clone(&reader_observations);
+    let data_dir = tmp.path().to_path_buf();
+    let reader = std::thread::spawn(move || -> Result<()> {
+        reader_barrier.wait();
+        loop {
+            let roots = read_profile_index_roots(&data_dir)?;
+            if roots.by_pubkey.is_some() != roots.search.is_some()
+                || roots.by_pubkey.is_some() != roots.by_pubkey_file_sha256.is_some()
+                || roots.search.is_some() != roots.search_file_sha256.is_some()
+            {
+                anyhow::bail!("reader observed a split profile root pair");
+            }
+            observations.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if reader_stop.load(std::sync::atomic::Ordering::Acquire) {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        Ok(())
+    });
+
+    let left_result = left_writer.join();
+    let right_result = right_writer.join();
+    stop_reader.store(true, std::sync::atomic::Ordering::Release);
+    let reader_result = reader.join();
+    left_result.unwrap().unwrap();
+    right_result.unwrap().unwrap();
+    reader_result.unwrap().unwrap();
+    assert!(
+        reader_observations.load(std::sync::atomic::Ordering::Relaxed) > 0,
+        "the real read-only path must observe at least one coherent snapshot"
+    );
+
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    for pubkey in expected_pubkeys {
+        assert!(
+            reopened.latest_profile_event(&pubkey).unwrap().is_some(),
+            "serialized writers must not lose profile {pubkey}"
+        );
+    }
+}
+
+#[test]
+fn profile_root_reads_treat_only_not_found_as_absent() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    drop(open_test_social_graph_store(tmp.path()).unwrap());
+    let root_path = tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    std::fs::create_dir(&root_path).unwrap();
+
+    let error = read_profile_index_roots(tmp.path())
+        .expect_err("a root-file I/O failure must not become absent authority");
+    assert!(format!("{error:#}").contains("read profile root file"));
+}
+
+#[test]
+fn profile_writer_fails_before_intent_when_existing_root_is_unreadable() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let original = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": "durable original"}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(1))
+    .sign_with_keys(&keys)
+    .unwrap();
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&original))
+        .unwrap();
+
+    let db_dir = tmp.path().join("socialgraph");
+    let by_pubkey_path = db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    let search_path = db_dir.join(PROFILE_SEARCH_ROOT_FILE);
+    let search_before = std::fs::read(&search_path).unwrap();
+    std::fs::remove_file(&by_pubkey_path).unwrap();
+    std::fs::create_dir(&by_pubkey_path).unwrap();
+    let replacement = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": "must not commit"}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(2))
+    .sign_with_keys(&keys)
+    .unwrap();
+
+    let error = graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&replacement))
+        .expect_err("writer-side root I/O failure must stop before durable intent");
+    assert!(format!("{error:#}").contains("read profile root file"));
+    assert!(by_pubkey_path.is_dir());
+    assert_eq!(std::fs::read(&search_path).unwrap(), search_before);
+    assert!(
+        !db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).exists(),
+        "failed authority read must not create a root-pair intent"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn sync_reader_fails_fast_under_async_profile_root_transaction() {
+    let _guard = test_lock().await;
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let lock_path = graph_store.profile_index.root_pair_lock_path.clone();
+    let writer_transaction =
+        acquire_profile_root_pair_lock_async(&lock_path, ProfileRootPairLockMode::Exclusive, true)
+            .await
+            .unwrap();
+
+    let started = std::time::Instant::now();
+    let error = read_profile_index_roots(tmp.path())
+        .expect_err("a synchronous reader must not pin a current-thread async writer");
+    assert!(error.to_string().contains("transaction is busy"));
+    assert!(
+        started.elapsed() < Duration::from_millis(100),
+        "same-runtime contention must fail fast instead of waiting for its own executor"
+    );
+
+    drop(writer_transaction);
+    read_profile_index_roots(tmp.path()).unwrap();
+}
+
+#[test]
+fn second_writer_recovers_first_writers_interrupted_pair_before_disjoint_update() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let first_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let first_keys = Keys::generate();
+    let second_keys = Keys::generate();
+    let original = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": "obsolete first writer"}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(1))
+    .sign_with_keys(&first_keys)
+    .unwrap();
+    let replacement = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": "recovered first writer"}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(2))
+    .sign_with_keys(&first_keys)
+    .unwrap();
+    let disjoint = EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": "second writer survives"}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(3))
+    .sign_with_keys(&second_keys)
+    .unwrap();
+    first_store
+        .sync_profile_index_for_events(std::slice::from_ref(&original))
+        .unwrap();
+
+    let (old_by_pubkey, old_search) = first_store.profile_index.roots().unwrap();
+    let (next_by_pubkey, next_search, changed) = first_store
+        .profile_index
+        .update_profile_events_locked(
+            old_by_pubkey.as_ref(),
+            old_search.as_ref(),
+            &[(&replacement, Some(1), false, true)],
+        )
+        .unwrap();
+    assert!(changed);
+    first_store
+        .profile_index
+        .write_roots_interrupted_after_search(next_by_pubkey.as_ref(), next_search.as_ref())
+        .expect_err("first writer must leave a durable intermediate root pair");
+    let db_dir = tmp.path().join("socialgraph");
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+
+    let second_store = open_test_social_graph_store(tmp.path())
+        .expect("second writer must recover the first writer's durable intent on open");
+    assert!(!db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).exists());
+    second_store
+        .sync_profile_index_for_events(std::slice::from_ref(&disjoint))
+        .expect("second writer must apply from the recovered pair");
+    drop(second_store);
+    drop(first_store);
+
+    let roots = read_profile_index_roots(tmp.path()).unwrap();
+    assert!(roots.by_pubkey.is_some());
+    assert!(roots.search.is_some());
+    assert!(roots.by_pubkey_file_sha256.is_some());
+    assert!(roots.search_file_sha256.is_some());
+    assert!(!db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).exists());
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    assert_eq!(
+        reopened
+            .latest_profile_event(&first_keys.public_key().to_hex())
+            .unwrap()
+            .expect("recovered first-writer profile")
+            .id,
+        replacement.id
+    );
+    assert_eq!(
+        reopened
+            .latest_profile_event(&second_keys.public_key().to_hex())
+            .unwrap()
+            .expect("disjoint second-writer profile")
+            .id,
+        disjoint.id
+    );
+    assert_eq!(
+        reopened
+            .profile_search_entries_for_prefix("p:recovered")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        reopened
+            .profile_search_entries_for_prefix("p:second")
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 #[test]
 fn interrupted_profile_root_pair_exclusion_recovers_before_replay() {
     let _guard = test_lock_blocking();
@@ -875,7 +1147,7 @@ fn interrupted_profile_root_pair_exclusion_recovers_before_replay() {
     let (old_by_pubkey, old_search) = graph_store.profile_index.roots().unwrap();
     let (next_by_pubkey, next_search, changed) = graph_store
         .profile_index
-        .update_profile_events(
+        .update_profile_events_locked(
             old_by_pubkey.as_ref(),
             old_search.as_ref(),
             &[(&profile, None, true, true)],
@@ -962,7 +1234,7 @@ fn interrupted_profile_root_pair_changed_terms_recovers_before_replay() {
     let (old_by_pubkey, old_search) = graph_store.profile_index.roots().unwrap();
     let (next_by_pubkey, next_search, changed) = graph_store
         .profile_index
-        .update_profile_events(
+        .update_profile_events_locked(
             old_by_pubkey.as_ref(),
             old_search.as_ref(),
             &[(&replacement, Some(4), false, true)],
