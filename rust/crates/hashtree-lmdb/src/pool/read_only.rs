@@ -219,7 +219,10 @@ impl ReadOnlyPoolStore {
             Some(_) => Err(StoreError::Other(format!(
                 "read-only pool member {id} returned corrupt or size-mismatched bytes"
             ))),
-            None => Ok(None),
+            None => Err(StoreError::Other(format!(
+                "pool catalog location {} references missing bytes on member {id}",
+                to_hex(hash)
+            ))),
         }
     }
 
@@ -229,12 +232,20 @@ impl ReadOnlyPoolStore {
         };
         match location {
             LocationRecord::Stored { member, size } => {
-                if !self.inner.members.contains_key(&member) {
-                    return Err(StoreError::Other(format!(
-                        "pool location references unknown member {member}"
-                    )));
+                let member_store = self.inner.members.get(&member).ok_or_else(|| {
+                    StoreError::Other(format!("pool location references unknown member {member}"))
+                })?;
+                match member_store.blob_size_sync(hash)? {
+                    Some(member_size) if member_size == size => Ok(Some(size)),
+                    Some(member_size) => Err(StoreError::Other(format!(
+                        "pool catalog size {size} for {} differs from member {member} size {member_size}",
+                        to_hex(hash)
+                    ))),
+                    None => Err(StoreError::Other(format!(
+                        "pool catalog location {} references missing bytes on member {member}",
+                        to_hex(hash)
+                    ))),
                 }
-                Ok(Some(size))
             }
             LocationRecord::Pending { .. } => Err(StoreError::Other(format!(
                 "read-only terminal verification rejected pending pool location {}",
@@ -245,6 +256,17 @@ impl ReadOnlyPoolStore {
                 to_hex(hash)
             ))),
         }
+    }
+
+    pub fn get_range_sync(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.get_sync(hash)?
+            .map(|data| slice_blob_range(&data, start, end_inclusive))
+            .transpose()
     }
 }
 
@@ -369,6 +391,13 @@ mod tests {
         sha256(&fs::read(path).expect("read LMDB data file"))
     }
 
+    fn file_modified(path: &Path) -> std::time::SystemTime {
+        fs::metadata(path)
+            .expect("read LMDB data file metadata")
+            .modified()
+            .expect("read LMDB data file mtime")
+    }
+
     fn pool_config() -> PoolStoreConfig {
         let mut config = PoolStoreConfig::default();
         config.temperature.enabled = false;
@@ -389,8 +418,12 @@ mod tests {
         pool.force_sync().expect("sync pool");
         drop(pool);
 
-        let catalog_before = file_sha256(&catalog.join("data.mdb"));
-        let member_before = file_sha256(&member.join("data.mdb"));
+        let catalog_data = catalog.join("data.mdb");
+        let member_data = member.join("data.mdb");
+        let catalog_before = file_sha256(&catalog_data);
+        let member_before = file_sha256(&member_data);
+        let catalog_mtime_before = file_modified(&catalog_data);
+        let member_mtime_before = file_modified(&member_data);
         let reader = ReadOnlyPoolStore::open(&catalog).expect("open read-only pool");
         let audit = reader
             .validate_committed_catalog()
@@ -416,8 +449,10 @@ mod tests {
         assert!(reader.unpin(&hash).await.is_err());
         drop(reader);
 
-        assert_eq!(file_sha256(&catalog.join("data.mdb")), catalog_before);
-        assert_eq!(file_sha256(&member.join("data.mdb")), member_before);
+        assert_eq!(file_sha256(&catalog_data), catalog_before);
+        assert_eq!(file_sha256(&member_data), member_before);
+        assert_eq!(file_modified(&catalog_data), catalog_mtime_before);
+        assert_eq!(file_modified(&member_data), member_mtime_before);
     }
 
     #[test]
@@ -491,6 +526,39 @@ mod tests {
             .expect_err("moving size must fail")
             .to_string()
             .contains("moving"));
+    }
+
+    #[test]
+    fn rejects_stored_location_with_missing_member_bytes() {
+        let temp = TempDir::new().expect("temp dir");
+        let catalog = temp.path().join("catalog");
+        let member_path = temp.path().join("member");
+        let pool = PoolStore::open(&catalog, pool_config()).expect("open pool");
+        let member = pool
+            .add_member(PoolMemberConfig::new(member_path, 1024 * 1024))
+            .expect("add member");
+        let data = b"catalogued but physically missing";
+        let hash = sha256(data);
+        pool.put_sync(hash, data).expect("put blob");
+        let member_store = pool.get_member(member).expect("open member");
+        assert!(member_store
+            .delete_sync(&hash)
+            .expect("delete only member bytes"));
+        pool.force_sync().expect("sync corrupt physical state");
+        drop(member_store);
+        drop(pool);
+
+        let reader = ReadOnlyPoolStore::open(&catalog).expect("open read-only pool");
+        let get_error = reader
+            .get_sync(&hash)
+            .expect_err("stored location without bytes must fail closed");
+        assert!(get_error.to_string().contains(&to_hex(&hash)));
+        assert!(get_error.to_string().contains(&member.to_string()));
+        assert!(get_error.to_string().contains("missing bytes"));
+        let size_error = reader
+            .blob_size_sync(&hash)
+            .expect_err("size must verify physical bytes");
+        assert!(size_error.to_string().contains("missing bytes"));
     }
 
     #[test]

@@ -9,8 +9,9 @@ use hashtree_core::{sha256, to_hex, types::Hash, Cid, HashTree, HashTreeConfig, 
 use hashtree_fs::FsBlobStore;
 #[cfg(feature = "lmdb")]
 use hashtree_lmdb::{
-    open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore,
-    ExternalBlobOptions, LmdbBlobReader, LmdbBlobStore, PoolStore,
+    open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, pool_audit_read_only_enabled,
+    ConfiguredLmdbBlobStore, ExternalBlobOptions, LmdbBlobReader, LmdbBlobStore, PoolStore,
+    ReadOnlyPoolStore, POOL_AUDIT_READ_ONLY_ERROR,
 };
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
@@ -216,6 +217,8 @@ pub enum LocalStore {
     Lmdb(LmdbBlobStore),
     #[cfg(feature = "lmdb")]
     Pool(Box<PoolStoreWithFallbacks>),
+    #[cfg(feature = "lmdb")]
+    ReadOnlyPool(Box<ReadOnlyPoolStoreWithFallbacks>),
 }
 
 /// A PoolStore with temporary exact-hash lookup fallbacks used during an
@@ -355,6 +358,92 @@ impl PoolStoreWithFallbacks {
     fn full_deletes_blocked(&self) -> bool {
         !self.fallbacks.is_empty()
     }
+}
+
+/// A strict MDB_RDONLY PoolStore plus strict read-only legacy fallbacks.
+///
+/// This is used only during an exhaustive Pool audit. It keeps hash GETs
+/// available while making every local storage mutation structurally
+/// impossible in the serving process.
+#[cfg(feature = "lmdb")]
+pub struct ReadOnlyPoolStoreWithFallbacks {
+    primary: ReadOnlyPoolStore,
+    fallbacks: Vec<LmdbBlobReader>,
+}
+
+#[cfg(feature = "lmdb")]
+impl ReadOnlyPoolStoreWithFallbacks {
+    fn new(primary: ReadOnlyPoolStore, fallbacks: Vec<LmdbBlobReader>) -> Self {
+        Self { primary, fallbacks }
+    }
+
+    fn get_sync(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+        let mut first_error = None;
+        match self.primary.get_sync(hash) {
+            Ok(Some(data)) => return Ok(Some(data)),
+            Ok(None) => {}
+            Err(error) => return Err(error),
+        }
+        for fallback in &self.fallbacks {
+            match fallback.get_sync(hash) {
+                Ok(Some(data)) if sha256(&data) == *hash => return Ok(Some(data)),
+                Ok(Some(_)) if first_error.is_none() => {
+                    first_error = Some(StoreError::Other(format!(
+                        "legacy fallback returned corrupt blob {}",
+                        to_hex(hash)
+                    )));
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
+    }
+
+    fn get_range_sync(
+        &self,
+        hash: &Hash,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.get_sync(hash)?
+            .map(|data| slice_blob_range(&data, start, end_inclusive))
+            .transpose()
+    }
+
+    fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
+        let mut first_error = None;
+        match self.primary.blob_size_sync(hash) {
+            Ok(Some(size)) => return Ok(Some(size)),
+            Ok(None) => {}
+            Err(error) => return Err(error),
+        }
+        for fallback in &self.fallbacks {
+            match fallback.blob_size_sync(hash) {
+                Ok(Some(size)) => return Ok(Some(size)),
+                Ok(None) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
+    }
+
+    fn exists(&self, hash: &Hash) -> Result<bool, StoreError> {
+        self.get_sync(hash).map(|data| data.is_some())
+    }
+}
+
+#[cfg(feature = "lmdb")]
+fn pool_audit_read_only_error() -> StoreError {
+    StoreError::Other(POOL_AUDIT_READ_ONLY_ERROR.into())
 }
 
 #[cfg(feature = "lmdb")]
@@ -600,6 +689,9 @@ impl LocalStore {
                     ConfiguredLmdbBlobStore::Pool(store) => {
                         LocalStore::Pool(Box::new(PoolStoreWithFallbacks::new(*store, Vec::new())))
                     }
+                    ConfiguredLmdbBlobStore::ReadOnlyPool(store) => LocalStore::ReadOnlyPool(
+                        Box::new(ReadOnlyPoolStoreWithFallbacks::new(*store, Vec::new())),
+                    ),
                 },
             ),
             #[cfg(not(feature = "lmdb"))]
@@ -616,7 +708,20 @@ impl LocalStore {
         match self {
             LocalStore::Fs(_) => StorageBackend::Fs,
             #[cfg(feature = "lmdb")]
-            LocalStore::Lmdb(_) | LocalStore::Pool(_) => StorageBackend::Lmdb,
+            LocalStore::Lmdb(_) | LocalStore::Pool(_) | LocalStore::ReadOnlyPool(_) => {
+                StorageBackend::Lmdb
+            }
+        }
+    }
+
+    pub fn is_pool_audit_read_only(&self) -> bool {
+        #[cfg(feature = "lmdb")]
+        {
+            matches!(self, LocalStore::ReadOnlyPool(_))
+        }
+        #[cfg(not(feature = "lmdb"))]
+        {
+            false
         }
     }
 
@@ -627,6 +732,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.force_sync(),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.force_sync(),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Ok(()),
         }
     }
 
@@ -638,6 +745,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.put_sync(hash, data),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.put_sync(hash, data),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Err(pool_audit_read_only_error()),
         }
     }
 
@@ -666,6 +775,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.put_many_report_sync(items),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.put_many_report_sync(items),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Err(pool_audit_read_only_error()),
         }
     }
 
@@ -686,6 +797,8 @@ impl LocalStore {
             LocalStore::Lmdb(_) => self.put_many_report_sync(items),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.put_many_optimistic_report_sync(items),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Err(pool_audit_read_only_error()),
         }
     }
 
@@ -702,6 +815,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.get_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.get_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(store) => store.get_sync(hash),
         }
     }
 
@@ -717,6 +832,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.get_range_sync(hash, start, end_inclusive),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.get_range_sync(hash, start, end_inclusive),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(store) => store.get_range_sync(hash, start, end_inclusive),
         }
     }
 
@@ -727,6 +844,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.blob_size_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.blob_size_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(store) => store.blob_size_sync(hash),
         }
     }
 
@@ -737,6 +856,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.touch_accessed_sync(hash, now),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.touch_accessed_sync(hash, now),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Ok(false),
         }
     }
 
@@ -747,6 +868,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.touch_many_accessed_sync(hashes, now),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.touch_many_accessed_sync(hashes, now),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Ok(0),
         }
     }
 
@@ -757,6 +880,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.last_accessed_at_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.last_accessed_at_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Ok(None),
         }
     }
 
@@ -770,6 +895,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.many_last_accessed_at_sync(hashes),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.many_last_accessed_at_sync(hashes),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Ok(Vec::new()),
         }
     }
 
@@ -781,6 +908,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.exists(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.exists(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(store) => store.exists(hash),
         }
     }
 
@@ -798,6 +927,11 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.existing_hashes_in_sorted_candidates(sorted_hashes),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.existing_hashes_in_sorted_candidates(sorted_hashes),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(store) => sorted_hashes
+                .iter()
+                .map(|hash| store.blob_size_sync(hash).map(|size| size.is_some()))
+                .collect(),
         }
     }
 
@@ -809,6 +943,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.delete_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.delete_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Err(pool_audit_read_only_error()),
         }
     }
 
@@ -827,6 +963,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.delete_many_sync(hashes),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.delete_many_sync(hashes),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Err(pool_audit_read_only_error()),
         }
     }
 
@@ -837,6 +975,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.delete_sync(hash),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.delete_writable_sync(hash),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Err(pool_audit_read_only_error()),
         }
     }
 
@@ -855,6 +995,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.delete_many_sync(hashes),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.delete_many_writable_sync(hashes),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Err(pool_audit_read_only_error()),
         }
     }
 
@@ -865,6 +1007,8 @@ impl LocalStore {
             LocalStore::Lmdb(_) => false,
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.full_deletes_blocked(),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => true,
         }
     }
 
@@ -894,6 +1038,11 @@ impl LocalStore {
                     total_bytes: stats.bytes,
                 })
             }
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Ok(LocalStoreStats {
+                count: 0,
+                total_bytes: 0,
+            }),
         }
     }
 
@@ -925,6 +1074,11 @@ impl LocalStore {
                     total_bytes: stats.bytes,
                 })
             }
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Ok(LocalStoreStats {
+                count: 0,
+                total_bytes: 0,
+            }),
         }
     }
 
@@ -936,6 +1090,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.list(),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.list(),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Err(pool_audit_read_only_error()),
         }
     }
 
@@ -947,6 +1103,8 @@ impl LocalStore {
             LocalStore::Lmdb(store) => store.list(),
             #[cfg(feature = "lmdb")]
             LocalStore::Pool(store) => store.list(),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Err(pool_audit_read_only_error()),
         }
     }
 
@@ -983,6 +1141,8 @@ impl LocalStore {
                 "bounded orphan cleanup is unsupported for PoolStore without tier-aware deletion"
                     .into(),
             )),
+            #[cfg(feature = "lmdb")]
+            LocalStore::ReadOnlyPool(_) => Err(pool_audit_read_only_error()),
         }
     }
 }
@@ -1037,6 +1197,17 @@ fn open_local_blob_store_with_options<P: AsRef<Path>>(
     max_size_bytes: u64,
 ) -> Result<Arc<LocalStore>, StoreError> {
     #[cfg(feature = "lmdb")]
+    {
+        let pool_audit_read_only = pool_audit_read_only_enabled()?;
+        if pool_audit_read_only && *backend != StorageBackend::Lmdb {
+            return Err(StoreError::Other(format!(
+                "{}=1 requires the LMDB storage backend",
+                hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV
+            )));
+        }
+    }
+
+    #[cfg(feature = "lmdb")]
     if *backend == StorageBackend::Lmdb {
         let data_dir = data_dir.as_ref();
         return open_shared_lmdb_blob_store(data_dir, max_size_bytes).and_then(|store| {
@@ -1045,6 +1216,16 @@ fn open_local_blob_store_with_options<P: AsRef<Path>>(
                 ConfiguredLmdbBlobStore::Pool(store) => {
                     let fallbacks = open_pool_fallbacks(data_dir)?;
                     LocalStore::Pool(Box::new(PoolStoreWithFallbacks::during_migration(
+                        *store, fallbacks,
+                    )))
+                }
+                ConfiguredLmdbBlobStore::ReadOnlyPool(store) => {
+                    let fallbacks = open_pool_fallbacks(data_dir)?;
+                    tracing::warn!(
+                        env = hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV,
+                        "Pool audit-serving read-only mode enabled; all local mutations are rejected"
+                    );
+                    LocalStore::ReadOnlyPool(Box::new(ReadOnlyPoolStoreWithFallbacks::new(
                         *store, fallbacks,
                     )))
                 }
@@ -1951,6 +2132,7 @@ impl HashtreeStore {
         // with tree refs, blob ownership, pins, and S3 archival behavior.
         let local_store = open_local_blob_store_with_options(path, backend, max_size_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to create blob store: {}", e))?;
+        let pool_audit_read_only = local_store.is_pool_audit_read_only();
 
         // Create storage router with optional S3
         #[cfg(feature = "s3")]
@@ -1991,7 +2173,7 @@ impl HashtreeStore {
             cached_roots,
             router,
             max_size_bytes,
-            evict_orphans,
+            evict_orphans: evict_orphans && !pool_audit_read_only,
             cache_quota: CacheQuotaController::default(),
             orphan_scan: Mutex::new(OrphanScanState::default()),
             blob_access_update_gate: BlobAccessUpdateGate::default(),
@@ -2002,6 +2184,10 @@ impl HashtreeStore {
 
     pub fn base_path(&self) -> &Path {
         &self.base_path
+    }
+
+    pub fn is_pool_audit_read_only(&self) -> bool {
+        self.router.local_store().is_pool_audit_read_only()
     }
 
     /// Get the storage router
@@ -2016,6 +2202,12 @@ impl HashtreeStore {
     }
 
     pub fn force_sync(&self) -> Result<()> {
+        if self.is_pool_audit_read_only() {
+            return self
+                .router
+                .force_sync()
+                .map_err(|err| anyhow::anyhow!("Failed to sync blob store: {}", err));
+        }
         self.env.force_sync()?;
         self.router
             .force_sync()
@@ -2032,6 +2224,9 @@ impl HashtreeStore {
     where
         I: IntoIterator<Item = Hash>,
     {
+        if self.is_pool_audit_read_only() {
+            return;
+        }
         let access_update_batch_limit = access_update_background_batch_limit();
         if access_update_batch_limit == 0 {
             return;
@@ -3696,6 +3891,7 @@ mod tests {
                 pool.largest_member_map_size_bytes()?
                     .expect("fresh pool should have a blob member") as u64
             }
+            LocalStore::ReadOnlyPool(_) => panic!("expected writable LMDB local store"),
             LocalStore::Fs(_) => panic!("expected LMDB local store"),
         };
 
@@ -3792,6 +3988,7 @@ mod tests {
                 pool.largest_member_map_size_bytes()?
                     .expect("fresh pool should have a blob member") as u64
             }
+            LocalStore::ReadOnlyPool(_) => panic!("expected writable LMDB local store"),
             LocalStore::Fs(_) => panic!("expected LMDB local store"),
         };
 

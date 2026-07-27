@@ -324,6 +324,13 @@ impl EmbeddedBackgroundServicesController {
         Self::shutdown_mirror(&mut runtime.mirror).await;
         Self::shutdown_sync(&mut runtime.sync).await;
 
+        if self.store.is_pool_audit_read_only() {
+            tracing::warn!(
+                "Pool audit-serving read-only mode: embedded crawler, mirror, and sync remain stopped"
+            );
+            return Ok(runtime.status());
+        }
+
         if !config.server.mode.background_services_enabled() {
             return Ok(runtime.status());
         }
@@ -689,11 +696,17 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         server = server.with_cors(cors);
     }
 
-    spawn_background_eviction_task(
-        Arc::clone(&store),
-        BACKGROUND_EVICTION_INTERVAL,
-        "embedded daemon",
-    );
+    if store.is_pool_audit_read_only() {
+        tracing::warn!(
+            "Pool audit-serving read-only mode: embedded background eviction remains stopped"
+        );
+    } else {
+        spawn_background_eviction_task(
+            Arc::clone(&store),
+            BACKGROUND_EVICTION_INTERVAL,
+            "embedded daemon",
+        );
+    }
 
     let listener = TcpListener::bind(&opts.bind_address).await?;
     let local_addr = listener.local_addr()?;

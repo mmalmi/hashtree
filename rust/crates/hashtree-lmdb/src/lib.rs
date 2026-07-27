@@ -6,8 +6,9 @@ mod migration;
 mod pool;
 
 pub use configured::{
-    open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore,
-    LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, SHARED_BLOB_MIN_MAP_SIZE_BYTES, SHARED_BLOB_POOL_DIR_NAME,
+    open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, pool_audit_read_only_enabled,
+    ConfiguredLmdbBlobStore, LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, POOL_AUDIT_READ_ONLY_ENV,
+    POOL_AUDIT_READ_ONLY_ERROR, SHARED_BLOB_MIN_MAP_SIZE_BYTES, SHARED_BLOB_POOL_DIR_NAME,
 };
 pub use migration::{
     migrate_lmdb_batch, migrate_lmdb_batch_with_max_buffer_bytes, PoolMigrationBatch,

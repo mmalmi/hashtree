@@ -17,10 +17,11 @@ use crate::storage::HashtreeStore;
 use anyhow::Result;
 use axum::{
     body::Body,
-    extract::DefaultBodyLimit,
-    http::Request,
+    extract::{DefaultBodyLimit, State},
+    http::{header, HeaderValue, Method, Request, StatusCode},
     middleware,
-    response::Response,
+    middleware::Next,
+    response::{IntoResponse, Json, Response},
     routing::{get, post, put},
     Router,
 };
@@ -53,6 +54,9 @@ static VIRTUAL_TREE_HOSTS: OnceLock<RwLock<HashMap<String, String>>> = OnceLock:
 const DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES: usize = 256 * 1024 * 1024;
 const INTERNAL_JSON_BODY_LIMIT_BYTES: usize = 64 * 1024;
+const POOL_AUDIT_READ_ONLY_HTTP_ERROR: &str = "PoolStore is in audit-serving read-only mode";
+const POOL_AUDIT_READ_ONLY_REASON: &str = "pool-audit-read-only";
+const POOL_AUDIT_READ_ONLY_REASON_HEADER: &str = "x-hashtree-maintenance-reason";
 
 #[cfg(not(test))]
 const HTTP1_HEADER_READ_TIMEOUT: Duration = Duration::from_secs(30);
@@ -72,6 +76,39 @@ pub fn bounded_upload_queue_bytes(bytes: u64) -> usize {
 
 fn virtual_tree_hosts() -> &'static RwLock<HashMap<String, String>> {
     VIRTUAL_TREE_HOSTS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+fn pool_audit_request_is_allowed(method: &Method, path: &str) -> bool {
+    if path == "/ws" || path == "/ws/" {
+        return false;
+    }
+    matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+        || (*method == Method::POST && matches!(path, "/blob/batch" | "/upload/check"))
+}
+
+async fn pool_audit_read_only_middleware(
+    State(state): State<AppState>,
+    request: Request<Body>,
+    next: Next,
+) -> Response {
+    if !state.store.is_pool_audit_read_only()
+        || pool_audit_request_is_allowed(request.method(), request.uri().path())
+    {
+        return next.run(request).await;
+    }
+
+    let mut response = (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({
+            "error": POOL_AUDIT_READ_ONLY_HTTP_ERROR,
+        })),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        header::HeaderName::from_static(POOL_AUDIT_READ_ONLY_REASON_HEADER),
+        HeaderValue::from_static(POOL_AUDIT_READ_ONLY_REASON),
+    );
+    response
 }
 
 fn normalize_virtual_tree_host(host: &str) -> Option<String> {
@@ -572,12 +609,23 @@ impl HashtreeServer {
         let mut app = public_routes
             .merge(protected_routes)
             .merge(internal_routes)
-            .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)) // 10GB limit
-            .layer(middleware::from_fn(status_metrics::record_http_status));
+            .layer(DefaultBodyLimit::max(10 * 1024 * 1024 * 1024)); // 10GB limit
 
         if let Some(extra) = self.extra_routes {
-            app = app.merge(extra.with_state(state));
+            app = app.merge(extra.with_state(state.clone()));
         }
+
+        // This gate is deliberately outside every route-level auth/body
+        // layer, including caller-supplied routes. Audit mode rejects
+        // mutation ingress before any handler can alter blob or metadata
+        // state. Status metrics remain outermost so maintenance responses are
+        // still observable.
+        app = app
+            .layer(middleware::from_fn_with_state(
+                state,
+                pool_audit_read_only_middleware,
+            ))
+            .layer(middleware::from_fn(status_metrics::record_http_status));
 
         if let Some(cors) = self.cors {
             app = app.layer(cors);
@@ -757,6 +805,8 @@ mod tests {
     use crate::nostr_relay::{NostrRelay, NostrRelayConfig};
     use crate::storage::HashtreeStore;
     use async_trait::async_trait;
+    use hashtree_config::StorageBackend;
+    use hashtree_core::types::Hash;
     use hashtree_core::{
         from_hex, nhash_encode, nhash_encode_full, sha256, to_hex, DirEntry, HashTree,
         HashTreeConfig, LinkType, NHashData,
@@ -767,15 +817,209 @@ mod tests {
         QueryOptions, QueryReport, VerifiedEvent,
     };
     use serde_json::json;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    use walkdir::WalkDir;
+
+    const AUDIT_SERVER_CHILD_DATA_ENV: &str = "HASHTREE_AUDIT_SERVER_CHILD_DATA";
+    const AUDIT_SERVER_CHILD_HASH_ENV: &str = "HASHTREE_AUDIT_SERVER_CHILD_HASH";
+
+    fn pool_data_file_snapshot(root: &Path) -> Vec<(PathBuf, Hash, std::time::SystemTime)> {
+        let mut snapshot = WalkDir::new(root)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                if !entry.file_type().is_file() || entry.file_name() != "data.mdb" {
+                    return false;
+                }
+                matches!(
+                    entry
+                        .path()
+                        .parent()
+                        .and_then(Path::file_name)
+                        .and_then(|name| name.to_str()),
+                    Some(hashtree_lmdb::SHARED_BLOB_POOL_DIR_NAME) | Some("blobs")
+                )
+            })
+            .map(|entry| {
+                let path = entry.into_path();
+                let bytes = std::fs::read(&path).expect("read Pool LMDB data file");
+                let modified = std::fs::metadata(&path)
+                    .expect("read Pool LMDB metadata")
+                    .modified()
+                    .expect("read Pool LMDB mtime");
+                (path, sha256(&bytes), modified)
+            })
+            .collect::<Vec<_>>();
+        snapshot.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+        snapshot
+    }
+
+    async fn assert_pool_audit_maintenance_response(response: reqwest::Response) -> Result<()> {
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(POOL_AUDIT_READ_ONLY_REASON_HEADER)
+                .and_then(|value| value.to_str().ok()),
+            Some(POOL_AUDIT_READ_ONLY_REASON)
+        );
+        let body: serde_json::Value = response.json().await?;
+        assert_eq!(
+            body,
+            json!({
+                "error": POOL_AUDIT_READ_ONLY_HTTP_ERROR,
+            })
+        );
+        Ok(())
+    }
 
     struct StaticProvider {
         event: Option<VerifiedEvent>,
         queries: AtomicUsize,
         publishes: AtomicUsize,
         mode: PubsubProviderMode,
+    }
+
+    #[test]
+    fn pool_audit_request_gate_only_allows_read_ingress() {
+        for method in [Method::GET, Method::HEAD, Method::OPTIONS] {
+            assert!(pool_audit_request_is_allowed(&method, "/health"));
+        }
+        assert!(pool_audit_request_is_allowed(&Method::POST, "/blob/batch"));
+        assert!(pool_audit_request_is_allowed(
+            &Method::POST,
+            "/upload/check"
+        ));
+        for (method, path) in [
+            (Method::GET, "/ws"),
+            (Method::GET, "/ws/"),
+            (Method::PUT, "/upload"),
+            (Method::POST, "/upload/batch"),
+            (Method::POST, "/upload/batch-binary"),
+            (Method::POST, "/api/pin/hash"),
+            (Method::POST, "/api/nostr/events"),
+            (Method::DELETE, "/hash"),
+        ] {
+            assert!(
+                !pool_audit_request_is_allowed(&method, path),
+                "{method} {path} must be blocked"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "subprocess entry point for Pool audit-serving HTTP verification"]
+    async fn pool_audit_read_only_server_subprocess() -> Result<()> {
+        let Some(data_dir) = std::env::var_os(AUDIT_SERVER_CHILD_DATA_ENV) else {
+            return Ok(());
+        };
+        let hash_hex = std::env::var(AUDIT_SERVER_CHILD_HASH_ENV)?;
+        let store = Arc::new(HashtreeStore::new_with_backend(
+            data_dir,
+            StorageBackend::Lmdb,
+            16 * 1024 * 1024 * 1024,
+        )?);
+        assert!(store.is_pool_audit_read_only());
+
+        let (port, handle) = spawn_test_server(Arc::clone(&store)).await?;
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{port}");
+
+        let response = client.get(format!("{base}/{hash_hex}")).send().await?;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.bytes().await?.as_ref(), b"audit-serving bytes");
+
+        let status: serde_json::Value = client
+            .get(format!("{base}/api/status"))
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(status["pool_audit_read_only"], true);
+        assert_eq!(status["capabilities"]["writes"], false);
+
+        assert_pool_audit_maintenance_response(
+            client
+                .put(format!("{base}/upload"))
+                .body(b"blocked upload".to_vec())
+                .send()
+                .await?,
+        )
+        .await?;
+        assert_pool_audit_maintenance_response(
+            client
+                .post(format!("{base}/upload/batch"))
+                .json(&json!({"blobs": []}))
+                .send()
+                .await?,
+        )
+        .await?;
+        assert_pool_audit_maintenance_response(
+            client.delete(format!("{base}/{hash_hex}")).send().await?,
+        )
+        .await?;
+        assert_pool_audit_maintenance_response(client.get(format!("{base}/ws")).send().await?)
+            .await?;
+
+        let response = client.get(format!("{base}/{hash_hex}")).send().await?;
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(response.bytes().await?.as_ref(), b"audit-serving bytes");
+
+        handle.abort();
+        Ok(())
+    }
+
+    #[test]
+    fn pool_audit_read_only_server_preserves_pool_files() -> Result<()> {
+        let temp = TempDir::new()?;
+        let data_dir = temp.path().join("data");
+        let store = HashtreeStore::new_with_backend(
+            &data_dir,
+            StorageBackend::Lmdb,
+            16 * 1024 * 1024 * 1024,
+        )?;
+        let hash_hex = store.put_blob(b"audit-serving bytes")?;
+        store.force_sync()?;
+        drop(store);
+
+        let before = pool_data_file_snapshot(&data_dir);
+        assert!(
+            before.len() >= 2,
+            "expected Pool catalog and at least one member data file"
+        );
+
+        let output = Command::new(std::env::current_exe()?)
+            .arg("--ignored")
+            .arg("--exact")
+            .arg("server::tests::pool_audit_read_only_server_subprocess")
+            .arg("--nocapture")
+            .env(AUDIT_SERVER_CHILD_DATA_ENV, &data_dir)
+            .env(AUDIT_SERVER_CHILD_HASH_ENV, &hash_hex)
+            .env(hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV, "1")
+            .env_remove("HTREE_LMDB_HOT_BLOB_DIR")
+            .env_remove("HTREE_LMDB_HOT_BLOB_LEGACY_DIR")
+            .env_remove("HTREE_LMDB_HOT_EXTERNAL_BLOB_DIR")
+            .env_remove("HTREE_LMDB_LEGACY_EXTERNAL_BLOB_DIR")
+            .env("RUST_TEST_THREADS", "1")
+            .output()?;
+        assert!(
+            output.status.success(),
+            "audit-serving subprocess failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let after = pool_data_file_snapshot(&data_dir);
+        assert_eq!(
+            after, before,
+            "audit-serving process mutated Pool data files"
+        );
+        Ok(())
     }
 
     #[async_trait]

@@ -682,12 +682,20 @@ pub(crate) async fn run() -> Result<()> {
                 .await
                 .context("Failed to start background services")?;
 
-            // Start background eviction task (runs every 5 minutes)
-            let eviction_handle = spawn_background_eviction_task(
-                Arc::clone(&store),
-                BACKGROUND_EVICTION_INTERVAL,
-                "daemon",
-            );
+            // Start background eviction task (runs every 5 minutes), except
+            // while the Pool catalog and member files are being audited.
+            let eviction_handle = if store.is_pool_audit_read_only() {
+                tracing::warn!(
+                    "Pool audit-serving read-only mode: daemon background eviction remains stopped"
+                );
+                None
+            } else {
+                Some(spawn_background_eviction_task(
+                    Arc::clone(&store),
+                    BACKGROUND_EVICTION_INTERVAL,
+                    "daemon",
+                ))
+            };
 
             match server_handle.await {
                 Ok(Ok(_)) => {}
@@ -697,7 +705,9 @@ pub(crate) async fn run() -> Result<()> {
 
             // Shutdown social graph crawler
             // Shutdown background eviction
-            eviction_handle.abort();
+            if let Some(eviction_handle) = eviction_handle {
+                eviction_handle.abort();
+            }
 
             #[cfg(feature = "experimental-decentralized-pubsub")]
             if let Some(ref handle) = nostr_pubsub_handle {

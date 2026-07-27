@@ -170,8 +170,10 @@ pub(super) async fn daemon_status(
         "daemon_started_at": state.daemon_started_at,
         "uptime_seconds": current_unix_secs().saturating_sub(state.daemon_started_at),
         "mode": state.peer_mode.as_str(),
+        "pool_audit_read_only": state.store.is_pool_audit_read_only(),
         "capabilities": {
             "hash_get": state.hash_get_enabled,
+            "writes": !state.store.is_pool_audit_read_only(),
             "fetch_from_fips_peers": state.fetch_from_fips_peers,
             "http_fips_fetch": state.fetch_from_fips_peers,
             "fips": state.fips_endpoint.is_some(),
