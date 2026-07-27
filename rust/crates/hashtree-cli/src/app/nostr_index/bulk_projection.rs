@@ -23,6 +23,10 @@ use super::{
     CRAWL_STATE_VERSION, INDEX_DIR,
 };
 
+mod audit;
+pub(super) use audit::audit_bulk_projection;
+pub(crate) use audit::BulkProjectionAuditOptions;
+
 const BULK_PROJECTION_VERSION: u32 = 2;
 const BULK_PROJECTION_DIR: &str = "bulk-projection-v2";
 const BULK_PROJECTION_STATE_FILE: &str = "state.json";

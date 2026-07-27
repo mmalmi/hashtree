@@ -423,7 +423,7 @@ fn batched_compare_preserves_digest_bounds_mismatches_errors_and_end_of_stream()
         "oversized single record and offset metadata must be included in owned capacity"
     );
 
-    let different_key = vec![(b"d".to_vec(), b"one".to_vec())];
+    let different_key = [(b"d".to_vec(), b"one".to_vec())];
     assert!(compare_borrowed_record_batches(
         records[..1]
             .iter()
@@ -438,7 +438,7 @@ fn batched_compare_preserves_digest_bounds_mismatches_errors_and_end_of_stream()
     )
     .unwrap_err()
     .contains("key mismatch"));
-    let different_value = vec![(b"a".to_vec(), b"two".to_vec())];
+    let different_value = [(b"a".to_vec(), b"two".to_vec())];
     assert!(compare_borrowed_record_batches(
         records[..1]
             .iter()

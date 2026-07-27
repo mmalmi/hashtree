@@ -30,6 +30,7 @@ use hashtree_cli::socialgraph::{self, SocialGraphBackend, SocialGraphCrawler};
 use hashtree_cli::{Config, HashtreeStore};
 
 mod bulk_projection;
+pub(crate) use bulk_projection::BulkProjectionAuditOptions;
 
 const INDEX_DIR: &str = "nostr-index";
 const LATEST_ROOT_FILE: &str = "latest-root.txt";
@@ -246,6 +247,14 @@ impl CrawlStateLock {
         Self::acquire_in(data_dir, STAGE_DIR, STAGE_LOCK_FILE)
     }
 
+    fn acquire_shared(data_dir: &Path) -> Result<Self> {
+        Self::acquire_shared_in(data_dir, INDEX_DIR, CRAWL_LOCK_FILE)
+    }
+
+    fn acquire_stage_shared(data_dir: &Path) -> Result<Self> {
+        Self::acquire_shared_in(data_dir, STAGE_DIR, STAGE_LOCK_FILE)
+    }
+
     fn acquire_in(data_dir: &Path, state_dir: &str, lock_file: &str) -> Result<Self> {
         let output_dir = data_dir.join(state_dir);
         std::fs::create_dir_all(&output_dir)
@@ -275,6 +284,35 @@ impl CrawlStateLock {
         {
             anyhow::bail!(
                 "resumable Nostr index crawls require an operating-system advisory file lock"
+            );
+        }
+
+        Ok(Self { file })
+    }
+
+    fn acquire_shared_in(data_dir: &Path, state_dir: &str, lock_file: &str) -> Result<Self> {
+        let path = data_dir.join(state_dir).join(lock_file);
+        let file = OpenOptions::new()
+            .read(true)
+            .open(&path)
+            .with_context(|| format!("open existing crawl lock {} read-only", path.display()))?;
+
+        #[cfg(unix)]
+        {
+            let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) };
+            if result != 0 {
+                let error = std::io::Error::last_os_error();
+                anyhow::bail!(
+                    "cannot audit while a Nostr index crawl owns {}: {}",
+                    path.display(),
+                    error
+                );
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            anyhow::bail!(
+                "read-only Nostr index audits require an operating-system advisory file lock"
             );
         }
 
@@ -317,6 +355,19 @@ pub(crate) struct NostrIndexQueryOutput {
     pub(crate) root: String,
     pub(crate) count: usize,
     pub(crate) events: Vec<StoredNostrEvent>,
+}
+
+pub(crate) async fn run_nostr_bulk_projection_audit(
+    data_dir: PathBuf,
+    options: BulkProjectionAuditOptions,
+) -> Result<()> {
+    // Shared, non-creating locks make this command fail while either the
+    // projection replay or staging crawler is active. The audit then rechecks
+    // byte-for-byte state and catalog digests after its exhaustive traversal.
+    let _projection_lock = CrawlStateLock::acquire_shared(&data_dir)?;
+    let _stage_lock = CrawlStateLock::acquire_stage_shared(&options.staging_data_dir)?;
+    bulk_projection::audit_bulk_projection(&data_dir, options).await?;
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -3998,6 +4049,24 @@ mod tests {
         assert!(CrawlStateLock::acquire(tmp.path()).is_err());
         drop(first);
         CrawlStateLock::acquire(tmp.path()).expect("lock after release");
+    }
+
+    #[test]
+    fn crawl_audit_lock_is_shared_noncreating_and_rejects_writers() {
+        let tmp = TempDir::new().expect("tempdir");
+        assert!(CrawlStateLock::acquire_shared(tmp.path()).is_err());
+        assert!(!tmp.path().join(INDEX_DIR).exists());
+
+        let writer = CrawlStateLock::acquire(tmp.path()).expect("writer lock");
+        assert!(CrawlStateLock::acquire_shared(tmp.path()).is_err());
+        drop(writer);
+
+        let first_reader = CrawlStateLock::acquire_shared(tmp.path()).expect("first reader");
+        let second_reader = CrawlStateLock::acquire_shared(tmp.path()).expect("second reader");
+        assert!(CrawlStateLock::acquire(tmp.path()).is_err());
+        drop(first_reader);
+        drop(second_reader);
+        CrawlStateLock::acquire(tmp.path()).expect("writer after readers");
     }
 
     #[test]

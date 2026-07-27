@@ -9,6 +9,7 @@ mod maintenance_tests;
 mod member;
 mod model;
 mod move_catalog;
+mod read_only;
 mod temperature;
 mod temperature_balancer;
 mod temperature_catalog;
@@ -24,6 +25,7 @@ pub use self::model::{
     PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
     PoolStoreConfig, PoolTemperatureConfig, PoolTemperatureReport,
 };
+pub use self::read_only::{ReadOnlyPoolCatalogAudit, ReadOnlyPoolStore};
 use self::temperature::TemperatureRuntime;
 use self::temperature_worker::TemperatureWorker;
 use crate::{managed_env::ManagedEnv, LmdbBlobStore};

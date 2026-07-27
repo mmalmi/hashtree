@@ -38,8 +38,9 @@ use super::mount_target::{
 };
 use super::mounts::print_active_mounts;
 use super::nostr_index::{
-    run_nostr_index_import, run_nostr_index_query, run_nostr_replaceable_repair,
-    run_nostr_time_repair_preparation, run_socialgraph_index_from_cli, NostrIndexImportOptions,
+    run_nostr_bulk_projection_audit, run_nostr_index_import, run_nostr_index_query,
+    run_nostr_replaceable_repair, run_nostr_time_repair_preparation,
+    run_socialgraph_index_from_cli, BulkProjectionAuditOptions, NostrIndexImportOptions,
     NostrIndexQueryOptions, NostrReplaceableRepairOptions, NostrTimeRepairPreparationOptions,
     SocialGraphIndexOptions,
 };
@@ -1032,6 +1033,29 @@ pub(crate) async fn run() -> Result<()> {
                         root,
                         filter_json,
                         limit,
+                        out,
+                    },
+                )
+                .await?;
+            }
+            NostrIndexCommands::AuditBulkProjection {
+                staging_data_dir,
+                expected_state_sha256,
+                expected_stage_state_sha256,
+                btree_order,
+                page_size,
+                query_limit,
+                out,
+            } => {
+                run_nostr_bulk_projection_audit(
+                    data_dir,
+                    BulkProjectionAuditOptions {
+                        staging_data_dir,
+                        expected_state_sha256,
+                        expected_stage_state_sha256,
+                        btree_order,
+                        page_size,
+                        query_limit,
                         out,
                     },
                 )

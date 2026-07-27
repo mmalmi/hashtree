@@ -1073,6 +1073,30 @@ pub(crate) enum NostrIndexCommands {
         #[arg(long, short)]
         out: Option<PathBuf>,
     },
+    /// Exhaustively audit a completed bulk projection using read-only live-data views
+    AuditBulkProjection {
+        /// Durable staging directory whose exact frozen state produced the candidate
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Optional CAS pin for nostr-index/bulk-projection-v2/state.json
+        #[arg(long = "expected-state-sha256")]
+        expected_state_sha256: Option<String>,
+        /// Optional CAS pin for nostr-stage/crawl-state.json
+        #[arg(long = "expected-stage-state-sha256")]
+        expected_stage_state_sha256: Option<String>,
+        /// B-tree order used by the bulk projection
+        #[arg(long, default_value_t = 64)]
+        btree_order: usize,
+        /// Maximum exact key/CID rows read per parity page
+        #[arg(long, default_value_t = 4096)]
+        page_size: usize,
+        /// Number of real events compared for each deterministic list query
+        #[arg(long, default_value_t = 32)]
+        query_limit: usize,
+        /// Output path for the JSON evidence (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
     /// Detach damaged derived indexes before closed-store retention and rebuild
     PrepareTimeRepair {
         /// Durable crawl state whose root will be replaced atomically

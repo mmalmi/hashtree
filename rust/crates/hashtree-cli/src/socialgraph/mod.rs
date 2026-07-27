@@ -23,7 +23,10 @@ use std::sync::{Arc, Mutex as StdMutex};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::executor::block_on;
-use hashtree_core::{nhash_encode_full, BufferedStore, Cid, HashTree, HashTreeConfig, NHashData};
+use hashtree_core::{
+    nhash_encode_full, sha256, to_hex, BufferedStore, Cid, HashTree, HashTreeConfig, NHashData,
+    Store,
+};
 use hashtree_index::BTree;
 use hashtree_nostr::{
     is_parameterized_replaceable_kind, is_replaceable_kind, stored_event_from_nostr_sdk_event,
@@ -99,6 +102,14 @@ pub struct StoredProfileSearchEntry {
     pub follow_distance: Option<u32>,
     pub created_at: u64,
     pub event_nhash: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProfileIndexRoots {
+    pub by_pubkey: Option<Cid>,
+    pub search: Option<Cid>,
+    pub by_pubkey_file_sha256: Option<String>,
+    pub search_file_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -199,6 +210,95 @@ pub fn test_lock_blocking() -> TestLockGuard {
 
 pub fn open_social_graph_store(data_dir: &Path) -> Result<Arc<SocialGraphStore>> {
     open_social_graph_store_with_mapsize(data_dir, None)
+}
+
+/// Read the two published profile roots without opening the writable social
+/// graph LMDB environment.
+pub fn read_profile_index_roots(data_dir: &Path) -> Result<ProfileIndexRoots> {
+    let db_dir = data_dir.join("socialgraph");
+    let (by_pubkey, by_pubkey_file_sha256) =
+        read_root_file_snapshot(&db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE))?;
+    let (search, search_file_sha256) =
+        read_root_file_snapshot(&db_dir.join(PROFILE_SEARCH_ROOT_FILE))?;
+    Ok(ProfileIndexRoots {
+        by_pubkey,
+        search,
+        by_pubkey_file_sha256,
+        search_file_sha256,
+    })
+}
+
+/// Validate both profile indexes against one real metadata event using only a
+/// caller-provided blob store. This does not open or mutate the social graph.
+pub async fn validate_profile_indexes_read_only<S: Store>(
+    data_dir: &Path,
+    store: Arc<S>,
+    event: &Event,
+) -> Result<StoredProfileSearchEntry> {
+    if event.kind != Kind::Metadata {
+        anyhow::bail!("profile index validation requires a kind-0 metadata event");
+    }
+    let roots = read_profile_index_roots(data_dir)?;
+    let by_pubkey_root = roots
+        .by_pubkey
+        .context("profile-by-pubkey root is missing")?;
+    let search_root = roots.search.context("profile-search root is missing")?;
+    let index = BTree::new(
+        Arc::clone(&store),
+        hashtree_index::BTreeOptions {
+            order: Some(PROFILE_SEARCH_INDEX_ORDER),
+        },
+    );
+    let pubkey = event.pubkey.to_hex();
+    let mirrored_cid = index
+        .get_link(Some(&by_pubkey_root), &pubkey)
+        .await
+        .context("query profile-by-pubkey root")?
+        .with_context(|| format!("profile-by-pubkey omitted {pubkey}"))?;
+    let tree = HashTree::new(HashTreeConfig::new(store));
+    let mirrored_bytes = tree
+        .get(&mirrored_cid, None)
+        .await
+        .context("read mirrored profile event")?
+        .with_context(|| format!("mirrored profile blob for {pubkey} is missing"))?;
+    let mirrored = Event::from_json(
+        String::from_utf8(mirrored_bytes).context("decode mirrored profile event as utf-8")?,
+    )
+    .context("decode mirrored profile event json")?;
+    if mirrored != *event {
+        anyhow::bail!(
+            "profile-by-pubkey returned event {} with different bytes than {} for {pubkey}",
+            mirrored.id,
+            event.id
+        );
+    }
+
+    let term = profile_search_terms_for_event(event)
+        .into_iter()
+        .next()
+        .with_context(|| format!("profile {pubkey} did not produce a search term"))?;
+    let exact_key = format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}");
+    let encoded = index
+        .get(Some(&search_root), &exact_key)
+        .await
+        .context("query profile-search root")?
+        .with_context(|| format!("profile-search omitted exact key {exact_key}"))?;
+    let entry: StoredProfileSearchEntry =
+        serde_json::from_str(&encoded).context("decode stored profile search entry JSON")?;
+    let expected_nhash = nhash_encode_full(&NHashData {
+        hash: mirrored_cid.hash,
+        decrypt_key: mirrored_cid.key,
+    })
+    .context("encode mirrored profile event nhash")?;
+    if entry.pubkey != pubkey
+        || entry.created_at != event.created_at.as_secs()
+        || entry.event_nhash != expected_nhash
+    {
+        anyhow::bail!(
+            "profile-search entry for {exact_key} does not match its profile-by-pubkey event"
+        );
+    }
+    Ok(entry)
 }
 
 pub fn open_social_graph_store_with_mapsize(
@@ -1568,6 +1668,19 @@ fn read_root_file(path: &Path) -> Result<Option<Cid>> {
     decode_cid(&bytes)
 }
 
+fn read_root_file_snapshot(path: &Path) -> Result<(Option<Cid>, Option<String>)> {
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            let digest = to_hex(&sha256(&bytes));
+            Ok((decode_cid(&bytes)?, Some(digest)))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok((None, None)),
+        Err(error) => {
+            Err(error).with_context(|| format!("read profile root file {}", path.display()))
+        }
+    }
+}
+
 fn write_root_file(path: &Path, root: Option<&Cid>) -> Result<()> {
     let Some(root) = root else {
         if path.exists() {
@@ -1809,7 +1922,8 @@ fn parse_search_keywords(text: &str) -> Vec<String> {
     keywords
 }
 
-fn profile_search_terms_for_event(event: &Event) -> Vec<String> {
+#[doc(hidden)]
+pub fn profile_search_terms_for_event(event: &Event) -> Vec<String> {
     let profile = match serde_json::from_str::<serde_json::Value>(&event.content) {
         Ok(serde_json::Value::Object(profile)) => profile,
         _ => serde_json::Map::new(),
@@ -1828,6 +1942,15 @@ fn profile_search_terms_for_event(event: &Event) -> Vec<String> {
         parts.extend(names.into_iter().skip(1));
     }
     parse_search_keywords(&parts.join(" "))
+}
+
+#[doc(hidden)]
+pub fn profile_search_keys_for_event(event: &Event) -> Vec<String> {
+    let pubkey = event.pubkey.to_hex();
+    profile_search_terms_for_event(event)
+        .into_iter()
+        .map(|term| format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}"))
+        .collect()
 }
 
 fn compare_nostr_events(left: &Event, right: &Event) -> std::cmp::Ordering {

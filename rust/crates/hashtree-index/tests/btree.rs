@@ -1049,6 +1049,31 @@ fn exhaustive_link_validation_rejects_a_missing_descendant() {
 }
 
 #[test]
+fn exhaustive_value_validation_reads_every_node_and_reports_key_bounds() {
+    block_on(async {
+        let store = Arc::new(CountingStore::default());
+        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(8) });
+        let entry_count = 2_000usize;
+        let root = btree
+            .build(
+                (0..entry_count)
+                    .map(|index| (format!("key:{index:05}"), format!("value:{index:05}"))),
+            )
+            .await
+            .unwrap()
+            .expect("built root");
+
+        store.reset_gets();
+        let validation = btree.validate_value_tree(Some(&root)).await.unwrap();
+        assert_eq!(validation.entries, entry_count as u64);
+        assert!(validation.nodes > 1);
+        assert_eq!(validation.first, Some("key:00000".to_string()));
+        assert_eq!(validation.last, Some(format!("key:{:05}", entry_count - 1)));
+        assert_eq!(store.gets(), validation.nodes as usize);
+    });
+}
+
+#[test]
 fn bulk_string_build_matches_incremental_entries() {
     block_on(async {
         let store = Arc::new(MemoryStore::new());

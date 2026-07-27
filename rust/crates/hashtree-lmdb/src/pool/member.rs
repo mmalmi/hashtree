@@ -78,7 +78,11 @@ fn read_member_marker(path: &Path) -> Result<PoolMemberId, StoreError> {
     value.trim().parse()
 }
 
-fn verify_member_path(path: &Path, marker_name: &str, id: PoolMemberId) -> Result<(), StoreError> {
+pub(super) fn verify_member_path(
+    path: &Path,
+    marker_name: &str,
+    id: PoolMemberId,
+) -> Result<(), StoreError> {
     let marker = path.join(marker_name);
     let actual = read_member_marker(&marker).map_err(|error| {
         StoreError::Other(format!(
