@@ -38,13 +38,13 @@ use super::mount_target::{
 };
 use super::mounts::print_active_mounts;
 use super::nostr_index::{
-    run_nostr_bulk_projection_audit, run_nostr_bulk_tranche_append, run_nostr_bulk_tranche_freeze,
-    run_nostr_bulk_tranche_prepare, run_nostr_index_import, run_nostr_index_query,
-    run_nostr_replaceable_repair, run_nostr_time_repair_preparation,
+    run_nostr_bulk_projection_audit, run_nostr_bulk_tranche_append, run_nostr_bulk_tranche_build,
+    run_nostr_bulk_tranche_freeze, run_nostr_bulk_tranche_prepare, run_nostr_index_import,
+    run_nostr_index_query, run_nostr_replaceable_repair, run_nostr_time_repair_preparation,
     run_socialgraph_index_from_cli, BulkProjectionAuditOptions, BulkTrancheAppendOptions,
-    BulkTrancheFreezeOptions, BulkTranchePrepareOptions, NostrIndexImportOptions,
-    NostrIndexQueryOptions, NostrReplaceableRepairOptions, NostrTimeRepairPreparationOptions,
-    SocialGraphIndexOptions,
+    BulkTrancheBuildOptions, BulkTrancheFreezeOptions, BulkTranchePrepareOptions,
+    NostrIndexImportOptions, NostrIndexQueryOptions, NostrReplaceableRepairOptions,
+    NostrTimeRepairPreparationOptions, SocialGraphIndexOptions,
 };
 use super::peers::list_peers;
 use super::pwa::run_export;
@@ -1165,6 +1165,23 @@ pub(crate) async fn run() -> Result<()> {
                         out,
                     },
                 )?;
+            }
+            NostrIndexCommands::BuildBulkTranche {
+                staging_data_dir,
+                expected_state_sha256,
+                max_indexes,
+                out,
+            } => {
+                run_nostr_bulk_tranche_build(
+                    data_dir,
+                    BulkTrancheBuildOptions {
+                        staging_data_dir,
+                        expected_state_sha256,
+                        max_indexes,
+                        out,
+                    },
+                )
+                .await?;
             }
             NostrIndexCommands::PrepareTimeRepair { state_file, apply } => {
                 let output = run_nostr_time_repair_preparation(

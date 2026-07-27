@@ -1223,6 +1223,21 @@ pub(crate) enum NostrIndexCommands {
         #[arg(long, short)]
         out: Option<PathBuf>,
     },
+    /// Build a frozen v3 tranche into a crash-resumable canonical candidate
+    BuildBulkTranche {
+        /// Durable staging directory containing the frozen author segments
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Required CAS pin for nostr-index/bulk-projection-v3/state.json
+        #[arg(long = "expected-state-sha256")]
+        expected_state_sha256: String,
+        /// Maximum missing index roots to build in this invocation
+        #[arg(long = "max-indexes", default_value_t = 9)]
+        max_indexes: usize,
+        /// Output path for transition evidence (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
     /// Detach damaged derived indexes before closed-store retention and rebuild
     PrepareTimeRepair {
         /// Durable crawl state whose root will be replaced atomically

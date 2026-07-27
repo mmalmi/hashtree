@@ -31,8 +31,8 @@ use hashtree_cli::{Config, HashtreeStore};
 
 mod bulk_projection;
 pub(crate) use bulk_projection::{
-    BulkProjectionAuditOptions, BulkTrancheAppendOptions, BulkTrancheFreezeOptions,
-    BulkTranchePrepareOptions, BulkTrancheTransitionOutput,
+    BulkProjectionAuditOptions, BulkTrancheAppendOptions, BulkTrancheBuildOptions,
+    BulkTrancheFreezeOptions, BulkTranchePrepareOptions, BulkTrancheTransitionOutput,
 };
 
 const INDEX_DIR: &str = "nostr-index";
@@ -481,6 +481,31 @@ pub(crate) fn run_nostr_bulk_tranche_freeze(
     let _stage_lock = CrawlStateLock::acquire_stage(&options.staging_data_dir)?;
     let _projection_lock = CrawlStateLock::acquire(&data_dir)?;
     bulk_projection::freeze_bulk_tranche(&data_dir, options)
+}
+
+pub(crate) async fn run_nostr_bulk_tranche_build(
+    data_dir: PathBuf,
+    options: BulkTrancheBuildOptions,
+) -> Result<BulkTrancheTransitionOutput> {
+    let _stage_lock = CrawlStateLock::acquire_stage_shared(&options.staging_data_dir)?;
+    let _projection_lock = CrawlStateLock::acquire(&data_dir)?;
+    let config = Config::load()?;
+    let max_size_bytes = config.storage.max_size_gb * 1024 * 1024 * 1024;
+    let durable_store =
+        HashtreeStore::with_options(&data_dir, config.storage.s3.as_ref(), max_size_bytes)?;
+    let graph = socialgraph::open_social_graph_store_with_storage(
+        &data_dir,
+        durable_store.store_arc(),
+        Some(
+            config
+                .nostr
+                .db_max_size_gb
+                .saturating_mul(1024 * 1024 * 1024),
+        ),
+    )
+    .context("initialize social graph store for v3 tranche build")?;
+    graph.set_profile_index_overmute_threshold(config.nostr.overmute_threshold);
+    bulk_projection::build_bulk_tranche(&durable_store, graph.as_ref(), &data_dir, options).await
 }
 
 #[derive(Debug, Clone)]

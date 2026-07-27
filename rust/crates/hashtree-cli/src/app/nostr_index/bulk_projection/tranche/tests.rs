@@ -619,14 +619,22 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
 
     let keys = Keys::generate();
     let pubkey = keys.public_key().to_hex();
-    let events = (0..3)
-        .map(|index| {
-            EventBuilder::new(Kind::TextNote, format!("append body read {index}"))
-                .custom_created_at(Timestamp::from_secs(100 + index))
-                .sign_with_keys(&keys)
-                .expect("sign generated staged event")
-        })
-        .collect::<Vec<_>>();
+    let events = [
+        EventBuilder::new(Kind::TextNote, "append body read")
+            .tags([Tag::parse(["t", "candidate-build"]).expect("build test tag")])
+            .custom_created_at(Timestamp::from_secs(100))
+            .sign_with_keys(&keys)
+            .expect("sign generated text-note event"),
+        EventBuilder::new(Kind::Metadata, r#"{"name":"candidate builder"}"#)
+            .custom_created_at(Timestamp::from_secs(101))
+            .sign_with_keys(&keys)
+            .expect("sign generated profile event"),
+        EventBuilder::new(Kind::Custom(30_023), "candidate long-form event")
+            .tags([Tag::identifier("candidate-build")])
+            .custom_created_at(Timestamp::from_secs(102))
+            .sign_with_keys(&keys)
+            .expect("sign generated parameterized-replaceable event"),
+    ];
     let stored = events
         .iter()
         .map(stored_event_from_nostr_sdk_event)
@@ -884,9 +892,9 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
     unsupported_phase.phase = TranchePhase::Building;
     unsupported_phase.generation = 2;
     assert!(validate_state_schema(&unsupported_phase)
-        .expect_err("unimplemented phase states must fail closed")
+        .expect_err("invalid Building phase states must fail closed")
         .to_string()
-        .contains("not implemented"));
+        .contains("violates its exact phase invariants"));
     let stores = ProjectionStores {
         durable: &projection_store,
         staging: &staging_store,
@@ -931,13 +939,134 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
         .expect("frozen state exists");
     assert_eq!(frozen_state_sha256, freeze_output.state_sha256);
     assert_eq!(frozen_state.phase, TranchePhase::Freeze);
-    let mut candidate_state = frozen_state.clone();
-    candidate_state.phase = TranchePhase::Candidate;
-    candidate_state.working.built_roots = candidate_state.last_validated.built_roots.clone();
-    candidate_state.working.candidate_root = Some(candidate_state.last_validated.root.clone());
-    let candidate_state_sha256 =
-        persist_state_cas(&state_path, &candidate_state, Some(&frozen_state_sha256))
-            .expect("persist generated Candidate state");
+
+    let building_output = build_bulk_tranche(
+        &projection_store,
+        &graph,
+        &data_dir,
+        BulkTrancheBuildOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            expected_state_sha256: frozen_state_sha256.clone(),
+            max_indexes: 1,
+            out: None,
+        },
+    )
+    .await
+    .expect("build one real index and leave a crash-resumable Building state");
+    assert_eq!(building_output.phase, "building");
+    let stale_error = build_bulk_tranche(
+        &projection_store,
+        &graph,
+        &data_dir,
+        BulkTrancheBuildOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            expected_state_sha256: frozen_state_sha256,
+            max_indexes: NostrEventIndex::ALL.len(),
+            out: None,
+        },
+    )
+    .await
+    .expect_err("a stale build invocation must not replace resumable progress");
+    assert!(stale_error.to_string().contains("mismatch"));
+
+    let candidate_output = build_bulk_tranche(
+        &projection_store,
+        &graph,
+        &data_dir,
+        BulkTrancheBuildOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            expected_state_sha256: building_output.state_sha256,
+            max_indexes: NostrEventIndex::ALL.len(),
+            out: None,
+        },
+    )
+    .await
+    .expect("resume real sorted index construction through a terminal Candidate");
+    assert_eq!(candidate_output.phase, "candidate");
+    let (candidate_state, _, candidate_state_sha256) = load_state(&state_path, &seals_dir)
+        .expect("load built candidate state")
+        .expect("built candidate state exists");
+    assert_eq!(candidate_state_sha256, candidate_output.state_sha256);
+    assert_eq!(candidate_state.phase, TranchePhase::Candidate);
+    assert_eq!(
+        candidate_state.working.built_roots.len(),
+        NostrEventIndex::ALL.len()
+    );
+    assert!(candidate_state
+        .working
+        .built_roots
+        .values()
+        .all(|root| !root.is_empty()));
+    let candidate_root = parse_root_text(
+        candidate_state
+            .working
+            .candidate_root
+            .as_deref()
+            .expect("built candidate root"),
+    )
+    .expect("parse built candidate root");
+    let candidate_store = NostrEventStore::with_options(
+        projection_store.store_arc(),
+        NostrEventStoreOptions {
+            btree_order: Some(8),
+            btree_update_concurrency: Some(1),
+            index_commit_batch_size: Some(1),
+        },
+    );
+    candidate_store
+        .validate_index_root(Some(&candidate_root))
+        .await
+        .expect("validate candidate through the production event-store manifest path");
+    let recent = candidate_store
+        .list_recent(
+            Some(&candidate_root),
+            hashtree_nostr::ListEventsOptions {
+                limit: Some(events.len()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("query built candidate through the production event-store path");
+    assert_eq!(recent.len(), events.len());
+
+    let stage_state_path = staging_data_dir.join(STAGE_DIR).join(STAGE_STATE_FILE);
+    let stage_state_bytes = std::fs::read(&stage_state_path).expect("read terminal staging state");
+    let mut changed_stage_state_bytes = stage_state_bytes.clone();
+    changed_stage_state_bytes.push(b'\n');
+    std::fs::write(&stage_state_path, changed_stage_state_bytes)
+        .expect("simulate changed terminal staging state");
+    let changed_stage_error = build_bulk_tranche(
+        &projection_store,
+        &graph,
+        &data_dir,
+        BulkTrancheBuildOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            expected_state_sha256: candidate_state_sha256.clone(),
+            max_indexes: NostrEventIndex::ALL.len(),
+            out: None,
+        },
+    )
+    .await
+    .expect_err("Candidate validation must reject a changed frozen staging state");
+    assert!(changed_stage_error.to_string().contains("SHA-256 mismatch"));
+    std::fs::write(&stage_state_path, stage_state_bytes).expect("restore terminal staging state");
+
+    let repeated_candidate = build_bulk_tranche(
+        &projection_store,
+        &graph,
+        &data_dir,
+        BulkTrancheBuildOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            expected_state_sha256: candidate_state_sha256.clone(),
+            max_indexes: NostrEventIndex::ALL.len(),
+            out: None,
+        },
+    )
+    .await
+    .expect("idempotently revalidate the persisted Candidate without changing its state");
+    assert_eq!(repeated_candidate.phase, "candidate");
+    assert_eq!(repeated_candidate.state_sha256, candidate_state_sha256);
+
     let authority =
         load_v3_candidate_audit_authority(&data_dir, &staging_data_dir, &candidate_state_sha256)
             .expect(

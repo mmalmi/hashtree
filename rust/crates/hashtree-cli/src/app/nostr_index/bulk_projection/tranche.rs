@@ -30,6 +30,9 @@ use super::{
     ProfileDistanceAuthority, BULK_PROJECTION_VERSION,
 };
 
+mod build;
+pub(crate) use build::{build_bulk_tranche, BulkTrancheBuildOptions};
+
 const TRANCHE_STATE_VERSION: u32 = 3;
 const TRANCHE_DIR: &str = "bulk-projection-v3";
 const TRANCHE_STATE_FILE: &str = "state.json";
@@ -1314,6 +1317,38 @@ fn validate_candidate_pin(label: &str, candidate: &CandidatePin) -> Result<()> {
     Ok(())
 }
 
+fn validate_build_root_prefix(label: &str, built_roots: &BTreeMap<u8, String>) -> Result<()> {
+    if built_roots.len() > NostrEventIndex::ALL.len() {
+        anyhow::bail!("{label} contains more than nine index roots");
+    }
+    let mut reached_missing = false;
+    for index in NostrEventIndex::ALL {
+        match built_roots.get(&index.stable_id()) {
+            Some(_) if reached_missing => {
+                anyhow::bail!("{label} contains non-contiguous {} progress", index.name());
+            }
+            Some(encoded) => {
+                if encoded.is_empty() {
+                    anyhow::bail!("{label} has an empty {} root", index.name());
+                }
+                let root = parse_root_text(encoded)
+                    .with_context(|| format!("parse {label} {} root", index.name()))?;
+                if cid_to_nhash(&root)? != *encoded {
+                    anyhow::bail!("{label} {} root is not canonical nhash text", index.name());
+                }
+            }
+            None => reached_missing = true,
+        }
+    }
+    if built_roots
+        .keys()
+        .any(|stable_id| (*stable_id as usize) >= NostrEventIndex::ALL.len())
+    {
+        anyhow::bail!("{label} contains an unknown stable index id");
+    }
+    Ok(())
+}
+
 fn validate_stage_prefix_schema(
     label: &str,
     prefix: &StagePrefixSeal,
@@ -1610,13 +1645,29 @@ fn validate_state_schema(state: &BulkTrancheState) -> Result<()> {
                 },
             )?;
         }
-        TranchePhase::Building
-        | TranchePhase::Verified
-        | TranchePhase::Publishing
-        | TranchePhase::Promoted => anyhow::bail!(
-            "v3 {:?} state is not implemented and cannot be loaded or persisted",
-            state.phase
-        ),
+        TranchePhase::Building => {
+            if state.generation != 1
+                || state.active_seal_sha256.is_none()
+                || state.pending_seal_sha256.is_some()
+                || state.working.next_author != state.policy.author_count
+                || state.working.frozen_prefix.is_none()
+                || state.working.frozen_profile_distances.is_none()
+                || state.working.segment_event_offset != 0
+                || state.working.active_segment_sha256.is_some()
+                || state.working.candidate_root.is_some()
+                || state.publication_intent.is_some()
+                || state.publication_receipt.is_some()
+            {
+                anyhow::bail!("v3 Building state violates its exact phase invariants");
+            }
+            validate_build_root_prefix("v3 Building state", &state.working.built_roots)?;
+        }
+        TranchePhase::Verified | TranchePhase::Publishing | TranchePhase::Promoted => {
+            anyhow::bail!(
+                "v3 {:?} state is not implemented and cannot be loaded or persisted",
+                state.phase
+            )
+        }
     }
     if let Some(sha256) = state.active_seal_sha256.as_deref() {
         validate_sha256("v3 active seal SHA-256", sha256)?;
@@ -1638,7 +1689,10 @@ fn validate_active_seal(state: &BulkTrancheState, seal: &TrancheSeal) -> Result<
                 anyhow::bail!("active Prepare seal has an invalid generation or parent");
             }
         }
-        (TranchePhase::Freeze | TranchePhase::Candidate, TrancheSealPurpose::Freeze) => {
+        (
+            TranchePhase::Freeze | TranchePhase::Building | TranchePhase::Candidate,
+            TrancheSealPurpose::Freeze,
+        ) => {
             let parent = seal
                 .parent_seal_sha256
                 .as_deref()
@@ -1696,7 +1750,7 @@ fn validate_persisted_seal_chain(state: &BulkTrancheState, seals_dir: &Path) -> 
             let active = load_seal(seals_dir, state.generation, active_sha)?;
             validate_active_seal(state, &active)
         }
-        TranchePhase::Freeze | TranchePhase::Candidate => {
+        TranchePhase::Freeze | TranchePhase::Building | TranchePhase::Candidate => {
             let active_sha = state
                 .active_seal_sha256
                 .as_deref()
@@ -1744,10 +1798,7 @@ fn validate_persisted_seal_chain(state: &BulkTrancheState, seals_dir: &Path) -> 
                 &state.policy,
             )
         }
-        TranchePhase::Building
-        | TranchePhase::Verified
-        | TranchePhase::Publishing
-        | TranchePhase::Promoted => {
+        TranchePhase::Verified | TranchePhase::Publishing | TranchePhase::Promoted => {
             anyhow::bail!("persisted seal-chain validation is not implemented for this phase")
         }
     }

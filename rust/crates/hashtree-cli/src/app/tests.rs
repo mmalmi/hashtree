@@ -315,6 +315,49 @@ fn test_nostr_bulk_projection_audit_requires_all_trust_pins_and_output() {
 }
 
 #[test]
+fn test_nostr_bulk_tranche_build_requires_state_pin_and_parses_bound() {
+    assert!(Cli::try_parse_from([
+        "htree",
+        "nostr-index",
+        "build-bulk-tranche",
+        "--staging-data-dir",
+        "/stage",
+    ])
+    .is_err());
+
+    let cli = Cli::try_parse_from([
+        "htree",
+        "nostr-index",
+        "build-bulk-tranche",
+        "--staging-data-dir",
+        "/stage",
+        "--expected-state-sha256",
+        &"a".repeat(64),
+        "--max-indexes",
+        "1",
+        "--out",
+        "/evidence/build.json",
+    ])
+    .unwrap();
+    let Commands::NostrIndex { command } = cli.command else {
+        panic!("expected nostr-index command");
+    };
+    let NostrIndexCommands::BuildBulkTranche {
+        staging_data_dir,
+        expected_state_sha256,
+        max_indexes,
+        out,
+    } = *command
+    else {
+        panic!("expected build-bulk-tranche command");
+    };
+    assert_eq!(staging_data_dir, PathBuf::from("/stage"));
+    assert_eq!(expected_state_sha256, "a".repeat(64));
+    assert_eq!(max_indexes, 1);
+    assert_eq!(out, Some(PathBuf::from("/evidence/build.json")));
+}
+
+#[test]
 fn test_storage_pool_add_and_migration_args() {
     let cli = Cli::try_parse_from([
         "htree",
