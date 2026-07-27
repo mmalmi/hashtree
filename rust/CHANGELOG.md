@@ -33,6 +33,10 @@
 
 ### Fixed
 
+- Bulk profile repair now bootstraps the root-pair transaction lock for
+  otherwise valid legacy socialgraph stores created before that lock existed.
+  Invalid invocations still fail before creating it, and ordinary read-only
+  root snapshots remain non-creating.
 - Profile-repair rank authority now reconstructs the frozen crawl allowlist in
   canonical `(follow distance, pubkey)` order instead of rank-decision JSONL
   key order. Background profile publication also owns and drains upload

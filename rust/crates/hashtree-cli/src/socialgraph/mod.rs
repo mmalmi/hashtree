@@ -257,6 +257,30 @@ fn profile_publication_lock_path(data_dir: &Path) -> PathBuf {
         .join(PROFILE_PUBLICATION_LOCK_FILE)
 }
 
+/// Create the profile root-pair transaction lock for an existing legacy
+/// socialgraph directory, then release it. Older stores can predate this lock
+/// file, while read-only root snapshots deliberately refuse to create it.
+pub fn bootstrap_profile_root_pair_transaction_lock(data_dir: &Path) -> Result<()> {
+    let db_dir = data_dir.join("socialgraph");
+    match std::fs::symlink_metadata(&db_dir) {
+        Ok(metadata) if metadata.file_type().is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => anyhow::bail!(
+            "socialgraph database is not a direct directory: {}",
+            db_dir.display()
+        ),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("inspect socialgraph database {}", db_dir.display()));
+        }
+    }
+    let _transaction = acquire_profile_root_pair_lock(
+        &db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE),
+        ProfileRootPairLockMode::Exclusive,
+        true,
+    )?;
+    Ok(())
+}
+
 /// Hold the shared side of the profile/event-root transaction while a storage
 /// retention pass snapshots and traverses every currently published root.
 /// Returning `None` is valid only when the data directory has no socialgraph

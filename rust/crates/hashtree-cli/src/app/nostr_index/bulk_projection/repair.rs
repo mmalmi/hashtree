@@ -801,6 +801,8 @@ where
     }
     let required_profile_pubkeys =
         validate_required_pubkeys(options.required_profile_pubkeys.clone())?;
+    hashtree_cli::socialgraph::bootstrap_profile_root_pair_transaction_lock(data_dir)
+        .context("bootstrap legacy profile root-pair transaction lock")?;
     let (intent_path, receipt_path) = repair_paths(data_dir);
     let completion_path = profile_repair_completion_path(data_dir);
     let existing_intent = load_canonical_intent(&intent_path)?;
@@ -1820,6 +1822,16 @@ mod tests {
         super::super::persist_bulk_state(&state_path, &state).unwrap();
         persist_stage_state(&staging_data_dir, &stage).unwrap();
 
+        assert_eq!(
+            hashtree_cli::socialgraph::read_profile_index_roots(&data_dir).unwrap(),
+            old_roots
+        );
+        let root_pair_lock_path = data_dir.join("socialgraph/profile-root-pair.lock");
+        std::fs::remove_file(&root_pair_lock_path).unwrap();
+        assert!(
+            !root_pair_lock_path.exists(),
+            "generated legacy store must begin without the transaction lock"
+        );
         let mut invalid_output_options = options.clone();
         invalid_output_options.out = Some(PathBuf::from("relative-receipt.json"));
         let error =
@@ -1829,9 +1841,17 @@ mod tests {
         assert!(error
             .to_string()
             .contains("output path must be absolute or `-`"));
+        assert!(
+            !root_pair_lock_path.exists(),
+            "invalid output must fail before bootstrapping the transaction lock"
+        );
         assert_eq!(
-            hashtree_cli::socialgraph::read_profile_index_roots(&data_dir).unwrap(),
-            old_roots
+            hash_file(&data_dir.join("socialgraph/profiles-by-pubkey-root.msgpack")).unwrap(),
+            old_roots.by_pubkey_file_sha256.clone().unwrap()
+        );
+        assert_eq!(
+            hash_file(&data_dir.join("socialgraph/profile-search-root.msgpack")).unwrap(),
+            old_roots.search_file_sha256.clone().unwrap()
         );
         let (intent_path, internal_receipt_path) = repair_paths(&data_dir);
         let internal_completion_path =
@@ -1880,6 +1900,10 @@ mod tests {
             Some(&pause_dir),
         );
         repair_child.wait_for_boundary(&pause_dir, "after-unpublished-profile-roots-built");
+        assert!(
+            root_pair_lock_path.is_file(),
+            "valid repair must bootstrap the legacy root-pair transaction lock"
+        );
         assert!(
             !gc_store.profile_repair_retention_lease_path().exists(),
             "repair published its retention lease before the post-build race boundary"
