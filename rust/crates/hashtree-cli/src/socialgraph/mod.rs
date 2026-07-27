@@ -120,6 +120,12 @@ pub(crate) enum EventQueryScope {
     All,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PublicEventsRootApplyOutcome {
+    Applied,
+    Conflict { current_root: Option<Cid> },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredCid {
@@ -1147,6 +1153,10 @@ impl SocialGraphStore {
     }
 
     fn set_root(&self, root: &[u8; 32]) -> Result<()> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
         let root_hex = hex::encode(root);
         {
             let mut graph = self.graph.lock().unwrap();
@@ -1261,7 +1271,67 @@ impl SocialGraphStore {
         };
         store
             .force_sync()
-            .map_err(|error| anyhow::anyhow!("force-sync metadata event blocks: {error}"))
+            .map_err(|error| anyhow::anyhow!("force-sync derived event blocks: {error}"))
+    }
+
+    fn force_sync_graph_projection_for_events(&self, events: &[Event]) -> Result<()> {
+        if events.iter().any(|event| is_social_graph_event(event.kind)) {
+            self._graph_env_lifecycle
+                .force_sync()
+                .context("force-sync derived social graph projection")?;
+        }
+        Ok(())
+    }
+
+    fn retained_derived_events_at_root(
+        &self,
+        bucket: &EventIndexBucket,
+        root: &Cid,
+        events: &[Event],
+    ) -> Result<Vec<Event>> {
+        let mut retained = Vec::new();
+        for event in events
+            .iter()
+            .filter(|event| is_derived_projection_event(event.kind))
+        {
+            match bucket.load_event_by_id(root, &event.id.to_hex())? {
+                Some(stored) if stored == *event => retained.push(event.clone()),
+                Some(_) => {
+                    anyhow::bail!(
+                        "derived event {} resolved to different event bytes in candidate root",
+                        event.id
+                    )
+                }
+                None => {}
+            }
+        }
+        Ok(retained)
+    }
+
+    fn load_full_derived_events_at_root(
+        &self,
+        bucket: &EventIndexBucket,
+        root: &Cid,
+    ) -> Result<Vec<Event>> {
+        block_on(bucket.event_store.validate_index_root(Some(root)))
+            .map_err(map_event_store_error)
+            .context("validate full derived-projection event root")?;
+        let mut events = Vec::new();
+        for kind in [Kind::ContactList, Kind::MuteList, Kind::Metadata] {
+            let stored = block_on(bucket.event_store.list_by_kind(
+                Some(root),
+                kind.as_u16() as u32,
+                ListEventsOptions::default(),
+            ))
+            .map_err(map_event_store_error)?;
+            events.extend(
+                stored
+                    .into_iter()
+                    .map(stored_event_to_nostr_event)
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        Ok(events)
     }
 
     fn persist_pending_profile_projection_locked(
@@ -1319,42 +1389,53 @@ impl SocialGraphStore {
 
         match projection.projection {
             PendingProfileProjectionMode::Incremental { events, .. } => {
+                block_on(bucket.event_store.validate_index_root(Some(&new_root)))
+                    .map_err(map_event_store_error)
+                    .with_context(|| {
+                        format!(
+                            "validate published event root required by pending derived projection {}",
+                            path.display()
+                        )
+                    })?;
                 if events.is_empty() {
                     anyhow::bail!(
-                        "pending incremental profile projection {} contains no events",
+                        "pending incremental derived projection {} contains no events",
                         path.display()
                     );
                 }
                 let events = events
                     .into_iter()
                     .map(|json| {
-                        Event::from_json(json)
-                            .context("decode pending profile projection metadata event")
+                        Event::from_json(json).context("decode pending derived projection event")
                     })
                     .collect::<Result<Vec<_>>>()?;
                 for event in &events {
-                    if event.kind != Kind::Metadata {
+                    if !is_derived_projection_event(event.kind) {
                         anyhow::bail!(
-                            "pending profile projection {} contains a non-metadata event",
-                            path.display()
+                            "pending derived projection {} contains unsupported event kind {}",
+                            path.display(),
+                            event.kind.as_u16()
                         );
                     }
                     let stored = bucket
                         .load_event_by_id(&new_root, &event.id.to_hex())?
                         .with_context(|| {
                             format!(
-                                "pending profile event {} is absent from its published event root",
+                                "pending derived event {} is absent from its published event root",
                                 event.id
                             )
                         })?;
-                    if stored.id != event.id {
+                    if stored != *event {
                         anyhow::bail!(
-                            "pending profile event {} resolved to a different event",
-                            event.id
+                            "pending derived event {} resolved to different event bytes in {}",
+                            event.id,
+                            path.display()
                         );
                     }
                 }
+                self.apply_graph_events_only_locked(&events)?;
                 self.update_profile_index_for_events_locked(&events)?;
+                self.force_sync_graph_projection_for_events(&events)?;
             }
             PendingProfileProjectionMode::RebuildPublicRoot { .. } => {
                 if storage_class != EventStorageClass::Public {
@@ -1363,17 +1444,10 @@ impl SocialGraphStore {
                         path.display()
                     );
                 }
-                let stored = block_on(bucket.event_store.list_by_kind_lossy(
-                    Some(&new_root),
-                    Kind::Metadata.as_u16() as u32,
-                    ListEventsOptions::default(),
-                ))
-                .map_err(map_event_store_error)?;
-                let events = stored
-                    .into_iter()
-                    .map(stored_event_to_nostr_event)
-                    .collect::<Result<Vec<_>>>()?;
+                let events = self.load_full_derived_events_at_root(bucket, &new_root)?;
+                self.apply_graph_events_only_locked(&events)?;
                 self.rebuild_profile_index_for_events_locked(&events)?;
+                self.force_sync_graph_projection_for_events(&events)?;
             }
         }
         self.clear_pending_profile_projection_locked()
@@ -1381,17 +1455,32 @@ impl SocialGraphStore {
 
     pub(crate) fn apply_public_events_root_and_projections(
         &self,
+        expected_old_root: Option<&Cid>,
         root: Option<&Cid>,
         events: &[Event],
         rebuild_profile_index: bool,
-    ) -> Result<()> {
+    ) -> Result<PublicEventsRootApplyOutcome> {
         let _transaction = self
             .profile_index
             .acquire_exclusive_root_pair_transaction()?;
         self.recover_profile_transactions_locked()?;
         let old_root = self.public_events.events_root_for_write()?;
-        let profile_projection = if events.iter().any(|event| event.kind == Kind::Metadata) {
-            let new_root = root.context("metadata projection requires a public event root")?;
+        if old_root.as_ref() != expected_old_root {
+            return Ok(PublicEventsRootApplyOutcome::Conflict {
+                current_root: old_root,
+            });
+        }
+        let projection_events = match root {
+            Some(root) if rebuild_profile_index => {
+                self.load_full_derived_events_at_root(&self.public_events, root)?
+            }
+            Some(root) => {
+                self.retained_derived_events_at_root(&self.public_events, root, events)?
+            }
+            None => Vec::new(),
+        };
+        let profile_projection = if rebuild_profile_index || !projection_events.is_empty() {
+            let new_root = root.context("derived projection requires a public event root")?;
             self.force_sync_event_storage(EventStorageClass::Public)?;
             Some(PendingProfileProjection {
                 version: PROFILE_PROJECTION_PENDING_VERSION,
@@ -1405,11 +1494,7 @@ impl SocialGraphStore {
                     PendingProfileProjectionMode::Incremental {
                         old_root: old_root.as_ref().map(stored_cid),
                         new_root: stored_cid(new_root),
-                        events: events
-                            .iter()
-                            .filter(|event| event.kind == Kind::Metadata)
-                            .map(JsonUtil::as_json)
-                            .collect(),
+                        events: projection_events.iter().map(JsonUtil::as_json).collect(),
                     }
                 },
             })
@@ -1422,16 +1507,17 @@ impl SocialGraphStore {
         } else {
             self.public_events.write_events_root(root)?;
         }
-        self.apply_graph_events_only(events)?;
+        self.apply_graph_events_only_locked(&projection_events)?;
         if profile_projection.is_some() {
             if rebuild_profile_index {
-                self.rebuild_profile_index_for_events_locked(events)?;
+                self.rebuild_profile_index_for_events_locked(&projection_events)?;
             } else {
-                self.update_profile_index_for_events_locked(events)?;
+                self.update_profile_index_for_events_locked(&projection_events)?;
             }
+            self.force_sync_graph_projection_for_events(&projection_events)?;
             self.clear_pending_profile_projection_locked()?;
         }
-        Ok(())
+        Ok(PublicEventsRootApplyOutcome::Applied)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1929,6 +2015,17 @@ impl SocialGraphStore {
     }
 
     fn apply_graph_events_only(&self, events: &[Event]) -> Result<()> {
+        if !events.iter().any(|event| is_social_graph_event(event.kind)) {
+            return Ok(());
+        }
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        self.apply_graph_events_only_locked(events)
+    }
+
+    fn apply_graph_events_only_locked(&self, events: &[Event]) -> Result<()> {
         let graph_events = events
             .iter()
             .filter(|event| is_social_graph_event(event.kind))
@@ -2001,16 +2098,19 @@ impl SocialGraphStore {
         let bucket = self.bucket(storage_class);
         let current_root = bucket.events_root_for_write()?;
         let next_root = bucket.store_event(current_root.as_ref(), event)?;
-        let profile_projection = (event.kind == Kind::Metadata).then(|| PendingProfileProjection {
-            version: PROFILE_PROJECTION_PENDING_VERSION,
-            storage_class: storage_class.into(),
-            projection: PendingProfileProjectionMode::Incremental {
-                old_root: current_root.as_ref().map(stored_cid),
-                new_root: stored_cid(&next_root),
-                events: vec![event.as_json()],
-            },
-        });
-        if let Some(projection) = profile_projection.as_ref() {
+        let projection_events =
+            self.retained_derived_events_at_root(bucket, &next_root, std::slice::from_ref(event))?;
+        let derived_projection =
+            (!projection_events.is_empty()).then(|| PendingProfileProjection {
+                version: PROFILE_PROJECTION_PENDING_VERSION,
+                storage_class: storage_class.into(),
+                projection: PendingProfileProjectionMode::Incremental {
+                    old_root: current_root.as_ref().map(stored_cid),
+                    new_root: stored_cid(&next_root),
+                    events: projection_events.iter().map(JsonUtil::as_json).collect(),
+                },
+            });
+        if let Some(projection) = derived_projection.as_ref() {
             self.force_sync_event_storage(storage_class)?;
             self.persist_pending_profile_projection_locked(projection)?;
             bucket.write_events_root_durable(Some(&next_root))?;
@@ -2018,18 +2118,10 @@ impl SocialGraphStore {
             bucket.write_events_root(Some(&next_root))?;
         }
 
-        if is_social_graph_event(event.kind) {
-            {
-                let mut graph = self.graph.lock().unwrap();
-                graph
-                    .handle_event(&graph_event_from_nostr(event), true, 0.0)
-                    .context("ingest social graph event into nostr-social-graph")?;
-            }
-            self.invalidate_distance_cache();
-        }
-
-        if profile_projection.is_some() {
-            self.update_profile_index_for_events_locked(std::slice::from_ref(event))?;
+        if derived_projection.is_some() {
+            self.apply_graph_events_only_locked(&projection_events)?;
+            self.update_profile_index_for_events_locked(&projection_events)?;
+            self.force_sync_graph_projection_for_events(&projection_events)?;
             self.clear_pending_profile_projection_locked()?;
         }
 
@@ -2061,27 +2153,27 @@ impl SocialGraphStore {
                 .build(current_root.as_ref(), stored_events),
         )
         .map_err(map_event_store_error)?;
-        let metadata = events
-            .iter()
-            .filter(|event| event.kind == Kind::Metadata)
-            .collect::<Vec<_>>();
-        let profile_projection = if metadata.is_empty() {
+        let projection_events = match next_root.as_ref() {
+            Some(root) => self.retained_derived_events_at_root(bucket, root, events)?,
+            None => Vec::new(),
+        };
+        let derived_projection = if projection_events.is_empty() {
             None
         } else {
             let next_root = next_root
                 .as_ref()
-                .context("metadata event batch did not produce an event root")?;
+                .context("derived event batch did not produce an event root")?;
             Some(PendingProfileProjection {
                 version: PROFILE_PROJECTION_PENDING_VERSION,
                 storage_class: storage_class.into(),
                 projection: PendingProfileProjectionMode::Incremental {
                     old_root: current_root.as_ref().map(stored_cid),
                     new_root: stored_cid(next_root),
-                    events: metadata.into_iter().map(JsonUtil::as_json).collect(),
+                    events: projection_events.iter().map(JsonUtil::as_json).collect(),
                 },
             })
         };
-        if let Some(projection) = profile_projection.as_ref() {
+        if let Some(projection) = derived_projection.as_ref() {
             self.force_sync_event_storage(storage_class)?;
             self.persist_pending_profile_projection_locked(projection)?;
             bucket.write_events_root_durable(next_root.as_ref())?;
@@ -2089,29 +2181,10 @@ impl SocialGraphStore {
             bucket.write_events_root(next_root.as_ref())?;
         }
 
-        let graph_events = events
-            .iter()
-            .filter(|event| is_social_graph_event(event.kind))
-            .collect::<Vec<_>>();
-        if !graph_events.is_empty() {
-            let mut graph = self.graph.lock().unwrap();
-            let mut snapshot = SocialGraph::from_state(
-                graph
-                    .export_state()
-                    .context("export social graph state for batch ingest")?,
-            )
-            .context("rebuild social graph state for batch ingest")?;
-            for event in graph_events {
-                snapshot.handle_event(&graph_event_from_nostr(event), true, 0.0);
-            }
-            graph
-                .replace_state(&snapshot.export_state())
-                .context("replace batched social graph state")?;
-            self.invalidate_distance_cache();
-        }
-
-        if profile_projection.is_some() {
-            self.update_profile_index_for_events_locked(events)?;
+        if derived_projection.is_some() {
+            self.apply_graph_events_only_locked(&projection_events)?;
+            self.update_profile_index_for_events_locked(&projection_events)?;
+            self.force_sync_graph_projection_for_events(&projection_events)?;
             self.clear_pending_profile_projection_locked()?;
         }
 
@@ -2236,6 +2309,12 @@ impl NostrSocialGraphBackend for SocialGraphStore {
         allow_unknown_authors: bool,
         overmute_threshold: f64,
     ) -> std::result::Result<(), Self::Error> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()
+            .map_err(|err| UpstreamGraphBackendError(err.to_string()))?;
+        self.recover_profile_transactions_locked()
+            .map_err(|err| UpstreamGraphBackendError(err.to_string()))?;
         {
             let mut graph = self.graph.lock().unwrap();
             graph
@@ -2432,6 +2511,10 @@ fn decode_pubkey(value: &str) -> Result<[u8; 32]> {
 
 fn is_social_graph_event(kind: Kind) -> bool {
     kind == Kind::ContactList || kind == Kind::MuteList
+}
+
+fn is_derived_projection_event(kind: Kind) -> bool {
+    kind == Kind::Metadata || is_social_graph_event(kind)
 }
 
 fn graph_event_from_nostr(event: &Event) -> GraphEvent {

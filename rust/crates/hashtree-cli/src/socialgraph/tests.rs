@@ -101,6 +101,103 @@ fn assert_event_and_profile_visible(
     );
 }
 
+fn stage_public_derived_projection_crash(
+    graph_store: &SocialGraphStore,
+    events: &[Event],
+    rebuild_profile_index: bool,
+) -> Cid {
+    let transaction = graph_store
+        .profile_index
+        .acquire_exclusive_root_pair_transaction()
+        .unwrap();
+    graph_store.recover_profile_transactions_locked().unwrap();
+    let old_root = graph_store.public_events.events_root_for_write().unwrap();
+    let stored = events
+        .iter()
+        .map(stored_event_from_nostr_sdk_event)
+        .collect::<Vec<_>>();
+    let new_root = block_on(
+        graph_store
+            .public_events
+            .event_store
+            .build(old_root.as_ref(), stored),
+    )
+    .map_err(map_event_store_error)
+    .unwrap()
+    .expect("derived events must produce an event root");
+    graph_store
+        .force_sync_event_storage(EventStorageClass::Public)
+        .unwrap();
+    graph_store
+        .persist_pending_profile_projection_locked(&PendingProfileProjection {
+            version: PROFILE_PROJECTION_PENDING_VERSION,
+            storage_class: StoredEventStorageClass::Public,
+            projection: if rebuild_profile_index {
+                PendingProfileProjectionMode::RebuildPublicRoot {
+                    old_root: old_root.as_ref().map(stored_cid),
+                    new_root: stored_cid(&new_root),
+                }
+            } else {
+                PendingProfileProjectionMode::Incremental {
+                    old_root: old_root.as_ref().map(stored_cid),
+                    new_root: stored_cid(&new_root),
+                    events: events.iter().map(JsonUtil::as_json).collect(),
+                }
+            },
+        })
+        .unwrap();
+    graph_store
+        .public_events
+        .write_events_root_durable(Some(&new_root))
+        .unwrap();
+    drop(transaction);
+    new_root
+}
+
+#[cfg(unix)]
+fn run_derived_recovery_child(
+    data_dir: &Path,
+    mode: &str,
+    expected_pubkey: &str,
+    expected_event_id: Option<&str>,
+) {
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .arg("--exact")
+        .arg("socialgraph::tests::derived_projection_recovery_child_helper")
+        .arg("--nocapture")
+        .env("RUST_TEST_THREADS", "1")
+        .env("HASHTREE_DERIVED_RECOVERY_CHILD_DATA_DIR", data_dir)
+        .env("HASHTREE_DERIVED_RECOVERY_CHILD_MODE", mode)
+        .env(
+            "HASHTREE_DERIVED_RECOVERY_CHILD_EXPECTED_PUBKEY",
+            expected_pubkey,
+        );
+    if let Some(event_id) = expected_event_id {
+        command.env(
+            "HASHTREE_DERIVED_RECOVERY_CHILD_EXPECTED_EVENT_ID",
+            event_id,
+        );
+    }
+    let mut child = command.spawn().unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("fresh-process derived projection recovery exceeded its deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(
+        status.success(),
+        "fresh-process derived projection recovery failed: {status}"
+    );
+}
+
 #[derive(Debug, Clone, Default)]
 struct ReadTraceSnapshot {
     get_calls: u64,
@@ -1307,6 +1404,112 @@ fn durable_pre_root_projection_obligation_cancels_and_same_process_retry_converg
 }
 
 #[test]
+fn failed_projection_intent_preserves_old_replaceable_root_across_reopen() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let original = metadata_event(&keys, "pre intent original", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &original, EventStorageClass::Public)
+        .unwrap();
+    let old_root = graph_store
+        .public_events_root()
+        .unwrap()
+        .expect("original event root");
+    assert_event_and_profile_visible(&graph_store, &original, "p:pre");
+
+    let pending_path = tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_PROJECTION_PENDING_FILE);
+    let pending_name = pending_path.file_name().unwrap().to_str().unwrap();
+    let pending_temp_path = pending_path.with_file_name(format!(".{pending_name}.pending"));
+    fs::create_dir(&pending_temp_path).unwrap();
+    let replacement = metadata_event(&keys, "pre intent replacement", 2);
+    let error = ingest_parsed_event_with_storage_class(
+        &graph_store,
+        &replacement,
+        EventStorageClass::Public,
+    )
+    .expect_err("a real pending-intent rename failure must stop publication");
+    assert!(
+        format!("{error:#}").contains("open pending pending profile projection"),
+        "unexpected intent persistence error: {error:#}"
+    );
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        Some(old_root.clone())
+    );
+    assert_eq!(
+        query_events(&graph_store, &Filter::new().id(original.id), 1)
+            .into_iter()
+            .map(|event| event.id)
+            .collect::<Vec<_>>(),
+        vec![original.id],
+        "non-destructive staging must leave the old replaceable event readable"
+    );
+    assert!(
+        query_events(&graph_store, &Filter::new().id(replacement.id), 1).is_empty(),
+        "the staged replacement must not become reachable without its durable intent"
+    );
+
+    fs::remove_dir(&pending_temp_path).unwrap();
+    assert_event_and_profile_visible(&graph_store, &original, "p:pre");
+    drop(graph_store);
+
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    assert_eq!(reopened.public_events_root().unwrap(), Some(old_root));
+    assert_event_and_profile_visible(&reopened, &original, "p:pre");
+    assert!(reopened
+        .latest_profile_event(&replacement.pubkey.to_hex())
+        .unwrap()
+        .is_some_and(|event| event.id == original.id));
+}
+
+#[test]
+fn rejected_older_metadata_creates_no_unrecoverable_obligation() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let current = metadata_event(&keys, "Current Winner", 2);
+    let older = metadata_event(&keys, "Rejected Older", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &current, EventStorageClass::Public)
+        .unwrap();
+    let root_before = graph_store.public_events_root().unwrap();
+
+    ingest_parsed_event_with_storage_class(&graph_store, &older, EventStorageClass::Public)
+        .unwrap();
+    assert_eq!(graph_store.public_events_root().unwrap(), root_before);
+    assert!(!tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_PROJECTION_PENDING_FILE)
+        .exists());
+    assert_eq!(
+        graph_store
+            .latest_profile_event(&current.pubkey.to_hex())
+            .unwrap()
+            .expect("current winner")
+            .id,
+        current.id
+    );
+    assert!(query_events(&graph_store, &Filter::new().id(older.id), 1).is_empty());
+    drop(graph_store);
+
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    assert_eq!(reopened.public_events_root().unwrap(), root_before);
+    assert_eq!(
+        reopened
+            .latest_profile_event(&current.pubkey.to_hex())
+            .unwrap()
+            .expect("current winner after reopen")
+            .id,
+        current.id
+    );
+}
+
+#[test]
 fn same_process_read_repairs_post_event_root_profile_io_failure() {
     let _guard = test_lock_blocking();
     let tmp = TempDir::new().unwrap();
@@ -1466,6 +1669,236 @@ async fn sync_and_async_profile_lock_waits_have_explicit_deadlines() {
         .latest_profile_event(&profile.pubkey.to_hex())
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn full_root_with_no_metadata_durably_clears_stale_profile_indexes() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let old_profile = metadata_event(&Keys::generate(), "VanishingProfile", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &old_profile, EventStorageClass::Public)
+        .unwrap();
+    let old_root = graph_store
+        .public_events_root()
+        .unwrap()
+        .expect("old profile event root");
+    assert_event_and_profile_visible(&graph_store, &old_profile, "p:vanishing");
+
+    let note = EventBuilder::new(Kind::TextNote, "profile-free replacement root")
+        .custom_created_at(Timestamp::from_secs(2))
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    let replacement_root = block_on(graph_store.public_events.event_store.build(
+        None,
+        std::iter::once(stored_event_from_nostr_sdk_event(&note)),
+    ))
+    .map_err(map_event_store_error)
+    .unwrap()
+    .expect("replacement root");
+    let outcome = graph_store
+        .apply_public_events_root_and_projections(
+            Some(&old_root),
+            Some(&replacement_root),
+            std::slice::from_ref(&note),
+            true,
+        )
+        .unwrap();
+    assert_eq!(outcome, PublicEventsRootApplyOutcome::Applied);
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        Some(replacement_root)
+    );
+    assert!(graph_store
+        .latest_profile_event(&old_profile.pubkey.to_hex())
+        .unwrap()
+        .is_none());
+    assert_eq!(graph_store.profiles_by_pubkey_root().unwrap(), None);
+    assert_eq!(graph_store.profile_search_root().unwrap(), None);
+    assert!(query_events(&graph_store, &Filter::new().id(note.id), 1)
+        .iter()
+        .any(|event| event.id == note.id));
+    assert!(!tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_PROJECTION_PENDING_FILE)
+        .exists());
+}
+
+#[test]
+fn full_rebuild_recovery_fails_closed_on_missing_metadata_blob() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let profile = metadata_event(&Keys::generate(), "strict rebuild", 1);
+    let root =
+        stage_public_derived_projection_crash(&graph_store, std::slice::from_ref(&profile), true);
+    let manifest = block_on(
+        graph_store
+            .public_events
+            .event_store
+            .get_manifest(Some(&root)),
+    )
+    .unwrap();
+    let by_id = manifest.by_id.expect("candidate by-id root");
+    let event_cid = block_on(
+        graph_store
+            .profile_index
+            .index
+            .get_link(Some(&by_id), &profile.id.to_hex()),
+    )
+    .unwrap()
+    .expect("candidate metadata event cid");
+    assert!(block_on(graph_store.profile_index.store.delete(&event_cid.hash)).unwrap());
+    graph_store.profile_index.store.force_sync().unwrap();
+    drop(graph_store);
+
+    let error = match open_test_social_graph_store(tmp.path()) {
+        Ok(_) => panic!("full rebuild recovery must reject a missing metadata blob"),
+        Err(error) => error,
+    };
+    assert!(
+        format!("{error:#}").contains("stored nostr event blob is missing"),
+        "unexpected strict recovery error: {error:#}"
+    );
+    assert!(
+        tmp.path()
+            .join("socialgraph")
+            .join(PROFILE_PROJECTION_PENDING_FILE)
+            .is_file(),
+        "strict recovery must retain the obligation for operator repair"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn derived_projection_recovery_child_helper() {
+    let Ok(data_dir) = std::env::var("HASHTREE_DERIVED_RECOVERY_CHILD_DATA_DIR") else {
+        return;
+    };
+    let mode = std::env::var("HASHTREE_DERIVED_RECOVERY_CHILD_MODE")
+        .expect("derived recovery mode must be provided");
+    let expected_pubkey = std::env::var("HASHTREE_DERIVED_RECOVERY_CHILD_EXPECTED_PUBKEY")
+        .expect("derived recovery pubkey must be provided");
+    let graph_store = open_social_graph_store(Path::new(&data_dir))
+        .expect("fresh process open must recover every derived projection");
+    let expected_bytes = nostr::PublicKey::from_hex(&expected_pubkey)
+        .unwrap()
+        .to_bytes();
+    assert_eq!(
+        get_follow_distance(&graph_store, &expected_bytes),
+        Some(1),
+        "graph recovery must precede release of the durable obligation"
+    );
+
+    match mode.as_str() {
+        "graph-only" => {}
+        "graph-before-profile" => {
+            let expected_event_id =
+                std::env::var("HASHTREE_DERIVED_RECOVERY_CHILD_EXPECTED_EVENT_ID")
+                    .expect("profile event id must be provided");
+            let recovered = graph_store
+                .latest_profile_event(&expected_pubkey)
+                .unwrap()
+                .expect("profile must be recovered after its graph dependency");
+            assert_eq!(recovered.id.to_hex(), expected_event_id);
+            let entry = graph_store
+                .profile_search_entries_for_prefix("p:ordered")
+                .unwrap()
+                .into_iter()
+                .find(|(_, entry)| entry.pubkey == expected_pubkey)
+                .map(|(_, entry)| entry)
+                .expect("recovered profile search entry");
+            assert_eq!(
+                entry.follow_distance,
+                Some(1),
+                "profile rank must be computed from the recovered graph state"
+            );
+        }
+        other => panic!("unsupported derived recovery mode {other}"),
+    }
+
+    assert!(
+        !Path::new(&data_dir)
+            .join("socialgraph")
+            .join(PROFILE_PROJECTION_PENDING_FILE)
+            .exists(),
+        "fresh-process recovery must durably clear the complete obligation"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_process_open_recovers_graph_only_batch_after_event_root_crash() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let root_keys = Keys::generate();
+    let followed_keys = Keys::generate();
+    set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
+    graph_store.force_sync().unwrap();
+    let contact = event_builder!(
+        Kind::ContactList,
+        "",
+        vec![Tag::public_key(followed_keys.public_key())],
+    )
+    .custom_created_at(Timestamp::from_secs(10))
+    .sign_with_keys(&root_keys)
+    .unwrap();
+    stage_public_derived_projection_crash(&graph_store, std::slice::from_ref(&contact), false);
+    assert_eq!(
+        get_follow_distance(&graph_store, &followed_keys.public_key().to_bytes()),
+        None,
+        "the simulated crash boundary must precede graph application"
+    );
+    assert!(tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_PROJECTION_PENDING_FILE)
+        .is_file());
+    drop(graph_store);
+
+    run_derived_recovery_child(
+        tmp.path(),
+        "graph-only",
+        &followed_keys.public_key().to_hex(),
+        None,
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_process_recovery_applies_graph_before_profile_rank() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let root_keys = Keys::generate();
+    let profile_keys = Keys::generate();
+    set_social_graph_root(&graph_store, &root_keys.public_key().to_bytes());
+    graph_store.force_sync().unwrap();
+    let contact = event_builder!(
+        Kind::ContactList,
+        "",
+        vec![Tag::public_key(profile_keys.public_key())],
+    )
+    .custom_created_at(Timestamp::from_secs(10))
+    .sign_with_keys(&root_keys)
+    .unwrap();
+    let profile = metadata_event(&profile_keys, "Ordered Profile", 11);
+    stage_public_derived_projection_crash(&graph_store, &[contact, profile.clone()], false);
+    assert_eq!(
+        get_follow_distance(&graph_store, &profile_keys.public_key().to_bytes()),
+        None,
+        "the simulated crash boundary must precede graph application"
+    );
+    drop(graph_store);
+
+    run_derived_recovery_child(
+        tmp.path(),
+        "graph-before-profile",
+        &profile.pubkey.to_hex(),
+        Some(&profile.id.to_hex()),
+    );
 }
 
 #[cfg(unix)]

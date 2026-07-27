@@ -52,8 +52,10 @@ impl EventIndexBucket {
 
     pub(super) fn store_event(&self, root: Option<&Cid>, event: &Event) -> Result<Cid> {
         let stored = stored_event_from_nostr_sdk_event(event);
-        let _profile = NostrProfileGuard::new("socialgraph.event_store.add");
-        block_on(self.event_store.add(root, stored)).map_err(map_event_store_error)
+        let _profile = NostrProfileGuard::new("socialgraph.event_store.build_single");
+        block_on(self.event_store.build(root, std::iter::once(stored)))
+            .map_err(map_event_store_error)?
+            .context("single Nostr event did not produce an event root")
     }
 
     pub(super) fn load_event_by_id(&self, root: &Cid, event_id: &str) -> Result<Option<Event>> {

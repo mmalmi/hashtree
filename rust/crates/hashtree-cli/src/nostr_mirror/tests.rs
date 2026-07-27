@@ -1826,38 +1826,12 @@ async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
         .custom_created_at(Timestamp::from(10))
         .sign_with_keys(&initial_keys)
         .expect("initial event");
-    let initial_stored = hashtree_nostr::StoredNostrEvent {
-        id: initial_event.id.to_hex(),
-        pubkey: initial_event.pubkey.to_hex(),
-        created_at: initial_event.created_at.as_secs(),
-        kind: initial_event.kind.as_u16() as u32,
-        tags: initial_event
-            .tags
-            .iter()
-            .map(|tag| tag.as_slice().to_vec())
-            .collect(),
-        content: initial_event.content.clone(),
-        sig: initial_event.sig.to_string(),
-    };
 
     let live_keys = nostr::Keys::generate();
     let live_event = event_builder!(Kind::TextNote, "live")
         .custom_created_at(Timestamp::from(11))
         .sign_with_keys(&live_keys)
         .expect("live event");
-    let live_stored = hashtree_nostr::StoredNostrEvent {
-        id: live_event.id.to_hex(),
-        pubkey: live_event.pubkey.to_hex(),
-        created_at: live_event.created_at.as_secs(),
-        kind: live_event.kind.as_u16() as u32,
-        tags: live_event
-            .tags
-            .iter()
-            .map(|tag| tag.as_slice().to_vec())
-            .collect(),
-        content: live_event.content.clone(),
-        sig: live_event.sig.to_string(),
-    };
 
     let history_keys = nostr::Keys::generate();
     let history_event = event_builder!(Kind::TextNote, "history")
@@ -1879,11 +1853,12 @@ async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
     };
 
     let event_store = NostrEventStore::new(store.store_arc());
-    let initial_root = event_store.build(None, vec![initial_stored]).await?;
-    graph_store.write_public_events_root(initial_root.as_ref())?;
-    let live_root = event_store
-        .build(initial_root.as_ref(), vec![live_stored.clone()])
-        .await?;
+    socialgraph::ingest_parsed_event_with_storage_class(
+        &graph_store,
+        &initial_event,
+        socialgraph::EventStorageClass::Public,
+    )?;
+    let initial_root = graph_store.public_events_root()?;
     let history_root = event_store
         .build(initial_root.as_ref(), vec![history_stored.clone()])
         .await?;
@@ -1903,13 +1878,13 @@ async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
             {
                 let call_index = Arc::clone(&call_index);
                 let graph_store = graph_store.clone();
-                let live_root = live_root.clone();
+                let live_event = live_event.clone();
                 let history_root = history_root.clone();
                 let history_stored = history_stored.clone();
                 move |_current_root, author_chunk| {
                     let call_index = Arc::clone(&call_index);
                     let graph_store = graph_store.clone();
-                    let live_root = live_root.clone();
+                    let live_event = live_event.clone();
                     let history_root = history_root.clone();
                     let history_stored = history_stored.clone();
                     async move {
@@ -1918,7 +1893,11 @@ async fn history_sync_merges_chunk_when_live_root_advances() -> Result<()> {
                             0,
                             "history chunk should not be refetched after live root churn"
                         );
-                        graph_store.write_public_events_root(live_root.as_ref())?;
+                        socialgraph::ingest_parsed_event_with_storage_class(
+                            &graph_store,
+                            &live_event,
+                            socialgraph::EventStorageClass::Public,
+                        )?;
                         Ok(CrawlReport {
                             root: history_root.clone(),
                             authors_considered: 1,
