@@ -135,33 +135,34 @@ struct ExpectedProfileSearchEntry {
     mirrored_cid: Cid,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-struct ProfileDistanceProvenance {
-    format: String,
-    census_format: String,
-    rank_decisions_file_sha256: String,
-    rank_decisions_report_sha256: String,
-    rank_decisions_sha256: String,
-    social_graph_root: String,
-    social_graph_sha256: String,
-    eligible_authors_sha256: String,
-    record_count: usize,
-    eligible_count: usize,
-    excluded_count: usize,
-    overmute_threshold: usize,
-    census_max_distance: Option<u32>,
-    rank_policy: String,
-    exclusion_policy: String,
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(super) struct ProfileDistanceProvenance {
+    pub(super) format: String,
+    pub(super) census_format: String,
+    pub(super) rank_decisions_file_sha256: String,
+    pub(super) rank_decisions_report_sha256: String,
+    pub(super) rank_decisions_sha256: String,
+    pub(super) social_graph_root: String,
+    pub(super) social_graph_sha256: String,
+    pub(super) eligible_authors_sha256: String,
+    pub(super) record_count: usize,
+    pub(super) eligible_count: usize,
+    pub(super) excluded_count: usize,
+    pub(super) overmute_threshold: usize,
+    pub(super) census_max_distance: Option<u32>,
+    pub(super) rank_policy: String,
+    pub(super) exclusion_policy: String,
 }
 
 #[derive(Debug)]
-struct TrustedProfileRankDecisions {
-    decisions: BTreeMap<String, Option<u32>>,
-    decisions_path: PathBuf,
-    decisions_bytes: Vec<u8>,
-    report_path: PathBuf,
-    report_bytes: Vec<u8>,
-    evidence: ProfileDistanceProvenance,
+pub(super) struct TrustedProfileRankDecisions {
+    pub(super) decisions: BTreeMap<String, Option<u32>>,
+    pub(super) decisions_path: PathBuf,
+    pub(super) decisions_bytes: Vec<u8>,
+    pub(super) report_path: PathBuf,
+    pub(super) report_bytes: Vec<u8>,
+    pub(super) evidence: ProfileDistanceProvenance,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -491,8 +492,7 @@ fn load_trusted_profile_rank_decisions(
             "profile rank-decisions provenance requires file, report, and both exact SHA-256 pins"
         );
     }
-    let (decisions_path, decisions_bytes, decisions_file_sha256) = canonical_read_pinned_file(
-        "profile rank-decisions file",
+    Ok(Some(load_pinned_profile_rank_decisions(
         options
             .profile_rank_decisions_file
             .as_deref()
@@ -501,9 +501,6 @@ fn load_trusted_profile_rank_decisions(
             .expected_profile_rank_decisions_file_sha256
             .as_deref()
             .expect("all provenance options checked"),
-    )?;
-    let (report_path, report_bytes, report_sha256) = canonical_read_pinned_file(
-        "profile rank-decisions report",
         options
             .profile_rank_decisions_report
             .as_deref()
@@ -512,6 +509,24 @@ fn load_trusted_profile_rank_decisions(
             .expected_profile_rank_decisions_report_sha256
             .as_deref()
             .expect("all provenance options checked"),
+    )?))
+}
+
+pub(super) fn load_pinned_profile_rank_decisions(
+    profile_rank_decisions_file: &Path,
+    expected_profile_rank_decisions_file_sha256: &str,
+    profile_rank_decisions_report: &Path,
+    expected_profile_rank_decisions_report_sha256: &str,
+) -> Result<TrustedProfileRankDecisions> {
+    let (decisions_path, decisions_bytes, decisions_file_sha256) = canonical_read_pinned_file(
+        "profile rank-decisions file",
+        profile_rank_decisions_file,
+        expected_profile_rank_decisions_file_sha256,
+    )?;
+    let (report_path, report_bytes, report_sha256) = canonical_read_pinned_file(
+        "profile rank-decisions report",
+        profile_rank_decisions_report,
+        expected_profile_rank_decisions_report_sha256,
     )?;
     if decisions_path == report_path {
         anyhow::bail!("profile rank-decisions file and report must be distinct");
@@ -585,7 +600,7 @@ fn load_trusted_profile_rank_decisions(
         anyhow::bail!("profile rank-decisions report does not match its exact decisions artifact");
     }
 
-    Ok(Some(TrustedProfileRankDecisions {
+    Ok(TrustedProfileRankDecisions {
         decisions,
         decisions_path,
         decisions_bytes,
@@ -608,10 +623,10 @@ fn load_trusted_profile_rank_decisions(
             rank_policy: report.rank_policy,
             exclusion_policy: report.exclusion_policy,
         },
-    }))
+    })
 }
 
-fn recheck_trusted_profile_rank_decisions(
+pub(super) fn recheck_trusted_profile_rank_decisions(
     trusted: Option<&TrustedProfileRankDecisions>,
 ) -> Result<()> {
     let Some(trusted) = trusted else {
@@ -635,7 +650,7 @@ fn recheck_trusted_profile_rank_decisions(
     Ok(())
 }
 
-fn require_profile_rank_policy_binding(
+pub(super) fn require_profile_rank_policy_binding(
     trusted: Option<&TrustedProfileRankDecisions>,
     policy_author_allowlist_sha256: &str,
     policy_author_count: usize,

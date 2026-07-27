@@ -267,6 +267,7 @@ pub struct BackgroundNostrMirror {
     missing_profile_cursor: Mutex<usize>,
     history_sync_lock: AsyncMutex<()>,
     root_publication_deferrals: AtomicUsize,
+    profile_publication_fence_logged: AtomicBool,
     root_upload_tasks: Mutex<Vec<RootUploadTask>>,
     shutting_down: AtomicBool,
     shutdown_tx: watch::Sender<bool>,
@@ -347,6 +348,7 @@ impl BackgroundNostrMirror {
             missing_profile_cursor: Mutex::new(0),
             history_sync_lock: AsyncMutex::new(()),
             root_publication_deferrals: AtomicUsize::new(0),
+            profile_publication_fence_logged: AtomicBool::new(false),
             root_upload_tasks: Mutex::new(Vec::new()),
             shutting_down: AtomicBool::new(false),
             shutdown_tx,
@@ -1869,6 +1871,9 @@ impl BackgroundNostrMirror {
     }
 
     async fn maybe_publish_profile_search_root(&self, force: bool) -> Result<()> {
+        if self.defer_profile_publication_while_fenced() {
+            return Ok(());
+        }
         self.maybe_publish_root(
             self.config.published_profile_search_tree_name.as_deref(),
             &self.profile_search_publish_state,
@@ -1880,6 +1885,9 @@ impl BackgroundNostrMirror {
     }
 
     async fn maybe_publish_profiles_by_pubkey_root(&self, force: bool) -> Result<()> {
+        if self.defer_profile_publication_while_fenced() {
+            return Ok(());
+        }
         self.maybe_publish_root(
             self.config
                 .published_profiles_by_pubkey_tree_name
@@ -1890,6 +1898,28 @@ impl BackgroundNostrMirror {
             true,
         )
         .await
+    }
+
+    fn defer_profile_publication_while_fenced(&self) -> bool {
+        match socialgraph::require_profile_publication_unfenced(self.store.base_path()) {
+            Ok(()) => {
+                self.profile_publication_fence_logged
+                    .store(false, Ordering::Release);
+                false
+            }
+            Err(error) => {
+                if !self
+                    .profile_publication_fence_logged
+                    .swap(true, Ordering::AcqRel)
+                {
+                    warn!(
+                        "Nostr mirror deferred all profile-root publication: {:#}",
+                        error
+                    );
+                }
+                true
+            }
+        }
     }
 
     async fn maybe_publish_root(

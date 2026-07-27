@@ -96,6 +96,12 @@ struct ReplayChunkReport {
     profile_sync_ms: u128,
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ProfileDistanceAuthority<'a> {
+    LiveGraph,
+    FrozenRankDecisions(&'a BTreeMap<String, Option<u32>>),
+}
+
 #[derive(Debug)]
 struct SpoolReplayPlan {
     events: Vec<(StoredNostrEvent, Option<Cid>)>,
@@ -783,6 +789,46 @@ impl BulkProjectionSpool {
         }
         Ok(None)
     }
+
+    fn profile_distance_seal_for_frozen_authority(
+        &self,
+        decisions: &BTreeMap<String, Option<u32>>,
+    ) -> Result<(String, usize)> {
+        let rtxn = self.env.read_txn()?;
+        let mut retained = BTreeMap::new();
+        for item in self.events.iter(&rtxn)? {
+            let (_event_id, encoded) = item?;
+            let record: SpoolEventRecord =
+                rmp_serde::from_slice(encoded).context("decode retained profile event")?;
+            if record.event.kind != 0 {
+                continue;
+            }
+            match decisions.get(&record.event.pubkey) {
+                Some(Some(distance)) => {
+                    if retained
+                        .insert(record.event.pubkey.clone(), Some(*distance))
+                        .is_some()
+                    {
+                        anyhow::bail!(
+                            "bulk spool retained duplicate metadata winners for pubkey {}",
+                            record.event.pubkey
+                        );
+                    }
+                }
+                Some(None) => {
+                    // The Nostr event remains in the general event indexes, but
+                    // the frozen Iris rank decision excludes it from profiles.
+                }
+                None => anyhow::bail!(
+                    "frozen profile rank decisions omitted retained metadata author {}",
+                    record.event.pubkey
+                ),
+            }
+        }
+        let retained_profile_count = retained.len();
+        let sha256 = hashtree_cli::socialgraph::profile_follow_distance_seal_v2(&retained);
+        Ok((sha256, retained_profile_count))
+    }
 }
 
 impl EntryTrieCursor<'_> {
@@ -1153,6 +1199,7 @@ async fn replay_staged_event_chunk<T, S>(
     target_event_store: &NostrEventStore<T>,
     staging_event_store: &NostrEventStore<S>,
     cids: Vec<Cid>,
+    profile_distance_authority: ProfileDistanceAuthority<'_>,
 ) -> Result<ReplayChunkReport>
 where
     T: Store,
@@ -1251,10 +1298,16 @@ where
         .map(|event| event.to_nostr_sdk_event().map_err(anyhow::Error::from))
         .collect::<Result<Vec<_>>>()?;
     if !profile_events.is_empty() {
-        stores
-            .graph
-            .sync_profile_index_for_events(&profile_events)
-            .context("sync bulk-projected profile events")?;
+        match profile_distance_authority {
+            ProfileDistanceAuthority::LiveGraph => stores
+                .graph
+                .sync_profile_index_for_events(&profile_events)
+                .context("sync bulk-projected profile events from live graph")?,
+            ProfileDistanceAuthority::FrozenRankDecisions(decisions) => stores
+                .graph
+                .sync_profile_index_for_events_with_frozen_distances(&profile_events, decisions)
+                .context("sync bulk-projected profile events from frozen rank decisions")?,
+        }
         stores.graph.force_sync()?;
     }
     let profile_sync_ms = profile_sync_started.elapsed().as_millis();
@@ -1365,6 +1418,7 @@ pub(super) async fn project_staged_allowlist_bulk(
             &target_event_store,
             &staging_event_store,
             cids,
+            ProfileDistanceAuthority::LiveGraph,
         )
         .await?;
         let apply = replay.apply;

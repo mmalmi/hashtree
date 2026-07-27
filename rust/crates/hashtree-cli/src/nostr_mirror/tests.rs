@@ -622,6 +622,86 @@ async fn apply_history_root_publishes_profile_search_tree() -> Result<()> {
 }
 
 #[tokio::test]
+async fn durable_tranche_fence_blocks_even_forced_profile_root_publication() -> Result<()> {
+    let _guard = crate::socialgraph::test_lock().await;
+    let tmp = TempDir::new().expect("tempdir");
+    let store = Arc::new(HashtreeStore::new(tmp.path())?);
+    let graph_store = open_social_graph_store_with_storage(
+        tmp.path(),
+        store.store_arc(),
+        Some(64 * 1024 * 1024),
+    )?;
+    let relay = TestRelay::new(Vec::new());
+    let publish_keys = nostr_sdk::Keys::generate();
+    let mirror = BackgroundNostrMirror::new(
+        NostrMirrorConfig {
+            relays: vec![relay.url()],
+            publish_relays: vec![relay.url()],
+            history_sync_on_start: false,
+            published_profile_search_tree_name: Some("profile-search".to_string()),
+            published_profiles_by_pubkey_tree_name: Some("profiles-by-pubkey".to_string()),
+            ..NostrMirrorConfig::default()
+        },
+        store,
+        graph_store,
+        Some(publish_keys),
+    )
+    .await?;
+
+    let connected_started = std::time::Instant::now();
+    while connected_started.elapsed() < Duration::from_secs(5) {
+        if mirror.has_connected_publish_relay().await {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(
+        mirror.has_connected_publish_relay().await,
+        "publisher relay should connect"
+    );
+
+    BackgroundNostrMirror::note_root_change(
+        Some("profile-search"),
+        &mirror.profile_search_publish_state,
+        Some(hashtree_core::Cid::public([31; 32])),
+    )?;
+    BackgroundNostrMirror::note_root_change(
+        Some("profiles-by-pubkey"),
+        &mirror.profiles_by_pubkey_publish_state,
+        Some(hashtree_core::Cid::public([32; 32])),
+    )?;
+    let fence_path = crate::socialgraph::profile_publication_fence_path(tmp.path());
+    std::fs::create_dir_all(fence_path.parent().expect("fence parent"))
+        .expect("create generated fence directory");
+    std::fs::write(&fence_path, b"generated test fence\n")
+        .expect("write generated profile publication fence");
+
+    mirror.maybe_publish_profile_search_root(true).await?;
+    mirror.maybe_publish_profiles_by_pubkey_root(true).await?;
+    assert!(
+        mirror
+            .profile_publication_fence_logged
+            .load(std::sync::atomic::Ordering::Acquire),
+        "the mirror must retain an observable deferral state while fenced"
+    );
+    assert_eq!(published_root_event_count(&relay, "profile-search"), 0);
+    assert_eq!(published_root_event_count(&relay, "profiles-by-pubkey"), 0);
+
+    std::fs::remove_file(&fence_path).expect("remove generated fence");
+    mirror.maybe_publish_profile_search_root(true).await?;
+    mirror.maybe_publish_profiles_by_pubkey_root(true).await?;
+    assert!(
+        !mirror
+            .profile_publication_fence_logged
+            .load(std::sync::atomic::Ordering::Acquire),
+        "an allowed publication attempt must clear the deferral state"
+    );
+    assert_eq!(published_root_event_count(&relay, "profile-search"), 1);
+    assert_eq!(published_root_event_count(&relay, "profiles-by-pubkey"), 1);
+    Ok(())
+}
+
+#[tokio::test]
 async fn apply_history_root_publishes_profiles_by_pubkey_tree() -> Result<()> {
     let _guard = crate::socialgraph::test_lock().await;
     let tmp = TempDir::new().expect("tempdir");

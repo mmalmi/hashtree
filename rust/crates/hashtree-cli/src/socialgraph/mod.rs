@@ -57,6 +57,8 @@ use std::time::Instant;
 
 pub type UserSet = BTreeSet<[u8; 32]>;
 
+const PROFILE_PUBLICATION_FENCE_RELATIVE_PATH: &str =
+    "nostr-index/bulk-projection-v3/profile-publication.fenced";
 const DEFAULT_ROOT_HEX: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 const EVENTS_ROOT_FILE: &str = "events-root.msgpack";
 const AMBIENT_EVENTS_ROOT_FILE: &str = "events-root-ambient.msgpack";
@@ -70,6 +72,31 @@ const SOCIALGRAPH_MAX_DBS: u32 = 16;
 const PROFILE_SEARCH_INDEX_ORDER: usize = 64;
 const PROFILE_SEARCH_PREFIX: &str = "p:";
 const PROFILE_NAME_MAX_LENGTH: usize = 100;
+
+pub fn profile_publication_fence_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(PROFILE_PUBLICATION_FENCE_RELATIVE_PATH)
+}
+
+pub fn profile_publication_is_fenced(data_dir: &Path) -> Result<bool> {
+    let path = profile_publication_fence_path(data_dir);
+    match std::fs::symlink_metadata(&path) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error)
+            .with_context(|| format!("inspect profile publication fence {}", path.display())),
+    }
+}
+
+pub fn require_profile_publication_unfenced(data_dir: &Path) -> Result<()> {
+    if profile_publication_is_fenced(data_dir)? {
+        let path = profile_publication_fence_path(data_dir);
+        anyhow::bail!(
+            "profile-root publication is fenced by active v3 tranche marker {}",
+            path.display()
+        );
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventStorageClass {
@@ -862,6 +889,26 @@ impl SocialGraphStore {
         self.update_profile_index_for_events(events)
     }
 
+    /// Apply profile updates using an immutable, independently derived rank
+    /// decision for every profile author. `Some(distance)` retains the profile
+    /// with that exact search rank; `None` removes an excluded profile.
+    pub fn sync_profile_index_for_events_with_frozen_distances(
+        &self,
+        events: &[Event],
+        decisions: &BTreeMap<String, Option<u32>>,
+    ) -> Result<()> {
+        self.update_profile_index_for_events_with(events, true, |event| {
+            let pubkey = event.pubkey.to_hex();
+            match decisions.get(&pubkey) {
+                Some(Some(distance)) => Ok((Some(*distance), false)),
+                Some(None) => Ok((None, true)),
+                None => {
+                    anyhow::bail!("frozen profile rank decisions omitted metadata author {pubkey}")
+                }
+            }
+        })
+    }
+
     pub(crate) fn rebuild_profile_index_for_events(&self, events: &[Event]) -> Result<()> {
         let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
         let (by_pubkey_root, search_root) = self
@@ -1084,22 +1131,36 @@ impl SocialGraphStore {
     }
 
     fn update_profile_index_for_events(&self, events: &[Event]) -> Result<()> {
-        let latest_by_pubkey = latest_metadata_events_by_pubkey(events);
         let threshold = self.profile_index_overmute_threshold();
-
-        if latest_by_pubkey.is_empty() {
-            return Ok(());
-        }
-
-        let mut updates = Vec::with_capacity(latest_by_pubkey.len());
-        for event in latest_by_pubkey.into_values() {
+        self.update_profile_index_for_events_with(events, false, |event| {
             let overmuted = self.is_overmuted_user(&event.pubkey.to_bytes(), threshold)?;
             let follow_distance = if overmuted {
                 None
             } else {
                 self.follow_distance(&event.pubkey.to_bytes())?
             };
-            updates.push((event, follow_distance, overmuted));
+            Ok((follow_distance, overmuted))
+        })
+    }
+
+    fn update_profile_index_for_events_with<F>(
+        &self,
+        events: &[Event],
+        force_existing_search_value: bool,
+        mut classify: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&Event) -> Result<(Option<u32>, bool)>,
+    {
+        let latest_by_pubkey = latest_metadata_events_by_pubkey(events);
+        if latest_by_pubkey.is_empty() {
+            return Ok(());
+        }
+
+        let mut updates = Vec::with_capacity(latest_by_pubkey.len());
+        for event in latest_by_pubkey.into_values() {
+            let (follow_distance, remove) = classify(event)?;
+            updates.push((event, follow_distance, remove, force_existing_search_value));
         }
 
         let by_pubkey_root = self.profile_index.by_pubkey_root()?;

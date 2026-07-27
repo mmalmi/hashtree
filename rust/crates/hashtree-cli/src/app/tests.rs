@@ -120,6 +120,7 @@ fn test_nostr_index_query_args() {
     let Commands::NostrIndex { command } = cli.command else {
         panic!("expected nostr-index command");
     };
+    let command = *command;
     let NostrIndexCommands::Query {
         root,
         filter,
@@ -156,6 +157,7 @@ fn test_nostr_index_import_args() {
     let Commands::NostrIndex { command } = cli.command else {
         panic!("expected nostr-index command");
     };
+    let command = *command;
     let NostrIndexCommands::Import {
         root,
         events_file,
@@ -246,6 +248,7 @@ fn test_nostr_bulk_projection_audit_requires_all_trust_pins_and_output() {
     let Commands::NostrIndex { command } = cli.command else {
         panic!("expected nostr-index command");
     };
+    let command = *command;
     let NostrIndexCommands::AuditBulkProjection {
         staging_data_dir,
         expected_state_sha256,

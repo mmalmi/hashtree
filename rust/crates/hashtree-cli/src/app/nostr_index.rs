@@ -21,7 +21,7 @@ use nostr_sdk::{
     Filter as NostrFilter,
 };
 use reqwest::header::ACCEPT;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 
@@ -45,9 +45,11 @@ const CRAWL_LOCK_FILE: &str = "crawl.lock";
 const CRAWL_STATE_VERSION: u32 = 1;
 const STAGE_DIR: &str = "nostr-stage";
 const STAGE_SEGMENTS_DIR: &str = "segments";
+const STAGE_SEGMENT_CLAIMS_DIR: &str = "segment-claims";
 const STAGE_STATE_FILE: &str = "crawl-state.json";
 const STAGE_LOCK_FILE: &str = "crawl.lock";
 const STAGE_FORMAT_VERSION: u32 = 1;
+const STAGE_SEGMENT_CLAIM_VERSION: u32 = 1;
 const IMMUTABLE_PENDING_SUFFIX: &str = ".pending";
 const MAX_STAGED_LIVE_BYTES_AHEAD: u64 = 8 * 1024 * 1024 * 1024;
 const MIRROR_STATE_DIR: &str = "nostr-mirror";
@@ -239,6 +241,15 @@ struct StagedNostrCrawlState {
     events_seen: usize,
     events_selected: usize,
     live_bytes_selected: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct StagedSegmentClaim {
+    version: u32,
+    start_author: usize,
+    end_author: usize,
+    body_sha256: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -1589,6 +1600,31 @@ async fn stage_allowlist_in_checkpoints(
             live_bytes_selected: indexed_state.map_or(0, |state| state.live_bytes_selected),
         },
     };
+    while let Some(recovered) = recover_uncheckpointed_stage_segment(paths.staging, &state)? {
+        let cids = recovered
+            .event_cids
+            .iter()
+            .map(|root| parse_root_text(root))
+            .collect::<Result<Vec<_>>>()?;
+        event_store.load_event_blobs(cids).await.with_context(|| {
+            format!(
+                "verify recovered durable staged event blobs for authors {}..{}",
+                recovered.start_author, recovered.end_author
+            )
+        })?;
+        advance_stage_state_from_segment(&mut state, &recovered)?;
+        persist_stage_state(paths.staging, &state)?;
+        eprintln!(
+            "Recovered staged segment after publish/checkpoint crash: authors={}/{} segment={}..{} events_seen={} events_selected={} live_bytes={}",
+            state.next_author,
+            authors.len(),
+            recovered.start_author,
+            recovered.end_author,
+            state.events_seen,
+            state.events_selected,
+            state.live_bytes_selected
+        );
+    }
     state.author_allowlist_source = options.author_allowlist_url.clone();
     state.policy = policy;
     persist_stage_state(paths.staging, &state)?;
@@ -1716,7 +1752,7 @@ async fn stage_allowlist_in_checkpoints(
                     )
                 })?;
         }
-        let segment = StagedAuthorSegment {
+        let fetched_segment = StagedAuthorSegment {
             version: STAGE_FORMAT_VERSION,
             start_author: start,
             end_author: end,
@@ -1728,16 +1764,9 @@ async fn stage_allowlist_in_checkpoints(
                 .map(cid_to_nhash)
                 .collect::<Result<Vec<_>>>()?,
         };
-        persist_stage_segment(paths.staging, &segment, &state.policy)?;
+        let segment = persist_stage_segment(paths.staging, &fetched_segment, &state.policy)?;
 
-        state.next_author = end;
-        state.events_seen = state.events_seen.saturating_add(segment.events_seen);
-        state.events_selected = state
-            .events_selected
-            .saturating_add(segment.events_selected);
-        state.live_bytes_selected = state
-            .live_bytes_selected
-            .saturating_add(segment.live_bytes_selected);
+        advance_stage_state_from_segment(&mut state, &segment)?;
         persist_stage_state(paths.staging, &state)?;
         hashtree_cli::diagnostics::trim_process_allocations();
         eprintln!(
@@ -2489,6 +2518,9 @@ fn validate_stage_state(
         );
     }
     let mut resumed_identity = state.policy.clone();
+    // Segment claims pin each historical start to its immutable end and body
+    // digest, so future fetch cadence can change without making mixed-width
+    // staged history ambiguous or requiring a directory scan.
     resumed_identity.author_batch_size = expected_policy.author_batch_size;
     resumed_identity.checkpoint_authors = expected_policy.checkpoint_authors;
     if resumed_identity.require_all_relays && !expected_policy.require_all_relays {
@@ -2509,6 +2541,58 @@ fn validate_stage_state(
     Ok(())
 }
 
+fn create_dir_all_durable(path: &Path) -> Result<()> {
+    let absolute;
+    let path = if path.is_absolute() {
+        path
+    } else {
+        absolute = std::env::current_dir()
+            .context("resolve current directory for durable hierarchy")?
+            .join(path);
+        absolute.as_path()
+    };
+    let mut missing = Vec::new();
+    let mut cursor = path;
+    while !cursor.exists() {
+        missing.push(cursor.to_path_buf());
+        cursor = cursor
+            .parent()
+            .context("durable directory hierarchy has no existing ancestor")?;
+    }
+    if !cursor.is_dir() {
+        anyhow::bail!(
+            "durable directory ancestor is not a directory: {}",
+            cursor.display()
+        );
+    }
+    for directory in missing.iter().rev() {
+        match std::fs::create_dir(directory) {
+            Ok(()) => {}
+            Err(error)
+                if error.kind() == std::io::ErrorKind::AlreadyExists && directory.is_dir() => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("create durable directory {}", directory.display()));
+            }
+        }
+        #[cfg(unix)]
+        {
+            File::open(directory)
+                .with_context(|| format!("open {} for fsync", directory.display()))?
+                .sync_all()
+                .with_context(|| format!("fsync {}", directory.display()))?;
+            let parent = directory
+                .parent()
+                .context("created durable directory has no parent")?;
+            File::open(parent)
+                .with_context(|| format!("open {} for fsync", parent.display()))?
+                .sync_all()
+                .with_context(|| format!("fsync {}", parent.display()))?;
+        }
+    }
+    Ok(())
+}
+
 fn stage_segment_path(data_dir: &Path, start_author: usize, end_author: usize) -> PathBuf {
     data_dir
         .join(STAGE_DIR)
@@ -2516,12 +2600,90 @@ fn stage_segment_path(data_dir: &Path, start_author: usize, end_author: usize) -
         .join(format!("{start_author:012}-{end_author:012}.json"))
 }
 
+fn stage_segment_claim_path(data_dir: &Path, start_author: usize) -> PathBuf {
+    data_dir
+        .join(STAGE_DIR)
+        .join(STAGE_SEGMENT_CLAIMS_DIR)
+        .join(format!("{start_author:012}.json"))
+}
+
+fn stage_bytes_sha256(bytes: &[u8]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(bytes);
+    hex::encode(digest.finalize())
+}
+
+fn validate_stage_sha256(label: &str, value: &str) -> Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        anyhow::bail!("{label} must be a lowercase 64-character SHA-256");
+    }
+    Ok(())
+}
+
+fn stage_segment_claim(segment: &StagedAuthorSegment, bytes: &[u8]) -> Result<StagedSegmentClaim> {
+    if segment.version != STAGE_FORMAT_VERSION || segment.end_author <= segment.start_author {
+        anyhow::bail!("cannot claim an invalid staged author segment");
+    }
+    Ok(StagedSegmentClaim {
+        version: STAGE_SEGMENT_CLAIM_VERSION,
+        start_author: segment.start_author,
+        end_author: segment.end_author,
+        body_sha256: stage_bytes_sha256(bytes),
+    })
+}
+
+fn persist_stage_segment_claim(
+    data_dir: &Path,
+    segment: &StagedAuthorSegment,
+    bytes: &[u8],
+) -> Result<()> {
+    let claim = stage_segment_claim(segment, bytes)?;
+    let mut claim_bytes =
+        serde_json::to_vec(&claim).context("encode Nostr staging segment claim")?;
+    claim_bytes.push(b'\n');
+    persist_immutable_bytes(
+        &stage_segment_claim_path(data_dir, segment.start_author),
+        &claim_bytes,
+        "Nostr staging segment boundary claim",
+    )
+}
+
+fn load_stage_segment_claim(data_dir: &Path, start_author: usize) -> Result<StagedSegmentClaim> {
+    let claim_path = stage_segment_claim_path(data_dir, start_author);
+    let claim_bytes = std::fs::read(&claim_path).with_context(|| {
+        format!(
+            "read immutable staged segment boundary claim at {}",
+            claim_path.display()
+        )
+    })?;
+    let claim: StagedSegmentClaim = serde_json::from_slice(&claim_bytes)
+        .with_context(|| format!("parse {}", claim_path.display()))?;
+    let mut canonical_claim =
+        serde_json::to_vec(&claim).context("re-encode staged segment boundary claim")?;
+    canonical_claim.push(b'\n');
+    if claim_bytes != canonical_claim
+        || claim.version != STAGE_SEGMENT_CLAIM_VERSION
+        || claim.start_author != start_author
+        || claim.end_author <= claim.start_author
+    {
+        anyhow::bail!(
+            "invalid immutable staged segment boundary claim {}",
+            claim_path.display()
+        );
+    }
+    validate_stage_sha256("staged segment body SHA-256", &claim.body_sha256)?;
+    Ok(claim)
+}
+
 fn persist_json_atomic<T: serde::Serialize>(path: &Path, value: &T, label: &str) -> Result<()> {
     let output_dir = path
         .parent()
         .context("atomic JSON path has no parent directory")?;
-    std::fs::create_dir_all(output_dir)
-        .with_context(|| format!("create {}", output_dir.display()))?;
+    create_dir_all_durable(output_dir)?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -2573,13 +2735,16 @@ fn fsync_parent(path: &Path) -> Result<()> {
 
 /// Publish immutable bytes without replacing an existing destination.
 ///
-/// A deterministic pending name makes a fully written orphan adoptable after
-/// a crash. The hard link is the no-replace commit point.
+/// A deterministic pending name makes a fully written orphan adoptable and a
+/// partially written crash orphan repairable. Callers hold the namespace's
+/// exclusive writer lock, so repairing the unpublished pending inode cannot
+/// race another legitimate writer. The destination hard link remains the
+/// no-replace commit point and is never overwritten.
 fn persist_immutable_bytes(path: &Path, bytes: &[u8], label: &str) -> Result<()> {
     let parent = path
         .parent()
         .context("immutable path has no parent directory")?;
-    std::fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    create_dir_all_durable(parent)?;
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -2596,16 +2761,8 @@ fn persist_immutable_bytes(path: &Path, bytes: &[u8], label: &str) -> Result<()>
             );
         }
         if pending.exists() {
-            let orphan = std::fs::read(&pending)
-                .with_context(|| format!("read pending {}", pending.display()))?;
-            if orphan != bytes {
-                anyhow::bail!(
-                    "{label} has a conflicting pending orphan at {}",
-                    pending.display()
-                );
-            }
             std::fs::remove_file(&pending)
-                .with_context(|| format!("remove adopted {}", pending.display()))?;
+                .with_context(|| format!("remove obsolete pending {}", pending.display()))?;
         }
         fsync_parent(path)?;
         return Ok(());
@@ -2626,10 +2783,21 @@ fn persist_immutable_bytes(path: &Path, bytes: &[u8], label: &str) -> Result<()>
             let orphan = std::fs::read(&pending)
                 .with_context(|| format!("read pending {}", pending.display()))?;
             if orphan != bytes {
-                anyhow::bail!(
-                    "{label} has a conflicting pending orphan at {}",
-                    pending.display()
-                );
+                let mut file = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&pending)
+                    .with_context(|| format!("repair partial pending {}", pending.display()))?;
+                file.write_all(bytes)
+                    .with_context(|| format!("rewrite {}", pending.display()))?;
+                file.sync_all()
+                    .with_context(|| format!("fsync repaired {}", pending.display()))?;
+            } else {
+                File::open(&pending)
+                    .with_context(|| format!("open pending {} for fsync", pending.display()))?
+                    .sync_all()
+                    .with_context(|| format!("fsync pending {}", pending.display()))?;
             }
         }
         Err(error) => {
@@ -2704,13 +2872,91 @@ fn expected_stage_segment_end(
         .min(policy.author_count))
 }
 
+fn recover_uncheckpointed_stage_segment(
+    data_dir: &Path,
+    state: &StagedNostrCrawlState,
+) -> Result<Option<StagedAuthorSegment>> {
+    if state.next_author >= state.policy.author_count {
+        return Ok(None);
+    }
+    let start = state.next_author;
+    let claim_path = stage_segment_claim_path(data_dir, start);
+    if claim_path.exists() {
+        return load_stage_segment(data_dir, start, &state.policy).map(Some);
+    }
+    // The old persisted cadence remains authoritative until this recovery
+    // check completes. It identifies the sole body that can have reached its
+    // durable publish boundary before a crash stopped claim/state publication.
+    let old_end = expected_stage_segment_end(&state.policy, start)?;
+    let body_path = stage_segment_path(data_dir, start, old_end);
+    if !body_path.exists() {
+        return Ok(None);
+    }
+    let (_, bytes, segment) = load_stage_segment_path_with_bytes(&body_path, start, &state.policy)?;
+    persist_stage_segment_claim(data_dir, &segment, &bytes)?;
+    Ok(Some(segment))
+}
+
+fn advance_stage_state_from_segment(
+    state: &mut StagedNostrCrawlState,
+    segment: &StagedAuthorSegment,
+) -> Result<()> {
+    if segment.start_author != state.next_author
+        || segment.end_author <= segment.start_author
+        || segment.end_author > state.policy.author_count
+    {
+        anyhow::bail!(
+            "cannot advance staging state at {} from durable segment {}..{}",
+            state.next_author,
+            segment.start_author,
+            segment.end_author
+        );
+    }
+    state.next_author = segment.end_author;
+    state.events_seen = state
+        .events_seen
+        .checked_add(segment.events_seen)
+        .context("staging events-seen counter overflow")?;
+    state.events_selected = state
+        .events_selected
+        .checked_add(segment.events_selected)
+        .context("staging events-selected counter overflow")?;
+    state.live_bytes_selected = state
+        .live_bytes_selected
+        .checked_add(segment.live_bytes_selected)
+        .context("staging live-byte counter overflow")?;
+    Ok(())
+}
+
 fn persist_stage_segment(
     data_dir: &Path,
     segment: &StagedAuthorSegment,
     policy: &IndexedNostrCrawlPolicy,
-) -> Result<()> {
+) -> Result<StagedAuthorSegment> {
     if segment.version != STAGE_FORMAT_VERSION || segment.end_author <= segment.start_author {
         anyhow::bail!("refusing to persist an invalid staged author segment");
+    }
+    let claim_path = stage_segment_claim_path(data_dir, segment.start_author);
+    if claim_path.exists() {
+        let claim = load_stage_segment_claim(data_dir, segment.start_author)?;
+        if claim.end_author > policy.author_count {
+            anyhow::bail!(
+                "durable staged segment claim {}..{} exceeds {} policy authors",
+                claim.start_author,
+                claim.end_author,
+                policy.author_count
+            );
+        }
+        let body_path = stage_segment_path(data_dir, segment.start_author, claim.end_author);
+        let (_, body_bytes, durable_segment) =
+            load_stage_segment_path_with_bytes(&body_path, segment.start_author, policy)?;
+        if stage_bytes_sha256(&body_bytes) != claim.body_sha256 {
+            anyhow::bail!(
+                "staged author segment body differs from immutable claim {}",
+                claim_path.display()
+            );
+        }
+        return Ok(durable_segment);
     }
     let expected_end = expected_stage_segment_end(policy, segment.start_author)?;
     if segment.end_author != expected_end {
@@ -2725,10 +2971,18 @@ fn persist_stage_segment(
     for cid in &segment.event_cids {
         parse_root_text(cid).context("parse staged event CID before immutable publish")?;
     }
-    let path = stage_segment_path(data_dir, segment.start_author, segment.end_author);
     let mut bytes = serde_json::to_vec(segment).context("encode Nostr staging segment")?;
     bytes.push(b'\n');
-    persist_immutable_bytes(&path, &bytes, "Nostr staging segment")
+    let body_path = stage_segment_path(data_dir, segment.start_author, segment.end_author);
+    if body_path.exists() {
+        let (_, body_bytes, durable_segment) =
+            load_stage_segment_path_with_bytes(&body_path, segment.start_author, policy)?;
+        persist_stage_segment_claim(data_dir, &durable_segment, &body_bytes)?;
+        return Ok(durable_segment);
+    }
+    persist_immutable_bytes(&body_path, &bytes, "Nostr staging segment")?;
+    persist_stage_segment_claim(data_dir, segment, &bytes)?;
+    Ok(segment.clone())
 }
 
 fn load_stage_segment(
@@ -2745,15 +2999,50 @@ fn load_stage_segment_with_bytes(
     start_author: usize,
     policy: &IndexedNostrCrawlPolicy,
 ) -> Result<(PathBuf, Vec<u8>, StagedAuthorSegment)> {
-    let expected_end = expected_stage_segment_end(policy, start_author)?;
-    let path = stage_segment_path(data_dir, start_author, expected_end);
-    let (file_start, file_end) = stage_segment_file_parts(&path)?;
+    if start_author >= policy.author_count {
+        anyhow::bail!(
+            "staged segment start {start_author} is outside {} policy authors",
+            policy.author_count
+        );
+    }
+    let claim = load_stage_segment_claim(data_dir, start_author)?;
+    if claim.end_author > policy.author_count {
+        anyhow::bail!(
+            "staged segment claim {}..{} exceeds {} policy authors",
+            claim.start_author,
+            claim.end_author,
+            policy.author_count
+        );
+    }
+    let path = stage_segment_path(data_dir, start_author, claim.end_author);
+    let (path, bytes, segment) = load_stage_segment_path_with_bytes(&path, start_author, policy)?;
+    if stage_bytes_sha256(&bytes) != claim.body_sha256 {
+        anyhow::bail!(
+            "staged author segment body differs from immutable claim {}",
+            stage_segment_claim_path(data_dir, start_author).display()
+        );
+    }
+    Ok((path, bytes, segment))
+}
+
+fn load_stage_segment_path_with_bytes(
+    path: &Path,
+    start_author: usize,
+    policy: &IndexedNostrCrawlPolicy,
+) -> Result<(PathBuf, Vec<u8>, StagedAuthorSegment)> {
+    let (file_start, file_end) = stage_segment_file_parts(path)?;
+    if start_author >= policy.author_count || file_end > policy.author_count {
+        anyhow::bail!(
+            "staged segment boundary {start_author}..{file_end} exceeds {} policy authors",
+            policy.author_count
+        );
+    }
     note_stage_segment_file_read();
-    let bytes = std::fs::read(&path).with_context(|| {
+    let bytes = std::fs::read(path).with_context(|| {
         format!(
             "read staged author segment {}..{} at {}",
             start_author,
-            expected_end,
+            file_end,
             path.display()
         )
     })?;
@@ -2771,7 +3060,7 @@ fn load_stage_segment_with_bytes(
         parse_root_text(cid)
             .with_context(|| format!("parse staged event CID in {}", path.display()))?;
     }
-    Ok((path, bytes, segment))
+    Ok((path.to_path_buf(), bytes, segment))
 }
 
 fn validate_crawl_state(
@@ -4299,6 +4588,30 @@ mod tests {
     }
 
     #[test]
+    fn staging_state_allows_new_cadence_because_segment_claims_pin_old_boundaries() {
+        let policy = stage_test_policy(8, 4);
+        let state = StagedNostrCrawlState {
+            version: STAGE_FORMAT_VERSION,
+            author_allowlist_source: Some("http://127.0.0.1/authors".to_string()),
+            policy: policy.clone(),
+            next_author: 4,
+            events_seen: 0,
+            events_selected: 0,
+            live_bytes_selected: 0,
+        };
+
+        let mut changed_batch_width = policy.clone();
+        changed_batch_width.author_batch_size = 2;
+        validate_stage_state(&state, &changed_batch_width, 8)
+            .expect("per-start claims make a new author batch width safe");
+
+        let mut changed_checkpoint_width = policy;
+        changed_checkpoint_width.checkpoint_authors = 2;
+        validate_stage_state(&state, &changed_checkpoint_width, 8)
+            .expect("per-start claims make a new checkpoint width safe");
+    }
+
+    #[test]
     fn staged_segment_publish_is_immutable_and_retryable() {
         let tmp = TempDir::new().expect("tempdir");
         let policy = stage_test_policy(8, 4);
@@ -4328,15 +4641,15 @@ mod tests {
 
         let mut conflicting = segment.clone();
         conflicting.events_seen = 3;
-        let error = persist_stage_segment(tmp.path(), &conflicting, &policy)
-            .expect_err("same boundary with different bytes must fail");
-        assert!(error.to_string().contains("different bytes"));
+        let adopted = persist_stage_segment(tmp.path(), &conflicting, &policy)
+            .expect("durable claimed bytes win over changed relay results");
+        assert_eq!(adopted, segment);
 
-        let mut different_boundary = segment;
+        let mut different_boundary = segment.clone();
         different_boundary.end_author = 5;
-        let error = persist_stage_segment(tmp.path(), &different_boundary, &policy)
-            .expect_err("duplicate start with a different end must fail");
-        assert!(error.to_string().contains("differs from policy boundary"));
+        let adopted = persist_stage_segment(tmp.path(), &different_boundary, &policy)
+            .expect("durable claimed boundary wins over a later cadence");
+        assert_eq!(adopted, segment);
     }
 
     #[test]
@@ -4379,6 +4692,109 @@ mod tests {
     }
 
     #[test]
+    fn staged_segment_publish_repairs_partial_pending_crash_orphan() {
+        let tmp = TempDir::new().expect("tempdir");
+        let policy = stage_test_policy(2, 2);
+        let segment = StagedAuthorSegment {
+            version: STAGE_FORMAT_VERSION,
+            start_author: 0,
+            end_author: 2,
+            events_seen: 1,
+            events_selected: 0,
+            live_bytes_selected: 0,
+            event_cids: Vec::new(),
+        };
+        let path = stage_segment_path(tmp.path(), 0, 2);
+        let parent = path.parent().expect("segment parent");
+        std::fs::create_dir_all(parent).expect("create segment parent");
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("segment file name");
+        let pending = parent.join(format!(".{file_name}{IMMUTABLE_PENDING_SUFFIX}"));
+        std::fs::write(&pending, b"{\"version\":1")
+            .expect("simulate a truncated unpublished pending file");
+
+        persist_stage_segment(tmp.path(), &segment, &policy)
+            .expect("repair partial orphan and commit exact immutable segment");
+
+        let mut expected = serde_json::to_vec(&segment).expect("encode expected segment");
+        expected.push(b'\n');
+        assert_eq!(
+            std::fs::read(&path).expect("read committed segment"),
+            expected
+        );
+        assert!(!pending.exists());
+    }
+
+    #[test]
+    fn restart_claims_old_cadence_body_and_advances_from_durable_counters() {
+        let tmp = TempDir::new().expect("tempdir");
+        let old_policy = stage_test_policy(4, 1);
+        let durable = StagedAuthorSegment {
+            version: STAGE_FORMAT_VERSION,
+            start_author: 0,
+            end_author: 1,
+            events_seen: 7,
+            events_selected: 3,
+            live_bytes_selected: 512,
+            event_cids: Vec::new(),
+        };
+        let body_path = stage_segment_path(tmp.path(), 0, 1);
+        let mut body_bytes = serde_json::to_vec(&durable).expect("encode durable segment");
+        body_bytes.push(b'\n');
+        persist_immutable_bytes(&body_path, &body_bytes, "simulated pre-claim segment")
+            .expect("publish body before simulated crash");
+        assert!(!stage_segment_claim_path(tmp.path(), 0).exists());
+
+        let mut state = StagedNostrCrawlState {
+            version: STAGE_FORMAT_VERSION,
+            author_allowlist_source: None,
+            policy: old_policy,
+            next_author: 0,
+            events_seen: 10,
+            events_selected: 4,
+            live_bytes_selected: 1_024,
+        };
+        let recovered = recover_uncheckpointed_stage_segment(tmp.path(), &state)
+            .expect("recover with old persisted cadence")
+            .expect("durable uncheckpointed body");
+        assert_eq!(recovered, durable);
+        assert!(stage_segment_claim_path(tmp.path(), 0).exists());
+        advance_stage_state_from_segment(&mut state, &recovered)
+            .expect("advance only from adopted durable body");
+        assert_eq!(state.next_author, 1);
+        assert_eq!(state.events_seen, 17);
+        assert_eq!(state.events_selected, 7);
+        assert_eq!(state.live_bytes_selected, 1_536);
+
+        let new_policy = stage_test_policy(4, 2);
+        validate_stage_state(&state, &new_policy, 4).expect("new cadence is safe after recovery");
+        state.policy = new_policy.clone();
+        let changed_fetch = StagedAuthorSegment {
+            version: STAGE_FORMAT_VERSION,
+            start_author: 0,
+            end_author: 2,
+            events_seen: 999,
+            events_selected: 999,
+            live_bytes_selected: 999,
+            event_cids: Vec::new(),
+        };
+        let adopted = persist_stage_segment(tmp.path(), &changed_fetch, &new_policy)
+            .expect("claimed old body must beat changed refetch results");
+        assert_eq!(adopted, durable);
+        assert_eq!(
+            std::fs::read_dir(tmp.path().join(STAGE_DIR).join(STAGE_SEGMENTS_DIR))
+                .expect("read segment directory")
+                .filter_map(std::result::Result::ok)
+                .filter(|entry| entry.file_name().to_string_lossy().ends_with(".json"))
+                .count(),
+            1,
+            "restart must not publish a duplicate start under the new cadence"
+        );
+    }
+
+    #[test]
     fn targeted_stage_load_is_constant_io_and_defers_catalog_duplicate_detection() {
         let tmp = TempDir::new().expect("tempdir");
         let policy = stage_test_policy(20, 1);
@@ -4393,14 +4809,12 @@ mod tests {
         };
         let mut second = first.clone();
         second.end_author = 13;
-        for segment in [&first, &second] {
-            let path = stage_segment_path(tmp.path(), segment.start_author, segment.end_author);
-            std::fs::create_dir_all(path.parent().expect("segment parent"))
-                .expect("create segment parent");
-            let mut bytes = serde_json::to_vec(segment).expect("encode segment");
-            bytes.push(b'\n');
-            std::fs::write(path, bytes).expect("install duplicate segment");
-        }
+        persist_stage_segment(tmp.path(), &first, &policy)
+            .expect("publish canonical claimed segment");
+        let second_path = stage_segment_path(tmp.path(), second.start_author, second.end_author);
+        let mut second_bytes = serde_json::to_vec(&second).expect("encode duplicate segment");
+        second_bytes.push(b'\n');
+        std::fs::write(second_path, second_bytes).expect("install duplicate legacy body");
 
         reset_stage_segment_io_counts();
         let loaded = load_stage_segment(tmp.path(), 11, &policy)

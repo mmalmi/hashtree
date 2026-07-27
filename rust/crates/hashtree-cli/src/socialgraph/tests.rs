@@ -661,6 +661,69 @@ fn test_profile_search_entries_include_follow_distance() {
 }
 
 #[test]
+fn test_profile_sync_uses_only_frozen_rank_decisions() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let alice_keys = Keys::generate();
+    let excluded_keys = Keys::generate();
+    let missing_keys = Keys::generate();
+    let profile = |keys: &Keys, name: &str, created_at| {
+        event_builder!(
+            Kind::Metadata,
+            serde_json::json!({ "display_name": name }).to_string(),
+            [],
+        )
+        .custom_created_at(Timestamp::from_secs(created_at))
+        .sign_with_keys(keys)
+        .unwrap()
+    };
+    let alice = profile(&alice_keys, "Frozen Alice", 5);
+    let excluded = profile(&excluded_keys, "Excluded Bob", 5);
+
+    graph_store
+        .sync_profile_index_for_events(&[alice.clone(), excluded.clone()])
+        .unwrap();
+    assert!(!graph_store
+        .profile_search_entries_for_prefix("p:excluded")
+        .unwrap()
+        .is_empty());
+
+    let mut decisions = BTreeMap::new();
+    decisions.insert(alice.pubkey.to_hex(), Some(4));
+    decisions.insert(excluded.pubkey.to_hex(), None);
+    graph_store
+        .sync_profile_index_for_events_with_frozen_distances(
+            &[alice.clone(), excluded.clone()],
+            &decisions,
+        )
+        .unwrap();
+
+    let alice_entries = graph_store
+        .profile_search_entries_for_prefix("p:frozen")
+        .unwrap();
+    assert!(alice_entries
+        .iter()
+        .all(|(_, entry)| entry.follow_distance == Some(4)));
+    assert!(graph_store
+        .profile_search_entries_for_prefix("p:excluded")
+        .unwrap()
+        .is_empty());
+    assert!(graph_store
+        .latest_profile_event(&excluded.pubkey.to_hex())
+        .unwrap()
+        .is_none());
+
+    let missing = profile(&missing_keys, "Missing Decision", 6);
+    let error = graph_store
+        .sync_profile_index_for_events_with_frozen_distances(&[missing], &decisions)
+        .expect_err("missing frozen decision must fail closed");
+    assert!(error
+        .to_string()
+        .contains("frozen profile rank decisions omitted metadata author"));
+}
+
+#[test]
 fn test_ambient_metadata_events_are_mirrored_into_public_profile_index() {
     let _guard = test_lock_blocking();
     let tmp = TempDir::new().unwrap();

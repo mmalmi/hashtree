@@ -708,6 +708,45 @@ fn duplicate_spool_apply_requires_the_same_payload_and_cid() {
 }
 
 #[test]
+fn frozen_profile_distance_seal_uses_authority_and_fails_on_missing_authors() {
+    let temp = tempfile::tempdir().unwrap();
+    let spool = BulkProjectionSpool::open(temp.path()).unwrap();
+    let mut eligible = event(&"01".repeat(32), 10, 0);
+    eligible.pubkey = "11".repeat(32);
+    let mut excluded = event(&"02".repeat(32), 10, 0);
+    excluded.pubkey = "22".repeat(32);
+    spool
+        .apply(vec![
+            (eligible, Cid::public([1; 32])),
+            (excluded, Cid::public([2; 32])),
+        ])
+        .unwrap();
+
+    let mut decisions = BTreeMap::new();
+    decisions.insert("11".repeat(32), Some(4));
+    decisions.insert("22".repeat(32), None);
+    let (actual, count) = spool
+        .profile_distance_seal_for_frozen_authority(&decisions)
+        .unwrap();
+    let expected = hashtree_cli::socialgraph::profile_follow_distance_seal_v2(&BTreeMap::from([(
+        "11".repeat(32),
+        Some(4),
+    )]));
+    assert_eq!(actual, expected);
+    assert_eq!(count, 1);
+
+    let mut missing = event(&"03".repeat(32), 10, 0);
+    missing.pubkey = "33".repeat(32);
+    spool.apply(vec![(missing, Cid::public([3; 32]))]).unwrap();
+    let error = spool
+        .profile_distance_seal_for_frozen_authority(&decisions)
+        .expect_err("missing frozen profile authority must fail");
+    assert!(error
+        .to_string()
+        .contains("omitted retained metadata author"));
+}
+
+#[test]
 fn deferred_sorted_edges_match_ordered_long_key_mutations() {
     let baseline_dir = tempfile::tempdir().unwrap();
     let baseline = BulkProjectionSpool::open(baseline_dir.path()).unwrap();
@@ -1061,6 +1100,7 @@ async fn production_replay_chunk_is_idempotent_before_cursor_checkpoint() {
         &target_events,
         &staging_events,
         cids.clone(),
+        ProfileDistanceAuthority::LiveGraph,
     )
     .await
     .unwrap();
@@ -1076,6 +1116,7 @@ async fn production_replay_chunk_is_idempotent_before_cursor_checkpoint() {
         &target_events,
         &staging_events,
         cids.clone(),
+        ProfileDistanceAuthority::LiveGraph,
     )
     .await
     .unwrap();

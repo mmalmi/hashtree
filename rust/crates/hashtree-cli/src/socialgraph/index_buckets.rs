@@ -565,7 +565,7 @@ impl ProfileIndexBucket {
         &self,
         by_pubkey_root: Option<&Cid>,
         search_root: Option<&Cid>,
-        updates: &[(&Event, Option<u32>, bool)],
+        updates: &[(&Event, Option<u32>, bool, bool)],
     ) -> Result<(Option<Cid>, Option<Cid>, bool)> {
         if updates.is_empty() {
             return Ok((by_pubkey_root.cloned(), search_root.cloned(), false));
@@ -573,7 +573,7 @@ impl ProfileIndexBucket {
 
         let pubkeys = updates
             .iter()
-            .map(|(event, _, _)| event.pubkey.to_hex())
+            .map(|(event, _, _, _)| event.pubkey.to_hex())
             .collect::<Vec<_>>();
         let existing_cids = block_on(self.index.get_links(by_pubkey_root, pubkeys))
             .context("lookup existing mirrored profile events")?;
@@ -588,7 +588,7 @@ impl ProfileIndexBucket {
         let mut by_pubkey_changes = BTreeMap::<String, Option<Cid>>::new();
         let mut search_changes = BTreeMap::<String, Option<String>>::new();
 
-        for (event, follow_distance, remove) in updates {
+        for (event, follow_distance, remove, force_existing_search_value) in updates {
             let pubkey = event.pubkey.to_hex();
             let existing_event = match existing_cids.get(&pubkey) {
                 Some(cid) => self.load_profile_event(cid)?,
@@ -608,18 +608,28 @@ impl ProfileIndexBucket {
                 continue;
             }
 
-            if existing_event
+            let existing_order = existing_event
                 .as_ref()
-                .is_some_and(|current| compare_nostr_events(event, current).is_le())
+                .map(|current| compare_nostr_events(event, current));
+            if existing_order.is_some_and(std::cmp::Ordering::is_lt)
+                || (existing_order.is_some_and(std::cmp::Ordering::is_eq)
+                    && !force_existing_search_value)
             {
                 continue;
             }
-
-            let bytes = event.as_json().into_bytes();
-            let mirrored_cid = block_on(buffered_tree.put_file(&bytes))
-                .map(|(cid, _size)| cid)
-                .context("buffer mirrored profile event")?;
-            by_pubkey_changes.insert(pubkey.clone(), Some(mirrored_cid.clone()));
+            let mirrored_cid = if existing_order.is_some_and(std::cmp::Ordering::is_eq) {
+                existing_cids
+                    .get(&pubkey)
+                    .cloned()
+                    .context("existing profile event has no mirrored CID")?
+            } else {
+                let bytes = event.as_json().into_bytes();
+                let mirrored_cid = block_on(buffered_tree.put_file(&bytes))
+                    .map(|(cid, _size)| cid)
+                    .context("buffer mirrored profile event")?;
+                by_pubkey_changes.insert(pubkey.clone(), Some(mirrored_cid.clone()));
+                mirrored_cid
+            };
             if let Some(current) = existing_event.as_ref() {
                 for term in profile_search_terms_for_event(current) {
                     search_changes.insert(format!("{PROFILE_SEARCH_PREFIX}{term}:{pubkey}"), None);

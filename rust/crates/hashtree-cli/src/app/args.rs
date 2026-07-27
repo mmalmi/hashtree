@@ -471,7 +471,7 @@ pub(crate) enum Commands {
     /// Query local hashtree-backed Nostr event indexes
     NostrIndex {
         #[command(subcommand)]
-        command: NostrIndexCommands,
+        command: Box<NostrIndexCommands>,
     },
 
     /// Follow a user (adds to your contact list)
@@ -1150,6 +1150,18 @@ pub(crate) enum NostrIndexCommands {
         /// Exhaustive audit JSON for the exact terminal v2 candidate
         #[arg(long = "audit-evidence")]
         audit_evidence: PathBuf,
+        /// Canonical Iris Social profile rank-decisions JSONL
+        #[arg(long = "profile-rank-decisions-file")]
+        profile_rank_decisions_file: PathBuf,
+        /// Exact SHA-256 of the profile rank-decisions JSONL bytes
+        #[arg(long = "expected-profile-rank-decisions-file-sha256")]
+        expected_profile_rank_decisions_file_sha256: String,
+        /// Canonical Iris Social rank-decisions provenance report
+        #[arg(long = "profile-rank-decisions-report")]
+        profile_rank_decisions_report: PathBuf,
+        /// Exact SHA-256 of the profile rank-decisions report bytes
+        #[arg(long = "expected-profile-rank-decisions-report-sha256")]
+        expected_profile_rank_decisions_report_sha256: String,
         /// Actual root resolved from the externally serving network event
         #[arg(long = "serving-root")]
         serving_root: String,

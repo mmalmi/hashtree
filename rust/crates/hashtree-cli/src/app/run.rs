@@ -996,7 +996,7 @@ pub(crate) async fn run() -> Result<()> {
                 }
             }
         },
-        Commands::NostrIndex { command } => match command {
+        Commands::NostrIndex { command } => match *command {
             NostrIndexCommands::Import {
                 root,
                 events_file,
@@ -1085,6 +1085,10 @@ pub(crate) async fn run() -> Result<()> {
                 expected_v2_state_sha256,
                 expected_stage_state_sha256,
                 audit_evidence,
+                profile_rank_decisions_file,
+                expected_profile_rank_decisions_file_sha256,
+                profile_rank_decisions_report,
+                expected_profile_rank_decisions_report_sha256,
                 serving_root,
                 serving_event,
                 serving_event_id,
@@ -1103,6 +1107,10 @@ pub(crate) async fn run() -> Result<()> {
                         expected_v2_state_sha256,
                         expected_stage_state_sha256,
                         audit_evidence,
+                        profile_rank_decisions_file,
+                        expected_profile_rank_decisions_file_sha256,
+                        profile_rank_decisions_report,
+                        expected_profile_rank_decisions_report_sha256,
                         serving_root,
                         serving_event,
                         serving_event_id,

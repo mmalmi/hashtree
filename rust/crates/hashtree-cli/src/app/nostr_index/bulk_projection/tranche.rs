@@ -10,15 +10,20 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::super::{
-    cid_to_nhash, expected_stage_segment_end, load_stage_segment_with_bytes,
-    note_stage_segment_directory_scan, parse_author_allowlist, parse_root_text,
-    persist_immutable_bytes, persist_json_atomic, stage_segment_file_parts, validate_stage_state,
-    IndexedNostrCrawlPolicy, ProjectionStores, StagedAuthorSegment, StagedNostrCrawlState,
-    STAGE_DIR, STAGE_FORMAT_VERSION, STAGE_SEGMENTS_DIR, STAGE_STATE_FILE,
+    cid_to_nhash, load_stage_segment_claim, load_stage_segment_path_with_bytes,
+    load_stage_segment_with_bytes, note_stage_segment_directory_scan, parse_author_allowlist,
+    parse_root_text, persist_immutable_bytes, persist_json_atomic, persist_stage_segment_claim,
+    stage_bytes_sha256, stage_segment_file_parts, validate_stage_state, IndexedNostrCrawlPolicy,
+    ProjectionStores, StagedAuthorSegment, StagedNostrCrawlState, STAGE_DIR, STAGE_SEGMENTS_DIR,
+    STAGE_SEGMENT_CLAIMS_DIR, STAGE_STATE_FILE,
+};
+use super::audit::{
+    load_pinned_profile_rank_decisions, recheck_trusted_profile_rank_decisions,
+    require_profile_rank_policy_binding, ProfileDistanceProvenance, TrustedProfileRankDecisions,
 };
 use super::{
     bulk_paths, replay_staged_event_chunk, BulkProjectionSpool, BulkProjectionState,
-    BULK_PROJECTION_VERSION,
+    ProfileDistanceAuthority, BULK_PROJECTION_VERSION,
 };
 
 const TRANCHE_STATE_VERSION: u32 = 3;
@@ -28,6 +33,8 @@ const TRANCHE_SEALS_DIR: &str = "seals";
 const TRANCHE_EVIDENCE_DIR: &str = "evidence";
 const TRANCHE_SERVING_EVENTS_DIR: &str = "serving-events";
 const TRANCHE_SPOOL_IDENTITY_FILE: &str = "spool-identity.json";
+const PROFILE_PUBLICATION_FENCE_BYTES: &[u8] =
+    b"{\"format\":\"hashtree-profile-publication-fence\",\"version\":3}\n";
 const PREFIX_CHAIN_DOMAIN: &[u8] = b"hashtree-nostr-tranche-prefix-chain-v3\0";
 const CID_CHAIN_DOMAIN: &[u8] = b"hashtree-nostr-tranche-prefix-cid-chain-v3\0";
 const CHAIN_SEED_SUFFIX: &[u8] = b"seed\0";
@@ -40,6 +47,10 @@ pub(crate) struct BulkTranchePrepareOptions {
     pub(crate) expected_v2_state_sha256: String,
     pub(crate) expected_stage_state_sha256: String,
     pub(crate) audit_evidence: PathBuf,
+    pub(crate) profile_rank_decisions_file: PathBuf,
+    pub(crate) expected_profile_rank_decisions_file_sha256: String,
+    pub(crate) profile_rank_decisions_report: PathBuf,
+    pub(crate) expected_profile_rank_decisions_report_sha256: String,
     pub(crate) serving_root: String,
     pub(crate) serving_event: PathBuf,
     pub(crate) serving_event_id: String,
@@ -127,6 +138,15 @@ impl StagePrefixSeal {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct StagePrefixTarget {
+    boundary: usize,
+    durable_next_author: usize,
+    events_seen: usize,
+    events_selected: usize,
+    live_bytes_selected: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SpoolIdentity {
     id: String,
@@ -167,9 +187,20 @@ struct AuditEvidencePin {
     candidate_root: String,
     v2_state_sha256: String,
     stage_state_sha256: String,
+    trusted_policy_sha256: String,
+    trusted_full_author_count: usize,
     pool_catalog_sha256: String,
+    pool_manifest_sha256: String,
     profile_by_pubkey_root_file_sha256: String,
     profile_search_root_file_sha256: String,
+    profile_follow_distance_seal_sha256: String,
+    profile_distance_provenance: ProfileDistanceProvenance,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct FrozenProfileDistanceSeal {
+    sha256: String,
+    retained_profile_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,6 +227,7 @@ struct WorkingProjection {
     events_selected: usize,
     live_bytes_selected: u64,
     rolling_prefix: StagePrefixSeal,
+    frozen_profile_distances: Option<FrozenProfileDistanceSeal>,
     built_roots: BTreeMap<u8, String>,
     candidate_root: Option<String>,
     frozen_prefix: Option<StagePrefixSeal>,
@@ -214,6 +246,7 @@ struct BulkTrancheState {
     serving: ServingRootPin,
     last_validated: CandidatePin,
     last_evidence: AuditEvidencePin,
+    profile_rank_authority: ProfileDistanceProvenance,
     spool_identity: SpoolIdentity,
     btree_order: usize,
     btree_update_concurrency: usize,
@@ -230,11 +263,14 @@ struct TrancheSeal {
     parent_seal_sha256: Option<String>,
     purpose: TrancheSealPurpose,
     policy: IndexedNostrCrawlPolicy,
-    ordered_allowlist: Vec<String>,
+    ordered_allowlist_sha256: String,
+    ordered_allowlist_count: usize,
     prefix: StagePrefixSeal,
     spool_identity: SpoolIdentity,
     internal_candidate: Option<CandidatePin>,
     evidence: Option<AuditEvidencePin>,
+    profile_rank_authority: ProfileDistanceProvenance,
+    frozen_profile_distances: Option<FrozenProfileDistanceSeal>,
     serving: ServingRootPin,
     publication_intent: Option<PublicationIntent>,
     publication_receipt: Option<PublicationReceipt>,
@@ -247,24 +283,73 @@ struct AuditEvidenceFile {
     candidate_root: String,
     state_sha256: String,
     stage_state_sha256: String,
+    trusted_policy_sha256: String,
+    trusted_profile_distance_seal_sha256: Option<String>,
+    profile_distance_provenance: Option<ProfileDistanceProvenance>,
+    trusted_full_author_count: usize,
+    crawl_policy_max_follow_distance: Option<u32>,
+    audit_mode: String,
+    cutover_eligible: bool,
     pool_catalog_sha256: String,
+    pool_manifest_sha256: String,
+    pool_stored_locations: u64,
     authors_processed: usize,
     authors_total: usize,
     recovery_tranche_only: bool,
     indexes: Vec<AuditIndexEvidence>,
     profile: AuditProfileEvidence,
+    queries: Vec<AuditQueryEvidence>,
+    representative_blocks: Vec<AuditBlockEvidence>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct AuditIndexEvidence {
     index: String,
     root: Option<String>,
+    nodes: u64,
+    links: u64,
+    durable_values_validated: u64,
+    entries_sha256: String,
+    retained_set_sha256: String,
+    first_key: Option<String>,
+    last_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct AuditProfileEvidence {
+    by_pubkey_root: String,
     by_pubkey_root_file_sha256: String,
+    by_pubkey_nodes: u64,
+    by_pubkey_links: u64,
+    by_pubkey_entries_sha256: String,
+    search_root: String,
     search_root_file_sha256: String,
+    search_nodes: u64,
+    search_entries: u64,
+    search_entries_sha256: String,
+    sample_pubkey: String,
+    sample_event_id: String,
+    sample_name: String,
+    follow_distance_binding: String,
+    follow_distance_seal_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct AuditQueryEvidence {
+    query: String,
+    parameters: serde_json::Value,
+    event_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct AuditBlockEvidence {
+    role: String,
+    nhash: String,
+    sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -287,6 +372,62 @@ fn tranche_paths(data_dir: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf, PathBu
         base.join(TRANCHE_SERVING_EVENTS_DIR),
         base.join(TRANCHE_SPOOL_IDENTITY_FILE),
     )
+}
+
+fn profile_rank_evidence_paths(
+    evidence_dir: &Path,
+    provenance: &ProfileDistanceProvenance,
+) -> (PathBuf, PathBuf) {
+    (
+        evidence_dir
+            .join("profile-rank-decisions")
+            .join(format!("{}.jsonl", provenance.rank_decisions_file_sha256)),
+        evidence_dir
+            .join("profile-rank-reports")
+            .join(format!("{}.json", provenance.rank_decisions_report_sha256)),
+    )
+}
+
+fn ordered_allowlist_evidence_path(evidence_dir: &Path, sha256: &str) -> PathBuf {
+    evidence_dir
+        .join("ordered-allowlists")
+        .join(format!("{sha256}.txt"))
+}
+
+fn validate_profile_publication_fence(data_dir: &Path) -> Result<()> {
+    let path = hashtree_cli::socialgraph::profile_publication_fence_path(data_dir);
+    let bytes = std::fs::read(&path)
+        .with_context(|| format!("read profile publication fence {}", path.display()))?;
+    if bytes != PROFILE_PUBLICATION_FENCE_BYTES {
+        anyhow::bail!(
+            "profile publication fence {} differs from the v3 durable marker",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn load_copied_profile_rank_authority(
+    evidence_dir: &Path,
+    expected: &ProfileDistanceProvenance,
+) -> Result<TrustedProfileRankDecisions> {
+    let (decisions_path, report_path) = profile_rank_evidence_paths(evidence_dir, expected);
+    let decisions_path = decisions_path
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", decisions_path.display()))?;
+    let report_path = report_path
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", report_path.display()))?;
+    let authority = load_pinned_profile_rank_decisions(
+        &decisions_path,
+        &expected.rank_decisions_file_sha256,
+        &report_path,
+        &expected.rank_decisions_report_sha256,
+    )?;
+    if authority.evidence != *expected {
+        anyhow::bail!("copied profile rank authority differs from durable v3 provenance");
+    }
+    Ok(authority)
 }
 
 fn bytes_sha256(bytes: &[u8]) -> String {
@@ -345,6 +486,19 @@ fn load_ordered_allowlist(path: &Path, policy: &IndexedNostrCrawlPolicy) -> Resu
         anyhow::bail!("ordered author allowlist does not match the v2 crawl policy");
     }
     Ok(authors)
+}
+
+fn canonical_ordered_allowlist_bytes(authors: &[String]) -> Vec<u8> {
+    let capacity = authors
+        .iter()
+        .map(|author| author.len().saturating_add(1))
+        .sum();
+    let mut bytes = Vec::with_capacity(capacity);
+    for author in authors {
+        bytes.extend_from_slice(author.as_bytes());
+        bytes.push(b'\n');
+    }
+    bytes
 }
 
 fn chain_seed(domain: &[u8]) -> String {
@@ -433,7 +587,7 @@ fn extend_stage_prefix(
 /// deterministic boundaries. Bodies are deliberately not retained here:
 /// Prepare/Freeze stream only the exact `[0, boundary)` prefix below, while
 /// Appending never calls this catalog scan.
-fn stage_segment_catalog(
+fn stage_segment_body_catalog(
     staging_data_dir: &Path,
     policy: &IndexedNostrCrawlPolicy,
 ) -> Result<BTreeMap<usize, PathBuf>> {
@@ -475,10 +629,9 @@ fn stage_segment_catalog(
             anyhow::bail!("duplicate staged segment start {start} in immutable catalog: {paths}");
         }
         let (end, path) = entries.into_iter().next().expect("one catalog entry");
-        let expected_end = expected_stage_segment_end(policy, start)?;
-        if end != expected_end {
+        if end <= start || end > policy.author_count {
             anyhow::bail!(
-                "staged segment catalog path {} has boundary {start}..{end}, expected {start}..{expected_end}",
+                "staged segment catalog path {} has invalid boundary {start}..{end}",
                 path.display()
             );
         }
@@ -487,18 +640,136 @@ fn stage_segment_catalog(
     Ok(segments)
 }
 
+fn backfill_stage_segment_claims(
+    staging_data_dir: &Path,
+    policy: &IndexedNostrCrawlPolicy,
+) -> Result<()> {
+    for (start, path) in stage_segment_body_catalog(staging_data_dir, policy)? {
+        let (_, bytes, segment) = load_stage_segment_path_with_bytes(&path, start, policy)?;
+        persist_stage_segment_claim(staging_data_dir, &segment, &bytes)?;
+    }
+    Ok(())
+}
+
+fn stage_segment_catalog(
+    staging_data_dir: &Path,
+    policy: &IndexedNostrCrawlPolicy,
+    durable_next_author: usize,
+) -> Result<BTreeMap<usize, PathBuf>> {
+    if durable_next_author > policy.author_count {
+        anyhow::bail!(
+            "durable staging cursor {durable_next_author} exceeds {} policy authors",
+            policy.author_count
+        );
+    }
+    let segments = stage_segment_body_catalog(staging_data_dir, policy)?;
+    let claims_dir = staging_data_dir
+        .join(STAGE_DIR)
+        .join(STAGE_SEGMENT_CLAIMS_DIR);
+    if segments.is_empty() && !claims_dir.exists() {
+        return Ok(segments);
+    }
+    if !claims_dir.exists() {
+        anyhow::bail!(
+            "immutable staged segment bodies and per-start boundary claims differ; refusing terminal scan"
+        );
+    }
+    let mut claimed_starts = BTreeMap::new();
+    for entry in
+        std::fs::read_dir(&claims_dir).with_context(|| format!("read {}", claims_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("read entry in {}", claims_dir.display()))?;
+        if !entry
+            .file_type()
+            .with_context(|| format!("read file type for {}", entry.path().display()))?
+            .is_file()
+        {
+            continue;
+        }
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .context("staged segment claim directory contains a non-UTF-8 file name")?;
+        let Some(stem) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if stem.len() != 12 || !stem.bytes().all(|byte| byte.is_ascii_digit()) {
+            anyhow::bail!("staged segment claim file `{name}` has a non-canonical start");
+        }
+        let start = stem
+            .parse::<usize>()
+            .with_context(|| format!("parse staged segment claim start in `{name}`"))?;
+        if claimed_starts.insert(start, path).is_some() {
+            anyhow::bail!("duplicate staged segment claim start {start}");
+        }
+    }
+    if claimed_starts.len() != segments.len() || claimed_starts.keys().ne(segments.keys()) {
+        anyhow::bail!(
+            "immutable staged segment bodies and per-start boundary claims differ; refusing terminal scan"
+        );
+    }
+    for (start, path) in &segments {
+        let claim = load_stage_segment_claim(staging_data_dir, *start)?;
+        let (_, end) = stage_segment_file_parts(path)?;
+        if claim.end_author != end {
+            anyhow::bail!(
+                "staged segment claim {}..{} differs from body path {}",
+                claim.start_author,
+                claim.end_author,
+                path.display()
+            );
+        }
+        let bytes =
+            std::fs::read(path).with_context(|| format!("read claimed body {}", path.display()))?;
+        if stage_bytes_sha256(&bytes) != claim.body_sha256 {
+            anyhow::bail!(
+                "staged segment body {} differs from its immutable per-start claim",
+                path.display()
+            );
+        }
+    }
+    let mut cursor = 0usize;
+    for (start, path) in &segments {
+        if *start != cursor {
+            anyhow::bail!(
+                "staged segment catalog is not one contiguous non-overlapping chain: expected start {cursor}, found {start} at {}",
+                path.display()
+            );
+        }
+        let (_, end) = stage_segment_file_parts(path)?;
+        if end > durable_next_author {
+            anyhow::bail!(
+                "staged segment catalog contains uncheckpointed body {} beyond durable cursor {durable_next_author}",
+                path.display()
+            );
+        }
+        cursor = end;
+    }
+    if cursor != durable_next_author {
+        anyhow::bail!(
+            "staged segment catalog ends at {cursor}, not durable staging cursor {durable_next_author}"
+        );
+    }
+    Ok(segments)
+}
+
 fn attest_stage_prefix(
     staging_data_dir: &Path,
-    boundary: usize,
-    expected_events_seen: usize,
-    expected_events_selected: usize,
-    expected_live_bytes_selected: u64,
+    target: StagePrefixTarget,
     observed_stage_state_sha256: String,
     policy: &IndexedNostrCrawlPolicy,
 ) -> Result<StagePrefixSeal> {
-    let segments = stage_segment_catalog(staging_data_dir, policy)?;
+    if target.boundary > target.durable_next_author {
+        anyhow::bail!(
+            "staged attestation boundary {} exceeds durable staging cursor {}",
+            target.boundary,
+            target.durable_next_author
+        );
+    }
+    let segments = stage_segment_catalog(staging_data_dir, policy, target.durable_next_author)?;
     let mut prefix = StagePrefixSeal::empty(observed_stage_state_sha256.clone());
-    while prefix.next_author < boundary {
+    while prefix.next_author < target.boundary {
         let expected_path = segments.get(&prefix.next_author).with_context(|| {
             format!(
                 "staged prefix is missing segment beginning at {}",
@@ -506,7 +777,7 @@ fn attest_stage_prefix(
             )
         })?;
         let (path, bytes, segment) =
-            load_stage_segment_with_bytes(staging_data_dir, prefix.next_author, policy)?;
+            load_stage_segment_path_with_bytes(expected_path, prefix.next_author, policy)?;
         if &path != expected_path {
             anyhow::bail!(
                 "targeted staged segment path {} differs from catalog path {}",
@@ -514,9 +785,10 @@ fn attest_stage_prefix(
                 expected_path.display()
             );
         }
-        if segment.end_author > boundary {
+        if segment.end_author > target.boundary {
             anyhow::bail!(
-                "chosen boundary {boundary} falls inside staged segment {}..{}",
+                "chosen boundary {} falls inside staged segment {}..{}",
+                target.boundary,
                 segment.start_author,
                 segment.end_author
             );
@@ -529,15 +801,19 @@ fn attest_stage_prefix(
             &observed_stage_state_sha256,
         )?;
     }
-    if prefix.next_author != boundary
-        || prefix.events_seen != expected_events_seen
-        || prefix.events_selected != expected_events_selected
-        || prefix.live_bytes_selected != expected_live_bytes_selected
+    if prefix.next_author != target.boundary
+        || prefix.events_seen != target.events_seen
+        || prefix.events_selected != target.events_selected
+        || prefix.live_bytes_selected != target.live_bytes_selected
     {
         anyhow::bail!(
-            "staged prefix counters through {boundary} differ from expected projection counters: \
-             expected=({expected_events_seen},{expected_events_selected},{expected_live_bytes_selected}) \
+            "staged prefix counters through {} differ from expected projection counters: \
+             expected=({},{},{}) \
              actual=({},{},{})",
+            target.boundary,
+            target.events_seen,
+            target.events_selected,
+            target.live_bytes_selected,
             prefix.events_seen,
             prefix.events_selected,
             prefix.live_bytes_selected
@@ -728,10 +1004,8 @@ fn validate_stage_covers_v2_terminal(
     state: &BulkProjectionState,
     require_exact_terminal_state: bool,
 ) -> Result<()> {
-    if stage.version != STAGE_FORMAT_VERSION
-        || state.policy != stage.policy
-        || state.author_allowlist_source != stage.author_allowlist_source
-    {
+    validate_stage_state(stage, &state.policy, state.policy.author_count)?;
+    if state.author_allowlist_source != stage.author_allowlist_source {
         anyhow::bail!("staging policy does not match the v2 terminal projection");
     }
     if require_exact_terminal_state {
@@ -759,23 +1033,51 @@ fn accept_audit_evidence(
     state_sha256: &str,
     stage_sha256: &str,
     state: &BulkProjectionState,
+    profile_rank_authority: &ProfileDistanceProvenance,
 ) -> Result<AuditEvidencePin> {
     let evidence: AuditEvidenceFile =
         serde_json::from_slice(bytes).context("parse exhaustive audit evidence")?;
-    if evidence.version != 1
+    let policy_sha256 = bytes_sha256(
+        &serde_json::to_vec(&state.policy).context("serialize pinned v2 crawl policy")?,
+    );
+    if state.next_author >= state.policy.author_count {
+        anyhow::bail!("v3 recovery Prepare requires a partial audited v2 recovery tranche");
+    }
+    if evidence.version != 2
         || evidence.candidate_root != candidate.root
         || evidence.state_sha256 != state_sha256
         || evidence.stage_state_sha256 != stage_sha256
+        || evidence.trusted_policy_sha256 != policy_sha256
+        || evidence.trusted_full_author_count != state.policy.author_count
+        || evidence.crawl_policy_max_follow_distance != state.policy.max_follow_distance
         || evidence.authors_processed != state.next_author
         || evidence.authors_total != state.policy.author_count
-        || evidence.recovery_tranche_only != (state.next_author < state.policy.author_count)
+        || !evidence.recovery_tranche_only
+        || evidence.audit_mode != "recovery-tranche-internal-non-cutover"
+        || evidence.cutover_eligible
+        || evidence.profile_distance_provenance.as_ref() != Some(profile_rank_authority)
     {
         anyhow::bail!(
-            "audit evidence does not pin the exact v2 terminal state, policy, and recovery mode"
+            "audit evidence does not pin the exact v2 state, full policy, profile-rank authority, and non-cutover recovery mode"
+        );
+    }
+    if evidence
+        .trusted_profile_distance_seal_sha256
+        .as_deref()
+        .is_some_and(|seal| seal != evidence.profile.follow_distance_seal_sha256)
+    {
+        anyhow::bail!(
+            "audit evidence trusted profile-distance seal differs from its exhaustive profile audit"
         );
     }
     let mut roots = BTreeMap::new();
     for index in evidence.indexes {
+        for (label, digest) in [
+            ("entries", index.entries_sha256.as_str()),
+            ("retained set", index.retained_set_sha256.as_str()),
+        ] {
+            validate_sha256(&format!("audit {} {label} SHA-256", index.index), digest)?;
+        }
         if roots.insert(index.index.clone(), index.root).is_some() {
             anyhow::bail!("audit evidence repeats index `{}`", index.index);
         }
@@ -801,6 +1103,10 @@ fn accept_audit_evidence(
         &evidence.pool_catalog_sha256,
     )?;
     validate_sha256(
+        "audit PoolStore manifest SHA-256",
+        &evidence.pool_manifest_sha256,
+    )?;
+    validate_sha256(
         "audit profile-by-pubkey root-file SHA-256",
         &evidence.profile.by_pubkey_root_file_sha256,
     )?;
@@ -808,14 +1114,43 @@ fn accept_audit_evidence(
         "audit profile-search root-file SHA-256",
         &evidence.profile.search_root_file_sha256,
     )?;
+    for (label, digest) in [
+        (
+            "audit profile-by-pubkey entries SHA-256",
+            evidence.profile.by_pubkey_entries_sha256.as_str(),
+        ),
+        (
+            "audit profile-search entries SHA-256",
+            evidence.profile.search_entries_sha256.as_str(),
+        ),
+        (
+            "audit profile follow-distance seal SHA-256",
+            evidence.profile.follow_distance_seal_sha256.as_str(),
+        ),
+    ] {
+        validate_sha256(label, digest)?;
+    }
+    for block in &evidence.representative_blocks {
+        validate_sha256(
+            &format!("audit representative block `{}` SHA-256", block.role),
+            &block.sha256,
+        )?;
+        parse_root_text(&block.nhash)
+            .with_context(|| format!("parse audit representative block `{}` nhash", block.role))?;
+    }
     Ok(AuditEvidencePin {
         sha256: evidence_sha256,
         candidate_root: candidate.root.clone(),
         v2_state_sha256: state_sha256.to_string(),
         stage_state_sha256: stage_sha256.to_string(),
+        trusted_policy_sha256: policy_sha256,
+        trusted_full_author_count: evidence.trusted_full_author_count,
         pool_catalog_sha256: evidence.pool_catalog_sha256,
+        pool_manifest_sha256: evidence.pool_manifest_sha256,
         profile_by_pubkey_root_file_sha256: evidence.profile.by_pubkey_root_file_sha256,
         profile_search_root_file_sha256: evidence.profile.search_root_file_sha256,
+        profile_follow_distance_seal_sha256: evidence.profile.follow_distance_seal_sha256,
+        profile_distance_provenance: profile_rank_authority.clone(),
     })
 }
 
@@ -893,15 +1228,56 @@ fn validate_stage_prefix_schema(
     if prefix.next_author > policy.author_count || prefix.events_selected > prefix.events_seen {
         anyhow::bail!("{label} has impossible cursor or event counters");
     }
-    let width = policy
-        .checkpoint_authors
-        .min(policy.author_batch_size)
-        .max(1);
-    let expected_segments = prefix.next_author.div_ceil(width);
-    if prefix.segment_count != expected_segments {
+    if (prefix.next_author == 0) != (prefix.segment_count == 0)
+        || prefix.segment_count > prefix.next_author
+    {
+        anyhow::bail!("{label} has an impossible immutable segment count");
+    }
+    Ok(())
+}
+
+fn validate_profile_rank_authority(
+    authority: &ProfileDistanceProvenance,
+    policy: &IndexedNostrCrawlPolicy,
+) -> Result<()> {
+    for (label, digest) in [
+        (
+            "profile rank-decisions file SHA-256",
+            authority.rank_decisions_file_sha256.as_str(),
+        ),
+        (
+            "profile rank-decisions report SHA-256",
+            authority.rank_decisions_report_sha256.as_str(),
+        ),
+        (
+            "profile rank-decisions semantic SHA-256",
+            authority.rank_decisions_sha256.as_str(),
+        ),
+        (
+            "profile rank social-graph SHA-256",
+            authority.social_graph_sha256.as_str(),
+        ),
+        (
+            "profile rank eligible-author SHA-256",
+            authority.eligible_authors_sha256.as_str(),
+        ),
+    ] {
+        validate_sha256(label, digest)?;
+    }
+    validate_lower_hex_32(
+        "profile rank social-graph root",
+        &authority.social_graph_root,
+    )?;
+    if authority.eligible_authors_sha256 != policy.author_allowlist_sha256
+        || authority.eligible_count != policy.author_count
+        || authority.record_count
+            != authority
+                .eligible_count
+                .checked_add(authority.excluded_count)
+                .context("profile rank authority count overflow")?
+    {
         anyhow::bail!(
-            "{label} segment count {} differs from deterministic prefix count {expected_segments}",
-            prefix.segment_count
+            "profile rank authority does not bind the exact full crawl allowlist and decision census"
         );
     }
     Ok(())
@@ -962,6 +1338,31 @@ fn validate_state_schema(state: &BulkTrancheState) -> Result<()> {
     if state.last_evidence.candidate_root != state.last_validated.root {
         anyhow::bail!("v3 accepted evidence candidate differs from last validated candidate");
     }
+    validate_profile_rank_authority(&state.profile_rank_authority, &state.policy)?;
+    if state.last_evidence.profile_distance_provenance != state.profile_rank_authority
+        || state.last_evidence.trusted_full_author_count != state.policy.author_count
+    {
+        anyhow::bail!("v3 audit evidence and profile rank authority provenance disagree");
+    }
+    for (label, digest) in [
+        (
+            "v3 accepted policy SHA-256",
+            state.last_evidence.trusted_policy_sha256.as_str(),
+        ),
+        (
+            "v3 accepted PoolStore manifest SHA-256",
+            state.last_evidence.pool_manifest_sha256.as_str(),
+        ),
+        (
+            "v3 accepted profile follow-distance seal SHA-256",
+            state
+                .last_evidence
+                .profile_follow_distance_seal_sha256
+                .as_str(),
+        ),
+    ] {
+        validate_sha256(label, digest)?;
+    }
     validate_stage_prefix_schema(
         "v3 rolling prefix",
         &state.working.rolling_prefix,
@@ -980,6 +1381,15 @@ fn validate_state_schema(state: &BulkTrancheState) -> Result<()> {
             anyhow::bail!("v3 frozen prefix differs from the durable rolling prefix");
         }
     }
+    if let Some(profile_distances) = state.working.frozen_profile_distances.as_ref() {
+        validate_sha256(
+            "v3 frozen profile follow-distance seal SHA-256",
+            &profile_distances.sha256,
+        )?;
+        if profile_distances.retained_profile_count > state.profile_rank_authority.eligible_count {
+            anyhow::bail!("v3 frozen profile count exceeds the frozen eligible rank census");
+        }
+    }
     if (state.working.segment_event_offset == 0 && state.working.active_segment_sha256.is_some())
         || (state.working.segment_event_offset > 0 && state.working.active_segment_sha256.is_none())
     {
@@ -993,6 +1403,7 @@ fn validate_state_schema(state: &BulkTrancheState) -> Result<()> {
             if state.active_seal_sha256.is_some()
                 || state.pending_seal_sha256.is_none()
                 || state.working.frozen_prefix.is_none()
+                || state.working.frozen_profile_distances.is_some()
             {
                 anyhow::bail!("v3 Prepare state has invalid active/pending seal references");
             }
@@ -1001,6 +1412,7 @@ fn validate_state_schema(state: &BulkTrancheState) -> Result<()> {
             if state.active_seal_sha256.is_none()
                 || state.pending_seal_sha256.is_some()
                 || state.working.frozen_prefix.is_some()
+                || state.working.frozen_profile_distances.is_some()
             {
                 anyhow::bail!("v3 post-Prepare state has invalid active/pending seal references");
             }
@@ -1009,6 +1421,7 @@ fn validate_state_schema(state: &BulkTrancheState) -> Result<()> {
             if state.active_seal_sha256.is_none()
                 || state.pending_seal_sha256.is_some()
                 || state.working.frozen_prefix.is_none()
+                || state.working.frozen_profile_distances.is_none()
             {
                 anyhow::bail!("v3 frozen-or-later state has invalid seal references");
             }
@@ -1025,27 +1438,41 @@ fn validate_state_schema(state: &BulkTrancheState) -> Result<()> {
 
 fn validate_active_seal(state: &BulkTrancheState, seal: &TrancheSeal) -> Result<()> {
     validate_stage_prefix_schema("active v3 seal prefix", &seal.prefix, &state.policy)?;
+    let purpose_matches = match seal.purpose {
+        TrancheSealPurpose::Prepare => {
+            seal.internal_candidate.as_ref() == Some(&state.last_validated)
+                && seal.evidence.as_ref() == Some(&state.last_evidence)
+                && seal.frozen_profile_distances.is_none()
+        }
+        TrancheSealPurpose::Freeze => {
+            seal.internal_candidate.is_none()
+                && seal.evidence.is_none()
+                && state
+                    .working
+                    .frozen_prefix
+                    .as_ref()
+                    .is_some_and(|prefix| prefix.immutable_prefix_eq(&seal.prefix))
+        }
+    };
     if seal.policy != state.policy
         || seal.spool_identity != state.spool_identity
         || seal.serving != state.serving
-        || seal.ordered_allowlist.len() != state.ordered_allowlist_count
+        || seal.ordered_allowlist_count != state.ordered_allowlist_count
+        || seal.ordered_allowlist_sha256 != state.ordered_allowlist_sha256
         || state.ordered_allowlist_count != state.policy.author_count
         || state.ordered_allowlist_sha256 != state.policy.author_allowlist_sha256
-        || seal.internal_candidate.as_ref() != Some(&state.last_validated)
-        || seal.evidence.as_ref() != Some(&state.last_evidence)
+        || !purpose_matches
+        || seal.profile_rank_authority != state.profile_rank_authority
+        || seal.frozen_profile_distances != state.working.frozen_profile_distances
         || seal.publication_intent != state.publication_intent
         || seal.publication_receipt != state.publication_receipt
     {
         anyhow::bail!("active v3 seal metadata differs from durable tranche state");
     }
-    let mut allowlist_digest = Sha256::new();
-    for author in &seal.ordered_allowlist {
-        allowlist_digest.update(author.as_bytes());
-        allowlist_digest.update(b"\n");
-    }
-    if hex::encode(allowlist_digest.finalize()) != state.ordered_allowlist_sha256 {
-        anyhow::bail!("active v3 seal ordered allowlist differs from durable tranche state");
-    }
+    validate_sha256(
+        "active v3 seal ordered allowlist SHA-256",
+        &seal.ordered_allowlist_sha256,
+    )?;
     Ok(())
 }
 
@@ -1166,12 +1593,37 @@ pub(crate) fn prepare_bulk_tranche(
     let candidate = validate_v2_terminal_state(&v2_state)?;
     validate_stage_covers_v2_terminal(&stage, &v2_state, existing_state.is_none())?;
     let authors = load_ordered_allowlist(&options.eligible_authors, &v2_state.policy)?;
+    let ordered_allowlist_bytes = canonical_ordered_allowlist_bytes(&authors);
+    require_sha256(
+        "canonical ordered author allowlist SHA-256",
+        &bytes_sha256(&ordered_allowlist_bytes),
+        &v2_state.policy.author_allowlist_sha256,
+    )?;
+    let profile_rank_authority = load_pinned_profile_rank_decisions(
+        &options.profile_rank_decisions_file,
+        &options.expected_profile_rank_decisions_file_sha256,
+        &options.profile_rank_decisions_report,
+        &options.expected_profile_rank_decisions_report_sha256,
+    )?;
+    require_profile_rank_policy_binding(
+        Some(&profile_rank_authority),
+        &v2_state.policy.author_allowlist_sha256,
+        v2_state.policy.author_count,
+    )?;
+    validate_profile_rank_authority(&profile_rank_authority.evidence, &v2_state.policy)?;
+    // This one-time locked Prepare migration gives pre-claim staged history
+    // the same immutable O(1) boundary index as every newly fetched segment.
+    // Subsequent append invocations never scan or backfill the catalog.
+    backfill_stage_segment_claims(&options.staging_data_dir, &v2_state.policy)?;
     let prefix = attest_stage_prefix(
         &options.staging_data_dir,
-        v2_state.next_author,
-        v2_state.events_seen,
-        v2_state.events_selected,
-        v2_state.live_bytes_selected,
+        StagePrefixTarget {
+            boundary: v2_state.next_author,
+            durable_next_author: stage.next_author,
+            events_seen: v2_state.events_seen,
+            events_selected: v2_state.events_selected,
+            live_bytes_selected: v2_state.live_bytes_selected,
+        },
         options.expected_stage_state_sha256.clone(),
         &v2_state.policy,
     )?;
@@ -1187,10 +1639,15 @@ pub(crate) fn prepare_bulk_tranche(
         &v2_state_sha256,
         &options.expected_stage_state_sha256,
         &v2_state,
+        &profile_rank_authority.evidence,
     )?;
 
     let (spool_identity, spool_identity_bytes) = spool_identity(data_dir)?;
     let evidence_path = evidence_dir.join(format!("{audit_sha256}.json"));
+    let ordered_allowlist_path =
+        ordered_allowlist_evidence_path(&evidence_dir, &v2_state.policy.author_allowlist_sha256);
+    let (rank_decisions_path, rank_report_path) =
+        profile_rank_evidence_paths(&evidence_dir, &profile_rank_authority.evidence);
     let serving_event_path = serving_events_dir.join(format!("{}.json", serving.event_id));
 
     let seal = TrancheSeal {
@@ -1199,11 +1656,14 @@ pub(crate) fn prepare_bulk_tranche(
         parent_seal_sha256: None,
         purpose: TrancheSealPurpose::Prepare,
         policy: v2_state.policy.clone(),
-        ordered_allowlist: authors,
+        ordered_allowlist_sha256: v2_state.policy.author_allowlist_sha256.clone(),
+        ordered_allowlist_count: authors.len(),
         prefix: prefix.clone(),
         spool_identity: spool_identity.clone(),
         internal_candidate: Some(candidate.clone()),
         evidence: Some(evidence.clone()),
+        profile_rank_authority: profile_rank_authority.evidence.clone(),
+        frozen_profile_distances: None,
         serving: serving.clone(),
         publication_intent: None,
         publication_receipt: None,
@@ -1221,6 +1681,7 @@ pub(crate) fn prepare_bulk_tranche(
         serving: serving.clone(),
         last_validated: candidate.clone(),
         last_evidence: evidence.clone(),
+        profile_rank_authority: profile_rank_authority.evidence.clone(),
         spool_identity: spool_identity.clone(),
         btree_order: options.btree_order,
         btree_update_concurrency: options.btree_update_concurrency,
@@ -1233,6 +1694,7 @@ pub(crate) fn prepare_bulk_tranche(
             events_selected: v2_state.events_selected,
             live_bytes_selected: v2_state.live_bytes_selected,
             rolling_prefix: prefix.clone(),
+            frozen_profile_distances: None,
             built_roots: v2_state.built_roots.clone(),
             candidate_root: v2_state.complete_root.clone(),
             frozen_prefix: Some(prefix),
@@ -1258,6 +1720,7 @@ pub(crate) fn prepare_bulk_tranche(
             anyhow::bail!("existing v3 state differs from exact resumable Prepare state");
         }
     } else {
+        recheck_trusted_profile_rank_decisions(Some(&profile_rank_authority))?;
         persist_state(&state_path, &prepare_state)?;
     }
 
@@ -1265,7 +1728,27 @@ pub(crate) fn prepare_bulk_tranche(
     // the old complete roots in both v2 and Prepare state, while an exact
     // rerun can adopt or recreate every immutable dependency below.
     persist_immutable_bytes(&marker_path, &spool_identity_bytes, "spool identity marker")?;
+    persist_immutable_bytes(
+        &hashtree_cli::socialgraph::profile_publication_fence_path(data_dir),
+        PROFILE_PUBLICATION_FENCE_BYTES,
+        "profile publication fence",
+    )?;
     persist_immutable_bytes(&evidence_path, &audit_bytes, "accepted audit evidence")?;
+    persist_immutable_bytes(
+        &ordered_allowlist_path,
+        &ordered_allowlist_bytes,
+        "canonical ordered author allowlist evidence",
+    )?;
+    persist_immutable_bytes(
+        &rank_decisions_path,
+        &profile_rank_authority.decisions_bytes,
+        "profile rank-decisions evidence",
+    )?;
+    persist_immutable_bytes(
+        &rank_report_path,
+        &profile_rank_authority.report_bytes,
+        "profile rank-decisions report evidence",
+    )?;
     persist_immutable_bytes(
         &serving_event_path,
         &serving_event_bytes,
@@ -1275,6 +1758,9 @@ pub(crate) fn prepare_bulk_tranche(
     if persisted_seal_sha256 != seal_sha256 {
         anyhow::bail!("persisted prepare seal SHA-256 changed unexpectedly");
     }
+    let copied_rank_authority =
+        load_copied_profile_rank_authority(&evidence_dir, &profile_rank_authority.evidence)?;
+    recheck_trusted_profile_rank_decisions(Some(&copied_rank_authority))?;
     if let Some((existing, state_sha256)) = existing_appending {
         let output = transition_output(&existing, state_sha256);
         write_output(&output, options.out.as_deref())?;
@@ -1298,7 +1784,7 @@ pub(crate) async fn append_bulk_tranche(
     data_dir: &Path,
     options: BulkTrancheAppendOptions,
 ) -> Result<BulkTrancheTransitionOutput> {
-    let (state_path, seals_dir, _, _, marker_path) = tranche_paths(data_dir);
+    let (state_path, seals_dir, evidence_dir, _, marker_path) = tranche_paths(data_dir);
     let (mut state, _, state_sha256) =
         load_state(&state_path)?.context("v3 tranche state does not exist; run prepare first")?;
     require_sha256(
@@ -1319,6 +1805,9 @@ pub(crate) async fn append_bulk_tranche(
         anyhow::bail!("v3 Appending state contains frozen build or candidate data");
     }
     validate_spool_identity(data_dir, &marker_path, &state.spool_identity)?;
+    validate_profile_publication_fence(data_dir)?;
+    let profile_rank_authority =
+        load_copied_profile_rank_authority(&evidence_dir, &state.profile_rank_authority)?;
     let active_sha = state
         .active_seal_sha256
         .as_deref()
@@ -1374,7 +1863,6 @@ pub(crate) async fn append_bulk_tranche(
     let mut persisted_state_sha256 = state_sha256;
     while completed_segments < options.max_segments && state.working.next_author < stage.next_author
     {
-        let started = std::time::Instant::now();
         let (segment_path, segment_bytes, segment) = load_stage_segment_with_bytes(
             &options.staging_data_dir,
             state.working.next_author,
@@ -1410,76 +1898,85 @@ pub(crate) async fn append_bulk_tranche(
         if state.working.segment_event_offset > segment.event_cids.len() {
             anyhow::bail!("v3 working offset exceeds immutable staged segment length");
         }
-        let event_end = state
-            .working
-            .segment_event_offset
-            .checked_add(state.index_commit_batch_size)
-            .context("v3 segment event offset overflow")?
-            .min(segment.event_cids.len());
-        let cids = segment.event_cids[state.working.segment_event_offset..event_end]
-            .iter()
-            .map(|root| parse_root_text(root))
-            .collect::<Result<Vec<_>>>()?;
-        let replay = replay_staged_event_chunk(
-            stores,
-            &spool,
-            &target_event_store,
-            &staging_event_store,
-            cids,
-        )
-        .await?;
-        let completed_segment = event_end == segment.event_cids.len();
-        if completed_segment {
-            extend_stage_prefix(
-                &mut state.working.rolling_prefix,
-                &segment_path,
-                &segment_bytes,
-                &segment,
-                &current_stage_sha256,
-            )?;
-            state.working.next_author = state.working.rolling_prefix.next_author;
-            state.working.segment_event_offset = 0;
-            state.working.active_segment_sha256 = None;
-            state.working.events_seen = state.working.rolling_prefix.events_seen;
-            state.working.events_selected = state.working.rolling_prefix.events_selected;
-            state.working.live_bytes_selected = state.working.rolling_prefix.live_bytes_selected;
-            completed_segments = completed_segments
-                .checked_add(1)
-                .context("v3 completed segment count overflow")?;
-        } else {
-            state.working.segment_event_offset = event_end;
-            state.working.active_segment_sha256 = Some(segment_sha256);
+        loop {
+            let started = std::time::Instant::now();
+            let event_end = state
+                .working
+                .segment_event_offset
+                .checked_add(state.index_commit_batch_size)
+                .context("v3 segment event offset overflow")?
+                .min(segment.event_cids.len());
+            let cids = segment.event_cids[state.working.segment_event_offset..event_end]
+                .iter()
+                .map(|root| parse_root_text(root))
+                .collect::<Result<Vec<_>>>()?;
+            let replay = replay_staged_event_chunk(
+                stores,
+                &spool,
+                &target_event_store,
+                &staging_event_store,
+                cids,
+                ProfileDistanceAuthority::FrozenRankDecisions(&profile_rank_authority.decisions),
+            )
+            .await?;
+            let completed_segment = event_end == segment.event_cids.len();
+            if completed_segment {
+                extend_stage_prefix(
+                    &mut state.working.rolling_prefix,
+                    &segment_path,
+                    &segment_bytes,
+                    &segment,
+                    &current_stage_sha256,
+                )?;
+                state.working.next_author = state.working.rolling_prefix.next_author;
+                state.working.segment_event_offset = 0;
+                state.working.active_segment_sha256 = None;
+                state.working.events_seen = state.working.rolling_prefix.events_seen;
+                state.working.events_selected = state.working.rolling_prefix.events_selected;
+                state.working.live_bytes_selected =
+                    state.working.rolling_prefix.live_bytes_selected;
+                completed_segments = completed_segments
+                    .checked_add(1)
+                    .context("v3 completed segment count overflow")?;
+            } else {
+                state.working.segment_event_offset = event_end;
+                state.working.active_segment_sha256 = Some(segment_sha256.clone());
+            }
+            persisted_state_sha256 = persist_state(&state_path, &state)?;
+            eprintln!(
+                "Nostr v3 tranche append checkpoint: authors={}/{} staged_authors={} segment_event_offset={}/{} retained={} replaced={} skipped={} index_entries={} reused_records={} spool_missing_candidates={} durable_reused_candidates={} stored_candidates={} reused_exact_batch={} completed_segment={} completed_segments={} stage_load_ms={} replay_plan_ms={} durable_probe_ms={} target_store_ms={} target_sync_ms={} spool_write_ms={} spool_sync_ms={} profile_sync_ms={} batch_elapsed_ms={}",
+                state.working.next_author,
+                state.ordered_allowlist_count,
+                stage.next_author,
+                state.working.segment_event_offset,
+                segment.event_cids.len(),
+                replay.apply.inserted,
+                replay.apply.replaced,
+                replay.apply.skipped,
+                replay.apply.index_entries,
+                replay.apply.reused_records,
+                replay.spool_missing_candidates,
+                replay.apply.durable_reused_candidates,
+                replay.apply.stored_candidates,
+                replay.apply.reused_exact_batch,
+                completed_segment,
+                completed_segments,
+                replay.stage_load_ms,
+                replay.replay_plan_ms,
+                replay.durable_probe_ms,
+                replay.target_store_ms,
+                replay.target_sync_ms,
+                replay.apply.spool_write_ms,
+                replay.apply.spool_sync_ms,
+                replay.profile_sync_ms,
+                started.elapsed().as_millis()
+            );
+            if completed_segment {
+                break;
+            }
         }
-        persisted_state_sha256 = persist_state(&state_path, &state)?;
-        eprintln!(
-            "Nostr v3 tranche append checkpoint: authors={}/{} staged_authors={} segment_event_offset={}/{} retained={} replaced={} skipped={} index_entries={} reused_records={} spool_missing_candidates={} durable_reused_candidates={} stored_candidates={} reused_exact_batch={} completed_segment={} completed_segments={} stage_load_ms={} replay_plan_ms={} durable_probe_ms={} target_store_ms={} target_sync_ms={} spool_write_ms={} spool_sync_ms={} profile_sync_ms={} batch_elapsed_ms={}",
-            state.working.next_author,
-            state.ordered_allowlist_count,
-            stage.next_author,
-            state.working.segment_event_offset,
-            segment.event_cids.len(),
-            replay.apply.inserted,
-            replay.apply.replaced,
-            replay.apply.skipped,
-            replay.apply.index_entries,
-            replay.apply.reused_records,
-            replay.spool_missing_candidates,
-            replay.apply.durable_reused_candidates,
-            replay.apply.stored_candidates,
-            replay.apply.reused_exact_batch,
-            completed_segment,
-            completed_segments,
-            replay.stage_load_ms,
-            replay.replay_plan_ms,
-            replay.durable_probe_ms,
-            replay.target_store_ms,
-            replay.target_sync_ms,
-            replay.apply.spool_write_ms,
-            replay.apply.spool_sync_ms,
-            replay.profile_sync_ms,
-            started.elapsed().as_millis()
-        );
     }
+    recheck_trusted_profile_rank_decisions(Some(&profile_rank_authority))?;
     let output = transition_output(&state, persisted_state_sha256);
     write_output(&output, options.out.as_deref())?;
     Ok(output)
@@ -1489,7 +1986,7 @@ pub(crate) fn freeze_bulk_tranche(
     data_dir: &Path,
     options: BulkTrancheFreezeOptions,
 ) -> Result<BulkTrancheTransitionOutput> {
-    let (state_path, seals_dir, _, _, marker_path) = tranche_paths(data_dir);
+    let (state_path, seals_dir, evidence_dir, _, marker_path) = tranche_paths(data_dir);
     let (mut state, _, state_sha256) =
         load_state(&state_path)?.context("v3 tranche state does not exist; run prepare first")?;
     require_sha256(
@@ -1514,6 +2011,9 @@ pub(crate) fn freeze_bulk_tranche(
         );
     }
     validate_spool_identity(data_dir, &marker_path, &state.spool_identity)?;
+    validate_profile_publication_fence(data_dir)?;
+    let profile_rank_authority =
+        load_copied_profile_rank_authority(&evidence_dir, &state.profile_rank_authority)?;
     let parent_sha = state
         .active_seal_sha256
         .clone()
@@ -1532,24 +2032,35 @@ pub(crate) fn freeze_bulk_tranche(
     let stage_sha256 = bytes_sha256(&stage_bytes);
     let stage: StagedNostrCrawlState =
         serde_json::from_slice(&stage_bytes).context("parse current staging state")?;
-    if stage.version != STAGE_FORMAT_VERSION
-        || stage.policy != state.policy
-        || stage.next_author < state.working.next_author
-    {
+    validate_stage_state(&stage, &state.policy, state.ordered_allowlist_count)?;
+    if stage.next_author < state.working.next_author {
         anyhow::bail!("current staging state cannot cover the requested v3 freeze boundary");
     }
     let frozen_prefix = attest_stage_prefix(
         &options.staging_data_dir,
-        state.working.next_author,
-        state.working.events_seen,
-        state.working.events_selected,
-        state.working.live_bytes_selected,
+        StagePrefixTarget {
+            boundary: state.working.next_author,
+            durable_next_author: stage.next_author,
+            events_seen: state.working.events_seen,
+            events_selected: state.working.events_selected,
+            live_bytes_selected: state.working.live_bytes_selected,
+        },
         stage_sha256,
         &state.policy,
     )?;
     if !frozen_prefix.immutable_prefix_eq(&state.working.rolling_prefix) {
         anyhow::bail!("full staged prefix reattestation differs from the rolling append seal");
     }
+    let (_, spool_path) = bulk_paths(data_dir);
+    let spool = BulkProjectionSpool::open(&spool_path)?;
+    let (profile_distance_sha256, retained_profile_count) = spool
+        .profile_distance_seal_for_frozen_authority(&profile_rank_authority.decisions)
+        .context("seal frozen profile rank decisions against retained metadata winners")?;
+    let frozen_profile_distances = FrozenProfileDistanceSeal {
+        sha256: profile_distance_sha256,
+        retained_profile_count,
+    };
+    recheck_trusted_profile_rank_decisions(Some(&profile_rank_authority))?;
     let generation = state
         .generation
         .checked_add(1)
@@ -1560,11 +2071,14 @@ pub(crate) fn freeze_bulk_tranche(
         parent_seal_sha256: Some(parent_sha),
         purpose: TrancheSealPurpose::Freeze,
         policy: state.policy.clone(),
-        ordered_allowlist: parent.ordered_allowlist,
+        ordered_allowlist_sha256: parent.ordered_allowlist_sha256,
+        ordered_allowlist_count: parent.ordered_allowlist_count,
         prefix: frozen_prefix.clone(),
         spool_identity: state.spool_identity.clone(),
         internal_candidate: None,
         evidence: None,
+        profile_rank_authority: state.profile_rank_authority.clone(),
+        frozen_profile_distances: Some(frozen_profile_distances.clone()),
         serving: state.serving.clone(),
         publication_intent: None,
         publication_receipt: None,
@@ -1575,6 +2089,7 @@ pub(crate) fn freeze_bulk_tranche(
     state.active_seal_sha256 = Some(seal_sha256);
     state.pending_seal_sha256 = None;
     state.working.frozen_prefix = Some(frozen_prefix);
+    state.working.frozen_profile_distances = Some(frozen_profile_distances);
     state.working.built_roots.clear();
     state.working.candidate_root = None;
     let state_sha256 = persist_state(&state_path, &state)?;
