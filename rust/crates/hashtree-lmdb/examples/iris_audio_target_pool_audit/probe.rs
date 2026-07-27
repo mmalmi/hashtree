@@ -63,6 +63,7 @@ pub struct ProbeContext {
 pub struct HashProbe {
     pub catalog_state: String,
     pub catalog_candidates: Vec<String>,
+    pub catalog_declared_size: Option<u64>,
     pub catalog_target_membership: bool,
     pub catalog_error: Option<String>,
     pub target_members: BTreeMap<String, String>,
@@ -231,6 +232,7 @@ impl ProbeContext {
         let mut probes = BTreeMap::new();
         for (index, hash) in hashes.into_iter().enumerate() {
             let location = catalog[index];
+            let catalog_declared_size = location.as_ref().and_then(catalog_location_size);
             let candidates = location
                 .as_ref()
                 .map(catalog_candidates)
@@ -294,6 +296,10 @@ impl ProbeContext {
                     .and_then(|batch| batch.states.get(&hash))
                     .is_some_and(SourceStatus::is_valid)
             });
+            let catalog_size_mismatch = data
+                .as_ref()
+                .zip(catalog_declared_size)
+                .is_some_and(|(body, declared)| body.len() as u64 != declared);
             let target_valid_anywhere = self.target_members.iter().any(|member| {
                 target_batches
                     .get(member)
@@ -305,6 +311,12 @@ impl ProbeContext {
                     .get(member)
                     .and_then(|batch| batch.states.get(&hash))
                     .is_some_and(SourceStatus::is_error)
+            });
+            let target_corrupt = self.target_members.iter().any(|member| {
+                target_batches
+                    .get(member)
+                    .and_then(|batch| batch.states.get(&hash))
+                    .is_some_and(SourceStatus::is_corrupt)
             });
             let fallback_error = self.fallback_tiers.iter().any(|tier| {
                 fallback_batches
@@ -324,10 +336,12 @@ impl ProbeContext {
                     .is_some_and(SourceStatus::is_corrupt)
             });
 
-            let residency = if catalog_witness && catalog_error.is_none() {
-                "target-valid"
+            let residency = if catalog_size_mismatch || target_corrupt {
+                "corrupt"
             } else if catalog_error.is_some() || target_error {
                 "unknown"
+            } else if catalog_witness {
+                "target-valid"
             } else if target_valid_anywhere {
                 "catalog-mismatch"
             } else if fallback_witness.is_some() {
@@ -348,6 +362,7 @@ impl ProbeContext {
                         .unwrap_or("error")
                         .into(),
                     catalog_candidates: candidates.iter().map(ToString::to_string).collect(),
+                    catalog_declared_size,
                     catalog_target_membership: terminal_target.is_some(),
                     catalog_error: catalog_error.clone(),
                     target_members: target_states,
@@ -387,7 +402,44 @@ pub fn verify_pool_manifest_unchanged(
     if terminal.member_ids != config.expected_pool_members {
         return Err("terminal Pool manifest member IDs differ from expectedPoolMembers".into());
     }
+    for member in &config.target_members {
+        reopened
+            .member_existing_hashes_in_sorted_candidates(*member, &[])
+            .map_err(|error| {
+                format!("terminal target Pool member {member} is unavailable: {error}")
+            })?;
+    }
     Ok(())
+}
+
+pub fn verify_terminal_target_residency(
+    config: &ValidatedConfig,
+    initial: &PoolManifestIdentity,
+    hashes: &[Hash],
+) -> Result<(), Box<dyn std::error::Error>> {
+    verify_pool_manifest_unchanged(config, initial)?;
+    let probe = ProbeContext::open(config)?;
+    if probe.pool_manifest_identity() != *initial {
+        return Err("Pool manifest changed before terminal target re-attestation".into());
+    }
+    for batch in hashes.chunks(config.config.work_item_batch_size.max(1)) {
+        let results = probe.probe_hashes(batch)?;
+        for hash in batch {
+            let result = results
+                .get(hash)
+                .ok_or("terminal target probe omitted a requested hash")?;
+            if result.residency != "target-valid" {
+                return Err(format!(
+                    "terminal target residency changed for {}: {}",
+                    to_hex(hash),
+                    result.residency
+                )
+                .into());
+            }
+        }
+    }
+    drop(probe);
+    verify_pool_manifest_unchanged(config, initial)
 }
 
 fn member_labels(members: &[PoolMemberId]) -> Vec<String> {
@@ -425,6 +477,15 @@ fn catalog_candidates(location: &PoolCatalogLocation) -> Vec<PoolMemberId> {
         PoolCatalogLocation::Pending { member, .. }
         | PoolCatalogLocation::Stored { member, .. } => vec![*member],
         PoolCatalogLocation::Moving { source, target, .. } => vec![*target, *source],
+    }
+}
+
+fn catalog_location_size(location: &PoolCatalogLocation) -> Option<u64> {
+    match location {
+        PoolCatalogLocation::Missing => None,
+        PoolCatalogLocation::Pending { size, .. }
+        | PoolCatalogLocation::Stored { size, .. }
+        | PoolCatalogLocation::Moving { size, .. } => Some(*size),
     }
 }
 

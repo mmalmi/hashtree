@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 
 pub const CONFIG_SCHEMA: &str = "iris-audio-target-pool-residency-audit-config/v1";
 pub const CHECKPOINT_SCHEMA: &str = "iris-audio-target-pool-residency-audit-checkpoint/v2";
-pub const LEDGER_ROW_SCHEMA: &str = "iris-audio-target-pool-residency-block/v1";
+pub const LEDGER_ROW_SCHEMA: &str = "iris-audio-target-pool-residency-block/v2";
 pub const MANIFEST_SCHEMA: &str = "iris-audio-target-pool-residency-manifest/v1";
 pub const INVENTORY_IDENTITY_SCHEMA: &str = "iris-audio-target-pool-inventory-identity/v1";
 
@@ -191,6 +191,8 @@ pub struct BlockLedgerRow {
     pub expected_link_type: String,
     pub catalog_state: String,
     pub catalog_candidates: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_declared_size: Option<u64>,
     pub catalog_target_membership: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_error: Option<String>,

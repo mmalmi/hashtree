@@ -141,6 +141,7 @@ pub fn process_block(
             expected_link_type: expected_link_label(block.expected_link_type).into(),
             catalog_state: probe.catalog_state.clone(),
             catalog_candidates: probe.catalog_candidates.clone(),
+            catalog_declared_size: probe.catalog_declared_size,
             catalog_target_membership: probe.catalog_target_membership,
             catalog_error: probe.catalog_error.clone(),
             target_members: probe.target_members.clone(),

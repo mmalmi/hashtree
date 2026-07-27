@@ -4,7 +4,7 @@ use hashtree_core::{key_from_hex, sha256, to_hex};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -138,19 +138,21 @@ struct LedgerHashRow {
     block_hash: String,
 }
 
-pub fn ledger_hash_stats(path: &Path) -> Result<(u64, u64), Box<dyn std::error::Error>> {
-    let mut hashes = HashSet::new();
+pub fn ledger_hash_stats(
+    path: &Path,
+) -> Result<(Vec<hashtree_core::Hash>, u64), Box<dyn std::error::Error>> {
+    let mut hashes = BTreeSet::new();
     let mut rows = 0u64;
     for (index, line) in BufReader::new(File::open(path)?).lines().enumerate() {
         let line = line?;
         let row: LedgerHashRow = serde_json::from_str(&line)
             .map_err(|error| format!("invalid ledger row {}: {error}", index + 1))?;
-        canonical_hash("ledger blockHash", &row.block_hash)
+        let hash = canonical_hash("ledger blockHash", &row.block_hash)
             .map_err(|error| format!("invalid ledger row {}: {error}", index + 1))?;
-        hashes.insert(row.block_hash);
+        hashes.insert(hash);
         rows += 1;
     }
-    Ok((hashes.len() as u64, rows))
+    Ok((hashes.into_iter().collect(), rows))
 }
 
 pub fn append_json_line<T: serde::Serialize>(

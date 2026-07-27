@@ -8,14 +8,16 @@ use crate::model::{
     LedgerManifest, RunOutcome, TargetManifest, WorkItem, CHECKPOINT_SCHEMA,
     INVENTORY_IDENTITY_SCHEMA, LEDGER_ROW_SCHEMA, MANIFEST_SCHEMA,
 };
-use crate::probe::{verify_pool_manifest_unchanged, ProbeContext};
+use crate::probe::{
+    verify_pool_manifest_unchanged, verify_terminal_target_residency, ProbeContext,
+};
 use crate::traversal::process_block;
 use hashtree_core::{Hash, LinkType};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 #[derive(Debug)]
 pub struct RunPaths {
@@ -42,6 +44,10 @@ pub fn run(
     validate_run_paths(paths)?;
     let validated = load_config(&paths.config)?;
     validate_output_storage_separation(paths, &validated)?;
+    if paths.manifest.exists() {
+        fs::remove_file(&paths.manifest)?;
+        sync_parent(&paths.manifest)?;
+    }
     let (inventory, inventory_sha256) = load_inventory(
         &paths.inventory,
         &validated.config.expected_inventory_sha256,
@@ -180,6 +186,13 @@ pub fn run(
             )
             .into());
         }
+        if release_ready {
+            verify_terminal_target_residency(
+                &validated,
+                &pool_manifest_identity,
+                &unique_block_hashes,
+            )?;
+        }
         let manifest = AuditManifest {
             schema: MANIFEST_SCHEMA,
             config_sha256: validated.config_sha256.clone(),
@@ -202,7 +215,7 @@ pub fn run(
                 sha256: ledger_sha256,
                 bytes: ledger_bytes,
                 rows: checkpoint.summary.block_references,
-                unique_block_hashes,
+                unique_block_hashes: unique_block_hashes.len() as u64,
             },
             summary: checkpoint.summary.clone(),
             release_ready,
@@ -227,12 +240,25 @@ fn validate_run_paths(paths: &RunPaths) -> Result<(), Box<dyn std::error::Error>
         ("checkpoint", &paths.checkpoint),
         ("manifest", &paths.manifest),
     ];
-    let mut identities = BTreeMap::new();
+    let mut identities = Vec::new();
     for (label, path) in named {
-        let identity = path_identity(path)?;
-        if let Some(previous) = identities.insert(identity, label) {
-            return Err(format!("{label} path aliases {previous} path").into());
+        let path_identity = path_identity(path)?;
+        let file_identity = existing_file_identity(path)?;
+        for (previous, previous_path, previous_file) in &identities {
+            if path_identity == *previous_path
+                || file_identity.is_some() && file_identity == *previous_file
+            {
+                return Err(format!("{label} path aliases {previous} path").into());
+            }
         }
+        identities.push((label, path_identity, file_identity));
+    }
+    for (label, path) in [
+        ("ledger", &paths.ledger),
+        ("checkpoint", &paths.checkpoint),
+        ("manifest", &paths.manifest),
+    ] {
+        reject_linked_output(label, path)?;
     }
     Ok(())
 }
@@ -261,25 +287,89 @@ fn validate_output_storage_separation(
     Ok(())
 }
 
-fn path_identity(path: &std::path::Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if path.exists() {
-        return Ok(fs::canonicalize(path)?);
-    }
+fn path_identity(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
     } else {
         std::env::current_dir()?.join(path)
     };
-    let parent = absolute
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("/"));
-    let file_name = absolute
-        .file_name()
-        .ok_or_else(|| format!("path has no file name: {}", path.display()))?;
-    Ok(match fs::canonicalize(parent) {
-        Ok(parent) => parent.join(file_name),
-        Err(_) => absolute,
-    })
+    let mut ancestor = absolute.as_path();
+    loop {
+        match fs::canonicalize(ancestor) {
+            Ok(mut identity) => {
+                for component in absolute.strip_prefix(ancestor)?.components() {
+                    match component {
+                        Component::CurDir => {}
+                        Component::ParentDir => {
+                            if !identity.pop() {
+                                return Err(format!(
+                                    "path escapes its filesystem root: {}",
+                                    path.display()
+                                )
+                                .into());
+                            }
+                        }
+                        Component::Normal(value) => identity.push(value),
+                        Component::Prefix(_) | Component::RootDir => {
+                            return Err(format!(
+                                "invalid unresolved path component in {}",
+                                path.display()
+                            )
+                            .into());
+                        }
+                    }
+                }
+                return Ok(identity);
+            }
+            Err(error) => {
+                let Some(parent) = ancestor.parent() else {
+                    return Err(error.into());
+                };
+                ancestor = parent;
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn existing_file_identity(path: &Path) -> Result<Option<(u64, u64)>, Box<dyn std::error::Error>> {
+    use std::os::unix::fs::MetadataExt;
+
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino()))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+#[cfg(not(unix))]
+fn existing_file_identity(path: &Path) -> Result<Option<()>, Box<dyn std::error::Error>> {
+    match fs::metadata(path) {
+        Ok(_) => Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn reject_linked_output(label: &str, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(format!("{label} output must not be a symbolic link").into());
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        let metadata = fs::metadata(path)?;
+        if metadata.is_file() && metadata.nlink() != 1 {
+            return Err(format!("{label} output must not have multiple hard links").into());
+        }
+    }
+    Ok(())
 }
 
 fn build_work_items(

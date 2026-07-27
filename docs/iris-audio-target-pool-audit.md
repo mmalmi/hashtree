@@ -47,15 +47,17 @@ lets the proof run before legacy-member removal without treating physical
 bytes on the still-present legacy member as migrated.
 
 Each JSONL block row has schema
-`iris-audio-target-pool-residency-block/v1`. It records the parent inventory or
+`iris-audio-target-pool-residency-block/v2`. It records the parent inventory or
 additional-root identity, block path and role, catalog candidates, the result
-from every exact target member, every probed fallback tier, a hash-valid
-witness, CHK/tree traversal outcome, and one residency classification:
+from every exact target member, the catalog-declared size, every probed fallback
+tier, a hash-valid witness, CHK/tree traversal outcome, and one residency
+classification:
 
 - `target-valid`: the Pool catalog has a terminal `Stored` location on an
   allowed native target member and that exact member returned full bytes whose
-  SHA-256 equals the block hash. `Pending` and `Moving` catalog states never
-  pass, even when target bytes already exist.
+  SHA-256 equals the block hash and whose byte length equals the catalog size.
+  `Pending` and `Moving` catalog states never pass, even when target bytes
+  already exist.
 - `fallback-only`: no target member is valid, but a configured fallback tier
   returned hash-valid bytes.
 - `catalog-mismatch`: target bytes are hash-valid but the catalog does not name
@@ -86,9 +88,21 @@ The terminal manifest separately pins `expectedPoolMemberIds` (the complete
 manifest identity) and `targetMemberIds` (the only acceptable residency
 witnesses), together with the full manifest generation and SHA-256. Before
 writing a terminal manifest the auditor opens a fresh read-only Pool reader and
-requires that complete identity to equal the checkpointed start identity. A
-long-running audit therefore cannot certify stale member configuration or
-membership.
+requires that complete identity to equal the checkpointed start identity and
+requires every configured target member to remain available. Any target-member
+probe error makes the affected rows `unknown`, even when a different target
+member is the catalogued hash-valid witness. A long-running audit therefore
+cannot certify stale member configuration, membership, or an unavailable
+target tier. Before preserving `releaseReady: true`, the terminal reader
+re-probes every unique ledger hash and requires its current catalog location,
+declared size, target member, and hash-checked body to remain valid, then
+re-reads the complete Pool manifest once more. Re-running a completed checkpoint
+first removes its old terminal manifest after proving that all output paths are
+separate from Pool storage, so failed re-attestation cannot leave a stale
+release-ready artifact behind. Run the terminal audit while Pool migration,
+temperature relocation, and crawler writes are quiesced; the independent Pool
+catalog and member LMDB environments do not provide one cross-environment
+snapshot for concurrent mutation.
 
 The terminal manifest schema is
 `iris-audio-target-pool-residency-manifest/v1`. It pins the inventory identity,
