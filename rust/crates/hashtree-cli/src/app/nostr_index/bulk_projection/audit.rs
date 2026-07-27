@@ -445,6 +445,18 @@ fn parse_profile_rank_decisions(bytes: &[u8]) -> Result<(BTreeMap<String, Option
     Ok((decisions, decisions_sha256))
 }
 
+fn eligible_profile_rank_authors_sha256(decisions: &BTreeMap<String, Option<u32>>) -> String {
+    let mut digest = Sha256::new();
+    for pubkey in decisions
+        .iter()
+        .filter_map(|(pubkey, rank)| rank.is_some().then_some(pubkey))
+    {
+        digest.update(pubkey.as_bytes());
+        digest.update(b"\n");
+    }
+    hex::encode(digest.finalize())
+}
+
 fn canonical_read_pinned_file(
     label: &str,
     path: &Path,
@@ -568,6 +580,7 @@ pub(super) fn load_pinned_profile_rank_decisions(
         anyhow::bail!("profile rank-decisions report has the wrong provenance contract");
     }
     let eligible_count = decisions.values().filter(|rank| rank.is_some()).count();
+    let eligible_authors_sha256 = eligible_profile_rank_authors_sha256(&decisions);
     let excluded_count = decisions.len() - eligible_count;
     let reachable_partition = report
         .eligible_count
@@ -599,6 +612,14 @@ pub(super) fn load_pinned_profile_rank_decisions(
     {
         anyhow::bail!("profile rank-decisions report does not match its exact decisions artifact");
     }
+    if report.eligible_authors_sha256 != eligible_authors_sha256 {
+        anyhow::bail!(
+            "profile rank-decisions report eligible-author digest {} does not match actual \
+             eligible decision keys {}",
+            report.eligible_authors_sha256,
+            eligible_authors_sha256
+        );
+    }
 
     Ok(TrustedProfileRankDecisions {
         decisions,
@@ -614,7 +635,7 @@ pub(super) fn load_pinned_profile_rank_decisions(
             rank_decisions_sha256,
             social_graph_root: report.social_graph_root,
             social_graph_sha256: report.social_graph_sha256,
-            eligible_authors_sha256: report.eligible_authors_sha256,
+            eligible_authors_sha256,
             record_count: report.record_count,
             eligible_count: report.eligible_count,
             excluded_count: report.excluded_count,
@@ -1960,12 +1981,13 @@ mod tests {
         let decisions_bytes = format!("{}\n", lines.join("\n")).into_bytes();
         let decisions_file_sha256 = bytes_sha256(&decisions_bytes);
         let eligible_count = decisions.values().filter(|rank| rank.is_some()).count();
+        let eligible_authors_sha256 = eligible_profile_rank_authors_sha256(decisions);
         let report = serde_json::json!({
             "format": PROFILE_RANK_DECISION_REPORT_FORMAT,
             "censusFormat": PROFILE_RANK_DECISION_CENSUS_FORMAT,
             "socialGraphRoot": "a".repeat(64),
             "socialGraphSha256": "b".repeat(64),
-            "eligibleAuthorsSha256": "c".repeat(64),
+            "eligibleAuthorsSha256": eligible_authors_sha256,
             "overmuteThreshold": PROFILE_OVERMUTE_THRESHOLD,
             "maxDistance": 4,
             "rankPolicy": PROFILE_RANK_POLICY,
@@ -2033,7 +2055,8 @@ mod tests {
             trusted.evidence.census_max_distance,
             crawl_policy_max_follow_distance
         );
-        require_profile_rank_policy_binding(Some(&trusted), &"c".repeat(64), 1).unwrap();
+        let eligible_authors_sha256 = eligible_profile_rank_authors_sha256(&decisions);
+        require_profile_rank_policy_binding(Some(&trusted), &eligible_authors_sha256, 1).unwrap();
         assert!(
             require_profile_rank_policy_binding(Some(&trusted), &"f".repeat(64), 1)
                 .unwrap_err()
@@ -2041,7 +2064,7 @@ mod tests {
                 .contains("does not match crawl-policy allowlist digest")
         );
         assert!(
-            require_profile_rank_policy_binding(Some(&trusted), &"c".repeat(64), 2)
+            require_profile_rank_policy_binding(Some(&trusted), &eligible_authors_sha256, 2)
                 .unwrap_err()
                 .to_string()
                 .contains("does not match crawl-policy author count")
@@ -2053,6 +2076,39 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("changed during read-only audit"));
+    }
+
+    #[test]
+    fn pinned_rank_decisions_reject_same_count_swapped_eligible_pubkey() {
+        let temp = tempfile::tempdir().unwrap();
+        let expected_pubkey = "d".repeat(64);
+        let expected = BTreeMap::from([(expected_pubkey, Some(1))]);
+        let expected_eligible_sha256 = eligible_profile_rank_authors_sha256(&expected);
+
+        let swapped_pubkey = "e".repeat(64);
+        let swapped = BTreeMap::from([(swapped_pubkey, Some(1))]);
+        let (decisions_bytes, report_bytes, decisions_sha256, _) =
+            rank_decision_artifacts(&swapped);
+        let mut report: serde_json::Value = serde_json::from_slice(&report_bytes).unwrap();
+        report["eligibleAuthorsSha256"] = serde_json::Value::String(expected_eligible_sha256);
+        let report_bytes =
+            format!("{}\n", serde_json::to_string_pretty(&report).unwrap()).into_bytes();
+        let report_sha256 = bytes_sha256(&report_bytes);
+        let decisions_path = temp.path().join("rank-decisions.jsonl");
+        let report_path = temp.path().join("rank-decisions-report.json");
+        std::fs::write(&decisions_path, decisions_bytes).unwrap();
+        std::fs::write(&report_path, report_bytes).unwrap();
+
+        let error = load_pinned_profile_rank_decisions(
+            &decisions_path,
+            &decisions_sha256,
+            &report_path,
+            &report_sha256,
+        )
+        .expect_err("same-count swapped eligible keys must not inherit the policy digest");
+        assert!(error
+            .to_string()
+            .contains("does not match actual eligible decision keys"));
     }
 
     #[test]
