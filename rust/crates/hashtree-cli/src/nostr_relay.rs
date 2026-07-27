@@ -489,7 +489,7 @@ mod imp {
     }
 
     struct BluetoothEventLog {
-        path: PathBuf,
+        path: Option<PathBuf>,
         state: Mutex<BluetoothEventLogState>,
     }
 
@@ -499,7 +499,7 @@ mod imp {
     }
 
     impl BluetoothEventLog {
-        fn load(path: PathBuf) -> Self {
+        fn load(path: PathBuf, durable_writes_enabled: bool) -> Self {
             let records = std::fs::read_to_string(&path)
                 .ok()
                 .map(|serialized| {
@@ -522,7 +522,7 @@ mod imp {
                 .collect::<HashSet<_>>();
 
             Self {
-                path,
+                path: durable_writes_enabled.then_some(path),
                 state: Mutex::new(BluetoothEventLogState {
                     records: trimmed,
                     event_ids,
@@ -577,10 +577,13 @@ mod imp {
                     .join("\n")
             };
 
-            if let Some(parent) = self.path.parent() {
+            let Some(path) = self.path.as_ref() else {
+                return;
+            };
+            if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::write(&self.path, serialized);
+            let _ = std::fs::write(path, serialized);
         }
     }
 
@@ -615,7 +618,7 @@ mod imp {
 
     pub struct NostrRelay {
         config: NostrRelayConfig,
-        trusted: NostrStore,
+        trusted: Option<NostrStore>,
         public_pubkeys: HashSet<String>,
         spambox: Option<SpamboxStore>,
         historical_index: Option<HistoricalNostrIndex>,
@@ -643,7 +646,7 @@ mod imp {
 
             let mut added = 0usize;
 
-            if !prefers_trusted_only(filter) {
+            if self.trusted.is_none() || !prefers_trusted_only(filter) {
                 let recent = {
                     let cache = self.recent_events.lock().await;
                     cache.matching(filter)
@@ -659,12 +662,14 @@ mod imp {
                 }
             }
 
-            for event in self.trusted.query(filter.clone(), limit).await {
-                if seen.insert(event.id) {
-                    events.push(event);
-                    added += 1;
-                    if added >= limit {
-                        return;
+            if let Some(trusted) = self.trusted.as_ref() {
+                for event in trusted.query(filter.clone(), limit).await {
+                    if seen.insert(event.id) {
+                        events.push(event);
+                        added += 1;
+                        if added >= limit {
+                            return;
+                        }
                     }
                 }
             }
@@ -695,7 +700,7 @@ mod imp {
 
             let mut added = 0usize;
 
-            if !prefers_trusted_only(filter) {
+            if self.trusted.is_none() || !prefers_trusted_only(filter) {
                 let recent = {
                     let cache = self.recent_events.lock().await;
                     cache.matching(filter)
@@ -710,11 +715,13 @@ mod imp {
                 }
             }
 
-            for event in self.trusted.query(filter.clone(), limit).await {
-                if seen.insert(event.id) {
-                    added += 1;
-                    if added >= limit {
-                        return;
+            if let Some(trusted) = self.trusted.as_ref() {
+                for event in trusted.query(filter.clone(), limit).await {
+                    if seen.insert(event.id) {
+                        added += 1;
+                        if added >= limit {
+                            return;
+                        }
                     }
                 }
             }
@@ -765,11 +772,12 @@ mod imp {
             let recent_size = config.max_query_limit.saturating_mul(2);
             let bluetooth_event_log = Arc::new(BluetoothEventLog::load(
                 data_dir.join("bluetooth-events.jsonl"),
+                true,
             ));
 
             Ok(Self {
                 config,
-                trusted: NostrStore::new(trusted_store),
+                trusted: Some(NostrStore::new(trusted_store)),
                 public_pubkeys,
                 spambox,
                 historical_index: None,
@@ -784,12 +792,41 @@ mod imp {
             })
         }
 
+        /// Build the daemon's maintenance-mode relay projection. Trusted
+        /// upstream events remain available to in-process resolver requests,
+        /// but no social-graph, spambox, historical-index, or Bluetooth-log
+        /// writer is installed.
+        pub fn new_read_only(data_dir: PathBuf, config: NostrRelayConfig) -> Self {
+            let recent_size = config.max_query_limit.saturating_mul(2);
+            let bluetooth_event_log = Arc::new(BluetoothEventLog::load(
+                data_dir.join("bluetooth-events.jsonl"),
+                false,
+            ));
+            Self {
+                config,
+                trusted: None,
+                public_pubkeys: HashSet::new(),
+                spambox: None,
+                historical_index: None,
+                social_graph: None,
+                clients: Mutex::new(HashMap::new()),
+                subscriptions: Mutex::new(HashMap::new()),
+                recent_events: Mutex::new(RecentEvents::new(recent_size)),
+                next_client_id: AtomicU64::new(1),
+                bluetooth_event_log,
+                #[cfg(feature = "experimental-decentralized-pubsub")]
+                decentralized_pubsub_tx: std::sync::Mutex::new(None),
+            }
+        }
+
         pub fn with_historical_nostr_index(
             mut self,
             store: Arc<StorageRouter>,
             data_dir: PathBuf,
         ) -> Self {
-            self.historical_index = Some(HistoricalNostrIndex::new(store, data_dir));
+            if self.trusted.is_some() {
+                self.historical_index = Some(HistoricalNostrIndex::new(store, data_dir));
+            }
             self
         }
 
@@ -863,10 +900,12 @@ mod imp {
             }
             if !is_ephemeral {
                 let storage_class = self.event_storage_class(&event);
-                self.trusted
-                    .ingest_with_storage_class(event.clone(), storage_class)
-                    .await?;
-                self.append_historical_index(&event).await;
+                if let Some(trusted) = self.trusted.as_ref() {
+                    trusted
+                        .ingest_with_storage_class(event.clone(), storage_class)
+                        .await?;
+                    self.append_historical_index(&event).await;
+                }
             }
 
             Ok(true)
@@ -892,10 +931,12 @@ mod imp {
 
             if !is_ephemeral {
                 let storage_class = self.event_storage_class(&event);
-                self.trusted
-                    .ingest_with_storage_class(event.clone(), storage_class)
-                    .await?;
-                self.append_historical_index(&event).await;
+                if let Some(trusted) = self.trusted.as_ref() {
+                    trusted
+                        .ingest_with_storage_class(event.clone(), storage_class)
+                        .await?;
+                    self.append_historical_index(&event).await;
+                }
             }
 
             if broadcast {
@@ -913,7 +954,7 @@ mod imp {
             let mut seen: HashSet<EventId> = HashSet::new();
             let mut events = Vec::new();
 
-            if !prefers_trusted_only(filter) {
+            if self.trusted.is_none() || !prefers_trusted_only(filter) {
                 let recent = {
                     let cache = self.recent_events.lock().await;
                     cache.matching(filter)
@@ -928,11 +969,13 @@ mod imp {
                 }
             }
 
-            for event in self.trusted.query(filter.clone(), limit).await {
-                if seen.insert(event.id) {
-                    events.push(event);
-                    if events.len() >= limit {
-                        break;
+            if let Some(trusted) = self.trusted.as_ref() {
+                for event in trusted.query(filter.clone(), limit).await {
+                    if seen.insert(event.id) {
+                        events.push(event);
+                        if events.len() >= limit {
+                            break;
+                        }
                     }
                 }
             }
@@ -1110,6 +1153,15 @@ mod imp {
                 return;
             }
 
+            if self.trusted.is_none() {
+                self.send_to_client(
+                    client_id,
+                    NostrRelayMessage::ok(event.id, false, "read-only"),
+                )
+                .await;
+                return;
+            }
+
             let trusted = self.is_trusted_event(client_id, &event).await;
             if !trusted && !self.allow_spambox_event(client_id).await {
                 self.send_to_client(
@@ -1130,6 +1182,8 @@ mod imp {
                     let storage_class = self.event_storage_class(&event);
                     let stored = self
                         .trusted
+                        .as_ref()
+                        .expect("read-only relay rejected client publication")
                         .ingest_with_storage_class(event.clone(), storage_class)
                         .await
                         .is_ok();

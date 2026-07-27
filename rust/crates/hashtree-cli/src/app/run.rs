@@ -405,15 +405,6 @@ pub(crate) async fn run() -> Result<()> {
                 }
             }
 
-            // Initialize the local social graph store.
-            let graph_store = hashtree_cli::socialgraph::open_social_graph_store_with_storage(
-                &data_dir,
-                store.store_arc(),
-                Some(nostr_db_max_bytes),
-            )
-            .context("Failed to initialize social graph store")?;
-            graph_store.set_profile_index_overmute_threshold(config.nostr.overmute_threshold);
-
             // Set social graph root (configured npub or own key)
             let social_graph_root_bytes = if let Some(ref root_npub) = config.nostr.socialgraph_root
             {
@@ -421,71 +412,108 @@ pub(crate) async fn run() -> Result<()> {
             } else {
                 pk_bytes
             };
-            hashtree_cli::socialgraph::set_social_graph_root(
-                &graph_store,
-                &social_graph_root_bytes,
-            );
-            hashtree_cli::socialgraph::sync_local_list_files_force(
-                graph_store.as_ref(),
-                &data_dir,
-                &keys,
-            )
-            .context("Failed to sync local social graph lists")?;
-            let fips_peer_ids = hashtree_cli::fips_transport::fips_peer_ids_from_pubkeys(
-                hashtree_cli::socialgraph::get_follows(graph_store.as_ref(), &pk_bytes),
-            );
-            let social_graph_store: Arc<dyn hashtree_cli::socialgraph::SocialGraphBackend> =
-                graph_store.clone();
-
-            // Build social graph access control
-            let social_graph = Arc::new(hashtree_cli::socialgraph::SocialGraphAccessControl::new(
-                Arc::clone(&social_graph_store),
-                config.nostr.max_write_distance,
-                allowed_pubkeys.clone(),
-            ));
-
             let nostr_relay_config = hashtree_cli::nostr_relay::NostrRelayConfig {
                 spambox_db_max_bytes,
                 ..Default::default()
             };
-            let nostr_relay = if config.nostr.enabled {
-                let mut public_event_pubkeys = HashSet::new();
-                public_event_pubkeys.insert(hex::encode(pk_bytes));
-                Some(Arc::new(
-                    hashtree_cli::nostr_relay::NostrRelay::new(
-                        Arc::clone(&social_graph_store),
+            let pool_audit_read_only = store.is_pool_audit_read_only();
+            let graph_store;
+            let social_graph_store;
+            let social_graph;
+            let fips_peer_ids;
+            let nostr_relay;
+            let crawler_spambox_backend;
+            if pool_audit_read_only {
+                tracing::warn!(
+                    "Pool audit-serving read-only mode: social graph and durable Nostr relay writers remain unopened"
+                );
+                graph_store = None;
+                social_graph_store = None;
+                social_graph = None;
+                fips_peer_ids = Vec::new();
+                nostr_relay = config.nostr.enabled.then(|| {
+                    Arc::new(hashtree_cli::nostr_relay::NostrRelay::new_read_only(
                         data_dir.clone(),
-                        public_event_pubkeys,
-                        Some(social_graph.clone()),
                         nostr_relay_config,
+                    ))
+                });
+                crawler_spambox_backend = None;
+            } else {
+                // Initialize the local social graph store.
+                let opened_graph_store =
+                    hashtree_cli::socialgraph::open_social_graph_store_with_storage(
+                        &data_dir,
+                        store.store_arc(),
+                        Some(nostr_db_max_bytes),
                     )
-                    .map(|relay| {
-                        relay.with_historical_nostr_index(store.store_arc(), data_dir.clone())
-                    })
-                    .context("Failed to initialize Nostr relay")?,
-                ))
-            } else {
-                None
-            };
-
-            let crawler_spambox = if config.nostr.enabled && spambox_db_max_bytes != 0 {
-                let spam_dir = data_dir.join("socialgraph_spambox");
-                match hashtree_cli::socialgraph::open_social_graph_store_at_path(
-                    &spam_dir,
-                    Some(spambox_db_max_bytes),
-                ) {
-                    Ok(store) => Some(store),
-                    Err(err) => {
-                        tracing::warn!("Failed to open social graph spambox for crawler: {}", err);
-                        None
+                    .context("Failed to initialize social graph store")?;
+                opened_graph_store
+                    .set_profile_index_overmute_threshold(config.nostr.overmute_threshold);
+                hashtree_cli::socialgraph::set_social_graph_root(
+                    &opened_graph_store,
+                    &social_graph_root_bytes,
+                );
+                hashtree_cli::socialgraph::sync_local_list_files_force(
+                    opened_graph_store.as_ref(),
+                    &data_dir,
+                    &keys,
+                )
+                .context("Failed to sync local social graph lists")?;
+                fips_peer_ids = hashtree_cli::fips_transport::fips_peer_ids_from_pubkeys(
+                    hashtree_cli::socialgraph::get_follows(opened_graph_store.as_ref(), &pk_bytes),
+                );
+                let opened_social_graph_store: Arc<
+                    dyn hashtree_cli::socialgraph::SocialGraphBackend,
+                > = opened_graph_store.clone();
+                let opened_social_graph =
+                    Arc::new(hashtree_cli::socialgraph::SocialGraphAccessControl::new(
+                        Arc::clone(&opened_social_graph_store),
+                        config.nostr.max_write_distance,
+                        allowed_pubkeys.clone(),
+                    ));
+                nostr_relay = if config.nostr.enabled {
+                    let mut public_event_pubkeys = HashSet::new();
+                    public_event_pubkeys.insert(hex::encode(pk_bytes));
+                    Some(Arc::new(
+                        hashtree_cli::nostr_relay::NostrRelay::new(
+                            Arc::clone(&opened_social_graph_store),
+                            data_dir.clone(),
+                            public_event_pubkeys,
+                            Some(opened_social_graph.clone()),
+                            nostr_relay_config,
+                        )
+                        .map(|relay| {
+                            relay.with_historical_nostr_index(store.store_arc(), data_dir.clone())
+                        })
+                        .context("Failed to initialize Nostr relay")?,
+                    ))
+                } else {
+                    None
+                };
+                let crawler_spambox = if config.nostr.enabled && spambox_db_max_bytes != 0 {
+                    let spam_dir = data_dir.join("socialgraph_spambox");
+                    match hashtree_cli::socialgraph::open_social_graph_store_at_path(
+                        &spam_dir,
+                        Some(spambox_db_max_bytes),
+                    ) {
+                        Ok(store) => Some(store),
+                        Err(err) => {
+                            tracing::warn!(
+                                "Failed to open social graph spambox for crawler: {}",
+                                err
+                            );
+                            None
+                        }
                     }
-                }
-            } else {
-                None
-            };
-            let crawler_spambox_backend = crawler_spambox
-                .clone()
-                .map(|store| store as Arc<dyn hashtree_cli::socialgraph::SocialGraphBackend>);
+                } else {
+                    None
+                };
+                crawler_spambox_backend = crawler_spambox
+                    .map(|store| store as Arc<dyn hashtree_cli::socialgraph::SocialGraphBackend>);
+                graph_store = Some(opened_graph_store);
+                social_graph_store = Some(opened_social_graph_store);
+                social_graph = Some(opened_social_graph);
+            }
 
             // Keep client-visible Blossom endpoints available to the daemon,
             // except for its own listener, which would recurse on a miss.
@@ -543,13 +571,17 @@ pub(crate) async fn run() -> Result<()> {
                 )
                 .with_nostr_relay_urls(active_nostr_relays);
 
-            // Add social graph to server
-            server = server.with_social_graph(social_graph);
-            server = server.with_socialgraph_snapshot(
-                Arc::clone(&social_graph_store),
-                social_graph_root_bytes,
-                config.server.socialgraph_snapshot_public,
-            );
+            // Add social graph to server when its durable stores are writable.
+            if let Some(social_graph) = social_graph {
+                server = server.with_social_graph(social_graph);
+            }
+            if let Some(social_graph_store) = social_graph_store.as_ref() {
+                server = server.with_socialgraph_snapshot(
+                    Arc::clone(social_graph_store),
+                    social_graph_root_bytes,
+                    config.server.socialgraph_snapshot_public,
+                );
+            }
             if let Some(nostr_relay) = nostr_relay.clone() {
                 server = server.with_nostr_relay(nostr_relay);
             }
@@ -563,16 +595,19 @@ pub(crate) async fn run() -> Result<()> {
                     .with_fips_blob_resolver(fips_handle.blob_resolver.clone());
             }
 
-            let background_services_controller = Arc::new(
-                hashtree_cli::daemon::EmbeddedBackgroundServicesController::new(
-                    keys.clone(),
-                    data_dir.clone(),
-                    Arc::clone(&store),
-                    graph_store.clone(),
-                    Arc::clone(&social_graph_store),
-                    crawler_spambox_backend,
-                ),
-            );
+            let background_services_controller = match (graph_store, social_graph_store.as_ref()) {
+                (Some(graph_store), Some(social_graph_store)) => Some(Arc::new(
+                    hashtree_cli::daemon::EmbeddedBackgroundServicesController::new(
+                        keys.clone(),
+                        data_dir.clone(),
+                        Arc::clone(&store),
+                        graph_store,
+                        Arc::clone(social_graph_store),
+                        crawler_spambox_backend,
+                    ),
+                )),
+                _ => None,
+            };
 
             // Print startup info
             println!("Starting hashtree daemon on {}", bind_address);
@@ -632,10 +667,14 @@ pub(crate) async fn run() -> Result<()> {
                 );
             }
             println!("Git remote: http://{}/git/<pubkey>/<repo>", bind_address);
-            println!(
-                "Social graph: enabled (social_graph_crawl_depth={}, max_write_distance={})",
-                config.nostr.social_graph_crawl_depth, config.nostr.max_write_distance
-            );
+            if pool_audit_read_only {
+                println!("Social graph: read-only maintenance projection");
+            } else {
+                println!(
+                    "Social graph: enabled (social_graph_crawl_depth={}, max_write_distance={})",
+                    config.nostr.social_graph_crawl_depth, config.nostr.max_write_distance
+                );
+            }
             println!("Storage limit: {} GB", config.storage.max_size_gb);
             if !config.cashu.accepted_mints.is_empty() {
                 println!(
@@ -677,10 +716,12 @@ pub(crate) async fn run() -> Result<()> {
             let server_handle =
                 tokio::spawn(async move { server.run_with_listener(listener).await });
 
-            background_services_controller
-                .apply_config(&config)
-                .await
-                .context("Failed to start background services")?;
+            if let Some(controller) = background_services_controller.as_ref() {
+                controller
+                    .apply_config(&config)
+                    .await
+                    .context("Failed to start background services")?;
+            }
 
             // Start background eviction task (runs every 5 minutes), except
             // while the Pool catalog and member files are being audited.
@@ -718,7 +759,9 @@ pub(crate) async fn run() -> Result<()> {
                 fips_handle.shutdown().await;
             }
 
-            background_services_controller.shutdown().await;
+            if let Some(controller) = background_services_controller {
+                controller.shutdown().await;
+            }
         }
         #[cfg(feature = "fuse")]
         Commands::Mount {

@@ -11,10 +11,13 @@
   the reachable event and profile trees; and installs the canonical manifest
   only after the complete build passes.
 - `nostr-index audit-bulk-projection --v3-candidate` now derives the stage,
-  policy, complete author count, profile-distance seal, and rank evidence
-  exclusively from the sealed Candidate state, then emits exhaustive
-  read-only full-policy cutover evidence. Raw v2 authority overrides and
-  recovery-tranche mode are rejected for this path.
+  policy, complete author count, B-tree order, profile-distance seal, and rank
+  evidence exclusively from the sealed Candidate state. Audit format 4
+  independently reattests the sealed segment chain before and after the
+  exhaustive audit, verifies every staged event CID and Schnorr signature from
+  PoolStore, and byte-compares the resulting retained records and replaceable
+  slots with the spool before proving spool-to-Candidate index parity. Raw v2
+  authority overrides and recovery-tranche mode are rejected for this path.
 
 ### Fixed
 
@@ -26,6 +29,14 @@
 - The aggregate release gate now propagates the first failing command from
   every lane explicitly, so Bash conditional-call semantics cannot turn a
   failed Rust, FIPS, static, or TypeScript check into a false-green release.
+- V3 Candidate construction now has generated crash-boundary coverage at both
+  index-root force-sync/state-CAS and manifest force-sync/Candidate-CAS. Each
+  interrupted build resumes to byte-identical state, index roots, and manifest
+  root compared with an uninterrupted build.
+- Strict Pool audit-serving now leaves social-graph, spambox, historical Nostr
+  index, and Bluetooth-log writers unopened. Production `htree start` and
+  embedded daemons resolve external roots through the configured pubsub router
+  and a memory-only relay projection while preserving every durable data file.
 
 ## 0.2.137 - 2026-07-23
 

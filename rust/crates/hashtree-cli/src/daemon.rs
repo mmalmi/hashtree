@@ -541,84 +541,115 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         }
     }
 
-    let graph_store = socialgraph::open_embedded_social_graph_store_with_storage(
-        &opts.data_dir,
-        store.store_arc(),
-        Some(nostr_db_max_bytes),
-    )
-    .context("Failed to initialize social graph store")?;
-    graph_store.set_profile_index_overmute_threshold(config.nostr.overmute_threshold);
-
     let social_graph_root_bytes = if let Some(ref root_npub) = config.nostr.socialgraph_root {
         parse_npub(root_npub).unwrap_or(pk_bytes)
     } else {
         pk_bytes
     };
-    socialgraph::set_social_graph_root(&graph_store, &social_graph_root_bytes);
-    socialgraph::sync_local_list_files_force(graph_store.as_ref(), &opts.data_dir, &keys)
-        .context("Failed to sync local social graph lists")?;
-    let fips_peer_ids = crate::fips_transport::fips_peer_ids_from_pubkeys(
-        socialgraph::get_follows(graph_store.as_ref(), &pk_bytes),
-    );
-    let social_graph_store: Arc<dyn socialgraph::SocialGraphBackend> = graph_store.clone();
-
-    let social_graph = Arc::new(socialgraph::SocialGraphAccessControl::new(
-        Arc::clone(&social_graph_store),
-        config.nostr.max_write_distance,
-        allowed_pubkeys.clone(),
-    ));
-
     let nostr_relay_config = NostrRelayConfig {
         spambox_db_max_bytes,
         ..Default::default()
     };
-    let nostr_relay = if config.nostr.enabled {
-        let mut public_event_pubkeys = HashSet::new();
-        public_event_pubkeys.insert(hex::encode(pk_bytes));
-        Some(Arc::new(
-            NostrRelay::new(
-                Arc::clone(&social_graph_store),
+    let pool_audit_read_only = store.is_pool_audit_read_only();
+    let graph_store;
+    let social_graph_store;
+    let social_graph;
+    let fips_peer_ids;
+    let nostr_relay;
+    let crawler_spambox_backend;
+    if pool_audit_read_only {
+        tracing::warn!(
+            "Pool audit-serving read-only mode: embedded social graph and durable Nostr relay writers remain unopened"
+        );
+        graph_store = None;
+        social_graph_store = None;
+        social_graph = None;
+        fips_peer_ids = Vec::new();
+        nostr_relay = config.nostr.enabled.then(|| {
+            Arc::new(NostrRelay::new_read_only(
                 opts.data_dir.clone(),
-                public_event_pubkeys,
-                Some(social_graph.clone()),
                 nostr_relay_config,
-            )
-            .map(|relay| {
-                relay.with_historical_nostr_index(store.store_arc(), opts.data_dir.clone())
-            })
-            .context("Failed to initialize Nostr relay")?,
-        ))
+            ))
+        });
+        crawler_spambox_backend = None;
     } else {
-        None
-    };
-
-    let crawler_spambox = if config.nostr.enabled && spambox_db_max_bytes != 0 {
-        let spam_dir = opts.data_dir.join("socialgraph_spambox");
-        match socialgraph::open_embedded_social_graph_store_at_path(
-            &spam_dir,
-            Some(spambox_db_max_bytes),
-        ) {
-            Ok(store) => Some(store),
-            Err(err) => {
-                tracing::warn!("Failed to open social graph spambox for crawler: {}", err);
-                None
+        let opened_graph_store = socialgraph::open_embedded_social_graph_store_with_storage(
+            &opts.data_dir,
+            store.store_arc(),
+            Some(nostr_db_max_bytes),
+        )
+        .context("Failed to initialize social graph store")?;
+        opened_graph_store.set_profile_index_overmute_threshold(config.nostr.overmute_threshold);
+        socialgraph::set_social_graph_root(&opened_graph_store, &social_graph_root_bytes);
+        socialgraph::sync_local_list_files_force(
+            opened_graph_store.as_ref(),
+            &opts.data_dir,
+            &keys,
+        )
+        .context("Failed to sync local social graph lists")?;
+        fips_peer_ids = crate::fips_transport::fips_peer_ids_from_pubkeys(
+            socialgraph::get_follows(opened_graph_store.as_ref(), &pk_bytes),
+        );
+        let opened_social_graph_store: Arc<dyn socialgraph::SocialGraphBackend> =
+            opened_graph_store.clone();
+        let opened_social_graph = Arc::new(socialgraph::SocialGraphAccessControl::new(
+            Arc::clone(&opened_social_graph_store),
+            config.nostr.max_write_distance,
+            allowed_pubkeys.clone(),
+        ));
+        nostr_relay = if config.nostr.enabled {
+            let mut public_event_pubkeys = HashSet::new();
+            public_event_pubkeys.insert(hex::encode(pk_bytes));
+            Some(Arc::new(
+                NostrRelay::new(
+                    Arc::clone(&opened_social_graph_store),
+                    opts.data_dir.clone(),
+                    public_event_pubkeys,
+                    Some(opened_social_graph.clone()),
+                    nostr_relay_config,
+                )
+                .map(|relay| {
+                    relay.with_historical_nostr_index(store.store_arc(), opts.data_dir.clone())
+                })
+                .context("Failed to initialize Nostr relay")?,
+            ))
+        } else {
+            None
+        };
+        let crawler_spambox = if config.nostr.enabled && spambox_db_max_bytes != 0 {
+            let spam_dir = opts.data_dir.join("socialgraph_spambox");
+            match socialgraph::open_embedded_social_graph_store_at_path(
+                &spam_dir,
+                Some(spambox_db_max_bytes),
+            ) {
+                Ok(store) => Some(store),
+                Err(err) => {
+                    tracing::warn!("Failed to open social graph spambox for crawler: {}", err);
+                    None
+                }
             }
+        } else {
+            None
+        };
+        crawler_spambox_backend =
+            crawler_spambox.map(|store| store as Arc<dyn socialgraph::SocialGraphBackend>);
+        graph_store = Some(opened_graph_store);
+        social_graph_store = Some(opened_social_graph_store);
+        social_graph = Some(opened_social_graph);
+    }
+    let background_services_controller = match (graph_store, social_graph_store.as_ref()) {
+        (Some(graph_store), Some(social_graph_store)) => {
+            Some(Arc::new(EmbeddedBackgroundServicesController::new(
+                keys.clone(),
+                opts.data_dir.clone(),
+                Arc::clone(&store),
+                graph_store,
+                Arc::clone(social_graph_store),
+                crawler_spambox_backend,
+            )))
         }
-    } else {
-        None
+        _ => None,
     };
-    let crawler_spambox_backend = crawler_spambox
-        .clone()
-        .map(|store| store as Arc<dyn socialgraph::SocialGraphBackend>);
-
-    let background_services_controller = Arc::new(EmbeddedBackgroundServicesController::new(
-        keys.clone(),
-        opts.data_dir.clone(),
-        Arc::clone(&store),
-        graph_store.clone(),
-        Arc::clone(&social_graph_store),
-        crawler_spambox_backend,
-    ));
 
     let upstream_blossom = config.blossom.upstream_read_servers(&opts.bind_address);
     let blossom_replica_queue_bytes = crate::server::bounded_upload_queue_bytes(
@@ -669,13 +700,17 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
             keys.clone(),
         )
         .with_nostr_relay_urls(active_nostr_relays)
-        .with_cached_tree_roots(opts.initial_tree_roots)
-        .with_social_graph(social_graph)
-        .with_socialgraph_snapshot(
-            Arc::clone(&social_graph_store),
+        .with_cached_tree_roots(opts.initial_tree_roots);
+    if let Some(social_graph) = social_graph {
+        server = server.with_social_graph(social_graph);
+    }
+    if let Some(social_graph_store) = social_graph_store.as_ref() {
+        server = server.with_socialgraph_snapshot(
+            Arc::clone(social_graph_store),
             social_graph_root_bytes,
             config.server.socialgraph_snapshot_public,
         );
+    }
     if let Some(nostr_relay) = nostr_relay {
         server = server.with_nostr_relay(nostr_relay);
     }
@@ -725,13 +760,15 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         }
     });
     let server_controller = Arc::new(EmbeddedServerController::new(server_shutdown, server_join));
-    background_services_controller.apply_config(&config).await?;
+    if let Some(controller) = background_services_controller.as_ref() {
+        controller.apply_config(&config).await?;
+    }
     let daemon_controller = Arc::new(EmbeddedDaemonController::new(
         server_controller,
         fips_handle.clone(),
         #[cfg(feature = "experimental-decentralized-pubsub")]
         nostr_pubsub_handle.clone(),
-        Some(background_services_controller.clone()),
+        background_services_controller.clone(),
     ));
 
     tracing::info!(
@@ -746,7 +783,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         npub,
         store,
         daemon_controller,
-        background_services_controller: Some(background_services_controller),
+        background_services_controller,
     })
 }
 

@@ -343,6 +343,21 @@ fn test_nostr_bulk_projection_audit_requires_all_trust_pins_and_output() {
         "/evidence/v3-audit.json",
     ])
     .is_err());
+    assert!(Cli::try_parse_from([
+        "htree",
+        "nostr-index",
+        "audit-bulk-projection",
+        "--v3-candidate",
+        "--staging-data-dir",
+        "/stage",
+        "--expected-state-sha256",
+        &"a".repeat(64),
+        "--btree-order",
+        "32",
+        "--out",
+        "/evidence/v3-audit.json",
+    ])
+    .is_err());
 }
 
 #[test]

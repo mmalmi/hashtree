@@ -1145,9 +1145,9 @@ pub(crate) enum NostrIndexCommands {
         /// Permit a non-cutover internal recovery-tranche audit
         #[arg(long = "allow-recovery-tranche", conflicts_with = "v3_candidate")]
         allow_recovery_tranche: bool,
-        /// B-tree order used by the bulk projection
-        #[arg(long, default_value_t = 64)]
-        btree_order: usize,
+        /// B-tree order used by a v2 bulk projection (v3 derives it from sealed state)
+        #[arg(long, conflicts_with = "v3_candidate")]
+        btree_order: Option<usize>,
         /// Maximum exact key/CID rows read per parity page
         #[arg(long, default_value_t = 4096)]
         page_size: usize,

@@ -63,7 +63,7 @@ struct BulkProjectionState {
     complete_root: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct SpoolEventRecord {
     event: StoredNostrEvent,
     cid_hash: [u8; 32],
@@ -123,6 +123,7 @@ enum SpoolEdgeApplyMode {
     #[cfg(test)]
     Immediate,
     DeferredSorted,
+    RecordsOnly,
 }
 
 #[derive(Debug)]
@@ -262,6 +263,7 @@ impl BulkProjectionSpool {
                 .map(|(event, cid)| (event, cid, SpoolRecordProof::Unknown))
                 .collect(),
             SpoolEdgeApplyMode::Immediate,
+            true,
         )
     }
 
@@ -269,7 +271,7 @@ impl BulkProjectionSpool {
         &self,
         events: Vec<(StoredNostrEvent, Cid, SpoolRecordProof)>,
     ) -> Result<SpoolApplyReport> {
-        self.apply_with_record_proofs(events, SpoolEdgeApplyMode::DeferredSorted)
+        self.apply_with_record_proofs(events, SpoolEdgeApplyMode::DeferredSorted, true)
     }
 
     #[cfg(test)]
@@ -277,21 +279,36 @@ impl BulkProjectionSpool {
         &self,
         events: Vec<(StoredNostrEvent, Cid, SpoolRecordProof)>,
     ) -> Result<SpoolApplyReport> {
-        self.apply_with_record_proofs(events, SpoolEdgeApplyMode::Immediate)
+        self.apply_with_record_proofs(events, SpoolEdgeApplyMode::Immediate, true)
+    }
+
+    fn apply_expected_corpus(&self, events: Vec<(StoredNostrEvent, Cid)>) -> Result<()> {
+        self.apply_with_record_proofs(
+            events
+                .into_iter()
+                .map(|(event, cid)| (event, cid, SpoolRecordProof::Unknown))
+                .collect(),
+            SpoolEdgeApplyMode::RecordsOnly,
+            false,
+        )?;
+        Ok(())
     }
 
     fn apply_with_record_proofs(
         &self,
         events: Vec<(StoredNostrEvent, Cid, SpoolRecordProof)>,
         edge_apply_mode: SpoolEdgeApplyMode,
+        force_sync: bool,
     ) -> Result<SpoolApplyReport> {
         let mut report = SpoolApplyReport::default();
         let write_started = Instant::now();
         let mut wtxn = self.env.write_txn()?;
+        let update_edges = edge_apply_mode != SpoolEdgeApplyMode::RecordsOnly;
         let mut deferred_edge_mutations = match edge_apply_mode {
             #[cfg(test)]
             SpoolEdgeApplyMode::Immediate => None,
             SpoolEdgeApplyMode::DeferredSorted => Some(SpoolEdgeMutations::new()),
+            SpoolEdgeApplyMode::RecordsOnly => None,
         };
         for (event, cid, proof) in events {
             match proof {
@@ -353,7 +370,12 @@ impl BulkProjectionSpool {
                         report.skipped = report.skipped.saturating_add(1);
                         continue;
                     }
-                    self.remove_event(&mut wtxn, deferred_edge_mutations.as_mut(), &previous)?;
+                    self.remove_event(
+                        &mut wtxn,
+                        deferred_edge_mutations.as_mut(),
+                        update_edges,
+                        &previous,
+                    )?;
                     replaced = true;
                 }
             }
@@ -365,13 +387,15 @@ impl BulkProjectionSpool {
             };
             let encoded = rmp_serde::to_vec_named(&record).context("encode spool event")?;
             self.events.put(&mut wtxn, event.id.as_bytes(), &encoded)?;
-            for entry in nostr_event_index_entries(&event, &cid) {
-                if let Some(mutations) = deferred_edge_mutations.as_mut() {
-                    Self::defer_put_entry(mutations, entry.index, &entry.key, &entry.cid);
-                } else {
-                    self.put_entry(&mut wtxn, entry.index, &entry.key, &entry.cid)?;
+            if update_edges {
+                for entry in nostr_event_index_entries(&event, &cid) {
+                    if let Some(mutations) = deferred_edge_mutations.as_mut() {
+                        Self::defer_put_entry(mutations, entry.index, &entry.key, &entry.cid);
+                    } else {
+                        self.put_entry(&mut wtxn, entry.index, &entry.key, &entry.cid)?;
+                    }
+                    report.index_entries = report.index_entries.saturating_add(1);
                 }
-                report.index_entries = report.index_entries.saturating_add(1);
             }
             if let Some((index, slot_key)) = slot {
                 self.slots.put(
@@ -392,9 +416,11 @@ impl BulkProjectionSpool {
         }
         wtxn.commit()?;
         report.spool_write_ms = write_started.elapsed().as_millis();
-        let sync_started = Instant::now();
-        self.env.force_sync()?;
-        report.spool_sync_ms = sync_started.elapsed().as_millis();
+        if force_sync {
+            let sync_started = Instant::now();
+            self.env.force_sync()?;
+            report.spool_sync_ms = sync_started.elapsed().as_millis();
+        }
         Ok(report)
     }
 
@@ -503,19 +529,22 @@ impl BulkProjectionSpool {
         &self,
         wtxn: &mut heed::RwTxn<'_>,
         deferred_edge_mutations: Option<&mut SpoolEdgeMutations>,
+        update_edges: bool,
         record: &SpoolEventRecord,
     ) -> Result<()> {
-        let cid = Cid {
-            hash: record.cid_hash,
-            key: record.cid_key,
-        };
-        if let Some(mutations) = deferred_edge_mutations {
-            for entry in nostr_event_index_entries(&record.event, &cid) {
-                Self::defer_remove_entry(mutations, entry.index, &entry.key);
-            }
-        } else {
-            for entry in nostr_event_index_entries(&record.event, &cid) {
-                self.remove_entry(wtxn, entry.index, &entry.key)?;
+        if update_edges {
+            let cid = Cid {
+                hash: record.cid_hash,
+                key: record.cid_key,
+            };
+            if let Some(mutations) = deferred_edge_mutations {
+                for entry in nostr_event_index_entries(&record.event, &cid) {
+                    Self::defer_remove_entry(mutations, entry.index, &entry.key);
+                }
+            } else {
+                for entry in nostr_event_index_entries(&record.event, &cid) {
+                    self.remove_entry(wtxn, entry.index, &entry.key)?;
+                }
             }
         }
         self.events.delete(wtxn, record.event.id.as_bytes())?;

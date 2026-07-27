@@ -23,10 +23,15 @@ use super::super::{
     STAGE_STATE_FILE,
 };
 use super::tranche::load_v3_candidate_audit_authority;
+#[cfg(test)]
+use super::tranche::V3CandidateAuditAuthority;
 use super::{
     bulk_paths, encode_cid, validate_terminal_stage_state, BulkProjectionSpool,
     BulkProjectionState, EntryTrieCursor, SpoolEventRecord, BULK_PROJECTION_VERSION,
 };
+
+mod stage_corpus;
+use stage_corpus::{reconcile_v3_stage_corpus, BulkProjectionStageCorpusAudit, V3StageCorpusSpec};
 
 const PROFILE_RANK_DECISION_FORMAT: &str = "iris-social/profile-search-v3-rank-decisions@1";
 const PROFILE_RANK_DECISION_REPORT_FORMAT: &str =
@@ -36,7 +41,8 @@ const PROFILE_RANK_POLICY: &str = "follow-distance@1";
 const PROFILE_EXCLUSION_POLICY: &str = "all-nonselected-graph-identities@1";
 const PROFILE_OVERMUTE_THRESHOLD: usize = 1;
 const PROFILE_UNREACHABLE_DISTANCE: u32 = 1_000;
-const BULK_PROJECTION_AUDIT_FORMAT_VERSION: u32 = 3;
+const BULK_PROJECTION_AUDIT_FORMAT_VERSION: u32 = 4;
+const DEFAULT_AUDIT_BTREE_ORDER: usize = 64;
 const FULL_POLICY_CUTOVER_AUDIT_MODE: &str = "full-policy-cutover";
 const RECOVERY_TRANCHE_AUDIT_MODE: &str = "recovery-tranche-internal-non-cutover";
 
@@ -54,7 +60,7 @@ pub(crate) struct BulkProjectionAuditOptions {
     pub(crate) expected_profile_rank_decisions_report_sha256: Option<String>,
     pub(crate) expected_full_author_count: Option<usize>,
     pub(crate) allow_recovery_tranche: bool,
-    pub(crate) btree_order: usize,
+    pub(crate) btree_order: Option<usize>,
     pub(crate) page_size: usize,
     pub(crate) query_limit: usize,
     pub(crate) out: PathBuf,
@@ -141,10 +147,12 @@ pub(super) struct AuditSubject {
     crawl_policy_max_follow_distance: Option<u32>,
     authors_processed: usize,
     authors_total: usize,
+    btree_order: usize,
     scope: AuditScope,
     spool_path: PathBuf,
     snapshots: Vec<PinnedAuditSnapshot>,
     v3_recheck: Option<V3AuditSubjectSpec>,
+    stage_corpus: Option<V3StageCorpusSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -326,6 +334,7 @@ pub(crate) struct BulkProjectionAuditOutput {
     authors_processed: usize,
     authors_total: usize,
     recovery_tranche_only: bool,
+    stage_corpus: Option<BulkProjectionStageCorpusAudit>,
     indexes: Vec<BulkProjectionIndexAudit>,
     profile: BulkProjectionProfileAudit,
     queries: Vec<BulkProjectionQueryAudit>,
@@ -351,6 +360,12 @@ pub(super) struct FullCutoverVerified {
     pool_catalog_sha256: String,
     pool_manifest_sha256: String,
     pool_stored_locations: u64,
+    stage_segment_count: u64,
+    stage_event_cids_validated: u64,
+    stage_retained_records: u64,
+    stage_retained_records_sha256: String,
+    stage_replaceable_slots: u64,
+    stage_replaceable_slots_sha256: String,
     profile_by_pubkey_root: String,
     profile_search_root: String,
     profile_follow_distance_seal_sha256: String,
@@ -657,10 +672,12 @@ fn load_v2_audit_subject(
         crawl_policy_max_follow_distance: state.policy.max_follow_distance,
         authors_processed: state.next_author,
         authors_total: state.policy.author_count,
+        btree_order: options.btree_order.unwrap_or(DEFAULT_AUDIT_BTREE_ORDER),
         scope,
         spool_path,
         snapshots: vec![state_snapshot, stage_snapshot],
         v3_recheck: None,
+        stage_corpus: None,
     })
 }
 
@@ -703,11 +720,35 @@ pub(super) fn load_v3_audit_subject(
         crawl_policy_max_follow_distance: authority.max_follow_distance,
         authors_processed: authority.author_count,
         authors_total: authority.author_count,
+        btree_order: authority.btree_order,
         scope: AuditScope::FullPolicyCutover,
         spool_path: authority.spool_path,
         snapshots: vec![state_snapshot, stage_snapshot],
         v3_recheck: Some(spec),
+        stage_corpus: Some(V3StageCorpusSpec {
+            staging_data_dir: authority.staging_data_dir,
+            policy: authority.policy,
+            expected_segment_count: authority.stage_segment_count,
+            expected_event_cid_count: authority.stage_event_cid_count,
+        }),
     })
+}
+
+#[cfg(test)]
+pub(super) async fn reconcile_v3_candidate_stage_corpus_for_test<S: Store>(
+    authority: &V3CandidateAuditAuthority,
+    spool: &BulkProjectionSpool,
+    target: &NostrEventStore<S>,
+) -> Result<()> {
+    let spec = V3StageCorpusSpec {
+        staging_data_dir: authority.staging_data_dir.clone(),
+        policy: authority.policy.clone(),
+        expected_segment_count: authority.stage_segment_count,
+        expected_event_cid_count: authority.stage_event_cid_count,
+    };
+    reconcile_v3_stage_corpus(&spec, spool, target)
+        .await
+        .map(|_| ())
 }
 
 fn parse_profile_rank_decisions(bytes: &[u8]) -> Result<(BTreeMap<String, Option<u32>>, String)> {
@@ -2025,6 +2066,7 @@ fn mint_full_cutover_verified(
             || output.cutover_eligible
             || output.authors_processed == 0
             || output.authors_processed >= output.authors_total
+            || output.stage_corpus.is_some()
         {
             anyhow::bail!("recovery audit evidence has inconsistent non-cutover boundaries");
         }
@@ -2042,6 +2084,28 @@ fn mint_full_cutover_verified(
     match (output.subject_kind, output.subject_version) {
         (AuditSubjectKind::V3, 3) => {}
         _ => anyhow::bail!("full-cutover token requires a v3 audit subject"),
+    }
+    let stage_corpus = output
+        .stage_corpus
+        .as_ref()
+        .context("full-cutover audit lacks sealed stage-corpus reconciliation evidence")?;
+    if stage_corpus.segment_count == 0
+        || stage_corpus.event_cids_validated == 0
+        || stage_corpus.retained_records == 0
+    {
+        anyhow::bail!("full-cutover stage-corpus evidence is empty");
+    }
+    for (label, digest) in [
+        (
+            "full-cutover retained stage records SHA-256",
+            stage_corpus.retained_records_sha256.as_str(),
+        ),
+        (
+            "full-cutover stage replaceable slots SHA-256",
+            stage_corpus.replaceable_slots_sha256.as_str(),
+        ),
+    ] {
+        require_sha256_text(label, digest)?;
     }
     for (label, digest) in [
         (
@@ -2153,6 +2217,12 @@ fn mint_full_cutover_verified(
         pool_catalog_sha256: output.pool_catalog_sha256.clone(),
         pool_manifest_sha256: output.pool_manifest_sha256.clone(),
         pool_stored_locations: output.pool_stored_locations,
+        stage_segment_count: stage_corpus.segment_count,
+        stage_event_cids_validated: stage_corpus.event_cids_validated,
+        stage_retained_records: stage_corpus.retained_records,
+        stage_retained_records_sha256: stage_corpus.retained_records_sha256.clone(),
+        stage_replaceable_slots: stage_corpus.replaceable_slots,
+        stage_replaceable_slots_sha256: stage_corpus.replaceable_slots_sha256.clone(),
         profile_by_pubkey_root: output.profile.by_pubkey_root.clone(),
         profile_search_root: output.profile.search_root.clone(),
         profile_follow_distance_seal_sha256: output.profile.follow_distance_seal_sha256.clone(),
@@ -2174,7 +2244,10 @@ pub(crate) async fn audit_bulk_projection(
     data_dir: &Path,
     mut options: BulkProjectionAuditOptions,
 ) -> Result<BulkProjectionAuditOutput> {
-    if options.btree_order < 2 || options.page_size == 0 || options.query_limit == 0 {
+    if options.btree_order.is_some_and(|order| order < 2)
+        || options.page_size == 0
+        || options.query_limit == 0
+    {
         anyhow::bail!(
             "audit B-tree order must be at least 2 and page/query limits must be non-zero"
         );
@@ -2197,11 +2270,12 @@ pub(crate) async fn audit_bulk_projection(
                 .expected_profile_rank_decisions_report_sha256
                 .is_some()
             || options.expected_full_author_count.is_some()
-            || options.allow_recovery_tranche;
+            || options.allow_recovery_tranche
+            || options.btree_order.is_some();
         if caller_authority_supplied {
             anyhow::bail!(
-                "v3 Candidate audit derives stage, policy, author-count, profile-distance, and \
-                 rank authority exclusively from the sealed Candidate state"
+                "v3 Candidate audit derives stage, policy, author-count, B-tree order, \
+                 profile-distance, and rank authority exclusively from the sealed Candidate state"
             );
         }
         let authority = load_v3_candidate_audit_authority(
@@ -2273,6 +2347,17 @@ async fn audit_loaded_subject(
         .validate_committed_catalog()
         .context("validate fully committed PoolStore catalog")?;
     let target = NostrEventStore::new(Arc::clone(&store));
+    let stage_corpus = if let Some(spec) = subject.stage_corpus.as_ref() {
+        Some(
+            reconcile_v3_stage_corpus(spec, &spool, &target)
+                .await
+                .context(
+                    "independently reconcile sealed v3 stage event-CID corpus with retained spool",
+                )?,
+        )
+    } else {
+        None
+    };
     let canonical_manifest = target
         .get_canonical_manifest(&subject.candidate_root)
         .await
@@ -2282,7 +2367,7 @@ async fn audit_loaded_subject(
     let btree = BTree::new(
         Arc::clone(&store),
         BTreeOptions {
-            order: Some(options.btree_order),
+            order: Some(subject.btree_order),
         },
     );
 
@@ -2425,13 +2510,15 @@ async fn audit_loaded_subject(
         audit_mode: subject.scope.audit_mode().to_string(),
         cutover_eligible: subject.scope == AuditScope::FullPolicyCutover
             && trusted_profile_rank_decisions.is_some()
-            && subject.expected_profile_distance_seal_sha256.is_some(),
+            && subject.expected_profile_distance_seal_sha256.is_some()
+            && stage_corpus.is_some(),
         pool_catalog_sha256: catalog_before.sha256,
         pool_manifest_sha256: catalog_before.manifest_sha256,
         pool_stored_locations: catalog_before.stored_locations,
         authors_processed: subject.authors_processed,
         authors_total: subject.authors_total,
         recovery_tranche_only: subject.scope.recovery_tranche_only(),
+        stage_corpus,
         indexes,
         profile,
         queries,
@@ -2541,6 +2628,14 @@ mod tests {
             authors_processed: 1,
             authors_total: 1,
             recovery_tranche_only: false,
+            stage_corpus: Some(BulkProjectionStageCorpusAudit {
+                segment_count: 1,
+                event_cids_validated: 1,
+                retained_records: 1,
+                retained_records_sha256: "f".repeat(64),
+                replaceable_slots: 0,
+                replaceable_slots_sha256: "0".repeat(64),
+            }),
             indexes,
             profile: BulkProjectionProfileAudit {
                 by_pubkey_root: synthetic_root(21),
@@ -2706,7 +2801,7 @@ mod tests {
             expected_profile_rank_decisions_report_sha256: Some(report_sha256),
             expected_full_author_count: Some(1),
             allow_recovery_tranche: false,
-            btree_order: 2,
+            btree_order: Some(2),
             page_size: 1,
             query_limit: 1,
             out: temp.path().join("unused-evidence.json"),
@@ -2853,6 +2948,7 @@ mod tests {
         recovery.authors_processed = 1;
         recovery.authors_total = 2;
         recovery.trusted_full_author_count = 2;
+        recovery.stage_corpus = None;
         let recovery_bytes = canonical_audit_output_bytes(&recovery).unwrap();
         assert!(mint_full_cutover_verified(&recovery, &recovery_bytes)
             .unwrap()
@@ -2867,6 +2963,23 @@ mod tests {
         let mut falsely_recovery = output.clone();
         falsely_recovery.recovery_tranche_only = true;
         assert_cutover_token_rejected(&falsely_recovery);
+        let mut missing_stage_corpus = output.clone();
+        missing_stage_corpus.stage_corpus = None;
+        assert_cutover_token_rejected(&missing_stage_corpus);
+        let mut empty_stage_corpus = output.clone();
+        empty_stage_corpus
+            .stage_corpus
+            .as_mut()
+            .expect("generated stage-corpus evidence")
+            .event_cids_validated = 0;
+        assert_cutover_token_rejected(&empty_stage_corpus);
+        let mut malformed_stage_digest = output.clone();
+        malformed_stage_digest
+            .stage_corpus
+            .as_mut()
+            .expect("generated stage-corpus evidence")
+            .retained_records_sha256 = "not-a-digest".to_string();
+        assert_cutover_token_rejected(&malformed_stage_digest);
         let mut partial_count = output.clone();
         partial_count.authors_processed = 0;
         assert_cutover_token_rejected(&partial_count);
@@ -3252,7 +3365,7 @@ mod tests {
                 expected_profile_rank_decisions_report_sha256: None,
                 expected_full_author_count: Some(101_267),
                 allow_recovery_tranche: false,
-                btree_order: 8,
+                btree_order: Some(8),
                 page_size: 2,
                 query_limit: 2,
                 out: temp.path().join("must-not-write-full-evidence.json"),
@@ -3280,7 +3393,7 @@ mod tests {
                 expected_profile_rank_decisions_report_sha256: None,
                 expected_full_author_count: Some(101_268),
                 allow_recovery_tranche: true,
-                btree_order: 8,
+                btree_order: Some(8),
                 page_size: 2,
                 query_limit: 2,
                 out: temp.path().join("must-not-write-count-evidence.json"),
@@ -3310,7 +3423,7 @@ mod tests {
                 expected_profile_rank_decisions_report_sha256: None,
                 expected_full_author_count: Some(101_267),
                 allow_recovery_tranche: true,
-                btree_order: 8,
+                btree_order: Some(8),
                 page_size: 2,
                 query_limit: 2,
                 out: evidence_path.clone(),

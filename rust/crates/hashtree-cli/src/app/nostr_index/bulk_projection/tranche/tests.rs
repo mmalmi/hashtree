@@ -484,6 +484,7 @@ fn prepare_transition_uses_canonical_policy_across_ephemeral_allowlist_ports() {
         authors_processed: 1,
         authors_total: pubkeys.len(),
         recovery_tranche_only: true,
+        stage_corpus: None,
         indexes: NostrEventIndex::ALL
             .into_iter()
             .map(|index| AuditIndexEvidence {
@@ -937,6 +938,8 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
     let (frozen_state, _, frozen_state_sha256) = load_state(&state_path, &seals_dir)
         .expect("load frozen state")
         .expect("frozen state exists");
+    let frozen_state_bytes =
+        std::fs::read(&state_path).expect("read exact durable Freeze state bytes");
     assert_eq!(frozen_state_sha256, freeze_output.state_sha256);
     assert_eq!(frozen_state.phase, TranchePhase::Freeze);
 
@@ -960,7 +963,7 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
         &data_dir,
         BulkTrancheBuildOptions {
             staging_data_dir: staging_data_dir.clone(),
-            expected_state_sha256: frozen_state_sha256,
+            expected_state_sha256: frozen_state_sha256.clone(),
             max_indexes: NostrEventIndex::ALL.len(),
             out: None,
         },
@@ -997,6 +1000,155 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
         .built_roots
         .values()
         .all(|root| !root.is_empty()));
+
+    let restore_freeze_state = || {
+        std::fs::write(&state_path, &frozen_state_bytes)
+            .expect("restore exact generated Freeze state bytes");
+    };
+
+    restore_freeze_state();
+    let uninterrupted_output = build_bulk_tranche(
+        &projection_store,
+        &graph,
+        &data_dir,
+        BulkTrancheBuildOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            expected_state_sha256: frozen_state_sha256.clone(),
+            max_indexes: NostrEventIndex::ALL.len(),
+            out: None,
+        },
+    )
+    .await
+    .expect("build an uninterrupted reference Candidate");
+    let (uninterrupted_state, uninterrupted_state_bytes, uninterrupted_state_sha256) =
+        load_state(&state_path, &seals_dir)
+            .expect("load uninterrupted Candidate state")
+            .expect("uninterrupted Candidate state exists");
+    assert_eq!(uninterrupted_output.phase, "candidate");
+    assert_eq!(
+        uninterrupted_output.state_sha256,
+        uninterrupted_state_sha256
+    );
+
+    restore_freeze_state();
+    let index_fault_guard =
+        super::build::arm_build_fault(super::build::BuildFaultPoint::IndexRootSyncedBeforeStateCas);
+    let index_fault_error = build_bulk_tranche(
+        &projection_store,
+        &graph,
+        &data_dir,
+        BulkTrancheBuildOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            expected_state_sha256: frozen_state_sha256.clone(),
+            max_indexes: NostrEventIndex::ALL.len(),
+            out: None,
+        },
+    )
+    .await
+    .expect_err("inject a crash after index-root force-sync and before state CAS");
+    drop(index_fault_guard);
+    assert!(format!("{index_fault_error:#}").contains("IndexRootSyncedBeforeStateCas"));
+    let (index_fault_state, _, index_fault_state_sha256) = load_state(&state_path, &seals_dir)
+        .expect("load index-fault Building state")
+        .expect("index-fault Building state exists");
+    assert_eq!(index_fault_state.phase, TranchePhase::Building);
+    assert!(index_fault_state.working.built_roots.is_empty());
+    assert!(index_fault_state.working.candidate_root.is_none());
+    let index_resumed_output = build_bulk_tranche(
+        &projection_store,
+        &graph,
+        &data_dir,
+        BulkTrancheBuildOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            expected_state_sha256: index_fault_state_sha256,
+            max_indexes: NostrEventIndex::ALL.len(),
+            out: None,
+        },
+    )
+    .await
+    .expect("resume after index-root force-sync fault");
+    let (index_resumed_state, index_resumed_state_bytes, index_resumed_state_sha256) =
+        load_state(&state_path, &seals_dir)
+            .expect("load index-fault resumed Candidate")
+            .expect("index-fault resumed Candidate exists");
+    assert_eq!(
+        index_resumed_output.state_sha256,
+        index_resumed_state_sha256
+    );
+    assert_eq!(index_resumed_state_bytes, uninterrupted_state_bytes);
+    assert_eq!(
+        index_resumed_state.working.built_roots,
+        uninterrupted_state.working.built_roots
+    );
+    assert_eq!(
+        index_resumed_state.working.candidate_root,
+        uninterrupted_state.working.candidate_root
+    );
+
+    restore_freeze_state();
+    let manifest_fault_guard = super::build::arm_build_fault(
+        super::build::BuildFaultPoint::ManifestSyncedBeforeCandidateCas,
+    );
+    let manifest_fault_error = build_bulk_tranche(
+        &projection_store,
+        &graph,
+        &data_dir,
+        BulkTrancheBuildOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            expected_state_sha256: frozen_state_sha256.clone(),
+            max_indexes: NostrEventIndex::ALL.len(),
+            out: None,
+        },
+    )
+    .await
+    .expect_err("inject a crash after manifest force-sync and before Candidate CAS");
+    drop(manifest_fault_guard);
+    assert!(format!("{manifest_fault_error:#}").contains("ManifestSyncedBeforeCandidateCas"));
+    let (manifest_fault_state, _, manifest_fault_state_sha256) =
+        load_state(&state_path, &seals_dir)
+            .expect("load manifest-fault Building state")
+            .expect("manifest-fault Building state exists");
+    assert_eq!(manifest_fault_state.phase, TranchePhase::Building);
+    assert_eq!(
+        manifest_fault_state.working.built_roots.len(),
+        NostrEventIndex::ALL.len()
+    );
+    assert!(manifest_fault_state.working.candidate_root.is_none());
+    let manifest_resumed_output = build_bulk_tranche(
+        &projection_store,
+        &graph,
+        &data_dir,
+        BulkTrancheBuildOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            expected_state_sha256: manifest_fault_state_sha256,
+            max_indexes: NostrEventIndex::ALL.len(),
+            out: None,
+        },
+    )
+    .await
+    .expect("resume after manifest force-sync fault");
+    let (manifest_resumed_state, manifest_resumed_state_bytes, manifest_resumed_state_sha256) =
+        load_state(&state_path, &seals_dir)
+            .expect("load manifest-fault resumed Candidate")
+            .expect("manifest-fault resumed Candidate exists");
+    assert_eq!(
+        manifest_resumed_output.state_sha256,
+        manifest_resumed_state_sha256
+    );
+    assert_eq!(manifest_resumed_state_bytes, uninterrupted_state_bytes);
+    assert_eq!(
+        manifest_resumed_state.working.built_roots,
+        uninterrupted_state.working.built_roots
+    );
+    assert_eq!(
+        manifest_resumed_state.working.candidate_root,
+        uninterrupted_state.working.candidate_root
+    );
+
+    let candidate_output = manifest_resumed_output;
+    let candidate_state = manifest_resumed_state;
+    let candidate_state_sha256 = manifest_resumed_state_sha256;
+    assert_eq!(candidate_state_sha256, candidate_output.state_sha256);
     let candidate_root = parse_root_text(
         candidate_state
             .working
@@ -1067,6 +1219,25 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
     assert_eq!(repeated_candidate.phase, "candidate");
     assert_eq!(repeated_candidate.state_sha256, candidate_state_sha256);
 
+    let stage_segment_path = super::super::super::stage_segment_path(&staging_data_dir, 0, 1);
+    let stage_segment_bytes =
+        std::fs::read(&stage_segment_path).expect("read sealed staged segment body");
+    let mut changed_stage_segment_bytes = stage_segment_bytes.clone();
+    changed_stage_segment_bytes.push(b'\n');
+    std::fs::write(&stage_segment_path, changed_stage_segment_bytes)
+        .expect("mutate sealed staged segment without changing Candidate state");
+    let changed_segment_error =
+        load_v3_candidate_audit_authority(&data_dir, &staging_data_dir, &candidate_state_sha256)
+            .expect_err(
+                "v3 audit authority must independently reject changed sealed segment bytes",
+            );
+    assert!(
+        format!("{changed_segment_error:#}").contains("immutable per-start claim"),
+        "unexpected sealed-segment error: {changed_segment_error:#}"
+    );
+    std::fs::write(&stage_segment_path, stage_segment_bytes)
+        .expect("restore sealed staged segment body");
+
     let authority =
         load_v3_candidate_audit_authority(&data_dir, &staging_data_dir, &candidate_state_sha256)
             .expect(
@@ -1086,6 +1257,61 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
         authority.policy_author_allowlist_sha256,
         candidate_state.policy.author_allowlist_sha256
     );
+    let audit_spool = BulkProjectionSpool::open(&spool_path)
+        .expect("reopen retained spool for corpus regression");
+    let omitted_event_id = events[0].id.to_hex();
+    let retained_record = {
+        let rtxn = audit_spool
+            .env
+            .read_txn()
+            .expect("read retained spool record");
+        audit_spool
+            .events
+            .get(&rtxn, omitted_event_id.as_bytes())
+            .expect("lookup retained spool record")
+            .expect("generated note is retained")
+            .to_vec()
+    };
+    {
+        let mut wtxn = audit_spool
+            .env
+            .write_txn()
+            .expect("open retained spool corruption transaction");
+        assert!(audit_spool
+            .events
+            .delete(&mut wtxn, omitted_event_id.as_bytes())
+            .expect("omit generated retained event"));
+        wtxn.commit()
+            .expect("commit generated retained-event omission");
+    }
+    let corpus_error = super::super::audit::reconcile_v3_candidate_stage_corpus_for_test(
+        &authority,
+        &audit_spool,
+        &candidate_store,
+    )
+    .await
+    .expect_err("sealed stage-corpus reconciliation must reject an omitted spool event");
+    let corpus_error = format!("{corpus_error:#}");
+    assert!(
+        corpus_error.contains("sealed stage corpus") && corpus_error.contains("retained spool"),
+        "unexpected stage-corpus mismatch error: {corpus_error}"
+    );
+    {
+        let mut wtxn = audit_spool
+            .env
+            .write_txn()
+            .expect("open retained spool restore transaction");
+        audit_spool
+            .events
+            .put(
+                &mut wtxn,
+                omitted_event_id.as_bytes(),
+                retained_record.as_slice(),
+            )
+            .expect("restore generated retained event");
+        wtxn.commit().expect("commit retained-event restoration");
+    }
+    drop(audit_spool);
     assert!(
         load_v3_candidate_audit_authority(&data_dir, &staging_data_dir, &"f".repeat(64),)
             .expect_err("v3 audit authority must reject an unrelated state pin")
@@ -1131,7 +1357,7 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
             expected_profile_rank_decisions_report_sha256: None,
             expected_full_author_count: None,
             allow_recovery_tranche: false,
-            btree_order: 8,
+            btree_order: None,
             page_size: 8,
             query_limit: events.len(),
             out: audit_path.clone(),
@@ -1151,6 +1377,10 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
     assert_eq!(audit["recovery_tranche_only"], false);
     assert_eq!(audit["authors_processed"], 1);
     assert_eq!(audit["authors_total"], 1);
+    assert_eq!(audit["stage_corpus"]["segment_count"], 1);
+    assert_eq!(audit["stage_corpus"]["event_cids_validated"], events.len());
+    assert_eq!(audit["stage_corpus"]["retained_records"], events.len());
+    assert_eq!(audit["stage_corpus"]["replaceable_slots"], 2);
     assert_eq!(
         audit["candidate_root"],
         candidate_state

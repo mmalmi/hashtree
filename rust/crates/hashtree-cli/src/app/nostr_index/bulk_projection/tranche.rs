@@ -89,8 +89,11 @@ pub(crate) struct BulkTrancheFreezeOptions {
 pub(super) struct V3CandidateAuditAuthority {
     pub(super) state_path: PathBuf,
     pub(super) state_sha256: String,
+    pub(super) staging_data_dir: PathBuf,
     pub(super) stage_state_path: PathBuf,
     pub(super) stage_state_sha256: String,
+    pub(super) stage_segment_count: usize,
+    pub(super) stage_event_cid_count: usize,
     pub(super) spool_path: PathBuf,
     pub(super) candidate_root: String,
     pub(super) built_roots: BTreeMap<u8, String>,
@@ -98,6 +101,8 @@ pub(super) struct V3CandidateAuditAuthority {
     pub(super) policy_author_allowlist_sha256: String,
     pub(super) author_count: usize,
     pub(super) max_follow_distance: Option<u32>,
+    pub(super) btree_order: usize,
+    pub(super) policy: IndexedNostrCrawlPolicy,
     pub(super) profile_distance_seal_sha256: String,
     pub(super) profile_rank_decisions_path: PathBuf,
     pub(super) profile_rank_report_path: PathBuf,
@@ -355,10 +360,23 @@ struct AuditEvidenceFile {
     authors_processed: usize,
     authors_total: usize,
     recovery_tranche_only: bool,
+    #[serde(default)]
+    stage_corpus: Option<AuditStageCorpusEvidence>,
     indexes: Vec<AuditIndexEvidence>,
     profile: AuditProfileEvidence,
     queries: Vec<AuditQueryEvidence>,
     representative_blocks: Vec<AuditBlockEvidence>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct AuditStageCorpusEvidence {
+    segment_count: u64,
+    event_cids_validated: u64,
+    retained_records: u64,
+    retained_records_sha256: String,
+    replaceable_slots: u64,
+    replaceable_slots_sha256: String,
 }
 
 fn default_v2_audit_subject_kind() -> AuditSubjectKind {
@@ -1111,7 +1129,7 @@ fn accept_audit_evidence(
     if state.next_author == 0 || state.next_author >= state.policy.author_count {
         anyhow::bail!("v3 recovery Prepare requires a partial audited v2 recovery tranche");
     }
-    if !matches!(evidence.version, 2 | 3)
+    if !matches!(evidence.version, 2..=4)
         || evidence.subject_kind != AuditSubjectKind::V2
         || evidence.subject_version != BULK_PROJECTION_VERSION
         || evidence.candidate_root != candidate.root
@@ -1128,6 +1146,7 @@ fn accept_audit_evidence(
         || evidence.authors_processed != state.next_author
         || evidence.authors_total != state.policy.author_count
         || !evidence.recovery_tranche_only
+        || evidence.stage_corpus.is_some()
         || evidence.audit_mode != "recovery-tranche-internal-non-cutover"
         || evidence.cutover_eligible
         || evidence.profile_distance_provenance.as_ref() != Some(profile_rank_authority)
@@ -1476,7 +1495,7 @@ fn validate_state_schema(state: &BulkTrancheState) -> Result<()> {
         anyhow::bail!("v3 serving root pin is not canonical nhash text");
     }
     validate_candidate_pin("v3 last validated candidate", &state.last_validated)?;
-    if !matches!(state.last_evidence.audit_format_version, 2 | 3)
+    if !matches!(state.last_evidence.audit_format_version, 2..=4)
         || state.last_evidence.subject_kind != AuditSubjectKind::V2
         || state.last_evidence.subject_version != BULK_PROJECTION_VERSION
         || state.last_evidence.candidate_root != state.last_validated.root
@@ -1916,6 +1935,24 @@ pub(super) fn load_v3_candidate_audit_authority(
     {
         anyhow::bail!("v3 frozen staging state counters differ from the Candidate prefix seal");
     }
+    let reattested_prefix = attest_stage_prefix(
+        staging_data_dir,
+        StagePrefixTarget {
+            boundary: frozen_prefix.next_author,
+            durable_next_author: stage.next_author,
+            events_seen: frozen_prefix.events_seen,
+            events_selected: frozen_prefix.events_selected,
+            live_bytes_selected: frozen_prefix.live_bytes_selected,
+        },
+        stage_state_sha256.clone(),
+        &state.policy,
+    )
+    .context("independently reattest v3 Candidate sealed stage prefix")?;
+    if !reattested_prefix.immutable_prefix_eq(frozen_prefix) {
+        anyhow::bail!(
+            "independently reattested v3 Candidate stage prefix differs from its Freeze seal"
+        );
+    }
 
     let policy_bytes =
         serde_json::to_vec(&state.policy).context("serialize v3 Candidate policy")?;
@@ -1931,15 +1968,20 @@ pub(super) fn load_v3_candidate_audit_authority(
     Ok(V3CandidateAuditAuthority {
         state_path,
         state_sha256,
+        staging_data_dir: staging_data_dir.to_path_buf(),
         stage_state_path,
         stage_state_sha256,
+        stage_segment_count: frozen_prefix.segment_count,
+        stage_event_cid_count: frozen_prefix.event_cid_count,
         spool_path,
         candidate_root,
         built_roots: candidate.built_roots,
         policy_sha256,
-        policy_author_allowlist_sha256: state.policy.author_allowlist_sha256,
+        policy_author_allowlist_sha256: state.policy.author_allowlist_sha256.clone(),
         author_count: state.policy.author_count,
         max_follow_distance: state.policy.max_follow_distance,
+        btree_order: state.btree_order,
+        policy: state.policy.clone(),
         profile_distance_seal_sha256,
         profile_rank_decisions_path: rank_authority.decisions_path,
         profile_rank_report_path: rank_authority.report_path,

@@ -2,6 +2,9 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+#[cfg(test)]
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use anyhow::{Context, Result};
 use hashtree_index::{BTree, BTreeOptions};
 use hashtree_nostr::{NostrEventIndex, NostrEventStore, NostrEventStoreOptions};
@@ -15,6 +18,50 @@ pub(crate) struct BulkTrancheBuildOptions {
     pub(crate) expected_state_sha256: String,
     pub(crate) max_indexes: usize,
     pub(crate) out: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum BuildFaultPoint {
+    IndexRootSyncedBeforeStateCas = 1,
+    ManifestSyncedBeforeCandidateCas = 2,
+}
+
+#[cfg(test)]
+static BUILD_FAULT_POINT: AtomicU8 = AtomicU8::new(0);
+
+#[cfg(test)]
+pub(super) struct BuildFaultGuard;
+
+#[cfg(test)]
+impl Drop for BuildFaultGuard {
+    fn drop(&mut self) {
+        BUILD_FAULT_POINT.store(0, Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+pub(super) fn arm_build_fault(point: BuildFaultPoint) -> BuildFaultGuard {
+    BUILD_FAULT_POINT
+        .compare_exchange(0, point as u8, Ordering::SeqCst, Ordering::SeqCst)
+        .expect("only one v3 build fault may be armed at a time");
+    BuildFaultGuard
+}
+
+#[cfg(test)]
+fn inject_build_fault(point: BuildFaultPoint) -> Result<()> {
+    if BUILD_FAULT_POINT
+        .compare_exchange(point as u8, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+    {
+        anyhow::bail!("injected v3 build fault at {point:?}");
+    }
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn inject_build_fault(_point: BuildFaultPoint) -> Result<()> {
+    Ok(())
 }
 
 fn load_frozen_stage(
@@ -204,6 +251,7 @@ async fn materialize_and_validate_candidate(
     durable
         .force_sync()
         .context("force-sync v3 bulk index manifest")?;
+    inject_build_fault(BuildFaultPoint::ManifestSyncedBeforeCandidateCas)?;
     validate_reachable_root(&target, Some(&root), "v3 bulk candidate root").await?;
     let encoded = cid_to_nhash(&root)?;
     if expected_root.is_some_and(|expected| expected != encoded) {
@@ -284,6 +332,7 @@ pub(crate) async fn build_bulk_tranche(
         durable
             .force_sync()
             .with_context(|| format!("force-sync v3 {} index", index.name()))?;
+        inject_build_fault(BuildFaultPoint::IndexRootSyncedBeforeStateCas)?;
         state
             .working
             .built_roots
