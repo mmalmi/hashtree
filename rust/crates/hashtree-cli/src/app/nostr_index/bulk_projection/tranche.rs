@@ -1067,9 +1067,10 @@ fn validate_stage_covers_v2_terminal(
     require_exact_terminal_state: bool,
 ) -> Result<()> {
     validate_stage_state(stage, &state.policy, state.policy.author_count)?;
-    if state.author_allowlist_source != stage.author_allowlist_source {
-        anyhow::bail!("staging policy does not match the v2 terminal projection");
-    }
+    // The source URL is transport metadata and may use a different ephemeral
+    // loopback port between staging and projection. `validate_stage_state`
+    // already binds the exact canonical policy, including ordered allowlist
+    // digest/count; the checks below bind the terminal counters.
     if require_exact_terminal_state {
         if state.next_author != stage.next_author
             || state.events_seen != stage.events_seen

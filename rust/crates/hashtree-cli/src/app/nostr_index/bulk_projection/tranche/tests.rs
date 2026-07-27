@@ -4,8 +4,8 @@ use super::super::super::{
 use super::*;
 
 use hashtree_config::StorageBackend;
-use hashtree_nostr::stored_event_from_nostr_sdk_event;
-use nostr::{EventBuilder, Keys, Kind, Timestamp};
+use hashtree_nostr::{stored_event_from_nostr_sdk_event, HASHTREE_ROOT_KIND};
+use nostr::{EventBuilder, JsonUtil, Keys, Kind, Tag, Timestamp};
 use tempfile::TempDir;
 
 fn test_rank_authority(
@@ -13,20 +13,38 @@ fn test_rank_authority(
     pubkey: &str,
     eligible_authors_sha256: &str,
 ) -> TrustedProfileRankDecisions {
+    test_rank_authority_for_pubkeys(directory, &[pubkey.to_string()], eligible_authors_sha256)
+}
+
+fn test_rank_authority_for_pubkeys(
+    directory: &Path,
+    pubkeys: &[String],
+    eligible_authors_sha256: &str,
+) -> TrustedProfileRankDecisions {
     const FORMAT: &str = "iris-social/profile-search-v3-rank-decisions@1";
-    let row = serde_json::to_string(&serde_json::json!([pubkey, "eligible", 0]))
-        .expect("encode semantic rank row");
+    let mut pubkeys = pubkeys.to_vec();
+    pubkeys.sort();
+    pubkeys.dedup();
+    assert!(!pubkeys.is_empty(), "rank authority needs eligible authors");
     let mut semantic = Sha256::new();
     semantic.update(FORMAT.as_bytes());
     semantic.update(b"\n");
-    semantic.update(row.as_bytes());
-    semantic.update(b"\n");
+    let mut records = Vec::with_capacity(pubkeys.len());
+    for pubkey in &pubkeys {
+        let row = serde_json::to_string(&serde_json::json!([pubkey, "eligible", 0]))
+            .expect("encode semantic rank row");
+        semantic.update(row.as_bytes());
+        semantic.update(b"\n");
+        records.push(format!(
+            r#"{{"pubkey":"{pubkey}","decision":"eligible","rankHint":0}}"#
+        ));
+    }
     let semantic_sha256 = hex::encode(semantic.finalize());
     let header = format!(
-        r#"{{"format":"{FORMAT}","eligibleRanksSha256":"{semantic_sha256}","recordCount":1}}"#
+        r#"{{"format":"{FORMAT}","eligibleRanksSha256":"{semantic_sha256}","recordCount":{}}}"#,
+        pubkeys.len()
     );
-    let record = format!(r#"{{"pubkey":"{pubkey}","decision":"eligible","rankHint":0}}"#);
-    let decisions_bytes = format!("{header}\n{record}\n").into_bytes();
+    let decisions_bytes = format!("{header}\n{}\n", records.join("\n")).into_bytes();
     let decisions_sha256 = bytes_sha256(&decisions_bytes);
     let report = serde_json::json!({
         "format": "iris-social/profile-search-v3-rank-decision-artifacts@1",
@@ -38,10 +56,10 @@ fn test_rank_authority(
         "maxDistance": 4,
         "rankPolicy": "follow-distance@1",
         "exclusionPolicy": "all-nonselected-graph-identities@1",
-        "recordCount": 1,
-        "eligibleCount": 1,
+        "recordCount": pubkeys.len(),
+        "eligibleCount": pubkeys.len(),
         "excludedCount": 0,
-        "reachableCount": 1,
+        "reachableCount": pubkeys.len(),
         "reachableOvermutedCount": 0,
         "distanceExcludedCount": 0,
         "unreachableCount": 0,
@@ -350,6 +368,223 @@ fn terminal_prefix_scan_rejects_duplicate_segment_starts() {
     )
     .expect_err("terminal full scan must reject duplicate starts");
     assert!(error.to_string().contains("duplicate staged segment start"));
+}
+
+#[test]
+fn prepare_transition_uses_canonical_policy_across_ephemeral_allowlist_ports() {
+    let tmp = TempDir::new().expect("tempdir");
+    let data_dir = tmp.path().join("projection");
+    let staging_data_dir = tmp.path().join("staging");
+    let source_dir = tmp.path().join("sources");
+    std::fs::create_dir_all(&source_dir).expect("create generated source directory");
+
+    let mut pubkeys = vec![
+        Keys::generate().public_key().to_hex(),
+        Keys::generate().public_key().to_hex(),
+    ];
+    pubkeys.sort();
+    let allowlist_bytes = format!("{}\n", pubkeys.join("\n")).into_bytes();
+    let allowlist_path = source_dir.join("eligible-authors.txt");
+    std::fs::write(&allowlist_path, &allowlist_bytes).expect("write generated canonical allowlist");
+    let mut policy = stage_policy(pubkeys.len(), 1);
+    policy.author_allowlist_sha256 = bytes_sha256(&allowlist_bytes);
+
+    super::super::super::persist_stage_segment(
+        &staging_data_dir,
+        &staged_segment(0, 1, 0, 0, 0, Vec::new()),
+        &policy,
+    )
+    .expect("publish generated claimed stage segment");
+    let staging_source = format!(
+        "http://127.0.0.1:45441/eligible/{}",
+        policy.author_allowlist_sha256
+    );
+    let stage_state = StagedNostrCrawlState {
+        version: STAGE_FORMAT_VERSION,
+        author_allowlist_source: Some(staging_source.clone()),
+        policy: policy.clone(),
+        next_author: 1,
+        events_seen: 0,
+        events_selected: 0,
+        live_bytes_selected: 0,
+    };
+    super::super::super::persist_stage_state(&staging_data_dir, &stage_state)
+        .expect("persist generated partial staging state");
+    let stage_state_path = staging_data_dir.join(STAGE_DIR).join(STAGE_STATE_FILE);
+    let stage_state_sha256 =
+        bytes_sha256(&std::fs::read(&stage_state_path).expect("read generated staging state"));
+
+    let mut built_roots = BTreeMap::new();
+    for (position, index) in NostrEventIndex::ALL.into_iter().enumerate() {
+        built_roots.insert(
+            index.stable_id(),
+            cid_to_nhash(&hashtree_core::Cid::public([position as u8 + 1; 32]))
+                .expect("encode generated index root"),
+        );
+    }
+    let candidate_cid = hashtree_core::Cid::public([240; 32]);
+    let candidate_root = cid_to_nhash(&candidate_cid).expect("encode generated candidate root");
+    let projection_source = format!(
+        "http://127.0.0.1:45442/eligible/{}",
+        policy.author_allowlist_sha256
+    );
+    assert_ne!(
+        projection_source, staging_source,
+        "the regression requires different ephemeral transports"
+    );
+    let v2_state = BulkProjectionState {
+        version: BULK_PROJECTION_VERSION,
+        author_allowlist_source: Some(projection_source),
+        policy: policy.clone(),
+        next_author: 1,
+        segment_event_offset: 0,
+        events_seen: 0,
+        events_selected: 0,
+        live_bytes_selected: 0,
+        built_roots: built_roots.clone(),
+        complete_root: Some(candidate_root.clone()),
+    };
+    let (v2_state_path, spool_path) = bulk_paths(&data_dir);
+    super::super::persist_bulk_state(&v2_state_path, &v2_state)
+        .expect("persist generated terminal v2 state");
+    let v2_state_sha256 =
+        bytes_sha256(&std::fs::read(&v2_state_path).expect("read generated terminal v2 state"));
+    drop(BulkProjectionSpool::open(&spool_path).expect("create real spool LMDB"));
+
+    let rank_source = source_dir.join("rank");
+    std::fs::create_dir_all(&rank_source).expect("create generated rank source directory");
+    let rank_authority =
+        test_rank_authority_for_pubkeys(&rank_source, &pubkeys, &policy.author_allowlist_sha256);
+    let policy_sha256 = bytes_sha256(
+        &serde_json::to_vec(&policy).expect("serialize generated canonical crawl policy"),
+    );
+    let profile_by_pubkey_root =
+        cid_to_nhash(&hashtree_core::Cid::public([241; 32])).expect("encode profile root");
+    let profile_search_root =
+        cid_to_nhash(&hashtree_core::Cid::public([242; 32])).expect("encode search root");
+    let profile_distance_seal_sha256 = "8".repeat(64);
+    let audit = AuditEvidenceFile {
+        version: 3,
+        subject_kind: AuditSubjectKind::V2,
+        subject_version: BULK_PROJECTION_VERSION,
+        candidate_root: candidate_root.clone(),
+        state_sha256: v2_state_sha256.clone(),
+        stage_state_sha256: stage_state_sha256.clone(),
+        trusted_policy_sha256: policy_sha256,
+        policy_author_allowlist_sha256: Some(policy.author_allowlist_sha256.clone()),
+        trusted_profile_distance_seal_sha256: Some(profile_distance_seal_sha256.clone()),
+        profile_distance_provenance: Some(rank_authority.evidence.clone()),
+        trusted_full_author_count: pubkeys.len(),
+        crawl_policy_max_follow_distance: policy.max_follow_distance,
+        audit_mode: "recovery-tranche-internal-non-cutover".to_string(),
+        cutover_eligible: false,
+        pool_catalog_sha256: "4".repeat(64),
+        pool_manifest_sha256: "5".repeat(64),
+        pool_stored_locations: 1,
+        authors_processed: 1,
+        authors_total: pubkeys.len(),
+        recovery_tranche_only: true,
+        indexes: NostrEventIndex::ALL
+            .into_iter()
+            .map(|index| AuditIndexEvidence {
+                index: index.name().to_string(),
+                root: built_roots.get(&index.stable_id()).cloned(),
+                nodes: 1,
+                links: 0,
+                durable_values_validated: 0,
+                entries_sha256: "1".repeat(64),
+                retained_set_sha256: "2".repeat(64),
+                first_key: None,
+                last_key: None,
+            })
+            .collect(),
+        profile: AuditProfileEvidence {
+            by_pubkey_root: profile_by_pubkey_root,
+            by_pubkey_root_file_sha256: "6".repeat(64),
+            by_pubkey_nodes: 1,
+            by_pubkey_links: 0,
+            by_pubkey_entries_sha256: "a".repeat(64),
+            search_root: profile_search_root,
+            search_root_file_sha256: "7".repeat(64),
+            search_nodes: 1,
+            search_entries: 1,
+            search_entries_sha256: "b".repeat(64),
+            sample_pubkey: pubkeys[0].clone(),
+            sample_event_id: "c".repeat(64),
+            sample_name: "generated profile".to_string(),
+            follow_distance_binding: "rank-decisions".to_string(),
+            follow_distance_seal_sha256: profile_distance_seal_sha256,
+        },
+        queries: vec![AuditQueryEvidence {
+            query: "generated exact prepare regression".to_string(),
+            parameters: serde_json::json!({"limit": 1}),
+            event_ids: vec!["c".repeat(64)],
+        }],
+        representative_blocks: vec![AuditBlockEvidence {
+            role: "candidate-root".to_string(),
+            nhash: candidate_root.clone(),
+            sha256: "d".repeat(64),
+        }],
+    };
+    let audit_path = source_dir.join("audit.json");
+    let mut audit_bytes = serde_json::to_vec_pretty(&audit).expect("encode generated audit");
+    audit_bytes.push(b'\n');
+    std::fs::write(&audit_path, audit_bytes).expect("write generated audit");
+
+    let serving_keys = Keys::generate();
+    let serving_tree_name = "social.iris.to";
+    let candidate_hash = hex::encode(candidate_cid.hash);
+    let serving_event = EventBuilder::new(Kind::Custom(HASHTREE_ROOT_KIND as u16), "")
+        .tags([
+            Tag::identifier(serving_tree_name),
+            Tag::parse(["hash", candidate_hash.as_str()]).expect("build root hash tag"),
+        ])
+        .custom_created_at(Timestamp::from_secs(1))
+        .sign_with_keys(&serving_keys)
+        .expect("sign generated serving root event");
+    let serving_event_path = source_dir.join("serving-event.json");
+    std::fs::write(&serving_event_path, serving_event.as_json())
+        .expect("write generated serving event");
+
+    let output = prepare_bulk_tranche(
+        &data_dir,
+        BulkTranchePrepareOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            eligible_authors: allowlist_path,
+            expected_v2_state_sha256: v2_state_sha256,
+            expected_stage_state_sha256: stage_state_sha256,
+            audit_evidence: audit_path,
+            profile_rank_decisions_file: rank_authority.decisions_path,
+            expected_profile_rank_decisions_file_sha256: rank_authority
+                .evidence
+                .rank_decisions_file_sha256,
+            profile_rank_decisions_report: rank_authority.report_path,
+            expected_profile_rank_decisions_report_sha256: rank_authority
+                .evidence
+                .rank_decisions_report_sha256,
+            serving_root: candidate_root,
+            serving_event: serving_event_path,
+            serving_event_id: serving_event.id.to_hex(),
+            serving_publisher_pubkey: serving_keys.public_key().to_hex(),
+            serving_tree_name: serving_tree_name.to_string(),
+            btree_order: 8,
+            btree_update_concurrency: 1,
+            index_commit_batch_size: 1,
+            out: Some(tmp.path().join("prepare-output.json")),
+        },
+    )
+    .expect("Prepare must bind canonical policy rather than ephemeral source URL");
+    assert_eq!(output.phase, "appending");
+    assert_eq!(output.next_author, 1);
+    assert_eq!(output.authors_total, pubkeys.len());
+
+    let (state_path, seals_dir, _, _, _) = tranche_paths(&data_dir);
+    let (persisted, _, persisted_sha256) = load_state(&state_path, &seals_dir)
+        .expect("load generated v3 state")
+        .expect("generated v3 state exists");
+    assert_eq!(persisted_sha256, output.state_sha256);
+    assert_eq!(persisted.phase, TranchePhase::Appending);
+    assert_eq!(persisted.policy, policy);
 }
 
 #[tokio::test]
