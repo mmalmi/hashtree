@@ -1543,7 +1543,79 @@ fn validate_active_seal(state: &BulkTrancheState, seal: &TrancheSeal) -> Result<
     Ok(())
 }
 
-fn load_state(path: &Path) -> Result<Option<(BulkTrancheState, Vec<u8>, String)>> {
+fn validate_persisted_seal_chain(state: &BulkTrancheState, seals_dir: &Path) -> Result<()> {
+    match state.phase {
+        TranchePhase::Prepare => Ok(()),
+        TranchePhase::Appending => {
+            let active_sha = state
+                .active_seal_sha256
+                .as_deref()
+                .context("v3 Appending state has no active Prepare seal")?;
+            let active = load_seal(seals_dir, state.generation, active_sha)?;
+            validate_active_seal(state, &active)
+        }
+        TranchePhase::Freeze => {
+            let active_sha = state
+                .active_seal_sha256
+                .as_deref()
+                .context("v3 Freeze state has no active Freeze seal")?;
+            let active = load_seal(seals_dir, state.generation, active_sha)?;
+            validate_active_seal(state, &active)?;
+            let parent_sha = active
+                .parent_seal_sha256
+                .as_deref()
+                .context("active Freeze seal has no parent Prepare seal")?;
+            let parent_generation = state
+                .generation
+                .checked_sub(1)
+                .context("Freeze seal generation has no predecessor")?;
+            let parent = load_seal(seals_dir, parent_generation, parent_sha)?;
+            if parent.version != TRANCHE_STATE_VERSION
+                || parent.generation != 0
+                || parent.purpose != TrancheSealPurpose::Prepare
+                || parent.parent_seal_sha256.is_some()
+                || parent.policy != state.policy
+                || parent.ordered_allowlist_sha256 != state.ordered_allowlist_sha256
+                || parent.ordered_allowlist_count != state.ordered_allowlist_count
+                || parent.spool_identity != state.spool_identity
+                || parent.internal_candidate.as_ref() != Some(&state.last_validated)
+                || parent.evidence.as_ref() != Some(&state.last_evidence)
+                || parent.profile_rank_authority != state.profile_rank_authority
+                || parent.frozen_profile_distances.is_some()
+                || parent.serving != state.serving
+                || parent.publication_intent.is_some()
+                || parent.publication_receipt.is_some()
+                || parent.prefix.next_author > active.prefix.next_author
+                || parent.prefix.events_seen > active.prefix.events_seen
+                || parent.prefix.events_selected > active.prefix.events_selected
+                || parent.prefix.live_bytes_selected > active.prefix.live_bytes_selected
+                || parent.prefix.segment_count > active.prefix.segment_count
+                || parent.prefix.event_cid_count > active.prefix.event_cid_count
+            {
+                anyhow::bail!(
+                    "parent Prepare seal differs from the frozen state's exact authority chain"
+                );
+            }
+            validate_stage_prefix_schema(
+                "parent Prepare seal prefix",
+                &parent.prefix,
+                &state.policy,
+            )
+        }
+        TranchePhase::Building
+        | TranchePhase::Candidate
+        | TranchePhase::Verified
+        | TranchePhase::Publishing
+        | TranchePhase::Promoted => {
+            anyhow::bail!("persisted seal-chain validation is not implemented for this phase")
+        }
+    }
+}
+
+fn load_state(
+    path: &Path,
+    seals_dir: &Path,
+) -> Result<Option<(BulkTrancheState, Vec<u8>, String)>> {
     match std::fs::read(path) {
         Ok(bytes) => {
             let sha256 = bytes_sha256(&bytes);
@@ -1559,6 +1631,7 @@ fn load_state(path: &Path) -> Result<Option<(BulkTrancheState, Vec<u8>, String)>
                 anyhow::bail!("unsupported bulk tranche state version {}", state.version);
             }
             validate_state_schema(&state)?;
+            validate_persisted_seal_chain(&state, seals_dir)?;
             Ok(Some((state, bytes, sha256)))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -1567,8 +1640,8 @@ fn load_state(path: &Path) -> Result<Option<(BulkTrancheState, Vec<u8>, String)>
 }
 
 pub(crate) fn load_bulk_tranche_progress(data_dir: &Path) -> Result<Option<(usize, u64)>> {
-    let (state_path, _, _, _, _) = tranche_paths(data_dir);
-    let Some((state, _, _)) = load_state(&state_path)? else {
+    let (state_path, seals_dir, _, _, _) = tranche_paths(data_dir);
+    let Some((state, _, _)) = load_state(&state_path, &seals_dir)? else {
         return Ok(None);
     };
     Ok(Some((
@@ -1699,7 +1772,7 @@ pub(crate) fn prepare_bulk_tranche(
     }
     let (state_path, seals_dir, evidence_dir, serving_events_dir, marker_path) =
         tranche_paths(data_dir);
-    let existing_state = load_state(&state_path)?;
+    let existing_state = load_state(&state_path, &seals_dir)?;
     let (v2_state_path, _) = bulk_paths(data_dir);
     let stage_state_path = options
         .staging_data_dir
@@ -1937,8 +2010,8 @@ pub(crate) async fn append_bulk_tranche(
     options: BulkTrancheAppendOptions,
 ) -> Result<BulkTrancheTransitionOutput> {
     let (state_path, seals_dir, evidence_dir, _, marker_path) = tranche_paths(data_dir);
-    let (mut state, _, state_sha256) =
-        load_state(&state_path)?.context("v3 tranche state does not exist; run prepare first")?;
+    let (mut state, _, state_sha256) = load_state(&state_path, &seals_dir)?
+        .context("v3 tranche state does not exist; run prepare first")?;
     require_sha256(
         "v3 tranche state SHA-256",
         &state_sha256,
@@ -2141,8 +2214,8 @@ pub(crate) fn freeze_bulk_tranche(
     options: BulkTrancheFreezeOptions,
 ) -> Result<BulkTrancheTransitionOutput> {
     let (state_path, seals_dir, evidence_dir, _, marker_path) = tranche_paths(data_dir);
-    let (mut state, _, state_sha256) =
-        load_state(&state_path)?.context("v3 tranche state does not exist; run prepare first")?;
+    let (mut state, _, state_sha256) = load_state(&state_path, &seals_dir)?
+        .context("v3 tranche state does not exist; run prepare first")?;
     require_sha256(
         "v3 tranche state SHA-256",
         &state_sha256,

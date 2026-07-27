@@ -616,7 +616,7 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
     noncanonical_state_bytes.push(b'\n');
     std::fs::write(&noncanonical_state_path, noncanonical_state_bytes)
         .expect("write noncanonical test state");
-    assert!(load_state(&noncanonical_state_path)
+    assert!(load_state(&noncanonical_state_path, &seals_dir)
         .expect_err("state loader must reject noncanonical JSON")
         .to_string()
         .contains("not canonical JSON"));
@@ -673,7 +673,7 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
         },
     )
     .expect("freeze the fully appended generated prefix");
-    let (frozen_state, _, frozen_state_sha256) = load_state(&state_path)
+    let (frozen_state, _, frozen_state_sha256) = load_state(&state_path, &seals_dir)
         .expect("load frozen state")
         .expect("frozen state exists");
     assert_eq!(frozen_state_sha256, freeze_output.state_sha256);
@@ -689,10 +689,30 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
     .expect("load frozen seal");
     validate_active_seal(&frozen_state, &frozen_seal)
         .expect("a Freeze seal must validate against the state it created");
+    let freeze_parent_sha256 = frozen_seal
+        .parent_seal_sha256
+        .clone()
+        .expect("Freeze seal parent");
+    let freeze_parent_path = seal_path(&seals_dir, 0, &freeze_parent_sha256);
+    let freeze_parent_bytes =
+        std::fs::read(&freeze_parent_path).expect("read canonical Prepare parent");
     let mut parentless_frozen_seal = frozen_seal;
     parentless_frozen_seal.parent_seal_sha256 = None;
     assert!(validate_active_seal(&frozen_state, &parentless_frozen_seal)
         .expect_err("Freeze seal must retain its exact parent link")
         .to_string()
         .contains("no parent Prepare seal"));
+    std::fs::write(&freeze_parent_path, b"{\"substituted\":true}\n")
+        .expect("substitute generated parent seal");
+    assert!(load_state(&state_path, &seals_dir)
+        .expect_err("restart must reject a substituted parent seal")
+        .to_string()
+        .contains("SHA-256 mismatch"));
+    std::fs::write(&freeze_parent_path, &freeze_parent_bytes)
+        .expect("restore canonical parent seal");
+    std::fs::remove_file(&freeze_parent_path).expect("remove generated parent seal");
+    assert!(load_state(&state_path, &seals_dir)
+        .expect_err("restart must reject a missing parent seal")
+        .to_string()
+        .contains("read"));
 }
