@@ -602,7 +602,7 @@ fn open_pool_fallbacks(data_dir: &Path) -> Result<Vec<LmdbBlobReader>, StoreErro
         tracing::info!(
             path = %path.display(),
             external_dir_env,
-            "Enabled read-only exact-hash LMDB fallback behind writable PoolStore"
+            "Enabled read-only exact-hash legacy LMDB fallback"
         );
         fallbacks.push(store);
     }
