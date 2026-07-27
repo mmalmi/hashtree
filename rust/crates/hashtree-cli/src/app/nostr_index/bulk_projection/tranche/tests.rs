@@ -354,6 +354,8 @@ fn terminal_prefix_scan_rejects_duplicate_segment_starts() {
 
 #[tokio::test]
 async fn append_reads_one_segment_body_across_many_event_checkpoints() {
+    const HISTORICAL_CLUTTER_FILES: usize = 2_048;
+
     let tmp = TempDir::new().expect("tempdir");
     let data_dir = tmp.path().join("projection");
     let staging_data_dir = tmp.path().join("staging");
@@ -424,6 +426,15 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
     );
     super::super::super::persist_stage_segment(&staging_data_dir, &segment, &policy)
         .expect("publish one real claimed staged segment");
+    let historical_clutter_paths = (0..HISTORICAL_CLUTTER_FILES)
+        .map(|offset| {
+            let start = 10_000 + offset;
+            let path = super::super::super::stage_segment_path(&staging_data_dir, start, start + 1);
+            std::fs::write(&path, b"unreadable historical segment body\n")
+                .expect("write generated historical segment clutter");
+            path
+        })
+        .collect::<Vec<_>>();
     let stage_state = StagedNostrCrawlState {
         version: STAGE_FORMAT_VERSION,
         author_allowlist_source: None,
@@ -589,9 +600,12 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
     assert_eq!(
         stage_segment_io_counts(),
         (0, 1),
-        "one append invocation must read and parse the active segment body exactly once"
+        "production append must ignore 2,048 historical bodies and read the active body once"
     );
 
+    for path in historical_clutter_paths {
+        std::fs::remove_file(path).expect("remove generated historical segment clutter");
+    }
     let freeze_output = freeze_bulk_tranche(
         &data_dir,
         BulkTrancheFreezeOptions {
