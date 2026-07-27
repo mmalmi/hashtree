@@ -53,6 +53,39 @@ grep -F 'cargo-gate-rust-' .github/workflows/release.yml >/dev/null
 grep -F 'cargo-gate-peripheral-' .github/workflows/release.yml >/dev/null
 grep -F 'cargo-gate-fips-' .github/workflows/release.yml >/dev/null
 
+# A failing command inside a lane must make the aggregate gate fail even
+# though run_all_gates captures each lane's status instead of relying on
+# errexit. Bash disables errexit inside a function invoked from an `||` list,
+# so exercise the actual aggregate shell with injected command shims.
+failure_test_dir="$(mktemp -d "${TMPDIR:-/tmp}/hashtree-release-gate-failure.XXXXXX")"
+trap 'rm -rf "$failure_test_dir"' EXIT
+failure_bin="$failure_test_dir/bin"
+failure_state="$failure_test_dir/failed-nextest"
+mkdir -p "$failure_bin"
+cat >"$failure_bin/cargo" <<'EOF'
+#!/bin/bash
+if [[ "${1:-}" == "nextest" && ! -e "$HASHTREE_RELEASE_GATE_FAILURE_STATE" ]]; then
+    : >"$HASHTREE_RELEASE_GATE_FAILURE_STATE"
+    exit 73
+fi
+exit 0
+EOF
+cat >"$failure_bin/success" <<'EOF'
+#!/bin/bash
+exit 0
+EOF
+chmod +x "$failure_bin/cargo" "$failure_bin/success"
+for command in bash cargo-nextest node pnpm; do
+    ln -s success "$failure_bin/$command"
+done
+if PATH="$failure_bin:$PATH" \
+    HASHTREE_RELEASE_GATE_FAILURE_STATE="$failure_state" \
+    /bin/bash scripts/release-gate.sh >/dev/null 2>&1; then
+    echo "aggregate release gate ignored an injected Rust lane failure" >&2
+    exit 1
+fi
+test -f "$failure_state"
+
 # CI keeps one dependency install and shards the ordinary and FIPS-enabled Rust
 # suites onto separate runners.
 [ "$(grep -c 'pnpm install --frozen-lockfile' .github/workflows/ci.yml)" -eq 1 ]

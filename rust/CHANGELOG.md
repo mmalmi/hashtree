@@ -23,6 +23,9 @@
   has a different valid Schnorr signature. Forced local-list reloads and
   pending projection recovery no longer fail on equivalent re-signatures,
   while invalid signatures and unsigned-field mismatches remain rejected.
+- The aggregate release gate now propagates the first failing command from
+  every lane explicitly, so Bash conditional-call semantics cannot turn a
+  failed Rust, FIPS, static, or TypeScript check into a false-green release.
 
 ## 0.2.137 - 2026-07-23
 

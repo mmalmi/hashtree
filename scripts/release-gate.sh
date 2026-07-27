@@ -65,45 +65,51 @@ ensure_test_fd_limit() {
   fi
   if ! ulimit -Sn "$minimum" 2>/dev/null; then
     echo "Rust tests require an open-file limit of at least ${minimum} (found ${current})" >&2
-    exit 1
+    return 1
   fi
 }
 
 require_rust_tools() {
-  command -v cargo >/dev/null || { echo "Missing required command: cargo" >&2; exit 1; }
+  command -v cargo >/dev/null || {
+    echo "Missing required command: cargo" >&2
+    return 1
+  }
   command -v cargo-nextest >/dev/null || {
     echo "Missing required command: cargo-nextest (install from https://nexte.st)" >&2
-    exit 1
+    return 1
   }
 }
 
 run_static_gate() {
-  git -C "$repo_root" diff --check
+  git -C "$repo_root" diff --check || return $?
 
-  bash "$repo_root/scripts/test-release-script-defaults.sh"
-  bash "$repo_root/scripts/tests/test_publish_release_wrapper.sh"
-  bash "$repo_root/scripts/test-rust-binary-feature-wiring.sh"
-  bash "$repo_root/scripts/test-release-gate-wiring.sh"
-  bash "$repo_root/rust/tests/test_build_release_artifacts.sh"
-  bash "$repo_root/rust/tests/test_build_release_invocation.sh"
-  bash "$repo_root/rust/tests/test_build_release_docker_invocation.sh"
-  bash "$repo_root/rust/tests/test_release_webrtc_smoke.sh"
-  node --test "$repo_root/rust/tests/test_build_windows_vm_artifacts.mjs"
+  bash "$repo_root/scripts/test-release-script-defaults.sh" || return $?
+  bash "$repo_root/scripts/tests/test_publish_release_wrapper.sh" || return $?
+  bash "$repo_root/scripts/test-rust-binary-feature-wiring.sh" || return $?
+  bash "$repo_root/scripts/test-release-gate-wiring.sh" || return $?
+  bash "$repo_root/rust/tests/test_build_release_artifacts.sh" || return $?
+  bash "$repo_root/rust/tests/test_build_release_invocation.sh" || return $?
+  bash "$repo_root/rust/tests/test_build_release_docker_invocation.sh" || return $?
+  bash "$repo_root/rust/tests/test_release_webrtc_smoke.sh" || return $?
+  node --test "$repo_root/rust/tests/test_build_windows_vm_artifacts.mjs" || return $?
 }
 
 run_typescript_gate() {
-  command -v pnpm >/dev/null || { echo "Missing required command: pnpm" >&2; exit 1; }
-  pnpm --dir "$repo_root/ts" install --frozen-lockfile
-  pnpm --dir "$repo_root/ts" test
-  pnpm --dir "$repo_root/ts" run verify:fips-transport
-  pnpm --dir "$repo_root/ts" lint
+  command -v pnpm >/dev/null || {
+    echo "Missing required command: pnpm" >&2
+    return 1
+  }
+  pnpm --dir "$repo_root/ts" install --frozen-lockfile || return $?
+  pnpm --dir "$repo_root/ts" test || return $?
+  pnpm --dir "$repo_root/ts" run verify:fips-transport || return $?
+  pnpm --dir "$repo_root/ts" lint || return $?
 }
 
 run_rust_gate() {
-  require_rust_tools
+  require_rust_tools || return $?
   (
-    cd "$repo_root/rust"
-    cargo fmt --all --check
+    cd "$repo_root/rust" || exit $?
+    cargo fmt --all --check || exit $?
     if [[ "$mode" == "fast" ]]; then
       cargo nextest run --workspace --locked \
         --exclude hashtree-embedded \
@@ -112,60 +118,60 @@ run_rust_gate() {
         --exclude hashtree-ffi \
         --exclude hashtree-cashu-cli \
         --exclude tauri-plugin-hashtree-updater \
-        --no-run
+        --no-run || exit $?
     else
-      ensure_test_fd_limit
+      ensure_test_fd_limit || exit $?
       cargo nextest run --workspace --locked \
         --exclude hashtree-embedded \
         --exclude hashtree-embedded-ffi \
         --exclude hashtree-s3 \
         --exclude hashtree-ffi \
         --exclude hashtree-cashu-cli \
-        --exclude tauri-plugin-hashtree-updater
+        --exclude tauri-plugin-hashtree-updater || exit $?
       # These are the only workspace crates with executable doctests.
-      cargo test --locked -p hashtree-core -p hashtree-blossom --doc
+      cargo test --locked -p hashtree-core -p hashtree-blossom --doc || exit $?
     fi
   )
 }
 
 run_rust_peripheral_gate() {
-  require_rust_tools
+  require_rust_tools || return $?
   (
-    cd "$repo_root/rust"
+    cd "$repo_root/rust" || exit $?
     if [[ "$mode" == "fast" ]]; then
       cargo nextest run --locked \
         -p hashtree-s3 \
         -p hashtree-ffi \
         -p hashtree-cashu-cli \
         -p tauri-plugin-hashtree-updater \
-        --no-run
+        --no-run || exit $?
     else
-      ensure_test_fd_limit
+      ensure_test_fd_limit || exit $?
       cargo nextest run --locked \
         -p hashtree-s3 \
         -p hashtree-ffi \
         -p hashtree-cashu-cli \
-        -p tauri-plugin-hashtree-updater
+        -p tauri-plugin-hashtree-updater || exit $?
     fi
   )
 }
 
 run_fips_gate() {
-  require_rust_tools
+  require_rust_tools || return $?
   (
-    cd "$repo_root/rust"
+    cd "$repo_root/rust" || exit $?
     if [[ "$mode" == "fast" ]]; then
       cargo nextest run --locked \
         -p hashtree-embedded \
         -p hashtree-embedded-ffi \
         --test-threads 4 \
-        --no-run
+        --no-run || exit $?
     else
-      ensure_test_fd_limit
+      ensure_test_fd_limit || exit $?
       cargo nextest run --locked \
         -p hashtree-embedded \
         -p hashtree-embedded-ffi \
-        --test-threads 4
+        --test-threads 4 || exit $?
     fi
   )
 }
