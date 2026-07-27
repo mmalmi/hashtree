@@ -1563,13 +1563,14 @@ impl BackgroundNostrMirror {
         publish_roots: bool,
         applied_events: Option<&[hashtree_nostr::StoredNostrEvent]>,
     ) -> Result<()> {
-        self.graph_store.write_public_events_root(root)?;
         let Some(root) = root else {
+            self.graph_store
+                .apply_public_events_root_and_projections(None, &[], false)?;
             return Ok(());
         };
 
-        self.note_public_events_root_change()?;
         if update_profile_and_graph {
+            let incremental = applied_events.is_some();
             let events = match applied_events {
                 Some(events) => events
                     .iter()
@@ -1588,20 +1589,16 @@ impl BackgroundNostrMirror {
                 }
             };
 
-            socialgraph::ingest_graph_parsed_events(self.graph_store.as_ref(), &events)
-                .context("sync mirrored social graph state")?;
-            if applied_events.is_some() {
-                self.graph_store
-                    .sync_profile_index_for_events(&events)
-                    .context("update mirrored profile search index")?;
-            } else {
-                self.graph_store
-                    .rebuild_profile_index_for_events(&events)
-                    .context("rebuild mirrored profile search index")?;
-            }
+            self.graph_store
+                .apply_public_events_root_and_projections(Some(root), &events, !incremental)
+                .context("apply mirrored event root and derived projections")?;
             self.note_profile_search_root_change()?;
             self.note_profiles_by_pubkey_root_change()?;
+        } else {
+            self.graph_store
+                .apply_public_events_root_and_projections(Some(root), &[], false)?;
         }
+        self.note_public_events_root_change()?;
         if !publish_roots {
             return Ok(());
         }

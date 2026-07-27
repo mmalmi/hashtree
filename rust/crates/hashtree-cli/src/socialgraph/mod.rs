@@ -21,6 +21,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
@@ -55,9 +56,6 @@ use sha2::{Digest, Sha256};
 use crate::managed_env::ManagedEnv;
 use crate::storage::{LocalStore, StorageRouter};
 
-#[cfg(test)]
-use std::time::Instant;
-
 pub type UserSet = BTreeSet<[u8; 32]>;
 
 const PROFILE_PUBLICATION_FENCE_RELATIVE_PATH: &str =
@@ -69,8 +67,12 @@ const AMBIENT_EVENTS_BLOB_DIR: &str = "ambient-blobs";
 const PROFILE_SEARCH_ROOT_FILE: &str = "profile-search-root.msgpack";
 const PROFILES_BY_PUBKEY_ROOT_FILE: &str = "profiles-by-pubkey-root.msgpack";
 const PROFILE_ROOT_PAIR_COMMIT_FILE: &str = "profile-root-pair.commit.json";
+const PROFILE_PROJECTION_PENDING_FILE: &str = "profile-projection.pending.json";
 const PROFILE_ROOT_PAIR_LOCK_FILE: &str = "profile-root-pair.lock";
 const PROFILE_ROOT_PAIR_COMMIT_VERSION: u32 = 1;
+const PROFILE_PROJECTION_PENDING_VERSION: u32 = 1;
+const PROFILE_ROOT_PAIR_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
+const PROFILE_ROOT_PAIR_LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(10);
 const UNKNOWN_FOLLOW_DISTANCE: u32 = 1000;
 const DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MIN_SOCIALGRAPH_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024;
@@ -135,6 +137,53 @@ struct ProfileRootPairCommit {
     new_by_pubkey: Option<StoredCid>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum StoredEventStorageClass {
+    Public,
+    Ambient,
+}
+
+impl From<EventStorageClass> for StoredEventStorageClass {
+    fn from(value: EventStorageClass) -> Self {
+        match value {
+            EventStorageClass::Public => Self::Public,
+            EventStorageClass::Ambient => Self::Ambient,
+        }
+    }
+}
+
+impl From<StoredEventStorageClass> for EventStorageClass {
+    fn from(value: StoredEventStorageClass) -> Self {
+        match value {
+            StoredEventStorageClass::Public => Self::Public,
+            StoredEventStorageClass::Ambient => Self::Ambient,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+enum PendingProfileProjectionMode {
+    Incremental {
+        old_root: Option<StoredCid>,
+        new_root: StoredCid,
+        events: Vec<String>,
+    },
+    RebuildPublicRoot {
+        old_root: Option<StoredCid>,
+        new_root: StoredCid,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PendingProfileProjection {
+    version: u32,
+    storage_class: StoredEventStorageClass,
+    projection: PendingProfileProjectionMode,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct StoredProfileSearchEntry {
     pub pubkey: String,
@@ -157,7 +206,7 @@ pub struct ProfileIndexRoots {
     pub search_file_sha256: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProfileRootPairLockMode {
     Shared,
     Exclusive,
@@ -205,11 +254,101 @@ fn profile_root_pair_process_lock(
     Ok(lock)
 }
 
-fn open_and_lock_profile_root_pair_file(
+#[cfg(test)]
+type ProfileRootPairTransactionProbe =
+    Arc<dyn Fn(&Path, ProfileRootPairLockMode) + Send + Sync + 'static>;
+
+#[cfg(test)]
+fn profile_root_pair_transaction_probe(
+) -> &'static StdMutex<Option<ProfileRootPairTransactionProbe>> {
+    static PROBE: OnceLock<StdMutex<Option<ProfileRootPairTransactionProbe>>> = OnceLock::new();
+    PROBE.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+struct ProfileRootPairTransactionProbeGuard;
+
+#[cfg(test)]
+impl Drop for ProfileRootPairTransactionProbeGuard {
+    fn drop(&mut self) {
+        if let Ok(mut probe) = profile_root_pair_transaction_probe().lock() {
+            *probe = None;
+        }
+    }
+}
+
+#[cfg(test)]
+fn install_profile_root_pair_transaction_probe(
+    probe: ProfileRootPairTransactionProbe,
+) -> ProfileRootPairTransactionProbeGuard {
+    *profile_root_pair_transaction_probe()
+        .lock()
+        .expect("profile root-pair transaction probe lock poisoned") = Some(probe);
+    ProfileRootPairTransactionProbeGuard
+}
+
+#[cfg(test)]
+fn run_profile_root_pair_transaction_probe(path: &Path, mode: ProfileRootPairLockMode) {
+    let probe = profile_root_pair_transaction_probe()
+        .lock()
+        .expect("profile root-pair transaction probe lock poisoned")
+        .clone();
+    if let Some(probe) = probe {
+        probe(path, mode);
+    }
+}
+
+#[cfg(test)]
+type PendingProfileProjectionPersistedProbe =
+    Arc<dyn Fn(&Path) -> Result<()> + Send + Sync + 'static>;
+
+#[cfg(test)]
+fn pending_profile_projection_persisted_probe(
+) -> &'static StdMutex<Option<PendingProfileProjectionPersistedProbe>> {
+    static PROBE: OnceLock<StdMutex<Option<PendingProfileProjectionPersistedProbe>>> =
+        OnceLock::new();
+    PROBE.get_or_init(|| StdMutex::new(None))
+}
+
+#[cfg(test)]
+struct PendingProfileProjectionPersistedProbeGuard;
+
+#[cfg(test)]
+impl Drop for PendingProfileProjectionPersistedProbeGuard {
+    fn drop(&mut self) {
+        if let Ok(mut probe) = pending_profile_projection_persisted_probe().lock() {
+            *probe = None;
+        }
+    }
+}
+
+#[cfg(test)]
+fn install_pending_profile_projection_persisted_probe(
+    probe: PendingProfileProjectionPersistedProbe,
+) -> PendingProfileProjectionPersistedProbeGuard {
+    *pending_profile_projection_persisted_probe()
+        .lock()
+        .expect("pending profile projection probe lock poisoned") = Some(probe);
+    PendingProfileProjectionPersistedProbeGuard
+}
+
+#[cfg(test)]
+fn run_pending_profile_projection_persisted_probe(path: &Path) -> Result<()> {
+    let probe = pending_profile_projection_persisted_probe()
+        .lock()
+        .map_err(|_| anyhow::anyhow!("pending profile projection probe lock poisoned"))?
+        .clone();
+    if let Some(probe) = probe {
+        probe(path)?;
+    }
+    Ok(())
+}
+
+fn try_open_and_lock_profile_root_pair_file(
     root_pair_lock_path: &Path,
     mode: ProfileRootPairLockMode,
     create: bool,
-) -> Result<File> {
+) -> Result<Option<File>> {
     let mut options = OpenOptions::new();
     options.read(true);
     if create {
@@ -232,9 +371,12 @@ fn open_and_lock_profile_root_pair_file(
         let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
         if result != 0 {
             let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                return Ok(None);
+            }
             return Err(error).with_context(|| {
                 format!(
-                    "profile root-pair transaction is busy ({:?}) at {}",
+                    "lock profile root-pair transaction ({:?}) at {}",
                     mode,
                     root_pair_lock_path.display()
                 )
@@ -249,7 +391,85 @@ fn open_and_lock_profile_root_pair_file(
         );
     }
 
-    Ok(file)
+    Ok(Some(file))
+}
+
+fn profile_root_pair_lock_timeout_error(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    timeout: Duration,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "timed out after {} ms waiting for profile root-pair transaction ({:?}) at {}",
+        timeout.as_millis(),
+        mode,
+        root_pair_lock_path.display()
+    )
+}
+
+fn try_acquire_profile_root_pair_lock_once(
+    process_lock: &Arc<tokio::sync::RwLock<()>>,
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+) -> Result<Option<ProfileRootPairTransactionGuard>> {
+    let (process_read, process_write) = match mode {
+        ProfileRootPairLockMode::Shared => {
+            let Ok(guard) = Arc::clone(process_lock).try_read_owned() else {
+                return Ok(None);
+            };
+            (Some(guard), None)
+        }
+        ProfileRootPairLockMode::Exclusive => {
+            let Ok(guard) = Arc::clone(process_lock).try_write_owned() else {
+                return Ok(None);
+            };
+            (None, Some(guard))
+        }
+    };
+    let Some(file) = try_open_and_lock_profile_root_pair_file(root_pair_lock_path, mode, create)?
+    else {
+        return Ok(None);
+    };
+    let guard = ProfileRootPairTransactionGuard {
+        _process_read: process_read,
+        _process_write: process_write,
+        file,
+    };
+    #[cfg(test)]
+    run_profile_root_pair_transaction_probe(root_pair_lock_path, mode);
+    Ok(Some(guard))
+}
+
+fn acquire_profile_root_pair_lock_with_timeout(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+    timeout: Duration,
+) -> Result<ProfileRootPairTransactionGuard> {
+    let process_lock = profile_root_pair_process_lock(root_pair_lock_path)?;
+    let started = Instant::now();
+    loop {
+        if let Some(guard) = try_acquire_profile_root_pair_lock_once(
+            &process_lock,
+            root_pair_lock_path,
+            mode,
+            create,
+        )? {
+            return Ok(guard);
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return Err(profile_root_pair_lock_timeout_error(
+                root_pair_lock_path,
+                mode,
+                timeout,
+            ));
+        }
+        std::thread::sleep(
+            PROFILE_ROOT_PAIR_LOCK_RETRY_INTERVAL.min(timeout.saturating_sub(elapsed)),
+        );
+    }
 }
 
 fn acquire_profile_root_pair_lock(
@@ -257,35 +477,44 @@ fn acquire_profile_root_pair_lock(
     mode: ProfileRootPairLockMode,
     create: bool,
 ) -> Result<ProfileRootPairTransactionGuard> {
+    acquire_profile_root_pair_lock_with_timeout(
+        root_pair_lock_path,
+        mode,
+        create,
+        PROFILE_ROOT_PAIR_LOCK_TIMEOUT,
+    )
+}
+
+async fn acquire_profile_root_pair_lock_async_with_timeout(
+    root_pair_lock_path: &Path,
+    mode: ProfileRootPairLockMode,
+    create: bool,
+    timeout: Duration,
+) -> Result<ProfileRootPairTransactionGuard> {
     let process_lock = profile_root_pair_process_lock(root_pair_lock_path)?;
-    let inside_tokio_runtime = tokio::runtime::Handle::try_current().is_ok();
-    let (process_read, process_write) =
-        match (mode, inside_tokio_runtime) {
-            (ProfileRootPairLockMode::Shared, true) => (
-                Some(process_lock.try_read_owned().map_err(|_| {
-                    anyhow::anyhow!("profile root-pair transaction is busy (Shared)")
-                })?),
-                None,
-            ),
-            (ProfileRootPairLockMode::Exclusive, true) => (
-                None,
-                Some(process_lock.try_write_owned().map_err(|_| {
-                    anyhow::anyhow!("profile root-pair transaction is busy (Exclusive)")
-                })?),
-            ),
-            (ProfileRootPairLockMode::Shared, false) => {
-                (Some(block_on(process_lock.read_owned())), None)
-            }
-            (ProfileRootPairLockMode::Exclusive, false) => {
-                (None, Some(block_on(process_lock.write_owned())))
-            }
-        };
-    let file = open_and_lock_profile_root_pair_file(root_pair_lock_path, mode, create)?;
-    Ok(ProfileRootPairTransactionGuard {
-        _process_read: process_read,
-        _process_write: process_write,
-        file,
-    })
+    let started = Instant::now();
+    loop {
+        if let Some(guard) = try_acquire_profile_root_pair_lock_once(
+            &process_lock,
+            root_pair_lock_path,
+            mode,
+            create,
+        )? {
+            return Ok(guard);
+        }
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return Err(profile_root_pair_lock_timeout_error(
+                root_pair_lock_path,
+                mode,
+                timeout,
+            ));
+        }
+        tokio::time::sleep(
+            PROFILE_ROOT_PAIR_LOCK_RETRY_INTERVAL.min(timeout.saturating_sub(elapsed)),
+        )
+        .await;
+    }
 }
 
 async fn acquire_profile_root_pair_lock_async(
@@ -293,17 +522,13 @@ async fn acquire_profile_root_pair_lock_async(
     mode: ProfileRootPairLockMode,
     create: bool,
 ) -> Result<ProfileRootPairTransactionGuard> {
-    let process_lock = profile_root_pair_process_lock(root_pair_lock_path)?;
-    let (process_read, process_write) = match mode {
-        ProfileRootPairLockMode::Shared => (Some(process_lock.read_owned().await), None),
-        ProfileRootPairLockMode::Exclusive => (None, Some(process_lock.write_owned().await)),
-    };
-    let file = open_and_lock_profile_root_pair_file(root_pair_lock_path, mode, create)?;
-    Ok(ProfileRootPairTransactionGuard {
-        _process_read: process_read,
-        _process_write: process_write,
-        file,
-    })
+    acquire_profile_root_pair_lock_async_with_timeout(
+        root_pair_lock_path,
+        mode,
+        create,
+        PROFILE_ROOT_PAIR_LOCK_TIMEOUT,
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -409,6 +634,13 @@ pub fn open_social_graph_store(data_dir: &Path) -> Result<Arc<SocialGraphStore>>
 /// Read the two published profile roots without opening the writable social
 /// graph LMDB environment.
 pub fn read_profile_index_roots(data_dir: &Path) -> Result<ProfileIndexRoots> {
+    read_profile_index_roots_with_timeout(data_dir, PROFILE_ROOT_PAIR_LOCK_TIMEOUT)
+}
+
+fn read_profile_index_roots_with_timeout(
+    data_dir: &Path,
+    timeout: Duration,
+) -> Result<ProfileIndexRoots> {
     let db_dir = data_dir.join("socialgraph");
     match std::fs::symlink_metadata(&db_dir) {
         Ok(_) => {}
@@ -425,12 +657,14 @@ pub fn read_profile_index_roots(data_dir: &Path) -> Result<ProfileIndexRoots> {
                 .with_context(|| format!("inspect profile index directory {}", db_dir.display()));
         }
     }
-    let _transaction = acquire_profile_root_pair_lock(
+    let _transaction = acquire_profile_root_pair_lock_with_timeout(
         &db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE),
         ProfileRootPairLockMode::Shared,
         false,
+        timeout,
     )?;
     require_no_pending_profile_root_pair_commit(&db_dir)?;
+    require_no_pending_profile_projection(&db_dir)?;
     let (by_pubkey, by_pubkey_file_sha256) =
         read_root_file_snapshot(&db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE))?;
     let (search, search_file_sha256) =
@@ -704,7 +938,7 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
     let graph_env_lifecycle = unsafe { ManagedEnv::open(&lifecycle_options, db_dir) }
         .context("manage nostr-social-graph heed backend lifecycle")?;
 
-    Ok(Arc::new(SocialGraphStore {
+    let graph_store = Arc::new(SocialGraphStore {
         graph: StdMutex::new(graph),
         _graph_env_lifecycle: graph_env_lifecycle,
         ambient_store: Arc::clone(&ambient_store),
@@ -732,7 +966,9 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
             root_pair_lock_path: db_dir.join(PROFILE_ROOT_PAIR_LOCK_FILE),
         },
         profile_index_overmute_threshold: StdMutex::new(1.0),
-    }))
+    });
+    graph_store.recover_pending_profile_projection_locked()?;
+    Ok(graph_store)
 }
 
 pub fn set_social_graph_root(store: &SocialGraphStore, pk_bytes: &[u8; 32]) {
@@ -976,14 +1212,22 @@ impl SocialGraphStore {
             .context("check social graph overmute")
     }
 
+    fn recovered_profile_index_roots(&self) -> Result<(Option<Cid>, Option<Cid>)> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        self.profile_index.roots_locked()
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn profile_search_root(&self) -> Result<Option<Cid>> {
-        self.profile_index.search_root()
+        Ok(self.recovered_profile_index_roots()?.1)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn profiles_by_pubkey_root(&self) -> Result<Option<Cid>> {
-        self.profile_index.by_pubkey_root()
+        Ok(self.recovered_profile_index_roots()?.0)
     }
 
     pub fn public_events_root(&self) -> Result<Option<Cid>> {
@@ -992,16 +1236,209 @@ impl SocialGraphStore {
 
     #[cfg_attr(test, allow(dead_code))]
     pub(crate) fn public_events_root_for_write(&self) -> Result<Option<Cid>> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
         self.public_events.events_root_for_write()
     }
 
+    #[cfg(test)]
     pub(crate) fn write_public_events_root(&self, root: Option<&Cid>) -> Result<()> {
         self.public_events.write_events_root(root)
     }
 
+    fn pending_profile_projection_path(&self) -> PathBuf {
+        self.profile_index
+            .root_pair_lock_path
+            .with_file_name(PROFILE_PROJECTION_PENDING_FILE)
+    }
+
+    fn force_sync_event_storage(&self, storage_class: EventStorageClass) -> Result<()> {
+        let store = match storage_class {
+            EventStorageClass::Public => &self.profile_index.store,
+            EventStorageClass::Ambient => &self.ambient_store,
+        };
+        store
+            .force_sync()
+            .map_err(|error| anyhow::anyhow!("force-sync metadata event blocks: {error}"))
+    }
+
+    fn persist_pending_profile_projection_locked(
+        &self,
+        projection: &PendingProfileProjection,
+    ) -> Result<()> {
+        let path = self.pending_profile_projection_path();
+        replace_file_durable(
+            &path,
+            &pending_profile_projection_bytes(projection)?,
+            "pending profile projection",
+        )?;
+        #[cfg(test)]
+        run_pending_profile_projection_persisted_probe(&path)?;
+        Ok(())
+    }
+
+    fn clear_pending_profile_projection_locked(&self) -> Result<()> {
+        remove_file_durable(&self.pending_profile_projection_path())
+    }
+
+    fn recover_profile_transactions_locked(&self) -> Result<()> {
+        self.profile_index
+            .recover_pending_root_pair_commit_locked()?;
+        self.recover_pending_profile_projection_locked()
+    }
+
+    fn recover_pending_profile_projection_locked(&self) -> Result<()> {
+        let path = self.pending_profile_projection_path();
+        let Some(projection) = load_pending_profile_projection(&path)? else {
+            return Ok(());
+        };
+        let storage_class = EventStorageClass::from(projection.storage_class);
+        let bucket = self.bucket(storage_class);
+        let current_root = bucket.events_root()?;
+        let (old_root, new_root) = match &projection.projection {
+            PendingProfileProjectionMode::Incremental {
+                old_root, new_root, ..
+            }
+            | PendingProfileProjectionMode::RebuildPublicRoot { old_root, new_root } => (
+                old_root.clone().map(cid_from_stored),
+                cid_from_stored(new_root.clone()),
+            ),
+        };
+
+        if current_root.as_ref() != Some(&new_root) {
+            if current_root == old_root {
+                return self.clear_pending_profile_projection_locked();
+            }
+            anyhow::bail!(
+                "event root does not match the pre- or post-publication state required by pending profile projection {}",
+                path.display()
+            );
+        }
+
+        match projection.projection {
+            PendingProfileProjectionMode::Incremental { events, .. } => {
+                if events.is_empty() {
+                    anyhow::bail!(
+                        "pending incremental profile projection {} contains no events",
+                        path.display()
+                    );
+                }
+                let events = events
+                    .into_iter()
+                    .map(|json| {
+                        Event::from_json(json)
+                            .context("decode pending profile projection metadata event")
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                for event in &events {
+                    if event.kind != Kind::Metadata {
+                        anyhow::bail!(
+                            "pending profile projection {} contains a non-metadata event",
+                            path.display()
+                        );
+                    }
+                    let stored = bucket
+                        .load_event_by_id(&new_root, &event.id.to_hex())?
+                        .with_context(|| {
+                            format!(
+                                "pending profile event {} is absent from its published event root",
+                                event.id
+                            )
+                        })?;
+                    if stored.id != event.id {
+                        anyhow::bail!(
+                            "pending profile event {} resolved to a different event",
+                            event.id
+                        );
+                    }
+                }
+                self.update_profile_index_for_events_locked(&events)?;
+            }
+            PendingProfileProjectionMode::RebuildPublicRoot { .. } => {
+                if storage_class != EventStorageClass::Public {
+                    anyhow::bail!(
+                        "pending full profile rebuild {} must target the public event root",
+                        path.display()
+                    );
+                }
+                let stored = block_on(bucket.event_store.list_by_kind_lossy(
+                    Some(&new_root),
+                    Kind::Metadata.as_u16() as u32,
+                    ListEventsOptions::default(),
+                ))
+                .map_err(map_event_store_error)?;
+                let events = stored
+                    .into_iter()
+                    .map(stored_event_to_nostr_event)
+                    .collect::<Result<Vec<_>>>()?;
+                self.rebuild_profile_index_for_events_locked(&events)?;
+            }
+        }
+        self.clear_pending_profile_projection_locked()
+    }
+
+    pub(crate) fn apply_public_events_root_and_projections(
+        &self,
+        root: Option<&Cid>,
+        events: &[Event],
+        rebuild_profile_index: bool,
+    ) -> Result<()> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        let old_root = self.public_events.events_root_for_write()?;
+        let profile_projection = if events.iter().any(|event| event.kind == Kind::Metadata) {
+            let new_root = root.context("metadata projection requires a public event root")?;
+            self.force_sync_event_storage(EventStorageClass::Public)?;
+            Some(PendingProfileProjection {
+                version: PROFILE_PROJECTION_PENDING_VERSION,
+                storage_class: StoredEventStorageClass::Public,
+                projection: if rebuild_profile_index {
+                    PendingProfileProjectionMode::RebuildPublicRoot {
+                        old_root: old_root.as_ref().map(stored_cid),
+                        new_root: stored_cid(new_root),
+                    }
+                } else {
+                    PendingProfileProjectionMode::Incremental {
+                        old_root: old_root.as_ref().map(stored_cid),
+                        new_root: stored_cid(new_root),
+                        events: events
+                            .iter()
+                            .filter(|event| event.kind == Kind::Metadata)
+                            .map(JsonUtil::as_json)
+                            .collect(),
+                    }
+                },
+            })
+        } else {
+            None
+        };
+        if let Some(projection) = profile_projection.as_ref() {
+            self.persist_pending_profile_projection_locked(projection)?;
+            self.public_events.write_events_root_durable(root)?;
+        } else {
+            self.public_events.write_events_root(root)?;
+        }
+        self.apply_graph_events_only(events)?;
+        if profile_projection.is_some() {
+            if rebuild_profile_index {
+                self.rebuild_profile_index_for_events_locked(events)?;
+            } else {
+                self.update_profile_index_for_events_locked(events)?;
+            }
+            self.clear_pending_profile_projection_locked()?;
+        }
+        Ok(())
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn latest_profile_event(&self, pubkey_hex: &str) -> Result<Option<Event>> {
-        self.profile_index.profile_event_for_pubkey(pubkey_hex)
+        let (root, _) = self.recovered_profile_index_roots()?;
+        self.profile_index
+            .profile_event_for_pubkey_at_root(root.as_ref(), pubkey_hex)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -1009,7 +1446,12 @@ impl SocialGraphStore {
         &self,
         prefix: &str,
     ) -> Result<Vec<(String, StoredProfileSearchEntry)>> {
-        self.profile_index.search_entries_for_prefix(prefix)
+        let (_, root) = self.recovered_profile_index_roots()?;
+        let Some(root) = root else {
+            return Ok(Vec::new());
+        };
+        self.profile_index
+            .search_entries_for_prefix_at_root(&root, prefix)
     }
 
     /// Validate profile-by-pubkey and profile-search semantics against one
@@ -1028,7 +1470,7 @@ impl SocialGraphStore {
         }
 
         let pubkey = event.pubkey.to_hex();
-        let (by_pubkey_root, search_root) = self.profile_index.roots()?;
+        let (by_pubkey_root, search_root) = self.recovered_profile_index_roots()?;
         let by_pubkey_root = by_pubkey_root.context("profile-by-pubkey root is missing")?;
         let search_root = search_root.context("profile-search root is missing")?;
         let mirrored_cid = block_on(
@@ -1100,22 +1542,28 @@ impl SocialGraphStore {
         })
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn rebuild_profile_index_for_events(&self, events: &[Event]) -> Result<()> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        self.rebuild_profile_index_for_events_locked(events)
+    }
+
+    fn rebuild_profile_index_for_events_locked(&self, events: &[Event]) -> Result<()> {
         let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
         self.profile_index
-            .rebuild_profile_events_and_commit_with_distances(
+            .rebuild_profile_events_and_commit_with_distances_locked(
                 latest_by_pubkey.into_values(),
                 |event| self.follow_distance(&event.pubkey.to_bytes()),
             )
     }
 
-    pub(crate) async fn rebuild_profile_index_for_events_async(
-        &self,
-        events: &[Event],
-    ) -> Result<()> {
+    async fn rebuild_profile_index_for_events_async_locked(&self, events: &[Event]) -> Result<()> {
         let latest_by_pubkey = self.filtered_latest_metadata_events_by_pubkey(events)?;
         self.profile_index
-            .rebuild_profile_events_async_and_commit_with_distances(
+            .rebuild_profile_events_async_and_commit_with_distances_locked(
                 latest_by_pubkey.into_values(),
                 |event| self.follow_distance(&event.pubkey.to_bytes()),
             )
@@ -1123,10 +1571,19 @@ impl SocialGraphStore {
     }
 
     pub fn rebuild_profile_index_from_stored_events(&self) -> Result<usize> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.rebuild_profile_index_from_stored_events_locked()
+    }
+
+    fn rebuild_profile_index_from_stored_events_locked(&self) -> Result<usize> {
+        self.recover_profile_transactions_locked()?;
         let public_events_root = self.public_events.events_root()?;
         let ambient_events_root = self.ambient_events.events_root()?;
         if public_events_root.is_none() && ambient_events_root.is_none() {
-            self.profile_index.write_roots(None, None)?;
+            self.profile_index
+                .write_roots_with_hooks_locked(None, None, || Ok(()), || Ok(()))?;
             return Ok(0);
         }
 
@@ -1155,15 +1612,26 @@ impl SocialGraphStore {
         let latest_count = self
             .filtered_latest_metadata_events_by_pubkey(&events)?
             .len();
-        self.rebuild_profile_index_for_events(&events)?;
+        self.rebuild_profile_index_for_events_locked(&events)?;
         Ok(latest_count)
     }
 
     pub async fn rebuild_profile_index_from_stored_events_async(&self) -> Result<usize> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction_async()
+            .await?;
+        self.rebuild_profile_index_from_stored_events_async_locked()
+            .await
+    }
+
+    async fn rebuild_profile_index_from_stored_events_async_locked(&self) -> Result<usize> {
+        self.recover_profile_transactions_locked()?;
         let public_events_root = self.public_events.events_root()?;
         let ambient_events_root = self.ambient_events.events_root()?;
         if public_events_root.is_none() && ambient_events_root.is_none() {
-            self.profile_index.write_roots(None, None)?;
+            self.profile_index
+                .write_roots_with_hooks_locked(None, None, || Ok(()), || Ok(()))?;
             return Ok(0);
         }
 
@@ -1195,27 +1663,37 @@ impl SocialGraphStore {
         let latest_count = self
             .filtered_latest_metadata_events_by_pubkey(&events)?
             .len();
-        self.rebuild_profile_index_for_events_async(&events).await?;
+        self.rebuild_profile_index_for_events_async_locked(&events)
+            .await?;
         Ok(latest_count)
     }
 
     pub fn rebuild_event_indexes_from_stored_events(&self) -> Result<(usize, usize)> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
         let public_count =
             self.rebuild_event_index_bucket_from_stored_events(&self.public_events)?;
         let ambient_count =
             self.rebuild_event_index_bucket_from_stored_events(&self.ambient_events)?;
-        self.rebuild_profile_index_from_stored_events()?;
+        self.rebuild_profile_index_from_stored_events_locked()?;
         Ok((public_count, ambient_count))
     }
 
     pub async fn rebuild_event_indexes_from_stored_events_async(&self) -> Result<(usize, usize)> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction_async()
+            .await?;
+        self.recover_profile_transactions_locked()?;
         let public_count = self
             .rebuild_event_index_bucket_from_stored_events_async(&self.public_events)
             .await?;
         let ambient_count = self
             .rebuild_event_index_bucket_from_stored_events_async(&self.ambient_events)
             .await?;
-        self.rebuild_profile_index_from_stored_events_async()
+        self.rebuild_profile_index_from_stored_events_async_locked()
             .await?;
         Ok((public_count, ambient_count))
     }
@@ -1312,8 +1790,19 @@ impl SocialGraphStore {
     }
 
     fn update_profile_index_for_events(&self, events: &[Event]) -> Result<()> {
+        if !events.iter().any(|event| event.kind == Kind::Metadata) {
+            return Ok(());
+        }
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        self.update_profile_index_for_events_locked(events)
+    }
+
+    fn update_profile_index_for_events_locked(&self, events: &[Event]) -> Result<()> {
         let threshold = self.profile_index_overmute_threshold();
-        self.update_profile_index_for_events_with(events, false, |event| {
+        self.update_profile_index_for_events_with_locked(events, false, |event| {
             let overmuted = self.is_overmuted_user(&event.pubkey.to_bytes(), threshold)?;
             let follow_distance = if overmuted {
                 None
@@ -1325,6 +1814,29 @@ impl SocialGraphStore {
     }
 
     fn update_profile_index_for_events_with<F>(
+        &self,
+        events: &[Event],
+        force_existing_search_value: bool,
+        classify: F,
+    ) -> Result<()>
+    where
+        F: FnMut(&Event) -> Result<(Option<u32>, bool)>,
+    {
+        if !events.iter().any(|event| event.kind == Kind::Metadata) {
+            return Ok(());
+        }
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
+        self.update_profile_index_for_events_with_locked(
+            events,
+            force_existing_search_value,
+            classify,
+        )
+    }
+
+    fn update_profile_index_for_events_with_locked<F>(
         &self,
         events: &[Event],
         force_existing_search_value: bool,
@@ -1345,7 +1857,7 @@ impl SocialGraphStore {
         }
 
         self.profile_index
-            .update_profile_events_and_commit(&updates)?;
+            .update_profile_events_and_commit_locked(&updates)?;
         Ok(())
     }
 
@@ -1469,12 +1981,42 @@ impl SocialGraphStore {
         event: &Event,
         storage_class: EventStorageClass,
     ) -> Result<()> {
-        let current_root = self.bucket(storage_class).events_root_for_write()?;
-        let next_root = self
-            .bucket(storage_class)
-            .store_event(current_root.as_ref(), event)?;
-        self.bucket(storage_class)
-            .write_events_root(Some(&next_root))?;
+        self.ingest_event_with_storage_class_and_lock_timeout(
+            event,
+            storage_class,
+            PROFILE_ROOT_PAIR_LOCK_TIMEOUT,
+        )
+    }
+
+    fn ingest_event_with_storage_class_and_lock_timeout(
+        &self,
+        event: &Event,
+        storage_class: EventStorageClass,
+        lock_timeout: Duration,
+    ) -> Result<()> {
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction_with_timeout(lock_timeout)?;
+        self.recover_profile_transactions_locked()?;
+        let bucket = self.bucket(storage_class);
+        let current_root = bucket.events_root_for_write()?;
+        let next_root = bucket.store_event(current_root.as_ref(), event)?;
+        let profile_projection = (event.kind == Kind::Metadata).then(|| PendingProfileProjection {
+            version: PROFILE_PROJECTION_PENDING_VERSION,
+            storage_class: storage_class.into(),
+            projection: PendingProfileProjectionMode::Incremental {
+                old_root: current_root.as_ref().map(stored_cid),
+                new_root: stored_cid(&next_root),
+                events: vec![event.as_json()],
+            },
+        });
+        if let Some(projection) = profile_projection.as_ref() {
+            self.force_sync_event_storage(storage_class)?;
+            self.persist_pending_profile_projection_locked(projection)?;
+            bucket.write_events_root_durable(Some(&next_root))?;
+        } else {
+            bucket.write_events_root(Some(&next_root))?;
+        }
 
         if is_social_graph_event(event.kind) {
             {
@@ -1486,7 +2028,10 @@ impl SocialGraphStore {
             self.invalidate_distance_cache();
         }
 
-        self.update_profile_index_for_events(std::slice::from_ref(event))?;
+        if profile_projection.is_some() {
+            self.update_profile_index_for_events_locked(std::slice::from_ref(event))?;
+            self.clear_pending_profile_projection_locked()?;
+        }
 
         Ok(())
     }
@@ -1500,6 +2045,10 @@ impl SocialGraphStore {
             return Ok(());
         }
 
+        let _transaction = self
+            .profile_index
+            .acquire_exclusive_root_pair_transaction()?;
+        self.recover_profile_transactions_locked()?;
         let bucket = self.bucket(storage_class);
         let current_root = bucket.events_root_for_write()?;
         let stored_events = events
@@ -1512,7 +2061,33 @@ impl SocialGraphStore {
                 .build(current_root.as_ref(), stored_events),
         )
         .map_err(map_event_store_error)?;
-        bucket.write_events_root(next_root.as_ref())?;
+        let metadata = events
+            .iter()
+            .filter(|event| event.kind == Kind::Metadata)
+            .collect::<Vec<_>>();
+        let profile_projection = if metadata.is_empty() {
+            None
+        } else {
+            let next_root = next_root
+                .as_ref()
+                .context("metadata event batch did not produce an event root")?;
+            Some(PendingProfileProjection {
+                version: PROFILE_PROJECTION_PENDING_VERSION,
+                storage_class: storage_class.into(),
+                projection: PendingProfileProjectionMode::Incremental {
+                    old_root: current_root.as_ref().map(stored_cid),
+                    new_root: stored_cid(next_root),
+                    events: metadata.into_iter().map(JsonUtil::as_json).collect(),
+                },
+            })
+        };
+        if let Some(projection) = profile_projection.as_ref() {
+            self.force_sync_event_storage(storage_class)?;
+            self.persist_pending_profile_projection_locked(projection)?;
+            bucket.write_events_root_durable(next_root.as_ref())?;
+        } else {
+            bucket.write_events_root(next_root.as_ref())?;
+        }
 
         let graph_events = events
             .iter()
@@ -1535,7 +2110,10 @@ impl SocialGraphStore {
             self.invalidate_distance_cache();
         }
 
-        self.update_profile_index_for_events(events)?;
+        if profile_projection.is_some() {
+            self.update_profile_index_for_events_locked(events)?;
+            self.clear_pending_profile_projection_locked()?;
+        }
 
         Ok(())
     }
@@ -2004,6 +2582,40 @@ fn profile_root_pair_commit_bytes(commit: &ProfileRootPairCommit) -> Result<Vec<
     Ok(bytes)
 }
 
+fn pending_profile_projection_bytes(projection: &PendingProfileProjection) -> Result<Vec<u8>> {
+    let mut bytes =
+        serde_json::to_vec(projection).context("encode canonical pending profile projection")?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn load_pending_profile_projection(path: &Path) -> Result<Option<PendingProfileProjection>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read pending profile projection {}", path.display()))
+        }
+    };
+    let projection: PendingProfileProjection = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse pending profile projection {}", path.display()))?;
+    if projection.version != PROFILE_PROJECTION_PENDING_VERSION {
+        anyhow::bail!(
+            "unsupported pending profile projection version {} in {}",
+            projection.version,
+            path.display()
+        );
+    }
+    if pending_profile_projection_bytes(&projection)? != bytes {
+        anyhow::bail!(
+            "pending profile projection {} is not canonical",
+            path.display()
+        );
+    }
+    Ok(Some(projection))
+}
+
 fn load_profile_root_pair_commit(path: &Path) -> Result<Option<ProfileRootPairCommit>> {
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
@@ -2072,6 +2684,17 @@ fn require_no_pending_profile_root_pair_commit(db_dir: &Path) -> Result<()> {
         anyhow::bail!(
             "profile root-pair commit {} is pending; open the writable social graph store to recover it before read-only audit",
             commit_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn require_no_pending_profile_projection(db_dir: &Path) -> Result<()> {
+    let path = db_dir.join(PROFILE_PROJECTION_PENDING_FILE);
+    if load_pending_profile_projection(&path)?.is_some() {
+        anyhow::bail!(
+            "profile projection {} is pending; open the writable social graph store to recover it before read-only audit",
+            path.display()
         );
     }
     Ok(())

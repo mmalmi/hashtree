@@ -8,6 +8,8 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -25,6 +27,79 @@ macro_rules! event_builder {
 
 const WELLORDER_FIXTURE_URL: &str =
     "https://wellorder.xyz/nostr/nostr-wellorder-early-500k-v1.jsonl.bz2";
+
+struct ProfileTransactionPause {
+    _probe: ProfileRootPairTransactionProbeGuard,
+    entered: Receiver<()>,
+    release: SyncSender<()>,
+}
+
+fn pause_next_exclusive_profile_transaction(
+    expected_lock_path: PathBuf,
+) -> ProfileTransactionPause {
+    let fired = Arc::new(AtomicBool::new(false));
+    let (entered_tx, entered) = mpsc::sync_channel(1);
+    let (release, release_rx) = mpsc::sync_channel(1);
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let probe = install_profile_root_pair_transaction_probe(Arc::new(move |path, mode| {
+        if mode != ProfileRootPairLockMode::Exclusive || fired.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        assert_eq!(path, expected_lock_path);
+        entered_tx
+            .send(())
+            .expect("report acquired profile transaction");
+        release_rx
+            .lock()
+            .expect("profile transaction release lock")
+            .recv_timeout(Duration::from_secs(10))
+            .expect("release paused profile transaction");
+    }));
+    ProfileTransactionPause {
+        _probe: probe,
+        entered,
+        release,
+    }
+}
+
+fn metadata_event(keys: &Keys, name: &str, created_at: u64) -> Event {
+    EventBuilder::new(
+        Kind::Metadata,
+        serde_json::json!({"display_name": name}).to_string(),
+    )
+    .custom_created_at(Timestamp::from_secs(created_at))
+    .sign_with_keys(keys)
+    .unwrap()
+}
+
+fn assert_event_and_profile_visible(
+    graph_store: &SocialGraphStore,
+    event: &Event,
+    search_prefix: &str,
+) {
+    assert_eq!(
+        graph_store
+            .latest_profile_event(&event.pubkey.to_hex())
+            .unwrap()
+            .expect("metadata event must be projected by pubkey")
+            .id,
+        event.id
+    );
+    assert!(
+        graph_store
+            .profile_search_entries_for_prefix(search_prefix)
+            .unwrap()
+            .iter()
+            .any(|(_, entry)| entry.pubkey == event.pubkey.to_hex()),
+        "metadata event must be projected into profile search"
+    );
+    assert!(
+        query_events(graph_store, &Filter::new().id(event.id), 1)
+            .iter()
+            .any(|stored| stored.id == event.id),
+        "metadata event must remain reachable from the event root"
+    );
+}
 
 #[derive(Debug, Clone, Default)]
 struct ReadTraceSnapshot {
@@ -946,6 +1021,168 @@ fn profile_root_pair_transactions_serialize_real_writers_and_coherent_readers() 
 }
 
 #[test]
+fn sync_rebuild_holds_transaction_from_source_snapshot_through_commit() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let original = metadata_event(&Keys::generate(), "sync rebuild original", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &original, EventStorageClass::Public)
+        .unwrap();
+    let root_before_update = graph_store.public_events_root().unwrap();
+
+    let pause = pause_next_exclusive_profile_transaction(
+        graph_store.profile_index.root_pair_lock_path.clone(),
+    );
+    let rebuild_store = Arc::clone(&graph_store);
+    let rebuild =
+        std::thread::spawn(move || rebuild_store.rebuild_profile_index_from_stored_events());
+    pause
+        .entered
+        .recv_timeout(Duration::from_secs(5))
+        .expect("rebuild must acquire its transaction before source-root snapshot");
+
+    let concurrent = metadata_event(&Keys::generate(), "sync rebuild concurrent", 2);
+    let concurrent_for_writer = concurrent.clone();
+    let writer_store = Arc::clone(&graph_store);
+    let (writer_started_tx, writer_started_rx) = mpsc::sync_channel(1);
+    let writer = std::thread::spawn(move || {
+        writer_started_tx.send(()).unwrap();
+        ingest_parsed_event_with_storage_class(
+            &writer_store,
+            &concurrent_for_writer,
+            EventStorageClass::Public,
+        )
+    });
+    writer_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("concurrent metadata ingest must start");
+    std::thread::sleep(Duration::from_millis(40));
+    assert!(
+        !writer.is_finished(),
+        "metadata ingest must wait before publishing its event root"
+    );
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        root_before_update,
+        "waiting metadata ingest must not advance the event root"
+    );
+
+    pause.release.send(()).unwrap();
+    assert_eq!(rebuild.join().unwrap().unwrap(), 1);
+    writer.join().unwrap().unwrap();
+    assert_event_and_profile_visible(&graph_store, &original, "p:sync");
+    assert_event_and_profile_visible(&graph_store, &concurrent, "p:sync");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn async_rebuild_holds_transaction_from_source_snapshot_through_commit() {
+    let _guard = test_lock().await;
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let original = metadata_event(&Keys::generate(), "async rebuild original", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &original, EventStorageClass::Public)
+        .unwrap();
+    let root_before_update = graph_store.public_events_root().unwrap();
+
+    let pause = pause_next_exclusive_profile_transaction(
+        graph_store.profile_index.root_pair_lock_path.clone(),
+    );
+    let ProfileTransactionPause {
+        _probe: probe_guard,
+        entered,
+        release,
+    } = pause;
+    let rebuild_store = Arc::clone(&graph_store);
+    let rebuild = std::thread::spawn(move || {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(rebuild_store.rebuild_profile_index_from_stored_events_async())
+    });
+    tokio::task::spawn_blocking(move || {
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("async rebuild must acquire before source-root snapshot");
+    })
+    .await
+    .unwrap();
+
+    let concurrent = metadata_event(&Keys::generate(), "async rebuild concurrent", 2);
+    let concurrent_for_writer = concurrent.clone();
+    let writer_store = Arc::clone(&graph_store);
+    let (writer_started_tx, writer_started_rx) = mpsc::sync_channel(1);
+    let writer = tokio::task::spawn_blocking(move || {
+        writer_started_tx.send(()).unwrap();
+        ingest_parsed_event_with_storage_class(
+            &writer_store,
+            &concurrent_for_writer,
+            EventStorageClass::Public,
+        )
+    });
+    writer_started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("spawn-blocking metadata ingest must start");
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(
+        !writer.is_finished(),
+        "spawn-blocking ingest must wait before event-root durability"
+    );
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        root_before_update,
+        "waiting spawn-blocking ingest must not advance the event root"
+    );
+
+    release.send(()).unwrap();
+    assert_eq!(rebuild.join().unwrap().unwrap(), 1);
+    writer.await.unwrap().unwrap();
+    drop(probe_guard);
+    assert_event_and_profile_visible(&graph_store, &original, "p:async");
+    assert_event_and_profile_visible(&graph_store, &concurrent, "p:async");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn tokio_spawn_blocking_ingest_waits_before_event_root_and_projects_after_release() {
+    let _guard = test_lock().await;
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let root_before = graph_store.public_events_root().unwrap();
+    let transaction = graph_store
+        .profile_index
+        .acquire_exclusive_root_pair_transaction_async()
+        .await
+        .unwrap();
+
+    let profile = metadata_event(&Keys::generate(), "spawn blocking profile", 1);
+    let profile_for_writer = profile.clone();
+    let writer_store = Arc::clone(&graph_store);
+    let (started_tx, started_rx) = mpsc::sync_channel(1);
+    let writer = tokio::task::spawn_blocking(move || {
+        started_tx.send(()).unwrap();
+        ingest_parsed_event_with_storage_class(
+            &writer_store,
+            &profile_for_writer,
+            EventStorageClass::Public,
+        )
+    });
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("spawn-blocking ingest must start");
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    assert!(!writer.is_finished());
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        root_before,
+        "lock contention must be resolved before event-root publication"
+    );
+
+    drop(transaction);
+    writer.await.unwrap().unwrap();
+    assert_event_and_profile_visible(&graph_store, &profile, "p:spawn");
+}
+
+#[test]
 fn profile_root_reads_treat_only_not_found_as_absent() {
     let _guard = test_lock_blocking();
     let tmp = TempDir::new().unwrap();
@@ -1004,8 +1241,171 @@ fn profile_writer_fails_before_intent_when_existing_root_is_unreadable() {
     );
 }
 
+#[test]
+fn durable_pre_root_projection_obligation_cancels_and_same_process_retry_converges() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let profile = metadata_event(&Keys::generate(), "durable pre-root retry", 1);
+    let db_dir = tmp.path().join("socialgraph");
+    let pending_path = db_dir.join(PROFILE_PROJECTION_PENDING_FILE);
+    let expected_path = pending_path.clone();
+    let fired = Arc::new(AtomicBool::new(false));
+    let fired_for_probe = Arc::clone(&fired);
+    let probe = install_pending_profile_projection_persisted_probe(Arc::new(move |path| {
+        if path == expected_path && !fired_for_probe.swap(true, Ordering::AcqRel) {
+            anyhow::bail!(
+                "injected interruption after durable projection obligation and before event root"
+            );
+        }
+        Ok(())
+    }));
+    let root_before = graph_store.public_events_root().unwrap();
+
+    let error =
+        ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Public)
+            .expect_err("injected pre-root interruption must stop metadata publication");
+    assert!(format!("{error:#}").contains("injected interruption"));
+    assert!(fired.load(Ordering::Acquire));
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        root_before,
+        "an interruption after obligation fsync must precede event-root publication"
+    );
+    assert!(query_events(&graph_store, &Filter::new().id(profile.id), 1).is_empty());
+    let projection = load_pending_profile_projection(&pending_path)
+        .unwrap()
+        .expect("the durable obligation must be installed");
+    assert_eq!(
+        pending_profile_projection_bytes(&projection).unwrap(),
+        fs::read(&pending_path).unwrap(),
+        "the installed obligation must be complete canonical bytes"
+    );
+    let pending_name = pending_path.file_name().unwrap().to_str().unwrap();
+    assert!(
+        !pending_path
+            .with_file_name(format!(".{pending_name}.pending"))
+            .exists(),
+        "the fsynced rename must not leave a partial temporary obligation"
+    );
+    File::open(&db_dir).unwrap().sync_all().unwrap();
+
+    drop(probe);
+    assert!(graph_store
+        .latest_profile_event(&profile.pubkey.to_hex())
+        .unwrap()
+        .is_none());
+    assert!(
+        !pending_path.exists(),
+        "same-process recovery must durably cancel an obligation whose event root stayed old"
+    );
+    File::open(&db_dir).unwrap().sync_all().unwrap();
+
+    ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Public)
+        .expect("same-process retry must publish event and both profile projections");
+    assert_event_and_profile_visible(&graph_store, &profile, "p:durable");
+}
+
+#[test]
+fn same_process_read_repairs_post_event_root_profile_io_failure() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let profile = metadata_event(&Keys::generate(), "same process projection retry", 1);
+    let db_dir = tmp.path().join("socialgraph");
+    let by_pubkey_path = db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    fs::create_dir(&by_pubkey_path).unwrap();
+
+    let error =
+        ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Public)
+            .expect_err("profile root I/O failure must leave a durable retry obligation");
+    assert!(format!("{error:#}").contains("read profile root file"));
+    assert!(
+        query_events(&graph_store, &Filter::new().id(profile.id), 1)
+            .iter()
+            .any(|event| event.id == profile.id),
+        "the authoritative event root was already published"
+    );
+    let pending_path = db_dir.join(PROFILE_PROJECTION_PENDING_FILE);
+    assert!(pending_path.is_file());
+
+    fs::remove_dir(&by_pubkey_path).unwrap();
+    assert_event_and_profile_visible(&graph_store, &profile, "p:same");
+    assert!(
+        !pending_path.exists(),
+        "the first same-process profile read must repair and clear the obligation"
+    );
+}
+
+#[test]
+fn mismatched_pending_metadata_root_pair_fails_closed() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let original = metadata_event(&Keys::generate(), "mismatch original", 1);
+    ingest_parsed_event_with_storage_class(&graph_store, &original, EventStorageClass::Public)
+        .unwrap();
+    let old_root = graph_store.public_events_root().unwrap().unwrap();
+    let pending = metadata_event(&Keys::generate(), "mismatch pending", 2);
+    let unrelated = EventBuilder::new(Kind::TextNote, "unexpected published root")
+        .custom_created_at(Timestamp::from_secs(3))
+        .sign_with_keys(&Keys::generate())
+        .unwrap();
+    let pending_root = graph_store
+        .public_events
+        .store_event(Some(&old_root), &pending)
+        .unwrap();
+    let unrelated_root = graph_store
+        .public_events
+        .store_event(Some(&old_root), &unrelated)
+        .unwrap();
+    assert_ne!(pending_root, unrelated_root);
+
+    let transaction = graph_store
+        .profile_index
+        .acquire_exclusive_root_pair_transaction()
+        .unwrap();
+    graph_store
+        .force_sync_event_storage(EventStorageClass::Public)
+        .unwrap();
+    graph_store
+        .persist_pending_profile_projection_locked(&PendingProfileProjection {
+            version: PROFILE_PROJECTION_PENDING_VERSION,
+            storage_class: StoredEventStorageClass::Public,
+            projection: PendingProfileProjectionMode::Incremental {
+                old_root: Some(stored_cid(&old_root)),
+                new_root: stored_cid(&pending_root),
+                events: vec![pending.as_json()],
+            },
+        })
+        .unwrap();
+    graph_store
+        .public_events
+        .write_events_root_durable(Some(&unrelated_root))
+        .unwrap();
+    drop(transaction);
+    drop(graph_store);
+
+    let error = match open_test_social_graph_store(tmp.path()) {
+        Ok(_) => panic!("an event root matching neither side of the obligation must be rejected"),
+        Err(error) => error,
+    };
+    assert!(format!("{error:#}").contains("does not match the pre- or post-publication state"));
+    assert_eq!(
+        read_root_file(&tmp.path().join("socialgraph").join(EVENTS_ROOT_FILE)).unwrap(),
+        Some(unrelated_root)
+    );
+    assert!(
+        tmp.path()
+            .join("socialgraph")
+            .join(PROFILE_PROJECTION_PENDING_FILE)
+            .is_file(),
+        "a mismatched pair must remain available for operator repair"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
-async fn sync_reader_fails_fast_under_async_profile_root_transaction() {
+async fn sync_and_async_profile_lock_waits_have_explicit_deadlines() {
     let _guard = test_lock().await;
     let tmp = TempDir::new().unwrap();
     let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
@@ -1015,17 +1415,260 @@ async fn sync_reader_fails_fast_under_async_profile_root_transaction() {
             .await
             .unwrap();
 
+    let timeout = Duration::from_millis(60);
+    let profile = metadata_event(&Keys::generate(), "deadline profile", 1);
+    let event_root_before = graph_store.public_events_root().unwrap();
+    let error = graph_store
+        .ingest_event_with_storage_class_and_lock_timeout(
+            &profile,
+            EventStorageClass::Public,
+            timeout,
+        )
+        .expect_err("metadata ingest must time out before event-root publication");
+    assert!(error.to_string().contains("timed out"));
+    assert_eq!(
+        graph_store.public_events_root().unwrap(),
+        event_root_before,
+        "timed-out metadata ingest must leave the event root unchanged"
+    );
+    assert!(query_events(&graph_store, &Filter::new().id(profile.id), 1).is_empty());
+
     let started = std::time::Instant::now();
-    let error = read_profile_index_roots(tmp.path())
-        .expect_err("a synchronous reader must not pin a current-thread async writer");
-    assert!(error.to_string().contains("transaction is busy"));
+    let error = read_profile_index_roots_with_timeout(tmp.path(), timeout)
+        .expect_err("a synchronous reader must stop at its explicit deadline");
+    assert!(error.to_string().contains("timed out"));
     assert!(
-        started.elapsed() < Duration::from_millis(100),
-        "same-runtime contention must fail fast instead of waiting for its own executor"
+        started.elapsed() >= timeout && started.elapsed() < Duration::from_millis(500),
+        "synchronous contention must honor its bounded deadline"
+    );
+
+    let started = std::time::Instant::now();
+    let error = match acquire_profile_root_pair_lock_async_with_timeout(
+        &lock_path,
+        ProfileRootPairLockMode::Shared,
+        false,
+        timeout,
+    )
+    .await
+    {
+        Ok(_) => panic!("an asynchronous reader must stop at its explicit deadline"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("timed out"));
+    assert!(
+        started.elapsed() >= timeout && started.elapsed() < Duration::from_millis(500),
+        "asynchronous contention must honor its bounded deadline"
     );
 
     drop(writer_transaction);
     read_profile_index_roots(tmp.path()).unwrap();
+    assert!(graph_store
+        .latest_profile_event(&profile.pubkey.to_hex())
+        .unwrap()
+        .is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn profile_projection_recovery_child_helper() {
+    let Ok(data_dir) = std::env::var("HASHTREE_PROFILE_RECOVERY_CHILD_DATA_DIR") else {
+        return;
+    };
+    let expected_pubkey = std::env::var("HASHTREE_PROFILE_RECOVERY_CHILD_PUBKEY")
+        .expect("child recovery pubkey must be provided");
+    let expected_event_id = std::env::var("HASHTREE_PROFILE_RECOVERY_CHILD_EVENT_ID")
+        .expect("child recovery event id must be provided");
+    let graph_store = open_social_graph_store(Path::new(&data_dir))
+        .expect("fresh process open must recover the profile projection");
+    let recovered = graph_store
+        .latest_profile_event(&expected_pubkey)
+        .unwrap()
+        .expect("fresh process must expose the recovered profile");
+    assert_eq!(recovered.id.to_hex(), expected_event_id);
+    assert!(
+        !Path::new(&data_dir)
+            .join("socialgraph")
+            .join(PROFILE_PROJECTION_PENDING_FILE)
+            .exists(),
+        "fresh process recovery must durably clear the obligation"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn fresh_process_open_repairs_post_event_root_profile_io_failure() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    let profile = metadata_event(&Keys::generate(), "fresh process projection retry", 1);
+    let db_dir = tmp.path().join("socialgraph");
+    let by_pubkey_path = db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE);
+    fs::create_dir(&by_pubkey_path).unwrap();
+
+    let error =
+        ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Public)
+            .expect_err("profile root I/O failure must leave a durable retry obligation");
+    assert!(format!("{error:#}").contains("read profile root file"));
+    assert!(
+        query_events(&graph_store, &Filter::new().id(profile.id), 1)
+            .iter()
+            .any(|event| event.id == profile.id),
+        "the event must be reachable before a fresh process repairs its profile projection"
+    );
+    let pending_path = db_dir.join(PROFILE_PROJECTION_PENDING_FILE);
+    assert!(pending_path.is_file());
+    drop(graph_store);
+    fs::remove_dir(&by_pubkey_path).unwrap();
+
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("socialgraph::tests::profile_projection_recovery_child_helper")
+        .arg("--nocapture")
+        .env("RUST_TEST_THREADS", "1")
+        .env("HASHTREE_PROFILE_RECOVERY_CHILD_DATA_DIR", tmp.path())
+        .env(
+            "HASHTREE_PROFILE_RECOVERY_CHILD_PUBKEY",
+            profile.pubkey.to_hex(),
+        )
+        .env(
+            "HASHTREE_PROFILE_RECOVERY_CHILD_EVENT_ID",
+            profile.id.to_hex(),
+        )
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("fresh-process profile recovery exceeded its deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "fresh-process recovery failed: {status}");
+    assert!(!pending_path.exists());
+
+    let reopened = open_social_graph_store(tmp.path()).unwrap();
+    assert_event_and_profile_visible(&reopened, &profile, "p:fresh");
+}
+
+#[cfg(unix)]
+#[test]
+fn profile_root_pair_cross_process_writer_helper() {
+    let Ok(data_dir) = std::env::var("HASHTREE_PROFILE_LOCK_CHILD_DATA_DIR") else {
+        return;
+    };
+    let ready_path = PathBuf::from(
+        std::env::var("HASHTREE_PROFILE_LOCK_CHILD_READY")
+            .expect("child ready path must be provided"),
+    );
+    let hold_millis = std::env::var("HASHTREE_PROFILE_LOCK_CHILD_HOLD_MS")
+        .expect("child hold duration must be provided")
+        .parse::<u64>()
+        .expect("child hold duration must be an integer");
+    let graph_store = open_social_graph_store(Path::new(&data_dir)).unwrap();
+    let profile = metadata_event(&Keys::generate(), "child process writer", 1);
+    let pubkey = profile.pubkey.to_hex();
+    let expected_lock_path = graph_store.profile_index.root_pair_lock_path.clone();
+    let fired = Arc::new(AtomicBool::new(false));
+    let _probe = install_profile_root_pair_transaction_probe(Arc::new(move |path, mode| {
+        if mode != ProfileRootPairLockMode::Exclusive || fired.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        assert_eq!(path, expected_lock_path);
+        fs::write(&ready_path, format!("{pubkey}\n")).unwrap();
+        std::thread::sleep(Duration::from_millis(hold_millis));
+    }));
+    ingest_parsed_event_with_storage_class(&graph_store, &profile, EventStorageClass::Public)
+        .unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn cross_process_writer_excludes_reader_and_writer_until_real_commit_finishes() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    drop(open_social_graph_store(tmp.path()).unwrap());
+    let ready_path = tmp.path().join("cross-process-profile-writer.ready");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("socialgraph::tests::profile_root_pair_cross_process_writer_helper")
+        .arg("--nocapture")
+        .env("RUST_TEST_THREADS", "1")
+        .env("HASHTREE_PROFILE_LOCK_CHILD_DATA_DIR", tmp.path())
+        .env("HASHTREE_PROFILE_LOCK_CHILD_READY", &ready_path)
+        .env("HASHTREE_PROFILE_LOCK_CHILD_HOLD_MS", "500")
+        .spawn()
+        .unwrap();
+
+    let ready_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !ready_path.exists() {
+        if let Some(status) = child.try_wait().unwrap() {
+            panic!("cross-process writer exited before acquiring the lock: {status}");
+        }
+        assert!(
+            std::time::Instant::now() < ready_deadline,
+            "cross-process writer did not acquire its lock before the deadline"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let child_pubkey = fs::read_to_string(&ready_path).unwrap().trim().to_string();
+    let timeout = Duration::from_millis(60);
+    let read_error = read_profile_index_roots_with_timeout(tmp.path(), timeout)
+        .expect_err("cross-process reader must not observe an in-flight writer");
+    assert!(read_error.to_string().contains("timed out"));
+    let lock_path = tmp
+        .path()
+        .join("socialgraph")
+        .join(PROFILE_ROOT_PAIR_LOCK_FILE);
+    let write_error = match acquire_profile_root_pair_lock_with_timeout(
+        &lock_path,
+        ProfileRootPairLockMode::Exclusive,
+        true,
+        timeout,
+    ) {
+        Ok(_) => panic!("cross-process writer must be excluded by the advisory lock"),
+        Err(error) => error,
+    };
+    assert!(write_error.to_string().contains("timed out"));
+
+    let child_deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= child_deadline {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("cross-process writer did not finish before the deadline");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    assert!(status.success(), "cross-process writer failed: {status}");
+
+    let graph_store = open_social_graph_store(tmp.path()).unwrap();
+    assert!(graph_store
+        .latest_profile_event(&child_pubkey)
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        graph_store
+            .profile_search_entries_for_prefix("p:child")
+            .unwrap()
+            .len(),
+        1
+    );
+    let parent_profile = metadata_event(&Keys::generate(), "parent process writer", 2);
+    ingest_parsed_event_with_storage_class(
+        &graph_store,
+        &parent_profile,
+        EventStorageClass::Public,
+    )
+    .unwrap();
+    assert_event_and_profile_visible(&graph_store, &parent_profile, "p:parent");
 }
 
 #[test]
