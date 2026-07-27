@@ -11,6 +11,7 @@ pub(super) struct ProfileIndexBucket {
     pub(super) index: BTree<StorageRouter>,
     pub(super) by_pubkey_root_path: PathBuf,
     pub(super) search_root_path: PathBuf,
+    pub(super) root_pair_commit_path: PathBuf,
 }
 
 impl EventIndexBucket {
@@ -407,24 +408,111 @@ impl EventIndexBucket {
 }
 
 impl ProfileIndexBucket {
+    pub(super) fn roots(&self) -> Result<(Option<Cid>, Option<Cid>)> {
+        self.recover_pending_root_pair_commit()?;
+        Ok((
+            read_root_file(&self.by_pubkey_root_path)?,
+            read_root_file(&self.search_root_path)?,
+        ))
+    }
+
     pub(super) fn by_pubkey_root(&self) -> Result<Option<Cid>> {
         let _profile = NostrProfileGuard::new("socialgraph.profile_by_pubkey_root.read");
-        read_root_file(&self.by_pubkey_root_path)
+        Ok(self.roots()?.0)
     }
 
     pub(super) fn search_root(&self) -> Result<Option<Cid>> {
         let _profile = NostrProfileGuard::new("socialgraph.profile_search_root.read");
-        read_root_file(&self.search_root_path)
+        Ok(self.roots()?.1)
     }
 
-    pub(super) fn write_by_pubkey_root(&self, root: Option<&Cid>) -> Result<()> {
-        let _profile = NostrProfileGuard::new("socialgraph.profile_by_pubkey_root.write");
-        write_root_file(&self.by_pubkey_root_path, root)
+    fn recover_pending_root_pair_commit(&self) -> Result<()> {
+        let Some(commit) = load_profile_root_pair_commit(&self.root_pair_commit_path)? else {
+            return Ok(());
+        };
+        install_profile_root_pair_commit_with(
+            &self.by_pubkey_root_path,
+            &self.search_root_path,
+            &self.root_pair_commit_path,
+            &commit,
+            || Ok(()),
+        )
     }
 
-    pub(super) fn write_search_root(&self, root: Option<&Cid>) -> Result<()> {
-        let _profile = NostrProfileGuard::new("socialgraph.profile_search_root.write");
-        write_root_file(&self.search_root_path, root)
+    pub(super) fn write_roots(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+    ) -> Result<()> {
+        self.write_roots_with_hooks(by_pubkey_root, search_root, || Ok(()), || Ok(()))
+    }
+
+    fn write_roots_with_hooks<F, G>(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+        after_intent: F,
+        after_search: G,
+    ) -> Result<()>
+    where
+        F: FnOnce() -> Result<()>,
+        G: FnOnce() -> Result<()>,
+    {
+        self.recover_pending_root_pair_commit()?;
+        self.store
+            .force_sync()
+            .map_err(|error| anyhow::anyhow!("force-sync profile index blocks: {error}"))?;
+        let old_by_pubkey = read_root_file(&self.by_pubkey_root_path)?;
+        let old_search = read_root_file(&self.search_root_path)?;
+        let commit = ProfileRootPairCommit {
+            version: PROFILE_ROOT_PAIR_COMMIT_VERSION,
+            old_search: old_search.as_ref().map(stored_cid),
+            old_by_pubkey: old_by_pubkey.as_ref().map(stored_cid),
+            new_search: search_root.map(stored_cid),
+            new_by_pubkey: by_pubkey_root.map(stored_cid),
+        };
+        let bytes = profile_root_pair_commit_bytes(&commit)?;
+        replace_file_durable(
+            &self.root_pair_commit_path,
+            &bytes,
+            "profile root-pair commit",
+        )?;
+        after_intent()?;
+        install_profile_root_pair_commit_with(
+            &self.by_pubkey_root_path,
+            &self.search_root_path,
+            &self.root_pair_commit_path,
+            &commit,
+            after_search,
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_roots_interrupted_after_intent(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+    ) -> Result<()> {
+        self.write_roots_with_hooks(
+            by_pubkey_root,
+            search_root,
+            || anyhow::bail!("injected interruption after durable profile root-pair intent"),
+            || Ok(()),
+        )
+    }
+
+    #[cfg(test)]
+    pub(super) fn write_roots_interrupted_after_search(
+        &self,
+        by_pubkey_root: Option<&Cid>,
+        search_root: Option<&Cid>,
+    ) -> Result<()> {
+        self.write_roots_with_hooks(
+            by_pubkey_root,
+            search_root,
+            || Ok(()),
+            || anyhow::bail!("injected interruption after durable profile-search root"),
+        )
     }
 
     fn mirror_profile_event(&self, event: &Event) -> Result<Cid> {

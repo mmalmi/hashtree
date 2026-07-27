@@ -1308,6 +1308,10 @@ where
                 .sync_profile_index_for_events_with_frozen_distances(&profile_events, decisions)
                 .context("sync bulk-projected profile events from frozen rank decisions")?,
         }
+        stores
+            .durable
+            .force_sync()
+            .context("force-sync bulk-projected profile index blocks")?;
         stores.graph.force_sync()?;
     }
     let profile_sync_ms = profile_sync_started.elapsed().as_millis();

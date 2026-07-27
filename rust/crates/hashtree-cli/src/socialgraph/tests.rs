@@ -854,6 +854,208 @@ fn test_profile_search_index_persists_across_reopen() {
 }
 
 #[test]
+fn interrupted_profile_root_pair_exclusion_recovers_before_replay() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+    let profile = event_builder!(
+        Kind::Metadata,
+        serde_json::json!({ "display_name": "stale exclusion" }).to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(5))
+    .sign_with_keys(&keys)
+    .unwrap();
+
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&profile))
+        .unwrap();
+    let (old_by_pubkey, old_search) = graph_store.profile_index.roots().unwrap();
+    let (next_by_pubkey, next_search, changed) = graph_store
+        .profile_index
+        .update_profile_events(
+            old_by_pubkey.as_ref(),
+            old_search.as_ref(),
+            &[(&profile, None, true, true)],
+        )
+        .unwrap();
+    assert!(changed);
+
+    let error = graph_store
+        .profile_index
+        .write_roots_interrupted_after_intent(next_by_pubkey.as_ref(), next_search.as_ref())
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("injected interruption after durable profile root-pair intent"));
+    let db_dir = tmp.path().join("socialgraph");
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+    assert_eq!(
+        read_root_file(&db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE)).unwrap(),
+        old_by_pubkey,
+        "by-pubkey must remain the replay authority until search is durable"
+    );
+    assert_eq!(
+        read_root_file(&db_dir.join(PROFILE_SEARCH_ROOT_FILE)).unwrap(),
+        old_search,
+        "neither root may move before the durable intent is installed"
+    );
+    let read_only_error = read_profile_index_roots(tmp.path()).unwrap_err();
+    assert!(read_only_error
+        .to_string()
+        .contains("open the writable social graph store to recover"));
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+
+    drop(graph_store);
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    assert!(!db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).exists());
+    assert_eq!(reopened.profile_index.roots().unwrap(), (None, None));
+    assert!(reopened.latest_profile_event(&pubkey).unwrap().is_none());
+    assert!(reopened
+        .profile_search_entries_for_prefix("p:stale")
+        .unwrap()
+        .is_empty());
+
+    let decisions = BTreeMap::from([(pubkey.clone(), None)]);
+    reopened
+        .sync_profile_index_for_events_with_frozen_distances(
+            std::slice::from_ref(&profile),
+            &decisions,
+        )
+        .unwrap();
+    assert!(reopened.latest_profile_event(&pubkey).unwrap().is_none());
+    assert!(reopened
+        .profile_search_entries_for_prefix("p:stale")
+        .unwrap()
+        .is_empty());
+}
+
+#[test]
+fn interrupted_profile_root_pair_changed_terms_recovers_before_replay() {
+    let _guard = test_lock_blocking();
+    let tmp = TempDir::new().unwrap();
+    let graph_store = open_test_social_graph_store(tmp.path()).unwrap();
+    let keys = Keys::generate();
+    let pubkey = keys.public_key().to_hex();
+    let old_profile = event_builder!(
+        Kind::Metadata,
+        serde_json::json!({ "display_name": "obsolete crash term" }).to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(5))
+    .sign_with_keys(&keys)
+    .unwrap();
+    let replacement = event_builder!(
+        Kind::Metadata,
+        serde_json::json!({ "display_name": "durable replacement term" }).to_string(),
+        [],
+    )
+    .custom_created_at(Timestamp::from_secs(6))
+    .sign_with_keys(&keys)
+    .unwrap();
+
+    graph_store
+        .sync_profile_index_for_events(std::slice::from_ref(&old_profile))
+        .unwrap();
+    let (old_by_pubkey, old_search) = graph_store.profile_index.roots().unwrap();
+    let (next_by_pubkey, next_search, changed) = graph_store
+        .profile_index
+        .update_profile_events(
+            old_by_pubkey.as_ref(),
+            old_search.as_ref(),
+            &[(&replacement, Some(4), false, true)],
+        )
+        .unwrap();
+    assert!(changed);
+
+    graph_store
+        .profile_index
+        .write_roots_interrupted_after_search(next_by_pubkey.as_ref(), next_search.as_ref())
+        .unwrap_err();
+    let db_dir = tmp.path().join("socialgraph");
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+    assert_eq!(
+        read_root_file(&db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE)).unwrap(),
+        old_by_pubkey,
+        "by-pubkey must not move before changed search terms are durable"
+    );
+    assert_eq!(
+        read_root_file(&db_dir.join(PROFILE_SEARCH_ROOT_FILE)).unwrap(),
+        next_search,
+        "replacement search terms must be installed first"
+    );
+    let read_only_error = read_profile_index_roots(tmp.path()).unwrap_err();
+    assert!(read_only_error
+        .to_string()
+        .contains("open the writable social graph store to recover"));
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+
+    write_root_file_durable(&db_dir.join(PROFILE_SEARCH_ROOT_FILE), old_search.as_ref()).unwrap();
+    write_root_file_durable(
+        &db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE),
+        next_by_pubkey.as_ref(),
+    )
+    .unwrap();
+    drop(graph_store);
+    let tamper_error = open_test_social_graph_store(tmp.path())
+        .err()
+        .expect("reverse-order root pair must fail closed");
+    assert!(format!("{tamper_error:#}").contains("do not match an allowed forward state"));
+    assert!(db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).is_file());
+    write_root_file_durable(
+        &db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE),
+        old_by_pubkey.as_ref(),
+    )
+    .unwrap();
+    write_root_file_durable(&db_dir.join(PROFILE_SEARCH_ROOT_FILE), next_search.as_ref()).unwrap();
+
+    let reopened = open_test_social_graph_store(tmp.path()).unwrap();
+    assert!(!db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE).exists());
+    assert_eq!(
+        reopened
+            .latest_profile_event(&pubkey)
+            .unwrap()
+            .expect("recovered replacement profile")
+            .id,
+        replacement.id
+    );
+    assert!(reopened
+        .profile_search_entries_for_prefix("p:obsolete")
+        .unwrap()
+        .is_empty());
+    let replacement_entries = reopened
+        .profile_search_entries_for_prefix("p:durable")
+        .unwrap();
+    assert!(replacement_entries.iter().any(|(key, entry)| {
+        key == &format!("p:durable:{pubkey}")
+            && entry.name == "durable replacement term"
+            && entry.follow_distance == Some(4)
+    }));
+
+    let decisions = BTreeMap::from([(pubkey.clone(), Some(4))]);
+    reopened
+        .sync_profile_index_for_events_with_frozen_distances(
+            std::slice::from_ref(&replacement),
+            &decisions,
+        )
+        .unwrap();
+    assert!(reopened
+        .profile_search_entries_for_prefix("p:obsolete")
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        reopened
+            .latest_profile_event(&pubkey)
+            .unwrap()
+            .expect("replacement after replay")
+            .id,
+        replacement.id
+    );
+}
+
+#[test]
 fn test_profile_search_index_with_shared_hashtree_storage() {
     let _guard = test_lock_blocking();
     let tmp = TempDir::new().unwrap();
@@ -976,11 +1178,7 @@ fn test_rebuild_profile_index_from_stored_events_uses_ambient_and_public_metadat
     ingest_parsed_event_with_storage_class(&graph_store, &ambient, EventStorageClass::Ambient)
         .unwrap();
 
-    graph_store
-        .profile_index
-        .write_by_pubkey_root(None)
-        .unwrap();
-    graph_store.profile_index.write_search_root(None).unwrap();
+    graph_store.profile_index.write_roots(None, None).unwrap();
 
     let rebuilt = graph_store
         .rebuild_profile_index_from_stored_events()

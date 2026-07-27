@@ -17,6 +17,8 @@ use index_buckets::{
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::fs::{File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -65,6 +67,8 @@ const AMBIENT_EVENTS_ROOT_FILE: &str = "events-root-ambient.msgpack";
 const AMBIENT_EVENTS_BLOB_DIR: &str = "ambient-blobs";
 const PROFILE_SEARCH_ROOT_FILE: &str = "profile-search-root.msgpack";
 const PROFILES_BY_PUBKEY_ROOT_FILE: &str = "profiles-by-pubkey-root.msgpack";
+const PROFILE_ROOT_PAIR_COMMIT_FILE: &str = "profile-root-pair.commit.json";
+const PROFILE_ROOT_PAIR_COMMIT_VERSION: u32 = 1;
 const UNKNOWN_FOLLOW_DISTANCE: u32 = 1000;
 const DEFAULT_SOCIALGRAPH_MAP_SIZE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MIN_SOCIALGRAPH_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024;
@@ -112,10 +116,21 @@ pub(crate) enum EventQueryScope {
     All,
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct StoredCid {
     hash: [u8; 32],
     key: Option<[u8; 32]>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileRootPairCommit {
+    version: u32,
+    old_search: Option<StoredCid>,
+    old_by_pubkey: Option<StoredCid>,
+    new_search: Option<StoredCid>,
+    new_by_pubkey: Option<StoredCid>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -244,6 +259,7 @@ pub fn open_social_graph_store(data_dir: &Path) -> Result<Arc<SocialGraphStore>>
 /// graph LMDB environment.
 pub fn read_profile_index_roots(data_dir: &Path) -> Result<ProfileIndexRoots> {
     let db_dir = data_dir.join("socialgraph");
+    require_no_pending_profile_root_pair_commit(&db_dir)?;
     let (by_pubkey, by_pubkey_file_sha256) =
         read_root_file_snapshot(&db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE))?;
     let (search, search_file_sha256) =
@@ -488,6 +504,7 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
     env_flags: EnvFlags,
 ) -> Result<Arc<SocialGraphStore>> {
     std::fs::create_dir_all(db_dir)?;
+    recover_profile_root_pair_commit(db_dir)?;
     if let Some(size) = mapsize_bytes {
         ensure_social_graph_mapsize_with_env_flags(db_dir, size, env_flags)?;
     }
@@ -535,6 +552,7 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
             ),
             by_pubkey_root_path: db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE),
             search_root_path: db_dir.join(PROFILE_SEARCH_ROOT_FILE),
+            root_pair_commit_path: db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE),
         },
         profile_index_overmute_threshold: StdMutex::new(1.0),
     }))
@@ -917,8 +935,7 @@ impl SocialGraphStore {
                 self.follow_distance(&event.pubkey.to_bytes())
             })?;
         self.profile_index
-            .write_by_pubkey_root(by_pubkey_root.as_ref())?;
-        self.profile_index.write_search_root(search_root.as_ref())?;
+            .write_roots(by_pubkey_root.as_ref(), search_root.as_ref())?;
         Ok(())
     }
 
@@ -934,8 +951,7 @@ impl SocialGraphStore {
             })
             .await?;
         self.profile_index
-            .write_by_pubkey_root(by_pubkey_root.as_ref())?;
-        self.profile_index.write_search_root(search_root.as_ref())?;
+            .write_roots(by_pubkey_root.as_ref(), search_root.as_ref())?;
         Ok(())
     }
 
@@ -943,8 +959,7 @@ impl SocialGraphStore {
         let public_events_root = self.public_events.events_root()?;
         let ambient_events_root = self.ambient_events.events_root()?;
         if public_events_root.is_none() && ambient_events_root.is_none() {
-            self.profile_index.write_by_pubkey_root(None)?;
-            self.profile_index.write_search_root(None)?;
+            self.profile_index.write_roots(None, None)?;
             return Ok(0);
         }
 
@@ -981,8 +996,7 @@ impl SocialGraphStore {
         let public_events_root = self.public_events.events_root()?;
         let ambient_events_root = self.ambient_events.events_root()?;
         if public_events_root.is_none() && ambient_events_root.is_none() {
-            self.profile_index.write_by_pubkey_root(None)?;
-            self.profile_index.write_search_root(None)?;
+            self.profile_index.write_roots(None, None)?;
             return Ok(0);
         }
 
@@ -1163,8 +1177,7 @@ impl SocialGraphStore {
             updates.push((event, follow_distance, remove, force_existing_search_value));
         }
 
-        let by_pubkey_root = self.profile_index.by_pubkey_root()?;
-        let search_root = self.profile_index.search_root()?;
+        let (by_pubkey_root, search_root) = self.profile_index.roots()?;
         let (by_pubkey_root, search_root, changed) = self.profile_index.update_profile_events(
             by_pubkey_root.as_ref(),
             search_root.as_ref(),
@@ -1172,8 +1185,7 @@ impl SocialGraphStore {
         )?;
         if changed {
             self.profile_index
-                .write_by_pubkey_root(by_pubkey_root.as_ref())?;
-            self.profile_index.write_search_root(search_root.as_ref())?;
+                .write_roots(by_pubkey_root.as_ref(), search_root.as_ref())?;
         }
 
         Ok(())
@@ -1717,10 +1729,21 @@ fn encode_cid(cid: &Cid) -> Result<Vec<u8>> {
 fn decode_cid(bytes: &[u8]) -> Result<Option<Cid>> {
     let stored: StoredCid =
         rmp_serde::from_slice(bytes).context("decode social graph events root")?;
-    Ok(Some(Cid {
+    Ok(Some(cid_from_stored(stored)))
+}
+
+fn cid_from_stored(stored: StoredCid) -> Cid {
+    Cid {
         hash: stored.hash,
         key: stored.key,
-    }))
+    }
+}
+
+fn stored_cid(cid: &Cid) -> StoredCid {
+    StoredCid {
+        hash: cid.hash,
+        key: cid.key,
+    }
 }
 
 fn read_root_file(path: &Path) -> Result<Option<Cid>> {
@@ -1756,6 +1779,161 @@ fn write_root_file(path: &Path, root: Option<&Cid>) -> Result<()> {
     std::fs::write(&tmp_path, encoded)?;
     std::fs::rename(tmp_path, path)?;
     Ok(())
+}
+
+fn write_root_file_durable(path: &Path, root: Option<&Cid>) -> Result<()> {
+    let Some(root) = root else {
+        return remove_file_durable(path);
+    };
+
+    let encoded = encode_cid(root)?;
+    replace_file_durable(path, &encoded, "durable social graph root")?;
+    Ok(())
+}
+
+fn fsync_parent(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    File::open(parent)
+        .with_context(|| format!("open {} for fsync", parent.display()))?
+        .sync_all()
+        .with_context(|| format!("fsync {}", parent.display()))
+}
+
+fn replace_file_durable(path: &Path, bytes: &[u8], label: &str) -> Result<()> {
+    let parent = path
+        .parent()
+        .with_context(|| format!("{} has no parent directory", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("create {} parent {}", label, parent.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .with_context(|| format!("{} path is not valid UTF-8", label))?;
+    let pending = path.with_file_name(format!(".{file_name}.pending"));
+    let mut file = OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&pending)
+        .with_context(|| format!("open pending {} {}", label, pending.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("write pending {} {}", label, pending.display()))?;
+    file.sync_all()
+        .with_context(|| format!("fsync pending {} {}", label, pending.display()))?;
+    drop(file);
+    std::fs::rename(&pending, path)
+        .with_context(|| format!("replace {} {}", label, path.display()))?;
+    fsync_parent(path)
+}
+
+fn remove_file_durable(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => fsync_parent(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("remove {}", path.display())),
+    }
+}
+
+fn profile_root_pair_commit_bytes(commit: &ProfileRootPairCommit) -> Result<Vec<u8>> {
+    let mut bytes =
+        serde_json::to_vec(commit).context("encode canonical profile root-pair commit")?;
+    bytes.push(b'\n');
+    Ok(bytes)
+}
+
+fn load_profile_root_pair_commit(path: &Path) -> Result<Option<ProfileRootPairCommit>> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("read profile root-pair commit {}", path.display()))
+        }
+    };
+    let commit: ProfileRootPairCommit = serde_json::from_slice(&bytes)
+        .with_context(|| format!("parse profile root-pair commit {}", path.display()))?;
+    if commit.version != PROFILE_ROOT_PAIR_COMMIT_VERSION {
+        anyhow::bail!(
+            "unsupported profile root-pair commit version {} in {}",
+            commit.version,
+            path.display()
+        );
+    }
+    if profile_root_pair_commit_bytes(&commit)? != bytes {
+        anyhow::bail!(
+            "profile root-pair commit {} is not canonical",
+            path.display()
+        );
+    }
+    Ok(Some(commit))
+}
+
+fn install_profile_root_pair_commit_with<F>(
+    by_pubkey_path: &Path,
+    search_path: &Path,
+    commit_path: &Path,
+    commit: &ProfileRootPairCommit,
+    after_search: F,
+) -> Result<()>
+where
+    F: FnOnce() -> Result<()>,
+{
+    let current_by_pubkey = read_root_file(by_pubkey_path)?;
+    let current_search = read_root_file(search_path)?;
+    let old_by_pubkey = commit.old_by_pubkey.clone().map(cid_from_stored);
+    let old_search = commit.old_search.clone().map(cid_from_stored);
+    let new_by_pubkey = commit.new_by_pubkey.clone().map(cid_from_stored);
+    let new_search = commit.new_search.clone().map(cid_from_stored);
+    let old_pair = current_by_pubkey == old_by_pubkey && current_search == old_search;
+    let search_first_pair = current_by_pubkey == old_by_pubkey && current_search == new_search;
+    let new_pair = current_by_pubkey == new_by_pubkey && current_search == new_search;
+    if !old_pair && !search_first_pair && !new_pair {
+        anyhow::bail!(
+            "profile root-pair files do not match an allowed forward state for {}",
+            commit_path.display()
+        );
+    }
+
+    // The by-pubkey tree is the replay authority: keeping its old root until
+    // the new search root is durable lets the same metadata batch reconstruct
+    // removals and changed terms after any interruption.
+    write_root_file_durable(search_path, new_search.as_ref())?;
+    after_search()?;
+    write_root_file_durable(by_pubkey_path, new_by_pubkey.as_ref())?;
+    remove_file_durable(commit_path)
+}
+
+fn require_no_pending_profile_root_pair_commit(db_dir: &Path) -> Result<()> {
+    let commit_path = db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE);
+    if load_profile_root_pair_commit(&commit_path)?.is_some() {
+        anyhow::bail!(
+            "profile root-pair commit {} is pending; open the writable social graph store to recover it before read-only audit",
+            commit_path.display()
+        );
+    }
+    Ok(())
+}
+
+fn recover_profile_root_pair_commit(db_dir: &Path) -> Result<()> {
+    let commit_path = db_dir.join(PROFILE_ROOT_PAIR_COMMIT_FILE);
+    let Some(commit) = load_profile_root_pair_commit(&commit_path)? else {
+        return Ok(());
+    };
+    install_profile_root_pair_commit_with(
+        &db_dir.join(PROFILES_BY_PUBKEY_ROOT_FILE),
+        &db_dir.join(PROFILE_SEARCH_ROOT_FILE),
+        &commit_path,
+        &commit,
+        || Ok(()),
+    )
+    .with_context(|| {
+        format!(
+            "recover interrupted profile root-pair commit {}",
+            commit_path.display()
+        )
+    })
 }
 
 fn normalize_profile_name(value: &serde_json::Value) -> Option<String> {
