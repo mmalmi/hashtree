@@ -285,6 +285,7 @@ fn test_nostr_bulk_projection_audit_requires_all_trust_pins_and_output() {
     let NostrIndexCommands::AuditBulkProjection {
         staging_data_dir,
         expected_state_sha256,
+        v3_candidate,
         expected_stage_state_sha256,
         expected_policy_sha256,
         expected_profile_distance_seal_sha256,
@@ -302,16 +303,46 @@ fn test_nostr_bulk_projection_audit_requires_all_trust_pins_and_output() {
     };
     assert_eq!(staging_data_dir, PathBuf::from("/stage"));
     assert_eq!(expected_state_sha256, "a".repeat(64));
-    assert_eq!(expected_stage_state_sha256, "b".repeat(64));
-    assert_eq!(expected_policy_sha256, "c".repeat(64));
+    assert!(!v3_candidate);
+    assert_eq!(expected_stage_state_sha256, Some("b".repeat(64)));
+    assert_eq!(expected_policy_sha256, Some("c".repeat(64)));
     assert!(expected_profile_distance_seal_sha256.is_none());
     assert!(profile_rank_decisions_file.is_none());
     assert!(expected_profile_rank_decisions_file_sha256.is_none());
     assert!(profile_rank_decisions_report.is_none());
     assert!(expected_profile_rank_decisions_report_sha256.is_none());
-    assert_eq!(expected_full_author_count, 101_267);
+    assert_eq!(expected_full_author_count, Some(101_267));
     assert!(allow_recovery_tranche);
     assert_eq!(out, PathBuf::from("/evidence/audit.json"));
+
+    assert!(Cli::try_parse_from([
+        "htree",
+        "nostr-index",
+        "audit-bulk-projection",
+        "--v3-candidate",
+        "--staging-data-dir",
+        "/stage",
+        "--expected-state-sha256",
+        &"a".repeat(64),
+        "--out",
+        "/evidence/v3-audit.json",
+    ])
+    .is_ok());
+    assert!(Cli::try_parse_from([
+        "htree",
+        "nostr-index",
+        "audit-bulk-projection",
+        "--v3-candidate",
+        "--staging-data-dir",
+        "/stage",
+        "--expected-state-sha256",
+        &"a".repeat(64),
+        "--expected-policy-sha256",
+        &"b".repeat(64),
+        "--out",
+        "/evidence/v3-audit.json",
+    ])
+    .is_err());
 }
 
 #[test]

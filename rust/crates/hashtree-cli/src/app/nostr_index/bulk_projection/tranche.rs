@@ -99,6 +99,8 @@ pub(super) struct V3CandidateAuditAuthority {
     pub(super) author_count: usize,
     pub(super) max_follow_distance: Option<u32>,
     pub(super) profile_distance_seal_sha256: String,
+    pub(super) profile_rank_decisions_path: PathBuf,
+    pub(super) profile_rank_report_path: PathBuf,
     pub(super) profile_rank_authority: ProfileDistanceProvenance,
 }
 
@@ -1939,6 +1941,8 @@ pub(super) fn load_v3_candidate_audit_authority(
         author_count: state.policy.author_count,
         max_follow_distance: state.policy.max_follow_distance,
         profile_distance_seal_sha256,
+        profile_rank_decisions_path: rank_authority.decisions_path,
+        profile_rank_report_path: rank_authority.report_path,
         profile_rank_authority: state.profile_rank_authority,
     })
 }

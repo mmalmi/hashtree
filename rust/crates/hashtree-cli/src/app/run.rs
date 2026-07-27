@@ -1053,6 +1053,7 @@ pub(crate) async fn run() -> Result<()> {
             NostrIndexCommands::AuditBulkProjection {
                 staging_data_dir,
                 expected_state_sha256,
+                v3_candidate,
                 expected_stage_state_sha256,
                 expected_policy_sha256,
                 expected_profile_distance_seal_sha256,
@@ -1072,6 +1073,7 @@ pub(crate) async fn run() -> Result<()> {
                     BulkProjectionAuditOptions {
                         staging_data_dir,
                         expected_state_sha256,
+                        v3_candidate,
                         expected_stage_state_sha256,
                         expected_policy_sha256,
                         expected_profile_distance_seal_sha256,

@@ -1095,11 +1095,86 @@ async fn append_reads_one_segment_body_across_many_event_checkpoints() {
     super::super::audit::load_v3_audit_subject(
         &data_dir,
         super::super::audit::V3AuditSubjectSpec {
-            expected_state_sha256: candidate_state_sha256,
+            expected_state_sha256: candidate_state_sha256.clone(),
             staging_data_dir: staging_data_dir.clone(),
         },
     )
     .expect("load typed v3 audit subject without caller-supplied roots or counts");
+
+    drop(candidate_store);
+    drop(staging_events);
+    drop(graph);
+    drop(projection_store);
+    drop(staging_store);
+    // Heed caches opened environments process-wide. Evict the writer so this
+    // same-process production-path test can exercise the auditor's strict
+    // MDB_RDONLY spool open.
+    let spool_to_close =
+        BulkProjectionSpool::open(&spool_path).expect("reopen generated spool for closing");
+    let spool_closing = spool_to_close.env.clone().prepare_for_closing();
+    drop(spool_to_close);
+    spool_closing.wait();
+
+    let audit_path = tmp.path().join("candidate-audit.json");
+    super::super::audit::audit_bulk_projection(
+        &data_dir,
+        super::super::audit::BulkProjectionAuditOptions {
+            staging_data_dir: staging_data_dir.clone(),
+            expected_state_sha256: candidate_state_sha256.clone(),
+            v3_candidate: true,
+            expected_stage_state_sha256: None,
+            expected_policy_sha256: None,
+            expected_profile_distance_seal_sha256: None,
+            profile_rank_decisions_file: None,
+            expected_profile_rank_decisions_file_sha256: None,
+            profile_rank_decisions_report: None,
+            expected_profile_rank_decisions_report_sha256: None,
+            expected_full_author_count: None,
+            allow_recovery_tranche: false,
+            btree_order: 8,
+            page_size: 8,
+            query_limit: events.len(),
+            out: audit_path.clone(),
+        },
+    )
+    .await
+    .expect("run the strict CLI audit path over the real generated v3 Candidate");
+    let audit: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(&audit_path).expect("read generated v3 Candidate audit evidence"),
+    )
+    .expect("parse generated v3 Candidate audit evidence");
+    assert_eq!(audit["subject_kind"], "v3");
+    assert_eq!(audit["subject_version"], 3);
+    assert_eq!(audit["state_sha256"], candidate_state_sha256);
+    assert_eq!(audit["audit_mode"], "full-policy-cutover");
+    assert_eq!(audit["cutover_eligible"], true);
+    assert_eq!(audit["recovery_tranche_only"], false);
+    assert_eq!(audit["authors_processed"], 1);
+    assert_eq!(audit["authors_total"], 1);
+    assert_eq!(
+        audit["candidate_root"],
+        candidate_state
+            .working
+            .candidate_root
+            .as_deref()
+            .expect("generated candidate root")
+    );
+    assert_eq!(
+        audit["indexes"]
+            .as_array()
+            .expect("v3 audit index evidence")
+            .len(),
+        NostrEventIndex::ALL.len()
+    );
+    assert!(!audit["queries"]
+        .as_array()
+        .expect("v3 audit query evidence")
+        .is_empty());
+    assert!(!audit["representative_blocks"]
+        .as_array()
+        .expect("v3 audit representative block evidence")
+        .is_empty());
+
     let frozen_seal = load_seal(
         &seals_dir,
         frozen_state.generation,

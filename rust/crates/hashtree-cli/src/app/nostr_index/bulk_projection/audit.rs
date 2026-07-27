@@ -44,14 +44,15 @@ const RECOVERY_TRANCHE_AUDIT_MODE: &str = "recovery-tranche-internal-non-cutover
 pub(crate) struct BulkProjectionAuditOptions {
     pub(crate) staging_data_dir: PathBuf,
     pub(crate) expected_state_sha256: String,
-    pub(crate) expected_stage_state_sha256: String,
-    pub(crate) expected_policy_sha256: String,
+    pub(crate) v3_candidate: bool,
+    pub(crate) expected_stage_state_sha256: Option<String>,
+    pub(crate) expected_policy_sha256: Option<String>,
     pub(crate) expected_profile_distance_seal_sha256: Option<String>,
     pub(crate) profile_rank_decisions_file: Option<PathBuf>,
     pub(crate) expected_profile_rank_decisions_file_sha256: Option<String>,
     pub(crate) profile_rank_decisions_report: Option<PathBuf>,
     pub(crate) expected_profile_rank_decisions_report_sha256: Option<String>,
-    pub(crate) expected_full_author_count: usize,
+    pub(crate) expected_full_author_count: Option<usize>,
     pub(crate) allow_recovery_tranche: bool,
     pub(crate) btree_order: usize,
     pub(crate) page_size: usize,
@@ -531,6 +532,17 @@ fn load_v2_audit_subject(
     data_dir: &Path,
     options: &BulkProjectionAuditOptions,
 ) -> Result<AuditSubject> {
+    let expected_stage_state_sha256 = options
+        .expected_stage_state_sha256
+        .as_deref()
+        .context("v2 audit requires the expected staging-state SHA-256")?;
+    let expected_policy_sha256 = options
+        .expected_policy_sha256
+        .as_deref()
+        .context("v2 audit requires the expected policy SHA-256")?;
+    let expected_full_author_count = options
+        .expected_full_author_count
+        .context("v2 audit requires the expected full author count")?;
     let (state_path, spool_path) = bulk_paths(data_dir);
     let stage_state_path = options
         .staging_data_dir
@@ -544,7 +556,7 @@ fn load_v2_audit_subject(
     let stage_snapshot = PinnedAuditSnapshot::read(
         "staging state",
         &stage_state_path,
-        &options.expected_stage_state_sha256,
+        expected_stage_state_sha256,
     )?;
     let state: BulkProjectionState =
         serde_json::from_slice(&state_snapshot.bytes).context("parse bulk projection state")?;
@@ -563,10 +575,10 @@ fn load_v2_audit_subject(
     // may serve the same immutable allowlist from different ephemeral ports.
     // Exact policy equality below, including digest/count, plus the external
     // policy SHA-256 pin is the authority boundary.
-    if state.policy.author_count != options.expected_full_author_count {
+    if state.policy.author_count != expected_full_author_count {
         anyhow::bail!(
             "bulk projection policy author count mismatch: expected trusted full count {}, found {}",
-            options.expected_full_author_count,
+            expected_full_author_count,
             state.policy.author_count
         );
     }
@@ -576,7 +588,7 @@ fn load_v2_audit_subject(
     require_expected_sha256(
         "bulk projection policy",
         &policy_sha256,
-        &options.expected_policy_sha256,
+        expected_policy_sha256,
     )?;
     if state.next_author > state.policy.author_count {
         anyhow::bail!(
@@ -585,30 +597,30 @@ fn load_v2_audit_subject(
             state.policy.author_count
         );
     }
-    if state.policy.max_authors != options.expected_full_author_count {
+    if state.policy.max_authors != expected_full_author_count {
         anyhow::bail!(
             "bulk projection policy max_authors {} differs from trusted full count {}",
             state.policy.max_authors,
-            options.expected_full_author_count
+            expected_full_author_count
         );
     }
     let scope = if options.allow_recovery_tranche {
-        if state.next_author == 0 || state.next_author >= options.expected_full_author_count {
+        if state.next_author == 0 || state.next_author >= expected_full_author_count {
             anyhow::bail!(
                 "recovery-tranche audit requires a nonzero partial watermark below trusted full \
                  count {}; found next_author={}",
-                options.expected_full_author_count,
+                expected_full_author_count,
                 state.next_author
             );
         }
         AuditScope::RecoveryTranche
     } else {
-        if state.next_author != options.expected_full_author_count {
+        if state.next_author != expected_full_author_count {
             anyhow::bail!(
                 "full-policy audit requires the terminal and frozen-stage author watermark to \
                  equal trusted full count {}; found next_author={}; use \
                  --allow-recovery-tranche only for internal non-cutover evidence",
-                options.expected_full_author_count,
+                expected_full_author_count,
                 state.next_author
             );
         }
@@ -641,7 +653,7 @@ fn load_v2_audit_subject(
             .expected_profile_distance_seal_sha256
             .clone(),
         expected_profile_distance_provenance: None,
-        trusted_full_author_count: options.expected_full_author_count,
+        trusted_full_author_count: expected_full_author_count,
         crawl_policy_max_follow_distance: state.policy.max_follow_distance,
         authors_processed: state.next_author,
         authors_total: state.policy.author_count,
@@ -2160,25 +2172,76 @@ fn write_audit_output_noreplace(
 
 pub(crate) async fn audit_bulk_projection(
     data_dir: &Path,
-    options: BulkProjectionAuditOptions,
+    mut options: BulkProjectionAuditOptions,
 ) -> Result<BulkProjectionAuditOutput> {
     if options.btree_order < 2 || options.page_size == 0 || options.query_limit == 0 {
         anyhow::bail!(
             "audit B-tree order must be at least 2 and page/query limits must be non-zero"
         );
     }
-    if options.expected_full_author_count == 0 {
+    if options.expected_full_author_count == Some(0) {
         anyhow::bail!("expected full author count must be non-zero");
     }
     let prepared_output =
         prepare_audit_output_path(data_dir, &options.staging_data_dir, &options.out)?;
-    let subject = load_v2_audit_subject(data_dir, &options)?;
+    let subject = if options.v3_candidate {
+        let caller_authority_supplied = options.expected_stage_state_sha256.is_some()
+            || options.expected_policy_sha256.is_some()
+            || options.expected_profile_distance_seal_sha256.is_some()
+            || options.profile_rank_decisions_file.is_some()
+            || options
+                .expected_profile_rank_decisions_file_sha256
+                .is_some()
+            || options.profile_rank_decisions_report.is_some()
+            || options
+                .expected_profile_rank_decisions_report_sha256
+                .is_some()
+            || options.expected_full_author_count.is_some()
+            || options.allow_recovery_tranche;
+        if caller_authority_supplied {
+            anyhow::bail!(
+                "v3 Candidate audit derives stage, policy, author-count, profile-distance, and \
+                 rank authority exclusively from the sealed Candidate state"
+            );
+        }
+        let authority = load_v3_candidate_audit_authority(
+            data_dir,
+            &options.staging_data_dir,
+            &options.expected_state_sha256,
+        )?;
+        if authority.author_count == 0 {
+            anyhow::bail!("v3 Candidate trusted full author count must be non-zero");
+        }
+        options.expected_stage_state_sha256 = Some(authority.stage_state_sha256);
+        options.expected_policy_sha256 = Some(authority.policy_sha256);
+        options.expected_profile_distance_seal_sha256 =
+            Some(authority.profile_distance_seal_sha256);
+        options.profile_rank_decisions_file = Some(authority.profile_rank_decisions_path);
+        options.expected_profile_rank_decisions_file_sha256 =
+            Some(authority.profile_rank_authority.rank_decisions_file_sha256);
+        options.profile_rank_decisions_report = Some(authority.profile_rank_report_path);
+        options.expected_profile_rank_decisions_report_sha256 = Some(
+            authority
+                .profile_rank_authority
+                .rank_decisions_report_sha256,
+        );
+        options.expected_full_author_count = Some(authority.author_count);
+        load_v3_audit_subject(
+            data_dir,
+            V3AuditSubjectSpec {
+                expected_state_sha256: options.expected_state_sha256.clone(),
+                staging_data_dir: options.staging_data_dir.clone(),
+            },
+        )?
+    } else {
+        load_v2_audit_subject(data_dir, &options)?
+    };
     let BulkProjectionAuditCompletion {
         output,
         full_cutover,
     } = audit_loaded_subject(data_dir, &options, subject, &prepared_output).await?;
-    // The legacy v2 CLI writes exhaustive evidence but has no publication
-    // operation. The typed token remains available only to the v3 lifecycle.
+    // Auditing writes exhaustive evidence but has no publication operation.
+    // The typed token remains available only to the publication lifecycle.
     drop(full_cutover);
     Ok(output)
 }
@@ -2633,14 +2696,15 @@ mod tests {
         let options = BulkProjectionAuditOptions {
             staging_data_dir: temp.path().join("unused-staging"),
             expected_state_sha256: "1".repeat(64),
-            expected_stage_state_sha256: "2".repeat(64),
-            expected_policy_sha256: "3".repeat(64),
+            v3_candidate: false,
+            expected_stage_state_sha256: Some("2".repeat(64)),
+            expected_policy_sha256: Some("3".repeat(64)),
             expected_profile_distance_seal_sha256: None,
             profile_rank_decisions_file: Some(decisions_path.clone()),
             expected_profile_rank_decisions_file_sha256: Some(decisions_sha256),
             profile_rank_decisions_report: Some(report_path.clone()),
             expected_profile_rank_decisions_report_sha256: Some(report_sha256),
-            expected_full_author_count: 1,
+            expected_full_author_count: Some(1),
             allow_recovery_tranche: false,
             btree_order: 2,
             page_size: 1,
@@ -3178,14 +3242,15 @@ mod tests {
             BulkProjectionAuditOptions {
                 staging_data_dir: staging_data_dir.clone(),
                 expected_state_sha256: state_sha256.clone(),
-                expected_stage_state_sha256: stage_sha256.clone(),
-                expected_policy_sha256: policy_sha256.clone(),
+                v3_candidate: false,
+                expected_stage_state_sha256: Some(stage_sha256.clone()),
+                expected_policy_sha256: Some(policy_sha256.clone()),
                 expected_profile_distance_seal_sha256: None,
                 profile_rank_decisions_file: None,
                 expected_profile_rank_decisions_file_sha256: None,
                 profile_rank_decisions_report: None,
                 expected_profile_rank_decisions_report_sha256: None,
-                expected_full_author_count: 101_267,
+                expected_full_author_count: Some(101_267),
                 allow_recovery_tranche: false,
                 btree_order: 8,
                 page_size: 2,
@@ -3205,14 +3270,15 @@ mod tests {
             BulkProjectionAuditOptions {
                 staging_data_dir: staging_data_dir.clone(),
                 expected_state_sha256: state_sha256.clone(),
-                expected_stage_state_sha256: stage_sha256.clone(),
-                expected_policy_sha256: policy_sha256.clone(),
+                v3_candidate: false,
+                expected_stage_state_sha256: Some(stage_sha256.clone()),
+                expected_policy_sha256: Some(policy_sha256.clone()),
                 expected_profile_distance_seal_sha256: None,
                 profile_rank_decisions_file: None,
                 expected_profile_rank_decisions_file_sha256: None,
                 profile_rank_decisions_report: None,
                 expected_profile_rank_decisions_report_sha256: None,
-                expected_full_author_count: 101_268,
+                expected_full_author_count: Some(101_268),
                 allow_recovery_tranche: true,
                 btree_order: 8,
                 page_size: 2,
@@ -3234,14 +3300,15 @@ mod tests {
             BulkProjectionAuditOptions {
                 staging_data_dir,
                 expected_state_sha256: state_sha256,
-                expected_stage_state_sha256: stage_sha256,
-                expected_policy_sha256: policy_sha256.clone(),
+                v3_candidate: false,
+                expected_stage_state_sha256: Some(stage_sha256),
+                expected_policy_sha256: Some(policy_sha256.clone()),
                 expected_profile_distance_seal_sha256: None,
                 profile_rank_decisions_file: None,
                 expected_profile_rank_decisions_file_sha256: None,
                 profile_rank_decisions_report: None,
                 expected_profile_rank_decisions_report_sha256: None,
-                expected_full_author_count: 101_267,
+                expected_full_author_count: Some(101_267),
                 allow_recovery_tranche: true,
                 btree_order: 8,
                 page_size: 2,
