@@ -2028,8 +2028,8 @@ fn mint_full_cutover_verified(
         anyhow::bail!("audit evidence does not satisfy the exact full-cutover boundary");
     }
     match (output.subject_kind, output.subject_version) {
-        (AuditSubjectKind::V2, BULK_PROJECTION_VERSION) | (AuditSubjectKind::V3, 3) => {}
-        _ => anyhow::bail!("full-cutover audit subject kind/version is inconsistent"),
+        (AuditSubjectKind::V3, 3) => {}
+        _ => anyhow::bail!("full-cutover token requires a v3 audit subject"),
     }
     for (label, digest) in [
         (
@@ -2776,6 +2776,11 @@ mod tests {
         assert_eq!(token.evidence_sha256, bytes_sha256(&bytes));
         assert_eq!(token.subject_kind, AuditSubjectKind::V3);
         assert_eq!(token.index_roots.len(), NostrEventIndex::ALL.len());
+
+        let mut legacy_v2_subject = output.clone();
+        legacy_v2_subject.subject_kind = AuditSubjectKind::V2;
+        legacy_v2_subject.subject_version = BULK_PROJECTION_VERSION;
+        assert_cutover_token_rejected(&legacy_v2_subject);
 
         let mut recovery = output.clone();
         recovery.audit_mode = RECOVERY_TRANCHE_AUDIT_MODE.to_string();
