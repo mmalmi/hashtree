@@ -84,6 +84,11 @@
 
 ### Fixed
 
+- Pool migration workers now prove their user namespace against the owner of
+  the already-verified host PID namespace through `NS_GET_USERNS`. This keeps
+  the initial-user-namespace gate fail-closed on hosts where an unprivileged
+  service cannot inspect `/proc/1/ns/user`, and additionally requires the
+  complete initial GID map.
 - Single-blob uploads now always call the writable store's verified put path.
   A public fallback read can no longer make an upload return success without
   verifying or repairing the body in the destination Pool.

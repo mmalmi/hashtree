@@ -1078,16 +1078,36 @@ fn require_initial_pid_namespace() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn require_initial_user_namespace() -> Result<()> {
-    if namespace_identity(Path::new("/proc/self/ns/user"))?
-        != namespace_identity(Path::new("/proc/1/ns/user"))?
-    {
-        bail!("Pool migration controller is not in the host user namespace");
+    let current = namespace_identity(Path::new("/proc/self/ns/user"))?;
+    let pid_namespace = File::open("/proc/self/ns/pid").context("open current PID namespace")?;
+    let owning_user_namespace_fd =
+        unsafe { libc::ioctl(pid_namespace.as_raw_fd(), libc::NS_GET_USERNS) };
+    if owning_user_namespace_fd < 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("query the owning user namespace of the host PID namespace");
+    }
+    let owning_user_namespace = unsafe { File::from_raw_fd(owning_user_namespace_fd) };
+    let owning_metadata = owning_user_namespace
+        .metadata()
+        .context("inspect the owning user namespace of the host PID namespace")?;
+    let owning = FileIdentityV3 {
+        device: owning_metadata.dev(),
+        inode: owning_metadata.ino(),
+    };
+    if owning.device == 0 || owning.inode == 0 || current != owning {
+        bail!("Pool migration controller/worker is not in the host user namespace");
     }
     let uid_map = std::fs::read_to_string("/proc/self/uid_map")
-        .context("read Pool migration controller user-namespace UID map")?;
-    let fields = uid_map.split_ascii_whitespace().collect::<Vec<_>>();
-    if fields != ["0", "0", "4294967295"] {
-        bail!("Pool migration controller is not in the initial full-range user namespace");
+        .context("read Pool migration controller/worker user-namespace UID map")?;
+    let gid_map = std::fs::read_to_string("/proc/self/gid_map")
+        .context("read Pool migration controller/worker user-namespace GID map")?;
+    for (label, map) in [("UID", uid_map), ("GID", gid_map)] {
+        let fields = map.split_ascii_whitespace().collect::<Vec<_>>();
+        if fields != ["0", "0", "4294967295"] {
+            bail!(
+                "Pool migration controller/worker is not in the initial full-range {label} namespace"
+            );
+        }
     }
     require_namespace_without_parent(Path::new("/proc/self/ns/user"), "user")
 }
