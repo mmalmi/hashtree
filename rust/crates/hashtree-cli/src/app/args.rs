@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use git_remote_htree::nostr_client::PullRequestStateFilter;
 use std::path::PathBuf;
 
@@ -805,8 +805,129 @@ pub(crate) enum PoolCommands {
         #[arg(long)]
         resume: bool,
     },
+    /// Root controller for one invocation-bound Pool migration v3 attempt
+    LaunchMigrateLmdbV3(Box<PoolMigrationControllerArgs>),
     /// Remove a fully drained member from the manifest
     Remove { id: String },
+}
+
+#[derive(Args)]
+pub(crate) struct PoolMigrationControllerArgs {
+    /// Validate every authority without creating files or starting systemd
+    #[arg(long)]
+    pub(crate) preflight: bool,
+    /// Existing root-owned rollout directory (its name must equal --rollout-id)
+    #[arg(long)]
+    pub(crate) rollout_dir: PathBuf,
+    /// Stable safe component identifying this audited rollout
+    #[arg(long)]
+    pub(crate) rollout_id: String,
+    /// Migration safety phase attested by the controller state
+    #[arg(long, value_enum)]
+    pub(crate) phase: PoolMigrationControllerPhase,
+    /// Exact currently-running controller executable
+    #[arg(long)]
+    pub(crate) controller_executable: PathBuf,
+    /// Exact dedicated controller systemd service instance running this process
+    #[arg(long)]
+    pub(crate) controller_systemd_unit: String,
+    /// Exact loaded dedicated controller systemd fragment
+    #[arg(long)]
+    pub(crate) controller_systemd_fragment: PathBuf,
+    /// Exact root-owned environment file consumed by the controller service
+    #[arg(long)]
+    pub(crate) controller_systemd_environment_file: PathBuf,
+    /// Root-owned audited controller-state JSON to copy into the fresh attempt authority
+    #[arg(long)]
+    pub(crate) controller_state_input: PathBuf,
+    /// Root-owned source baseline evidence to copy into the fresh attempt authority
+    #[arg(long)]
+    pub(crate) source_baseline_input: PathBuf,
+    /// Root-owned strict Pool topology v3 JSON to copy into the fresh attempt authority
+    #[arg(long)]
+    pub(crate) pool_topology_input: PathBuf,
+    /// Additional immutable authority as LABEL=/absolute/path (repeatable; at least one)
+    #[arg(long = "cas", value_name = "LABEL=/ABSOLUTE/PATH", required = true)]
+    pub(crate) additional_cas: Vec<String>,
+    /// Complete sorted systemd writer-unit set fenced by a stopped phase
+    #[arg(long = "writer-unit", value_name = "UNIT.service")]
+    pub(crate) writer_units: Vec<String>,
+    /// Exact fresh systemd service instance to start
+    #[arg(long)]
+    pub(crate) systemd_unit: String,
+    /// Exact trusted systemctl executable
+    #[arg(long)]
+    pub(crate) systemctl: PathBuf,
+    /// Exact loaded hashtree-pool-migration-worker@.service fragment
+    #[arg(long)]
+    pub(crate) systemd_fragment: PathBuf,
+    /// Fresh root-owned environment file consumed by this service instance
+    #[arg(long)]
+    pub(crate) systemd_environment_file: PathBuf,
+    /// Numeric service group that owns the sticky attempt directory
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..))]
+    pub(crate) service_gid: u32,
+    /// Exact immutable htree binary executed by the systemd unit
+    #[arg(long)]
+    pub(crate) migration_binary: PathBuf,
+    /// Exact target Hashtree data directory passed to the worker
+    #[arg(long)]
+    pub(crate) target_data_dir: PathBuf,
+    /// Exact target Pool catalog directory
+    #[arg(long)]
+    pub(crate) pool: PathBuf,
+    /// Exact existing source LMDB directory
+    #[arg(long)]
+    pub(crate) source: PathBuf,
+    /// Exact existing source external-blob directory, when present
+    #[arg(long)]
+    pub(crate) source_external_dir: Option<PathBuf>,
+    /// Exact durable migration cursor path
+    #[arg(long)]
+    pub(crate) state_file: PathBuf,
+    /// Blobs per committed migration batch
+    #[arg(long)]
+    pub(crate) batch_size: usize,
+    /// Maximum MiB of complete blob payloads retained per Pool write
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    pub(crate) max_buffer_mib: u64,
+    /// Concurrent source external-blob reads
+    #[arg(long)]
+    pub(crate) source_read_concurrency: usize,
+    /// Reopen source and Pool mappings after this many batches
+    #[arg(long)]
+    pub(crate) reopen_batches: usize,
+    /// Required for online-bounded and forbidden for stopped final passes
+    #[arg(long)]
+    pub(crate) max_items: Option<usize>,
+    /// Worker rendezvous timeout encoded into the immutable argv/environment
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=300))]
+    pub(crate) launch_request_wait_seconds: u64,
+    /// Controller timeout for the exact durable acknowledgement
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..=300))]
+    pub(crate) acknowledgement_wait_seconds: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+pub(crate) enum PoolMigrationControllerPhase {
+    OnlineBounded,
+    FinalStoppedSource,
+    FinalStoppedFull,
+}
+
+#[cfg(target_os = "linux")]
+impl PoolMigrationControllerPhase {
+    pub(crate) fn as_protocol_str(self) -> &'static str {
+        match self {
+            Self::OnlineBounded => "online-bounded",
+            Self::FinalStoppedSource => "final-stopped-source",
+            Self::FinalStoppedFull => "final-stopped-full",
+        }
+    }
+
+    pub(crate) fn is_final_stopped(self) -> bool {
+        matches!(self, Self::FinalStoppedSource | Self::FinalStoppedFull)
+    }
 }
 
 #[derive(Subcommand)]

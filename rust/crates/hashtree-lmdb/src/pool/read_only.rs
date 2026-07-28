@@ -902,6 +902,37 @@ mod tests {
         assert_eq!(file_modified(&member_data), member_mtime_before);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn production_pool_read_allows_nested_reader_on_tokio_worker() {
+        let temp = TempDir::new().expect("generated Pool root");
+        let catalog = temp.path().join("catalog");
+        let member = temp.path().join("member");
+        let pool = PoolStore::open(&catalog, pool_config()).expect("open generated Pool");
+        pool.add_member(PoolMemberConfig::new(member, 16 * 1024 * 1024))
+            .expect("add generated member");
+        let body = b"real nested Pool reader body";
+        let hash = sha256(body);
+        pool.put_sync(hash, body).expect("store generated body");
+        pool.force_sync().expect("sync generated Pool");
+        drop(pool);
+
+        let reader = ReadOnlyPoolStore::open(&catalog).expect("open production Pool reader");
+        tokio::task::block_in_place(|| {
+            let held = reader
+                .inner
+                ._env
+                .read_txn()
+                .expect("hold first catalog read transaction");
+            assert_eq!(
+                reader
+                    .get_sync(&hash)
+                    .expect("open nested production catalog transaction"),
+                Some(body.to_vec())
+            );
+            drop(held);
+        });
+    }
+
     #[test]
     fn durable_writer_check_rejects_unsynced_external_pool_members() {
         let temp = TempDir::new().expect("temp dir");

@@ -1,4 +1,4 @@
-use crate::{LmdbBlobReader, PoolStore};
+use crate::{LmdbBlobReader, PoolCatalogLocation, PoolStore};
 use hashtree_core::store::StoreError;
 use hashtree_core::{sha256, types::Hash};
 use std::time::{Duration, Instant};
@@ -17,6 +17,14 @@ pub struct PoolMigrationBatch {
     pub already_present: usize,
     /// Source payloads loaded and hash-verified in this pass.
     pub verified: usize,
+    /// Ordered content-address/length pairs for every source payload verified
+    /// in this page. Final migration receipts stream these compact records
+    /// into one source-content digest without rereading multi-terabyte bodies.
+    pub verified_source_entries: Vec<(Hash, u64)>,
+    /// Ordered hash/declared-size pairs for the complete scanned source page,
+    /// including entries whose exact-size Stored target record let the
+    /// reconciliation path skip loading source bytes.
+    pub source_entries: Vec<(Hash, u64)>,
     pub inserted: usize,
     pub inserted_bytes: u64,
     /// Number of byte-bounded writes used to commit this cursor page.
@@ -29,12 +37,95 @@ pub struct PoolMigrationBatch {
     pub catalog_probe_micros: u64,
     /// Time spent loading source payloads.
     pub source_read_micros: u64,
+    /// Number of source-group reads used for this page.
+    pub source_read_groups: usize,
     /// Time spent hash-verifying source payloads.
     pub source_verify_micros: u64,
     /// Time spent committing payloads and locations to the Pool.
     pub target_write_micros: u64,
     pub last_hash: Option<Hash>,
     pub source_exhausted: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LmdbSourceAuditBatch {
+    pub scanned: usize,
+    pub verified: usize,
+    pub verified_bytes: u64,
+    pub verified_source_entries: Vec<(Hash, u64)>,
+    pub peak_buffered_bytes: u64,
+    pub scan_micros: u64,
+    pub source_read_micros: u64,
+    pub source_verify_micros: u64,
+    pub last_hash: Option<Hash>,
+    pub source_exhausted: bool,
+}
+
+/// Read and content-hash one bounded source page without opening or mutating a
+/// target. This is the expensive source proof used before final downtime.
+pub fn audit_lmdb_source_batch_with_max_buffer_bytes(
+    source: &LmdbBlobReader,
+    after: Option<Hash>,
+    limit: usize,
+    max_buffer_bytes: usize,
+) -> Result<LmdbSourceAuditBatch, StoreError> {
+    if limit == 0 {
+        return Ok(LmdbSourceAuditBatch::default());
+    }
+    if max_buffer_bytes == 0 {
+        return Err(StoreError::Other(
+            "source audit max buffer bytes must be non-zero".into(),
+        ));
+    }
+    let scan_started = Instant::now();
+    let hashes = source.scan_hashes_after(after, limit)?;
+    let scan_micros = elapsed_micros(scan_started.elapsed());
+    if hashes.is_empty() {
+        return Ok(LmdbSourceAuditBatch {
+            source_exhausted: true,
+            scan_micros,
+            ..LmdbSourceAuditBatch::default()
+        });
+    }
+    let mut batch = LmdbSourceAuditBatch {
+        scanned: hashes.len(),
+        scan_micros,
+        last_hash: hashes.last().copied(),
+        ..LmdbSourceAuditBatch::default()
+    };
+    let mut next = 0usize;
+    while next < hashes.len() {
+        let source_read_started = Instant::now();
+        let items = source.read_hashes_bounded(&hashes[next..], max_buffer_bytes as u64)?;
+        batch.source_read_micros = batch
+            .source_read_micros
+            .saturating_add(elapsed_micros(source_read_started.elapsed()));
+        if items.is_empty() {
+            return Err(StoreError::Other(
+                "bounded source audit read made no progress".into(),
+            ));
+        }
+        let source_verify_started = Instant::now();
+        let mut buffered_bytes = 0u64;
+        for (hash, data) in &items {
+            if sha256(data) != *hash {
+                return Err(StoreError::Other(format!(
+                    "source returned corrupt bytes for {hash:?}"
+                )));
+            }
+            let len = data.len() as u64;
+            buffered_bytes = buffered_bytes.saturating_add(len);
+            batch.verified_bytes = batch.verified_bytes.saturating_add(len);
+            batch.verified_source_entries.push((*hash, len));
+        }
+        batch.source_verify_micros = batch
+            .source_verify_micros
+            .saturating_add(elapsed_micros(source_verify_started.elapsed()));
+        batch.verified = batch.verified.saturating_add(items.len());
+        batch.peak_buffered_bytes = batch.peak_buffered_bytes.max(buffered_bytes);
+        next = next.saturating_add(items.len());
+    }
+    Ok(batch)
 }
 
 /// Copy and verify one bounded lexicographic page from an existing LMDB store.
@@ -70,6 +161,32 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes(
     after: Option<Hash>,
     limit: usize,
     max_buffer_bytes: usize,
+) -> Result<PoolMigrationBatch, StoreError> {
+    migrate_lmdb_batch_with_max_buffer_bytes_and_authorizer(
+        source,
+        target,
+        after,
+        limit,
+        max_buffer_bytes,
+        &mut |_, _| Ok(()),
+    )
+}
+
+/// Copy and verify one lexicographic cursor page, authorizing each bounded
+/// target-write group immediately before it can mutate the Pool.
+///
+/// The callback is deliberately invoked after source reads and verification,
+/// and only when the group contains at least one blob not already committed in
+/// the target. This keeps a root-owned external fence fresh at the mutation
+/// boundary without holding that authorization across potentially slow source
+/// I/O.
+pub fn migrate_lmdb_batch_with_max_buffer_bytes_and_authorizer(
+    source: &LmdbBlobReader,
+    target: &PoolStore,
+    after: Option<Hash>,
+    limit: usize,
+    max_buffer_bytes: usize,
+    authorize_target_write: &mut dyn FnMut(Option<Hash>, usize) -> Result<(), StoreError>,
 ) -> Result<PoolMigrationBatch, StoreError> {
     if limit == 0 {
         return Ok(PoolMigrationBatch::default());
@@ -121,6 +238,9 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes(
                 )));
             }
             buffered_bytes = buffered_bytes.saturating_add(data.len() as u64);
+            batch
+                .verified_source_entries
+                .push((*hash, data.len() as u64));
         }
         batch.source_verify_micros = batch
             .source_verify_micros
@@ -147,6 +267,9 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes(
             }
         }
         let target_write_started = Instant::now();
+        if !writes.is_empty() {
+            authorize_target_write(after, writes.len())?;
+        }
         let report = target.put_many_report_sync(&writes)?;
         batch.target_write_micros = batch
             .target_write_micros
@@ -157,6 +280,272 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes(
             batch.write_batches = batch.write_batches.saturating_add(1);
         }
         next = next.saturating_add(item_count);
+    }
+    Ok(batch)
+}
+
+/// Reconcile one sorted source page using metadata first.
+///
+/// Exact-size `Stored` target records are accepted without reading either
+/// source or target payload bytes. `Missing` and exact-size `Pending` records
+/// load and hash-check only the needed source bodies. `Moving` and every
+/// declared-size mismatch fail closed; the single exhaustive terminal Pool
+/// audit remains responsible for reading and proving all target payloads.
+pub fn reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer(
+    source: &LmdbBlobReader,
+    target: &PoolStore,
+    after: Option<Hash>,
+    limit: usize,
+    max_buffer_bytes: usize,
+    authorize_target_write: &mut dyn FnMut(Option<Hash>, usize) -> Result<(), StoreError>,
+) -> Result<PoolMigrationBatch, StoreError> {
+    if limit == 0 {
+        return Ok(PoolMigrationBatch::default());
+    }
+    if max_buffer_bytes == 0 {
+        return Err(StoreError::Other(
+            "migration max buffer bytes must be non-zero".into(),
+        ));
+    }
+    let scan_started = Instant::now();
+    let hashes = source.scan_hashes_after(after, limit)?;
+    let scan_micros = elapsed_micros(scan_started.elapsed());
+    if hashes.is_empty() {
+        return Ok(PoolMigrationBatch {
+            source_exhausted: true,
+            scan_micros,
+            ..PoolMigrationBatch::default()
+        });
+    }
+    let sizes = source.sizes_for_sorted_hashes(&hashes)?;
+    if sizes.len() != hashes.len() {
+        return Err(StoreError::Other(
+            "source size lookup returned the wrong result count".into(),
+        ));
+    }
+    let source_entries = hashes
+        .iter()
+        .copied()
+        .zip(sizes.iter().copied())
+        .collect::<Vec<_>>();
+    let mut batch = reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer(
+        source,
+        target,
+        &source_entries,
+        max_buffer_bytes,
+        authorize_target_write,
+    )?;
+    batch.scan_micros = scan_micros;
+    Ok(batch)
+}
+
+/// Reconcile an exact, receipt-proven sorted hash/size page.
+///
+/// This is the final-union counterpart to the source-cursor API above. It
+/// never scans source keys or stats source blobs: the caller supplies the
+/// immutable evidence records and this function loads only bodies absent from
+/// an exact-size terminal `Stored` target location.
+pub fn reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer(
+    source: &LmdbBlobReader,
+    target: &PoolStore,
+    source_entries: &[(Hash, u64)],
+    max_buffer_bytes: usize,
+    authorize_target_write: &mut dyn FnMut(Option<Hash>, usize) -> Result<(), StoreError>,
+) -> Result<PoolMigrationBatch, StoreError> {
+    let union_entries = source_entries
+        .iter()
+        .map(|(hash, size)| (*hash, *size, 0usize))
+        .collect::<Vec<_>>();
+    reconcile_lmdb_source_union_page_with_max_buffer_bytes_and_authorizer(
+        &[source],
+        target,
+        &union_entries,
+        max_buffer_bytes,
+        authorize_target_write,
+    )
+}
+
+/// Reconcile one globally sorted, receipt-proven union page.
+///
+/// The target catalog is probed exactly once for the whole page. Missing and
+/// exact-size Pending bodies are then read in globally byte-bounded chunks,
+/// grouped by source within each chunk, and committed in global hash order.
+/// Thus interleaved manifests cost at most one read per participating source
+/// per byte-bounded chunk rather than one read transaction per alternating
+/// hash.
+pub fn reconcile_lmdb_source_union_page_with_max_buffer_bytes_and_authorizer(
+    sources: &[&LmdbBlobReader],
+    target: &PoolStore,
+    source_entries: &[(Hash, u64, usize)],
+    max_buffer_bytes: usize,
+    authorize_target_write: &mut dyn FnMut(Option<Hash>, usize) -> Result<(), StoreError>,
+) -> Result<PoolMigrationBatch, StoreError> {
+    if source_entries.is_empty() {
+        return Ok(PoolMigrationBatch::default());
+    }
+    if sources.is_empty() {
+        return Err(StoreError::Other(
+            "receipt-proven source union has no body sources".into(),
+        ));
+    }
+    if max_buffer_bytes == 0 {
+        return Err(StoreError::Other(
+            "migration max buffer bytes must be non-zero".into(),
+        ));
+    }
+    if source_entries
+        .windows(2)
+        .any(|entries| entries[0].0 >= entries[1].0)
+    {
+        return Err(StoreError::Other(
+            "receipt-proven source entries must be strictly sorted".into(),
+        ));
+    }
+    if source_entries
+        .iter()
+        .any(|(_, _, source_index)| *source_index >= sources.len())
+    {
+        return Err(StoreError::Other(
+            "receipt-proven source union references an unknown body source".into(),
+        ));
+    }
+    let hashes = source_entries
+        .iter()
+        .map(|(hash, _, _)| *hash)
+        .collect::<Vec<_>>();
+    let catalog_probe_started = Instant::now();
+    let locations = target.catalog_locations_in_sorted_candidates(&hashes)?;
+    let catalog_probe_micros = elapsed_micros(catalog_probe_started.elapsed());
+    if locations.len() != hashes.len() {
+        return Err(StoreError::Other(
+            "target catalog lookup returned the wrong result count".into(),
+        ));
+    }
+
+    let mut needed = Vec::new();
+    let mut already_present = 0usize;
+    for ((hash, expected_size, source_index), location) in
+        source_entries.iter().copied().zip(locations)
+    {
+        match location {
+            PoolCatalogLocation::Stored { size, .. } if size == expected_size => {
+                already_present = already_present.saturating_add(1);
+            }
+            PoolCatalogLocation::Stored { size, .. } => {
+                return Err(StoreError::Other(format!(
+                    "target Stored size {size} differs from source size {expected_size} for {hash:?}"
+                )));
+            }
+            PoolCatalogLocation::Pending { size, .. } if size == expected_size => {
+                needed.push((hash, expected_size, source_index));
+            }
+            PoolCatalogLocation::Missing => needed.push((hash, expected_size, source_index)),
+            PoolCatalogLocation::Pending { size, .. } => {
+                return Err(StoreError::Other(format!(
+                    "target Pending size {size} differs from source size {expected_size} for {hash:?}"
+                )));
+            }
+            PoolCatalogLocation::Moving { size, .. } => {
+                return Err(StoreError::Other(format!(
+                    "target Moving location is non-terminal for {hash:?} (declared size {size})"
+                )));
+            }
+        }
+    }
+
+    let mut batch = PoolMigrationBatch {
+        scanned: hashes.len(),
+        already_present,
+        source_entries: source_entries
+            .iter()
+            .map(|(hash, size, _)| (*hash, *size))
+            .collect(),
+        catalog_probe_micros,
+        last_hash: hashes.last().copied(),
+        ..PoolMigrationBatch::default()
+    };
+    let max_buffer_bytes = max_buffer_bytes as u64;
+    let mut next = 0usize;
+    while next < needed.len() {
+        let mut end = next;
+        let mut chunk_bytes = 0u64;
+        while end < needed.len() {
+            let size = needed[end].1;
+            if end > next && chunk_bytes.saturating_add(size) > max_buffer_bytes {
+                break;
+            }
+            chunk_bytes = chunk_bytes.saturating_add(size);
+            end += 1;
+            if chunk_bytes >= max_buffer_bytes {
+                break;
+            }
+        }
+        let mut bodies = std::collections::HashMap::with_capacity(end - next);
+        let source_read_started = Instant::now();
+        for (source_index, source) in sources.iter().enumerate() {
+            let source_hashes = needed[next..end]
+                .iter()
+                .filter_map(|(hash, _, candidate_source)| {
+                    (*candidate_source == source_index).then_some(*hash)
+                })
+                .collect::<Vec<_>>();
+            if source_hashes.is_empty() {
+                continue;
+            }
+            let items = source.read_hashes_bounded(&source_hashes, max_buffer_bytes)?;
+            if items.len() != source_hashes.len() {
+                return Err(StoreError::Other(
+                    "bounded source-union read returned an incomplete body group".into(),
+                ));
+            }
+            batch.source_read_groups = batch.source_read_groups.saturating_add(1);
+            for (hash, data) in items {
+                if bodies.insert(hash, data).is_some() {
+                    return Err(StoreError::Other(
+                        "source-union body group returned a duplicate hash".into(),
+                    ));
+                }
+            }
+        }
+        batch.source_read_micros = batch
+            .source_read_micros
+            .saturating_add(elapsed_micros(source_read_started.elapsed()));
+        if bodies.len() != end - next {
+            return Err(StoreError::Other(
+                "source-union body reads did not cover the exact needed chunk".into(),
+            ));
+        }
+        let source_verify_started = Instant::now();
+        let mut items = Vec::with_capacity(end - next);
+        for (expected_hash, expected_size, _) in &needed[next..end] {
+            let data = bodies.remove(expected_hash).ok_or_else(|| {
+                StoreError::Other(format!("source-union body group omitted {expected_hash:?}"))
+            })?;
+            if data.len() as u64 != *expected_size || sha256(&data) != *expected_hash {
+                return Err(StoreError::Other(format!(
+                    "source payload differs from its receipt-bound hash/size for {expected_hash:?}"
+                )));
+            }
+            batch
+                .verified_source_entries
+                .push((*expected_hash, *expected_size));
+            items.push((*expected_hash, data));
+        }
+        batch.source_verify_micros = batch
+            .source_verify_micros
+            .saturating_add(elapsed_micros(source_verify_started.elapsed()));
+        batch.verified = batch.verified.saturating_add(items.len());
+        batch.peak_buffered_bytes = batch.peak_buffered_bytes.max(chunk_bytes);
+        authorize_target_write(items.last().map(|(hash, _)| *hash), items.len())?;
+        let target_write_started = Instant::now();
+        let report = target.put_many_optimistic_report_sync(&items)?;
+        batch.target_write_micros = batch
+            .target_write_micros
+            .saturating_add(elapsed_micros(target_write_started.elapsed()));
+        batch.inserted = batch.inserted.saturating_add(report.inserted);
+        batch.inserted_bytes = batch.inserted_bytes.saturating_add(report.inserted_bytes);
+        batch.write_batches = batch.write_batches.saturating_add(1);
+        next = end;
     }
     Ok(batch)
 }

@@ -90,7 +90,7 @@ pub struct PoolManifestIdentity {
 }
 
 impl PoolCatalogLocation {
-    fn from_record(record: Option<LocationRecord>) -> Self {
+    pub(super) fn from_record(record: Option<LocationRecord>) -> Self {
         match record {
             None => Self::Missing,
             Some(LocationRecord::Pending { member, size }) => Self::Pending { member, size },
@@ -303,7 +303,7 @@ impl PoolStoreReader {
         decode_manifest(manifest)?;
 
         let mut catalog_digest = Sha256::new();
-        catalog_digest.update(b"hashtree-pool-terminal-catalog/v1\0");
+        catalog_digest.update(b"hashtree-pool-terminal-catalog/v2\0");
         catalog_digest.update((manifest.len() as u64).to_be_bytes());
         catalog_digest.update(manifest);
         let mut payload_digest = Sha256::new();
@@ -311,6 +311,7 @@ impl PoolStoreReader {
         let mut stored_locations = 0u64;
         let mut stored_bytes = 0u64;
         let mut member_counts = HashMap::<PoolMemberId, u64>::new();
+        let mut member_bytes = HashMap::<PoolMemberId, u64>::new();
         let mut batch = Vec::<(Hash, PoolMemberId, u64)>::with_capacity(TERMINAL_AUDIT_BATCH_ITEMS);
         let started = Instant::now();
         let mut last_progress = started;
@@ -360,6 +361,10 @@ impl PoolStoreReader {
             *member_count = member_count
                 .checked_add(1)
                 .ok_or_else(|| StoreError::Other("terminal Pool member count overflow".into()))?;
+            let member_byte_total = member_bytes.entry(member).or_default();
+            *member_byte_total = member_byte_total.checked_add(size).ok_or_else(|| {
+                StoreError::Other("terminal Pool member byte total overflow".into())
+            })?;
             catalog_digest.update(hash);
             catalog_digest.update((encoded.len() as u64).to_be_bytes());
             catalog_digest.update(encoded);
@@ -412,17 +417,25 @@ impl PoolStoreReader {
                 .get(member)
                 .ok_or_else(|| self.member_unavailable_error(*member))?;
             let expected = member_counts.get(member).copied().unwrap_or(0);
+            let expected_bytes = member_bytes.get(member).copied().unwrap_or(0);
             let keyset = reader.validate_terminal_member_keyset()?;
-            if keyset.blob_entries != expected || keyset.metadata_entries != expected {
+            if keyset.blob_entries != expected
+                || keyset.metadata_entries != expected
+                || keyset.total_bytes != expected_bytes
+            {
                 return Err(StoreError::Other(format!(
-                    "terminal Pool member {member} has {} blob and {} metadata records, expected exactly {expected} catalog locations",
-                    keyset.blob_entries, keyset.metadata_entries
+                    "terminal Pool member {member} has {} blob and {} metadata records / {} exact metadata bytes, expected exactly {expected} catalog locations / {expected_bytes} catalog bytes",
+                    keyset.blob_entries, keyset.metadata_entries, keyset.total_bytes
                 )));
             }
             catalog_digest.update(member.as_bytes());
             catalog_digest.update(expected.to_be_bytes());
+            catalog_digest.update(expected_bytes.to_be_bytes());
             catalog_digest.update(keyset.blob_entries.to_be_bytes());
             catalog_digest.update(keyset.metadata_entries.to_be_bytes());
+            catalog_digest.update(keyset.total_bytes.to_be_bytes());
+            catalog_digest.update(keyset.pinned_count.to_be_bytes());
+            catalog_digest.update(keyset.pinned_bytes.to_be_bytes());
             catalog_digest.update(keyset.sha256);
         }
 

@@ -14,6 +14,33 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use super::pool_migration_checkpoint::{
+    ack_file_name, boottime_millis, request_file_name, timeout_millis,
+    validate_checkpoint_operation, validate_root_broker_process, validate_root_broker_service,
+    CheckpointBrokerAuthorityV3, MigrationCheckpointAckV3, MigrationCheckpointRequestV3,
+    CHECKPOINT_ACK_SCHEMA, CHECKPOINT_REQUEST_SCHEMA, MAX_CHECKPOINT_BYTES,
+};
+use super::pool_migration_evidence::{
+    SourceEvidenceManifestAuthorityV3, SourceEvidenceManifestWriterV3,
+};
+use super::pool_migration_mount::{
+    require_host_execution_namespace, validate_cached_source_read_only_mount_authorities,
+    validate_source_read_only_mount_authority, SourceReadOnlyMountAuthorityV3,
+};
+use super::pool_migration_pinned::{PinnedDirectory, PinnedRegularEntry};
+pub(super) use super::pool_migration_protocol::{
+    ControllerAuthorityV3, ControllerStateV3, CursorAuthorityV3, FileAuthorityV3, FileIdentityV3,
+    LmdbIdentityV3, NamedFileAuthorityV3, PoolAuthorityV3, PoolMigrationLaunchRequestV3,
+    PoolTopologyMemberV3, PoolTopologyV3, SourceAuthorityV3, WriterUnitMaskV3,
+};
+use super::pool_migration_receipt::{
+    capture_source_generation_fingerprint, load_validated_prior_source_terminal_receipts,
+    validate_frozen_source_generation, PoolMigrationSourceTerminalReceiptV3,
+    PriorSourceReceiptExpectationV3, SourceContentAuditV3, SourceGenerationFingerprintV3,
+    ValidatedSourceTerminalReceiptV3, MAX_FINAL_SOURCE_RECEIPTS, SOURCE_TERMINAL_FILE_NAME,
+    SOURCE_TERMINAL_SCHEMA,
+};
+
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
@@ -21,11 +48,11 @@ use std::os::unix::ffi::OsStrExt;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
-const REQUEST_SCHEMA: &str = "hashtree-pool-migration-launch-request/v3";
+pub(super) const REQUEST_SCHEMA: &str = "hashtree-pool-migration-launch-request/v3";
 const START_SCHEMA: &str = "hashtree-pool-migration-launch-start/v3";
-const ACK_SCHEMA: &str = "hashtree-pool-migration-launch-ack/v3";
-const ATTEMPT_NAMESPACE_NAME: &str = "attempts-v3";
-const REQUEST_FILE_NAME: &str = "launch-request.json";
+pub(super) const ACK_SCHEMA: &str = "hashtree-pool-migration-launch-ack/v3";
+pub(super) const ATTEMPT_NAMESPACE_NAME: &str = "attempts-v3";
+pub(super) const REQUEST_FILE_NAME: &str = "launch-request.json";
 const START_FILE_NAME: &str = "launch-started.json";
 const ACK_FILE_NAME: &str = "launch-ack.json";
 const TERMINAL_AUDIT_FILE_NAME: &str = "terminal-audit.json";
@@ -36,10 +63,46 @@ const MAX_SYSTEMD_ENVIRONMENT_BYTES: u64 = 64 * 1024;
 const MAX_CONTROLLER_STATE_BYTES: u64 = 64 * 1024;
 const MAX_CURSOR_BYTES: u64 = 1024;
 const SYSTEMD_INVOCATION_ID_ENV: &str = "INVOCATION_ID";
-const POOL_TOPOLOGY_SCHEMA: &str = "hashtree-pool-migration-topology/v3";
-const CONTROLLER_STATE_SCHEMA: &str = "hashtree-pool-migration-controller-state/v3";
+pub(super) const POOL_TOPOLOGY_SCHEMA: &str = "hashtree-pool-migration-topology/v3";
+pub(super) const CONTROLLER_STATE_SCHEMA: &str = "hashtree-pool-migration-controller-state/v3";
+pub(super) const MAX_FINAL_REOPEN_BATCHES: usize = 256;
+pub(super) const MAX_FINAL_BATCH_SIZE: usize = 4_096;
+pub(super) const MAX_FINAL_SOURCE_READ_CONCURRENCY: usize = 64;
 const MEMBER_MARKER_NAME: &str = ".hashtree-pool-member-v1";
 const EXTERNAL_MARKER_NAME: &str = ".hashtree-pool-external-v1";
+
+pub(super) fn validate_stopped_final_batch_size(
+    final_stopped: bool,
+    batch_size: usize,
+) -> Result<()> {
+    if final_stopped && batch_size != MAX_FINAL_BATCH_SIZE {
+        bail!(
+            "stopped final migration requires --batch-size {MAX_FINAL_BATCH_SIZE} to bound durable checkpoint amplification"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn validate_pool_migration_release_phase(phase: &str) -> Result<()> {
+    match phase {
+        "final-stopped-source" | "final-stopped-full" => Ok(()),
+        "online-bounded" => bail!(
+            "online-bounded Pool migration v3 is disabled until a rollout-bound exact target-state audit receipt is implemented"
+        ),
+        _ => bail!(
+            "unsupported Pool migration controller phase {phase}; expected final-stopped-source or final-stopped-full"
+        ),
+    }
+}
+
+pub(super) fn validate_source_read_concurrency(concurrency: usize) -> Result<()> {
+    if concurrency > MAX_FINAL_SOURCE_READ_CONCURRENCY {
+        bail!(
+            "Pool migration source read concurrency exceeds the hard maximum of {MAX_FINAL_SOURCE_READ_CONCURRENCY}"
+        );
+    }
+    Ok(())
+}
 
 #[derive(Debug)]
 pub(super) struct PoolMigrationLaunchContext<'a> {
@@ -51,140 +114,6 @@ pub(super) struct PoolMigrationLaunchContext<'a> {
     pub(super) resume: bool,
     pub(super) max_items: Option<usize>,
     pub(super) request_wait: Duration,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PoolMigrationLaunchRequestV3 {
-    schema: String,
-    attempt_namespace: PathBuf,
-    attempt_namespace_identity: FileIdentityV3,
-    attempt_identity: FileIdentityV3,
-    nonce: String,
-    boot_id: String,
-    systemd_invocation_id: String,
-    systemd_unit: String,
-    systemd_manager: String,
-    systemd_fragment: FileAuthorityV3,
-    systemd_environment_file: FileAuthorityV3,
-    main_pid: u32,
-    proc_start_time_ticks: u64,
-    binary: FileAuthorityV3,
-    argv: Vec<String>,
-    controller: ControllerAuthorityV3,
-    source: SourceAuthorityV3,
-    pool: PoolAuthorityV3,
-    cursor: CursorAuthorityV3,
-    cas: Vec<NamedFileAuthorityV3>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct FileAuthorityV3 {
-    path: PathBuf,
-    sha256: String,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct FileIdentityV3 {
-    device: u64,
-    inode: u64,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct LmdbIdentityV3 {
-    directory: FileIdentityV3,
-    data: FileIdentityV3,
-    lock: FileIdentityV3,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct NamedFileAuthorityV3 {
-    label: String,
-    path: PathBuf,
-    sha256: String,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ControllerAuthorityV3 {
-    rollout_id: String,
-    phase: String,
-    executable: FileAuthorityV3,
-    state: FileAuthorityV3,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ControllerStateV3 {
-    schema: String,
-    rollout_id: String,
-    phase: String,
-    boot_id: String,
-    source_lmdb_identity: LmdbIdentityV3,
-    source_external_identity: Option<FileIdentityV3>,
-    pool_lmdb_identity: LmdbIdentityV3,
-    pool_manifest_sha256: String,
-    pool_topology_sha256: String,
-    source_writers_fenced: bool,
-    target_writers_fenced: bool,
-    fence_held_until_completion: bool,
-    source_writer_processes_with_open_handles: u64,
-    target_writer_processes_with_open_handles: u64,
-    stopped_writer_units: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct SourceAuthorityV3 {
-    lmdb_path: PathBuf,
-    lmdb_identity: LmdbIdentityV3,
-    external_path: Option<PathBuf>,
-    external_identity: Option<FileIdentityV3>,
-    baseline: FileAuthorityV3,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PoolAuthorityV3 {
-    path: PathBuf,
-    lmdb_identity: LmdbIdentityV3,
-    topology: FileAuthorityV3,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PoolTopologyV3 {
-    schema: String,
-    pool_path: PathBuf,
-    manifest_sha256: String,
-    members: Vec<PoolTopologyMemberV3>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PoolTopologyMemberV3 {
-    id: String,
-    path: PathBuf,
-    directory_identity: FileIdentityV3,
-    lmdb_identity: LmdbIdentityV3,
-    marker: FileAuthorityV3,
-    external_path: Option<PathBuf>,
-    external_directory_identity: Option<FileIdentityV3>,
-    external_marker: Option<FileAuthorityV3>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CursorAuthorityV3 {
-    path: PathBuf,
-    parent_identity: FileIdentityV3,
-    exists: bool,
-    value: Option<String>,
-    sha256: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -211,6 +140,8 @@ struct PoolMigrationLaunchAckV3<'a> {
     binary_sha256: &'a str,
     argv_sha256: String,
     controller_state_sha256: &'a str,
+    checkpoint_broker_pid: u32,
+    checkpoint_broker_proc_start_time_ticks: u64,
     source_writers_fenced: bool,
     target_writers_fenced: bool,
     fence_held_until_completion: bool,
@@ -246,15 +177,24 @@ struct PoolMigrationTerminalAuditReceiptV3<'a> {
     schema: &'static str,
     status: &'static str,
     controller_state_sha256: &'a str,
-    source_blob_entries: u64,
-    source_metadata_entries: u64,
-    source_legacy_blob_only: bool,
-    source_keyset_sha256: String,
+    source_receipt_sha256: &'a [String],
+    source_count: u64,
+    source_entries: u64,
+    source_bytes: u64,
+    source_reconciliation_sha256: String,
     target_stored_locations: u64,
     target_stored_bytes: u64,
     target_catalog_sha256: String,
     target_payload_sha256: String,
     target_manifest_sha256: String,
+}
+
+pub(super) struct PoolMigrationSourceUnionAuditV3 {
+    pub(super) receipt_sha256: Vec<String>,
+    pub(super) source_count: u64,
+    pub(super) entries: u64,
+    pub(super) bytes: u64,
+    pub(super) sha256: [u8; 32],
 }
 
 struct ValidatedLaunch {
@@ -269,15 +209,26 @@ struct ValidatedLaunch {
 
 pub(super) struct AcknowledgedPoolMigrationLaunch {
     pub(super) cursor: Option<[u8; 32]>,
+    pub(super) final_stopped_pass: bool,
+    pub(super) final_stopped_source_pass: bool,
     pub(super) final_stopped_full_pass: bool,
     source: PathBuf,
     source_external: Option<PathBuf>,
     pool: PathBuf,
     controller_state_authority: FileAuthorityV3,
     controller_state: ControllerStateV3,
+    request: PoolMigrationLaunchRequestV3,
+    request_sha256: String,
+    acknowledgement_sha256: String,
+    checkpoint_state: Mutex<CheckpointChainState>,
     cursor_authority: Mutex<CursorAuthorityV3>,
     attempt: PinnedDirectory,
     pins: PinnedMigrationPaths,
+}
+
+struct CheckpointChainState {
+    next_sequence: u64,
+    previous_ack_sha256: Option<String>,
 }
 
 pub(super) struct AcknowledgedPoolMemberRuntimePaths {
@@ -287,6 +238,12 @@ pub(super) struct AcknowledgedPoolMemberRuntimePaths {
     pub(super) configured_external_path: Option<PathBuf>,
     pub(super) runtime_external_path: Option<PathBuf>,
     pub(super) lmdb_identity: PinnedLmdbIdentity,
+}
+
+pub(super) struct AcknowledgedSourceRuntimePlanV3 {
+    pub(super) validated: ValidatedSourceTerminalReceiptV3,
+    pub(super) runtime_path: PathBuf,
+    pub(super) runtime_external_path: Option<PathBuf>,
 }
 
 impl AcknowledgedPoolMigrationLaunch {
@@ -322,20 +279,326 @@ impl AcknowledgedPoolMigrationLaunch {
         self.pins.ensure_path_identities()
     }
 
+    pub(super) fn ensure_source_paths(&self) -> Result<()> {
+        self.pins.ensure_source_path_identities()
+    }
+
+    pub(super) fn capture_source_generation(
+        &self,
+        lmdb: hashtree_lmdb::LmdbEnvironmentGeneration,
+    ) -> Result<SourceGenerationFingerprintV3> {
+        self.pins.ensure_source_path_identities()?;
+        let first = capture_source_generation_fingerprint(
+            &self.request.source.lmdb_path,
+            self.request.source.lmdb_identity,
+            self.request.source.external_path.as_deref(),
+            self.request.source.external_identity,
+            lmdb,
+        )?;
+        self.ensure_final_writer_fence()?;
+        self.pins.ensure_source_path_identities()?;
+        Ok(first)
+    }
+
     pub(super) fn ensure_final_writer_fence(&self) -> Result<()> {
-        if !self.final_stopped_full_pass {
-            return Ok(());
+        validate_file_authority(&self.controller_state_authority, "controller state")?;
+        validate_controller_state_ownership(&self.controller_state_authority.path)?;
+        if !self.final_stopped_pass {
+            return validate_legacy_worker_activation_fence(
+                &self.controller_state.legacy_worker_template_mask,
+                &self.controller_state.legacy_worker_instance_masks,
+            );
         }
         // The root controller owns continuous start inhibition and the
         // complete /proc open-handle census. This process can only revalidate
         // the immutable attestation plus point-in-time systemd unit state.
-        validate_file_authority(&self.controller_state_authority, "controller state")?;
-        validate_controller_state_ownership(&self.controller_state_authority.path)?;
-        validate_stopped_writer_units(&self.controller_state.stopped_writer_units)
+        validate_batched_runtime_masked_final_fence(
+            &self.controller_state.stopped_writer_units,
+            &self.controller_state.writer_unit_masks,
+            &self.controller_state.legacy_worker_template_mask,
+            &self.controller_state.legacy_worker_instance_masks,
+        )?;
+        let mounts = self
+            .request
+            .source
+            .read_only_mounts
+            .as_ref()
+            .context("stopped final launch has no source read-only mount authority")?;
+        validate_source_read_only_mount_authority(
+            mounts,
+            &self.request.source.lmdb_path,
+            self.request.source.lmdb_identity,
+            self.request.source.external_path.as_deref(),
+            self.request.source.external_identity,
+        )?;
+        self.validate_source_terminal_receipts(false)
+    }
+
+    /// Revalidate the enforceable part of the final writer fence without a
+    /// systemd round trip. The migration loop calls this before and after every
+    /// bounded batch so removing or replacing a runtime mask cannot go
+    /// unnoticed until the next mapping epoch.
+    pub(super) fn ensure_final_writer_masks(&self) -> Result<()> {
+        validate_legacy_worker_mask_authorities(
+            &self.controller_state.legacy_worker_template_mask,
+            &self.controller_state.legacy_worker_instance_masks,
+        )?;
+        if !self.final_stopped_pass {
+            return Ok(());
+        }
+        validate_runtime_writer_mask_authorities(
+            &self.controller_state.stopped_writer_units,
+            &self.controller_state.writer_unit_masks,
+        )?;
+        let current_mounts = self
+            .request
+            .source
+            .read_only_mounts
+            .as_ref()
+            .context("stopped final launch has no source read-only mount authority")?;
+        let mut mounts = Vec::with_capacity(self.pins.prior_sources.len().saturating_add(1));
+        mounts.push(current_mounts);
+        mounts.extend(
+            self.pins
+                .prior_sources
+                .iter()
+                .map(|source| &source.read_only_mounts),
+        );
+        validate_cached_source_read_only_mount_authorities(&mounts)
+    }
+
+    pub(super) fn authorize_checkpoint(
+        &self,
+        operation: &str,
+        cursor: Option<[u8; 32]>,
+        range_limit: Option<usize>,
+    ) -> Result<()> {
+        validate_checkpoint_operation(operation)?;
+        self.attempt
+            .ensure_path_identity("Pool migration attempt directory")?;
+        validate_root_broker_process(
+            self.request.checkpoint_broker.pid,
+            self.request.checkpoint_broker.proc_start_time_ticks,
+        )?;
+        let mut chain = self
+            .checkpoint_state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("migration checkpoint chain lock poisoned"))?;
+        let sequence = chain.next_sequence;
+        let request_name = request_file_name(sequence);
+        let ack_name = ack_file_name(sequence);
+        if self
+            .attempt
+            .entry_exists(OsStr::new(&request_name), "migration checkpoint request")?
+            || self.attempt.entry_exists(
+                OsStr::new(&ack_name),
+                "migration checkpoint acknowledgement",
+            )?
+        {
+            bail!("migration checkpoint sequence {sequence} was prepublished or replayed");
+        }
+        let requested_at = boottime_millis()?;
+        let timeout = Duration::from_secs(self.request.checkpoint_broker.timeout_seconds);
+        let start_before = requested_at
+            .checked_add(timeout_millis(timeout)?)
+            .context("checkpoint authorization deadline overflow")?;
+        let cursor = cursor.map(|hash| hashtree_core::to_hex(&hash));
+        let range_limit = range_limit
+            .map(u64::try_from)
+            .transpose()
+            .context("checkpoint range limit exceeds u64")?;
+        let request = MigrationCheckpointRequestV3 {
+            schema: CHECKPOINT_REQUEST_SCHEMA.to_string(),
+            sequence,
+            previous_ack_sha256: chain.previous_ack_sha256.clone(),
+            operation: operation.to_string(),
+            cursor: cursor.clone(),
+            range_limit,
+            worker_pid: self.request.main_pid,
+            worker_proc_start_time_ticks: self.request.proc_start_time_ticks,
+            broker_pid: self.request.checkpoint_broker.pid,
+            broker_proc_start_time_ticks: self.request.checkpoint_broker.proc_start_time_ticks,
+            boot_id: self.request.boot_id.clone(),
+            attempt_nonce: self.request.nonce.clone(),
+            launch_request_sha256: self.request_sha256.clone(),
+            requested_at_boottime_millis: requested_at,
+            start_before_boottime_millis: start_before,
+        };
+        let mut request_bytes =
+            serde_json::to_vec(&request).context("serialize migration checkpoint request")?;
+        request_bytes.push(b'\n');
+        let request_sha256 = sha256_bytes(&request_bytes);
+        self.attempt.create_durable_exclusive_with_mode(
+            OsStr::new(&request_name),
+            &request_bytes,
+            "migration checkpoint request",
+            0o640,
+        )?;
+
+        loop {
+            validate_root_broker_process(
+                self.request.checkpoint_broker.pid,
+                self.request.checkpoint_broker.proc_start_time_ticks,
+            )
+            .context("checkpoint broker died before authorizing the next operation")?;
+            if boottime_millis()? > start_before {
+                bail!(
+                    "checkpoint broker timed out before authorizing sequence {sequence} operation {operation}"
+                );
+            }
+            if let Some(mut ack_file) = self.attempt.open_regular_optional(
+                OsStr::new(&ack_name),
+                "migration checkpoint acknowledgement",
+            )? {
+                let metadata = ack_file
+                    .metadata()
+                    .context("inspect migration checkpoint acknowledgement")?;
+                validate_checkpoint_ack_ownership(&metadata)?;
+                let ack_bytes = read_bounded_open_file(
+                    &mut ack_file,
+                    MAX_CHECKPOINT_BYTES,
+                    "migration checkpoint acknowledgement",
+                    &self.attempt.path.join(&ack_name),
+                )?;
+                let ack: MigrationCheckpointAckV3 = serde_json::from_slice(&ack_bytes)
+                    .context("parse strict migration checkpoint acknowledgement")?;
+                if ack.schema != CHECKPOINT_ACK_SCHEMA
+                    || ack.status != "authorized"
+                    || ack.sequence != sequence
+                    || ack.previous_ack_sha256 != chain.previous_ack_sha256
+                    || ack.request_sha256 != request_sha256
+                    || ack.operation != operation
+                    || ack.cursor != cursor
+                    || ack.range_limit != range_limit
+                    || ack.worker_pid != self.request.main_pid
+                    || ack.worker_proc_start_time_ticks != self.request.proc_start_time_ticks
+                    || ack.broker_pid != self.request.checkpoint_broker.pid
+                    || ack.broker_proc_start_time_ticks
+                        != self.request.checkpoint_broker.proc_start_time_ticks
+                    || ack.boot_id != self.request.boot_id
+                    || ack.attempt_nonce != self.request.nonce
+                    || ack.launch_request_sha256 != self.request_sha256
+                    || ack.start_before_boottime_millis != start_before
+                    || ack.authorized_at_boottime_millis < requested_at
+                    || ack.authorized_at_boottime_millis > start_before
+                {
+                    bail!(
+                        "migration checkpoint acknowledgement does not exactly authorize sequence {sequence}"
+                    );
+                }
+                if boottime_millis()? > ack.start_before_boottime_millis {
+                    bail!("migration checkpoint acknowledgement expired before operation start");
+                }
+                validate_root_broker_process(
+                    self.request.checkpoint_broker.pid,
+                    self.request.checkpoint_broker.proc_start_time_ticks,
+                )
+                .context("checkpoint broker died while publishing its authorization")?;
+                chain.previous_ack_sha256 = Some(sha256_bytes(&ack_bytes));
+                chain.next_sequence = chain
+                    .next_sequence
+                    .checked_add(1)
+                    .context("migration checkpoint sequence overflow")?;
+                return Ok(());
+            }
+            thread::sleep(Duration::from_millis(10));
+            self.attempt
+                .ensure_path_identity("Pool migration attempt directory")?;
+        }
+    }
+
+    pub(super) fn ensure_checkpoint_broker_alive(&self) -> Result<()> {
+        validate_root_broker_process(
+            self.request.checkpoint_broker.pid,
+            self.request.checkpoint_broker.proc_start_time_ticks,
+        )
+        .context("checkpoint broker died during an authorized operation")
+    }
+
+    pub(super) fn validate_controller_terminal_cursor(&self, expected_value: &str) -> Result<()> {
+        self.pins
+            .cursor_parent
+            .ensure_path_identity("migration cursor parent")?;
+        let mut file = self
+            .pins
+            .cursor_parent
+            .open_regular_optional(&self.pins.cursor_name, "controller terminal cursor")?
+            .context("root checkpoint broker did not publish the terminal cursor")?;
+        let metadata = file
+            .metadata()
+            .context("inspect controller terminal cursor")?;
+        validate_controller_terminal_cursor_ownership(&metadata)?;
+        let bytes = read_bounded_open_file(
+            &mut file,
+            MAX_CURSOR_BYTES,
+            "controller terminal cursor",
+            &self.request.cursor.path,
+        )?;
+        if bytes != format!("{expected_value}\n").as_bytes() {
+            bail!("controller terminal cursor does not contain {expected_value}");
+        }
+        self.ensure_checkpoint_broker_alive()
+    }
+
+    fn validate_source_terminal_receipts(&self, physical: bool) -> Result<()> {
+        validate_request_source_terminal_receipts(
+            &self.request,
+            &self.controller_state,
+            &self.pins,
+            physical,
+        )
+    }
+
+    pub(super) fn source_terminal_receipts(
+        &self,
+        physical: bool,
+    ) -> Result<Vec<ValidatedSourceTerminalReceiptV3>> {
+        load_validated_prior_source_terminal_receipts(
+            &self.request.cas,
+            &PriorSourceReceiptExpectationV3 {
+                boot_id: &self.request.boot_id,
+                pool_path: &self.request.pool.path,
+                pool_lmdb_identity: self.request.pool.lmdb_identity,
+                pool_topology_sha256: &self.request.pool.topology.sha256,
+                pool_manifest_sha256: &self.controller_state.pool_manifest_sha256,
+                pool_topology: &self.pins.pool_topology,
+                stopped_writer_units: &self.controller_state.stopped_writer_units,
+                writer_unit_masks: &self.controller_state.writer_unit_masks,
+                legacy_worker_template_mask: &self.controller_state.legacy_worker_template_mask,
+                legacy_worker_instance_masks: &self.controller_state.legacy_worker_instance_masks,
+                expected_service_gid: service_gid(),
+                validate_physical_generation: physical,
+            },
+        )
+    }
+
+    pub(super) fn source_terminal_runtime_plans(
+        &self,
+    ) -> Result<Vec<AcknowledgedSourceRuntimePlanV3>> {
+        let receipts = self.source_terminal_receipts(false)?;
+        let plans = self.pins.prior_source_runtime_paths(receipts)?;
+        for plan in &plans {
+            validate_frozen_source_generation(
+                &plan.validated.receipt,
+                &plan.runtime_path,
+                plan.runtime_external_path.as_deref(),
+            )
+            .with_context(|| {
+                format!(
+                    "validate pinned prior source generation {}",
+                    plan.validated.receipt.source_path.display()
+                )
+            })?;
+        }
+        Ok(plans)
     }
 
     pub(super) fn write_cursor(&self, value: &str) -> Result<()> {
-        self.pins.ensure_path_identities()?;
+        if self.final_stopped_source_pass {
+            self.pins.ensure_source_path_identities()?;
+        } else {
+            self.pins.ensure_path_identities()?;
+        }
         self.pins
             .cursor_parent
             .ensure_path_identity("migration cursor parent")?;
@@ -353,7 +616,7 @@ impl AcknowledgedPoolMigrationLaunch {
 
     pub(super) fn write_terminal_audit_receipt(
         &self,
-        source: &LmdbSourceKeysetAudit,
+        source: &PoolMigrationSourceUnionAuditV3,
         target: &PoolTerminalAudit,
     ) -> Result<()> {
         if !self.final_stopped_full_pass {
@@ -365,10 +628,11 @@ impl AcknowledgedPoolMigrationLaunch {
             schema: "hashtree-pool-migration-terminal-audit/v3",
             status: "verified",
             controller_state_sha256: &self.controller_state_authority.sha256,
-            source_blob_entries: source.blob_entries,
-            source_metadata_entries: source.metadata_entries,
-            source_legacy_blob_only: source.legacy_blob_only,
-            source_keyset_sha256: hashtree_core::to_hex(&source.sha256),
+            source_receipt_sha256: &source.receipt_sha256,
+            source_count: source.source_count,
+            source_entries: source.entries,
+            source_bytes: source.bytes,
+            source_reconciliation_sha256: hashtree_core::to_hex(&source.sha256),
             target_stored_locations: target.stored_locations,
             target_stored_bytes: target.stored_bytes,
             target_catalog_sha256: hashtree_core::to_hex(&target.catalog_sha256),
@@ -384,6 +648,232 @@ impl AcknowledgedPoolMigrationLaunch {
             "terminal Pool audit receipt",
         )
     }
+
+    pub(super) fn write_source_terminal_receipt(
+        &self,
+        source: &LmdbSourceKeysetAudit,
+        content: &SourceContentAuditV3,
+        source_evidence: SourceEvidenceManifestAuthorityV3,
+        source_generation: SourceGenerationFingerprintV3,
+    ) -> Result<()> {
+        if self.request.controller.phase != "final-stopped-source" {
+            bail!("source-terminal receipts are valid only for final-stopped-source");
+        }
+        if content.verified_entries != source.blob_entries {
+            bail!(
+                "source content verification count {} differs from terminal source key count {}",
+                content.verified_entries,
+                source.blob_entries
+            );
+        }
+        self.attempt
+            .ensure_path_identity("Pool migration attempt directory")?;
+        self.pins.ensure_source_path_identities()?;
+        self.ensure_final_writer_fence()?;
+        let terminal_cursor_bytes = b"source-complete\n";
+        let terminal_cursor = CursorAuthorityV3 {
+            path: self.request.cursor.path.clone(),
+            parent_identity: self.request.cursor.parent_identity,
+            exists: true,
+            value: Some("source-complete".to_string()),
+            sha256: Some(sha256_bytes(terminal_cursor_bytes)),
+        };
+        let receipt = PoolMigrationSourceTerminalReceiptV3 {
+            schema: SOURCE_TERMINAL_SCHEMA.to_string(),
+            status: "verified".to_string(),
+            phase: self.request.controller.phase.clone(),
+            boot_id: self.request.boot_id.clone(),
+            attempt_namespace: self.request.attempt_namespace.clone(),
+            attempt_namespace_identity: self.request.attempt_namespace_identity,
+            attempt_identity: self.request.attempt_identity,
+            attempt_nonce: self.request.nonce.clone(),
+            request_path: self.attempt.path.join(REQUEST_FILE_NAME),
+            request_sha256: self.request_sha256.clone(),
+            acknowledgement_path: self.attempt.path.join(ACK_FILE_NAME),
+            acknowledgement_sha256: self.acknowledgement_sha256.clone(),
+            terminal_cursor,
+            worker_binary: self.request.binary.clone(),
+            worker_argv_sha256: argv_sha256(&self.request.argv),
+            systemd_unit: self.request.systemd_unit.clone(),
+            systemd_invocation_id: self.request.systemd_invocation_id.clone(),
+            systemd_fragment: self.request.systemd_fragment.clone(),
+            systemd_environment_file: self.request.systemd_environment_file.clone(),
+            main_pid: self.request.main_pid,
+            proc_start_time_ticks: self.request.proc_start_time_ticks,
+            controller_state_sha256: self.controller_state_authority.sha256.clone(),
+            source_path: self.request.source.lmdb_path.clone(),
+            source_lmdb_identity: self.request.source.lmdb_identity,
+            source_external_path: self.request.source.external_path.clone(),
+            source_external_identity: self.request.source.external_identity,
+            source_read_only_mounts: self
+                .request
+                .source
+                .read_only_mounts
+                .clone()
+                .context("source-terminal launch has no read-only mount authority")?,
+            source_baseline_sha256: self.request.source.baseline.sha256.clone(),
+            source_blob_entries: source.blob_entries,
+            source_metadata_entries: source.metadata_entries,
+            source_blob_only_entries: source.blob_only_entries,
+            source_legacy_blob_only: source.legacy_blob_only,
+            source_inline_entries: source.inline_entries,
+            source_loose_external_entries: source.loose_external_entries,
+            source_packed_external_entries: source.packed_external_entries,
+            source_keyset_sha256: hashtree_core::to_hex(&source.sha256),
+            source_catalog_location_sha256: hashtree_core::to_hex(&source.catalog_location_sha256),
+            source_verified_entries: content.verified_entries,
+            source_verified_bytes: content.verified_bytes,
+            source_content_sha256: hashtree_core::to_hex(&content.sha256),
+            source_evidence,
+            source_generation,
+            pool_path: self.request.pool.path.clone(),
+            pool_lmdb_identity: self.request.pool.lmdb_identity,
+            pool_topology_sha256: self.request.pool.topology.sha256.clone(),
+            pool_manifest_sha256: hex::encode(self.pins.pool_manifest_sha256),
+            pool_topology: self.pins.pool_topology.clone(),
+            stopped_writer_units: self.controller_state.stopped_writer_units.clone(),
+            writer_unit_masks: self.controller_state.writer_unit_masks.clone(),
+            legacy_worker_template_mask: self.controller_state.legacy_worker_template_mask.clone(),
+            legacy_worker_instance_masks: self
+                .controller_state
+                .legacy_worker_instance_masks
+                .clone(),
+            source_read_only: true,
+            target_audit_deferred: true,
+        };
+        let mut bytes =
+            serde_json::to_vec(&receipt).context("serialize source-terminal receipt")?;
+        bytes.push(b'\n');
+        self.attempt.create_durable_exclusive_with_mode(
+            OsStr::new(SOURCE_TERMINAL_FILE_NAME),
+            &bytes,
+            "source-terminal receipt",
+            0o640,
+        )
+    }
+
+    pub(super) fn create_source_evidence_writer(&self) -> Result<SourceEvidenceManifestWriterV3> {
+        if self.request.controller.phase != "final-stopped-source" {
+            bail!("source evidence manifests are valid only for final-stopped-source");
+        }
+        self.attempt
+            .ensure_path_identity("Pool migration attempt directory")?;
+        SourceEvidenceManifestWriterV3::create(&self.attempt.path)
+    }
+}
+
+fn validate_request_source_terminal_receipts(
+    request: &PoolMigrationLaunchRequestV3,
+    state: &ControllerStateV3,
+    paths: &PinnedMigrationPaths,
+    physical: bool,
+) -> Result<()> {
+    load_request_source_terminal_receipts(request, state, paths, physical).map(|_| ())
+}
+
+fn load_request_source_terminal_receipts(
+    request: &PoolMigrationLaunchRequestV3,
+    state: &ControllerStateV3,
+    paths: &PinnedMigrationPaths,
+    physical: bool,
+) -> Result<Vec<ValidatedSourceTerminalReceiptV3>> {
+    let receipts = load_validated_prior_source_terminal_receipts(
+        &request.cas,
+        &PriorSourceReceiptExpectationV3 {
+            boot_id: &request.boot_id,
+            pool_path: &request.pool.path,
+            pool_lmdb_identity: request.pool.lmdb_identity,
+            pool_topology_sha256: &request.pool.topology.sha256,
+            pool_manifest_sha256: &state.pool_manifest_sha256,
+            pool_topology: &paths.pool_topology,
+            stopped_writer_units: &state.stopped_writer_units,
+            writer_unit_masks: &state.writer_unit_masks,
+            legacy_worker_template_mask: &state.legacy_worker_template_mask,
+            legacy_worker_instance_masks: &state.legacy_worker_instance_masks,
+            expected_service_gid: service_gid(),
+            validate_physical_generation: physical,
+        },
+    )?;
+    let receipt_sha256 = receipts
+        .iter()
+        .map(|validated| validated.authority_sha256.clone())
+        .collect::<Vec<_>>();
+    if receipt_sha256 != state.source_terminal_receipt_sha256 {
+        bail!(
+            "source-terminal receipt CAS set differs from the exact controller-state receipt set"
+        );
+    }
+    Ok(receipts)
+}
+
+#[cfg(target_os = "linux")]
+fn service_gid() -> Option<u32> {
+    Some(unsafe { libc::getegid() })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn service_gid() -> Option<u32> {
+    None
+}
+
+fn pin_prior_source_paths(
+    receipts: &[ValidatedSourceTerminalReceiptV3],
+) -> Result<Vec<PinnedPriorSourcePaths>> {
+    receipts
+        .iter()
+        .map(|validated| {
+            let receipt = &validated.receipt;
+            let directory =
+                PinnedDirectory::open_exact(&receipt.source_path, "prior source LMDB directory")?;
+            let lmdb_files = PinnedLmdbFiles::pin(&directory, "prior source LMDB")?;
+            lmdb_files.require_authority_identity(
+                &directory,
+                receipt.source_lmdb_identity,
+                "prior source LMDB",
+            )?;
+            let external_directory = receipt
+                .source_external_path
+                .as_deref()
+                .map(|path| {
+                    let directory =
+                        PinnedDirectory::open_exact(path, "prior source external directory")?;
+                    let identity = receipt
+                        .source_external_identity
+                        .context("prior source receipt has an external path without identity")?;
+                    directory
+                        .require_authority_identity(identity, "prior source external directory")?;
+                    Ok::<PinnedDirectory, anyhow::Error>(directory)
+                })
+                .transpose()?;
+            if receipt.source_external_path.is_none() != receipt.source_external_identity.is_none()
+            {
+                bail!("prior source external path/identity authority is incomplete");
+            }
+            validate_frozen_source_generation(
+                receipt,
+                &directory.runtime_path(),
+                external_directory
+                    .as_ref()
+                    .map(PinnedDirectory::runtime_path)
+                    .as_deref(),
+            )
+            .with_context(|| {
+                format!(
+                    "validate retained prior source generation {}",
+                    receipt.source_path.display()
+                )
+            })?;
+            Ok(PinnedPriorSourcePaths {
+                authority_sha256: validated.authority_sha256.clone(),
+                configured_path: receipt.source_path.clone(),
+                directory,
+                lmdb_files,
+                configured_external_path: receipt.source_external_path.clone(),
+                external_directory,
+                read_only_mounts: receipt.source_read_only_mounts.clone(),
+            })
+        })
+        .collect()
 }
 
 struct PinnedMigrationPaths {
@@ -393,9 +883,21 @@ struct PinnedMigrationPaths {
     pool: PinnedDirectory,
     pool_lmdb_files: PinnedLmdbFiles,
     pool_manifest_sha256: [u8; 32],
+    pool_topology: PoolTopologyV3,
     pool_members: Vec<PinnedPoolMemberPaths>,
+    prior_sources: Vec<PinnedPriorSourcePaths>,
     cursor_parent: PinnedDirectory,
     cursor_name: std::ffi::OsString,
+}
+
+struct PinnedPriorSourcePaths {
+    authority_sha256: String,
+    configured_path: PathBuf,
+    directory: PinnedDirectory,
+    lmdb_files: PinnedLmdbFiles,
+    configured_external_path: Option<PathBuf>,
+    external_directory: Option<PinnedDirectory>,
+    read_only_mounts: SourceReadOnlyMountAuthorityV3,
 }
 
 struct PinnedPoolMemberPaths {
@@ -411,6 +913,7 @@ struct PinnedPoolMemberPaths {
 
 struct PinnedPoolTopology {
     manifest_sha256: [u8; 32],
+    topology: PoolTopologyV3,
     members: Vec<PinnedPoolMemberPaths>,
 }
 
@@ -419,512 +922,11 @@ struct PinnedLmdbFiles {
     lock: PinnedRegularEntry,
 }
 
-struct PinnedRegularEntry {
-    file: File,
-    name: std::ffi::OsString,
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-}
-
 struct LaunchRendezvous {
     attempt: PinnedDirectory,
     request: File,
     request_snapshot: std::fs::Metadata,
     request_path: PathBuf,
-}
-
-struct PinnedDirectory {
-    file: File,
-    path: PathBuf,
-    #[cfg(unix)]
-    device: u64,
-    #[cfg(unix)]
-    inode: u64,
-}
-
-impl PinnedDirectory {
-    fn open_exact(path: &Path, label: &str) -> Result<Self> {
-        require_absolute(path, label)?;
-        let canonical = path
-            .canonicalize()
-            .with_context(|| format!("canonicalize {label} {}", path.display()))?;
-        if canonical != path {
-            bail!(
-                "{label} must be an exact canonical path (got {}, canonical {})",
-                path.display(),
-                canonical.display()
-            );
-        }
-
-        #[cfg(unix)]
-        let file = open_absolute_directory_without_symlinks(path, label)?;
-        #[cfg(not(unix))]
-        let file = File::open(path).with_context(|| format!("open {label} {}", path.display()))?;
-
-        let metadata = file
-            .metadata()
-            .with_context(|| format!("inspect open {label} {}", path.display()))?;
-        if !metadata.is_dir() {
-            bail!("{label} {} is not a directory", path.display());
-        }
-        let pinned = Self {
-            file,
-            path: path.to_path_buf(),
-            #[cfg(unix)]
-            device: metadata.dev(),
-            #[cfg(unix)]
-            inode: metadata.ino(),
-        };
-        pinned.ensure_path_identity(label)?;
-        Ok(pinned)
-    }
-
-    fn ensure_path_identity(&self, label: &str) -> Result<()> {
-        let current = std::fs::symlink_metadata(&self.path)
-            .with_context(|| format!("reinspect {label} {}", self.path.display()))?;
-        if !current.file_type().is_dir() {
-            bail!("{label} {} is no longer a directory", self.path.display());
-        }
-        #[cfg(unix)]
-        if current.dev() != self.device || current.ino() != self.inode {
-            bail!("{label} path changed while the launch was being validated");
-        }
-        Ok(())
-    }
-
-    fn same_object(&self, other: &Self) -> bool {
-        #[cfg(unix)]
-        {
-            self.device == other.device && self.inode == other.inode
-        }
-        #[cfg(not(unix))]
-        {
-            self.path == other.path
-        }
-    }
-
-    fn authority_identity(&self) -> FileIdentityV3 {
-        #[cfg(unix)]
-        {
-            FileIdentityV3 {
-                device: self.device,
-                inode: self.inode,
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            FileIdentityV3 {
-                device: 0,
-                inode: 0,
-            }
-        }
-    }
-
-    fn require_authority_identity(&self, expected: FileIdentityV3, label: &str) -> Result<()> {
-        if self.authority_identity() != expected {
-            bail!("{label} device/inode differs from controller authority");
-        }
-        Ok(())
-    }
-
-    fn runtime_path(&self) -> PathBuf {
-        #[cfg(target_os = "linux")]
-        {
-            PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.path.clone()
-        }
-    }
-
-    fn open_regular_optional(&self, name: &OsStr, label: &str) -> Result<Option<File>> {
-        #[cfg(unix)]
-        {
-            let name = os_str_to_c_string(name, label)?;
-            let raw = unsafe {
-                libc::openat(
-                    self.file.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
-                )
-            };
-            if raw < 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() == ErrorKind::NotFound {
-                    return Ok(None);
-                }
-                return Err(error)
-                    .with_context(|| format!("open {label} beneath {}", self.path.display()));
-            }
-            let file = unsafe { File::from_raw_fd(raw) };
-            if !file
-                .metadata()
-                .with_context(|| format!("inspect open {label}"))?
-                .is_file()
-            {
-                bail!("{label} is not a regular file");
-            }
-            Ok(Some(file))
-        }
-
-        #[cfg(not(unix))]
-        {
-            let path = self.path.join(name);
-            match OpenOptions::new().read(true).open(&path) {
-                Ok(file) => {
-                    if !file.metadata()?.is_file() {
-                        bail!("{label} {} is not a regular file", path.display());
-                    }
-                    Ok(Some(file))
-                }
-                Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
-                Err(error) => Err(error.into()),
-            }
-        }
-    }
-
-    fn pin_regular(&self, name: &OsStr, label: &str) -> Result<PinnedRegularEntry> {
-        let file = self
-            .open_regular_optional(name, label)?
-            .with_context(|| format!("{label} is absent beneath {}", self.path.display()))?;
-        let metadata = file
-            .metadata()
-            .with_context(|| format!("inspect pinned {label}"))?;
-        let entry = PinnedRegularEntry {
-            file,
-            name: name.to_os_string(),
-            #[cfg(unix)]
-            device: metadata.dev(),
-            #[cfg(unix)]
-            inode: metadata.ino(),
-        };
-        entry.ensure_identity(self, label)?;
-        Ok(entry)
-    }
-
-    fn entry_exists(&self, name: &OsStr, label: &str) -> Result<bool> {
-        #[cfg(unix)]
-        {
-            let name = os_str_to_c_string(name, label)?;
-            let mut stat = std::mem::MaybeUninit::<libc::stat>::zeroed();
-            let status = unsafe {
-                libc::fstatat(
-                    self.file.as_raw_fd(),
-                    name.as_ptr(),
-                    stat.as_mut_ptr(),
-                    libc::AT_SYMLINK_NOFOLLOW,
-                )
-            };
-            if status == 0 {
-                return Ok(true);
-            }
-            let error = std::io::Error::last_os_error();
-            if error.kind() == ErrorKind::NotFound {
-                return Ok(false);
-            }
-            Err(error).with_context(|| format!("inspect {label} beneath {}", self.path.display()))
-        }
-
-        #[cfg(not(unix))]
-        {
-            match std::fs::symlink_metadata(self.path.join(name)) {
-                Ok(_) => Ok(true),
-                Err(error) if error.kind() == ErrorKind::NotFound => Ok(false),
-                Err(error) => Err(error.into()),
-            }
-        }
-    }
-
-    fn acquire_exclusive_migration_lease(&self) -> Result<()> {
-        self.ensure_path_identity("migration cursor parent")?;
-        #[cfg(target_os = "linux")]
-        {
-            let status =
-                unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-            if status != 0 {
-                let error = std::io::Error::last_os_error();
-                if error
-                    .raw_os_error()
-                    .is_some_and(|code| code == libc::EWOULDBLOCK || code == libc::EAGAIN)
-                {
-                    bail!(
-                        "another Pool migration process holds the cursor-parent lease; every attempt sharing this cursor authority must serialize"
-                    );
-                }
-                return Err(error).context("acquire Pool migration cursor-parent lease");
-            }
-        }
-        Ok(())
-    }
-
-    fn create_durable_exclusive(&self, name: &OsStr, bytes: &[u8], label: &str) -> Result<()> {
-        #[cfg(target_os = "linux")]
-        let mut file = {
-            let dot = os_str_to_c_string(OsStr::new("."), label)?;
-            let raw = unsafe {
-                libc::openat(
-                    self.file.as_raw_fd(),
-                    dot.as_ptr(),
-                    libc::O_RDWR | libc::O_TMPFILE | libc::O_CLOEXEC,
-                    0o600,
-                )
-            };
-            if raw < 0 {
-                return Err(std::io::Error::last_os_error()).with_context(|| {
-                    format!("create unnamed {label} beneath {}", self.path.display())
-                });
-            }
-            unsafe { File::from_raw_fd(raw) }
-        };
-
-        #[cfg(not(target_os = "linux"))]
-        let mut file = {
-            let path = self.path.join(name);
-            match OpenOptions::new().write(true).create_new(true).open(&path) {
-                Ok(file) => file,
-                Err(error) if error.kind() == ErrorKind::AlreadyExists => {
-                    bail!("{label} already exists; create a fresh {ATTEMPT_NAMESPACE_NAME} nonce");
-                }
-                Err(error) => return Err(error.into()),
-            }
-        };
-
-        file.write_all(bytes)?;
-        file.sync_all()?;
-
-        #[cfg(target_os = "linux")]
-        {
-            file.seek(SeekFrom::Start(0))?;
-            let mut verified = Vec::with_capacity(bytes.len());
-            Read::by_ref(&mut file)
-                .take((bytes.len() as u64).saturating_add(1))
-                .read_to_end(&mut verified)?;
-            if verified != bytes {
-                bail!("open unnamed {label} differs from intended acknowledgement bytes");
-            }
-            if unsafe { libc::fchmod(file.as_raw_fd(), 0o600) } != 0 {
-                return Err(std::io::Error::last_os_error())
-                    .with_context(|| format!("set unnamed {label} mode"));
-            }
-            let name = os_str_to_c_string(name, label)?;
-            let proc_fd = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
-                .expect("generated procfd path has no NUL");
-            let status = unsafe {
-                libc::linkat(
-                    libc::AT_FDCWD,
-                    proc_fd.as_ptr(),
-                    self.file.as_raw_fd(),
-                    name.as_ptr(),
-                    libc::AT_SYMLINK_FOLLOW,
-                )
-            };
-            if status != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.kind() == ErrorKind::AlreadyExists {
-                    bail!("{label} already exists; create a fresh {ATTEMPT_NAMESPACE_NAME} nonce");
-                }
-                return Err(error).with_context(|| format!("publish retained unnamed {label}"));
-            }
-        }
-
-        self.file.sync_all()?;
-        self.ensure_path_identity("Pool migration attempt directory")?;
-        let created = file
-            .metadata()
-            .with_context(|| format!("reinspect created {label}"))?;
-        let mut reopened = self
-            .open_regular_optional(name, label)?
-            .with_context(|| format!("{label} disappeared after durable creation"))?;
-        let entry = reopened
-            .metadata()
-            .with_context(|| format!("reinspect created {label} directory entry"))?;
-        ensure_same_file_snapshot(&created, &entry, label)?;
-        let mut published = Vec::with_capacity(bytes.len());
-        Read::by_ref(&mut reopened)
-            .take((bytes.len() as u64).saturating_add(1))
-            .read_to_end(&mut published)?;
-        if published != bytes {
-            bail!("published {label} differs from intended bytes");
-        }
-        self.ensure_path_identity("Pool migration attempt directory")?;
-        Ok(())
-    }
-
-    fn durable_replace(&self, name: &OsStr, bytes: &[u8], label: &str) -> Result<()> {
-        static TEMP_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let sequence = TEMP_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let temporary = format!(
-            ".htree-pool-migration-cursor.tmp.{}.{}",
-            std::process::id(),
-            sequence
-        );
-
-        #[cfg(target_os = "linux")]
-        {
-            let temporary_c = os_str_to_c_string(OsStr::new(&temporary), label)?;
-            let target_c = os_str_to_c_string(name, label)?;
-            let dot = os_str_to_c_string(OsStr::new("."), label)?;
-            let raw = unsafe {
-                libc::openat(
-                    self.file.as_raw_fd(),
-                    dot.as_ptr(),
-                    libc::O_RDWR | libc::O_TMPFILE | libc::O_CLOEXEC,
-                    0o600,
-                )
-            };
-            if raw < 0 {
-                return Err(std::io::Error::last_os_error())
-                    .with_context(|| format!("create unnamed temporary {label}"));
-            }
-            let mut file = unsafe { File::from_raw_fd(raw) };
-            let result = (|| -> Result<()> {
-                file.write_all(bytes)?;
-                file.sync_all()?;
-                file.seek(SeekFrom::Start(0))?;
-                let mut verified = Vec::with_capacity(bytes.len());
-                Read::by_ref(&mut file)
-                    .take((bytes.len() as u64).saturating_add(1))
-                    .read_to_end(&mut verified)?;
-                if verified != bytes {
-                    bail!("open unnamed {label} differs from intended bytes");
-                }
-                if unsafe { libc::fchmod(file.as_raw_fd(), 0o400) } != 0 {
-                    return Err(std::io::Error::last_os_error())
-                        .with_context(|| format!("make unnamed {label} read-only"));
-                }
-                let proc_fd = std::ffi::CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
-                    .expect("generated procfd path has no NUL");
-                let linked = unsafe {
-                    libc::linkat(
-                        libc::AT_FDCWD,
-                        proc_fd.as_ptr(),
-                        self.file.as_raw_fd(),
-                        temporary_c.as_ptr(),
-                        libc::AT_SYMLINK_FOLLOW,
-                    )
-                };
-                if linked != 0 {
-                    return Err(std::io::Error::last_os_error())
-                        .with_context(|| format!("publish retained unnamed {label}"));
-                }
-                let created = file
-                    .metadata()
-                    .with_context(|| format!("inspect retained unnamed {label}"))?;
-                let mut linked_file = self
-                    .open_regular_optional(OsStr::new(&temporary), label)?
-                    .with_context(|| format!("linked temporary {label} disappeared"))?;
-                let linked_metadata = linked_file
-                    .metadata()
-                    .with_context(|| format!("inspect linked temporary {label}"))?;
-                ensure_same_file_snapshot(&created, &linked_metadata, label)?;
-                let mut linked_bytes = Vec::with_capacity(bytes.len());
-                Read::by_ref(&mut linked_file)
-                    .take((bytes.len() as u64).saturating_add(1))
-                    .read_to_end(&mut linked_bytes)?;
-                if linked_bytes != bytes {
-                    bail!("linked temporary {label} differs from intended bytes");
-                }
-                let status = unsafe {
-                    libc::renameat(
-                        self.file.as_raw_fd(),
-                        temporary_c.as_ptr(),
-                        self.file.as_raw_fd(),
-                        target_c.as_ptr(),
-                    )
-                };
-                if status != 0 {
-                    return Err(std::io::Error::last_os_error())
-                        .with_context(|| format!("atomically replace {label}"));
-                }
-                let mut published = self
-                    .open_regular_optional(name, label)?
-                    .with_context(|| format!("published {label} disappeared"))?;
-                let published_metadata = published
-                    .metadata()
-                    .with_context(|| format!("inspect published {label}"))?;
-                ensure_same_file_snapshot(&created, &published_metadata, label)?;
-                let mut published_bytes = Vec::with_capacity(bytes.len());
-                Read::by_ref(&mut published)
-                    .take((bytes.len() as u64).saturating_add(1))
-                    .read_to_end(&mut published_bytes)?;
-                if published_bytes != bytes {
-                    bail!("published {label} differs from intended bytes");
-                }
-                self.file.sync_all()?;
-                Ok(())
-            })();
-            if result.is_err() {
-                unsafe {
-                    libc::unlinkat(self.file.as_raw_fd(), temporary_c.as_ptr(), 0);
-                }
-            }
-            return result;
-        }
-
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = label;
-            let temporary = self.path.join(temporary);
-            let target = self.path.join(name);
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary)?;
-            let result = (|| -> Result<()> {
-                file.write_all(bytes)?;
-                file.sync_all()?;
-                std::fs::rename(&temporary, &target)?;
-                self.file.sync_all()?;
-                Ok(())
-            })();
-            if result.is_err() {
-                let _ = std::fs::remove_file(&temporary);
-            }
-            result
-        }
-    }
-}
-
-impl PinnedRegularEntry {
-    fn same_object(&self, other: &Self) -> bool {
-        #[cfg(unix)]
-        {
-            self.device == other.device && self.inode == other.inode && self.name == other.name
-        }
-        #[cfg(not(unix))]
-        {
-            self.name == other.name
-        }
-    }
-
-    fn ensure_identity(&self, directory: &PinnedDirectory, label: &str) -> Result<()> {
-        let opened = self
-            .file
-            .metadata()
-            .with_context(|| format!("reinspect pinned {label}"))?;
-        #[cfg(unix)]
-        if opened.dev() != self.device || opened.ino() != self.inode {
-            bail!("{label} open file identity changed");
-        }
-        let current = directory
-            .open_regular_optional(&self.name, label)?
-            .with_context(|| format!("{label} disappeared after it was pinned"))?;
-        let current = current
-            .metadata()
-            .with_context(|| format!("reinspect {label} directory entry"))?;
-        #[cfg(unix)]
-        if current.dev() != self.device || current.ino() != self.inode {
-            bail!("{label} directory entry changed after it was pinned");
-        }
-        #[cfg(not(unix))]
-        if !current.is_file() {
-            bail!("{label} is no longer a regular file");
-        }
-        Ok(())
-    }
 }
 
 impl PinnedLmdbFiles {
@@ -1075,28 +1077,43 @@ impl PinnedMigrationPaths {
             && self.pool.same_object(&other.pool)
             && self.pool_lmdb_files.same_objects(&other.pool_lmdb_files)
             && self.pool_manifest_sha256 == other.pool_manifest_sha256
+            && self.pool_topology == other.pool_topology
             && self.pool_members.len() == other.pool_members.len()
             && self
                 .pool_members
                 .iter()
                 .zip(&other.pool_members)
                 .all(|(left, right)| left.same_objects(right))
+            && self.prior_sources.len() == other.prior_sources.len()
+            && self
+                .prior_sources
+                .iter()
+                .zip(&other.prior_sources)
+                .all(|(left, right)| left.same_objects(right))
             && self.cursor_parent.same_object(&other.cursor_parent)
             && self.cursor_name == other.cursor_name
     }
 
     fn ensure_path_identities(&self) -> Result<()> {
-        self.source.ensure_path_identity("source LMDB")?;
-        self.source_lmdb_files
-            .ensure_identities(&self.source, "source LMDB")?;
-        if let Some(external) = &self.source_external {
-            external.ensure_path_identity("source external directory")?;
-        }
+        self.ensure_source_path_identities()?;
         self.pool.ensure_path_identity("target Pool")?;
         self.pool_lmdb_files
             .ensure_identities(&self.pool, "target Pool catalog")?;
         for member in &self.pool_members {
             member.ensure_path_identities_and_markers()?;
+        }
+        for source in &self.prior_sources {
+            source.ensure_path_identities()?;
+        }
+        Ok(())
+    }
+
+    fn ensure_source_path_identities(&self) -> Result<()> {
+        self.source.ensure_path_identity("source LMDB")?;
+        self.source_lmdb_files
+            .ensure_identities(&self.source, "source LMDB")?;
+        if let Some(external) = &self.source_external {
+            external.ensure_path_identity("source external directory")?;
         }
         self.cursor_parent
             .ensure_path_identity("migration cursor parent")?;
@@ -1138,6 +1155,36 @@ impl PinnedMigrationPaths {
             .collect()
     }
 
+    fn prior_source_runtime_paths(
+        &self,
+        receipts: Vec<ValidatedSourceTerminalReceiptV3>,
+    ) -> Result<Vec<AcknowledgedSourceRuntimePlanV3>> {
+        if receipts.len() != self.prior_sources.len() {
+            bail!("validated source receipt count differs from retained source pin count");
+        }
+        receipts
+            .into_iter()
+            .zip(&self.prior_sources)
+            .map(|(validated, pinned)| {
+                if validated.authority_sha256 != pinned.authority_sha256
+                    || validated.receipt.source_path != pinned.configured_path
+                    || validated.receipt.source_external_path != pinned.configured_external_path
+                {
+                    bail!("validated source receipt order/path differs from retained source pins");
+                }
+                pinned.ensure_path_identities()?;
+                Ok(AcknowledgedSourceRuntimePlanV3 {
+                    validated,
+                    runtime_path: pinned.directory.runtime_path(),
+                    runtime_external_path: pinned
+                        .external_directory
+                        .as_ref()
+                        .map(PinnedDirectory::runtime_path),
+                })
+            })
+            .collect()
+    }
+
     fn ensure_isolated_authority_roots(
         &self,
         request: &PoolMigrationLaunchRequestV3,
@@ -1149,6 +1196,14 @@ impl PinnedMigrationPaths {
         ];
         for member in &self.pool_members {
             lmdbs.push((format!("Pool member {}", member.id), &member.lmdb_files));
+        }
+        for source in &self.prior_sources {
+            if !source.lmdb_files.same_objects(&self.source_lmdb_files) {
+                lmdbs.push((
+                    format!("prior source {} LMDB", source.authority_sha256),
+                    &source.lmdb_files,
+                ));
+            }
         }
         let mut leaf_owners: HashMap<FileIdentityV3, String> = HashMap::new();
         for (role, files) in lmdbs {
@@ -1180,6 +1235,29 @@ impl PinnedMigrationPaths {
                     format!("Pool member {} external directory", member.id),
                     directory,
                 ));
+            }
+        }
+        for source in &self.prior_sources {
+            if !source.directory.same_object(&self.source) {
+                roots.push((
+                    format!("prior source {} LMDB", source.authority_sha256),
+                    &source.directory,
+                ));
+            }
+            if let Some(directory) = &source.external_directory {
+                let aliases_current = self
+                    .source_external
+                    .as_ref()
+                    .is_some_and(|current| directory.same_object(current));
+                if !aliases_current {
+                    roots.push((
+                        format!(
+                            "prior source {} external directory",
+                            source.authority_sha256
+                        ),
+                        directory,
+                    ));
+                }
             }
         }
         for left in 0..roots.len() {
@@ -1304,6 +1382,33 @@ impl PinnedPoolMemberPaths {
     }
 }
 
+impl PinnedPriorSourcePaths {
+    fn same_objects(&self, other: &Self) -> bool {
+        self.authority_sha256 == other.authority_sha256
+            && self.configured_path == other.configured_path
+            && self.directory.same_object(&other.directory)
+            && self.lmdb_files.same_objects(&other.lmdb_files)
+            && self.configured_external_path == other.configured_external_path
+            && self.read_only_mounts == other.read_only_mounts
+            && match (&self.external_directory, &other.external_directory) {
+                (Some(left), Some(right)) => left.same_object(right),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+
+    fn ensure_path_identities(&self) -> Result<()> {
+        self.directory
+            .ensure_path_identity("prior source LMDB directory")?;
+        self.lmdb_files
+            .ensure_identities(&self.directory, "prior source LMDB")?;
+        if let Some(external) = &self.external_directory {
+            external.ensure_path_identity("prior source external directory")?;
+        }
+        Ok(())
+    }
+}
+
 impl LaunchRendezvous {
     fn read_request(&mut self) -> Result<Vec<u8>> {
         self.attempt
@@ -1383,50 +1488,6 @@ impl LaunchRendezvous {
     }
 }
 
-#[cfg(unix)]
-fn open_absolute_directory_without_symlinks(path: &Path, label: &str) -> Result<File> {
-    let mut options = OpenOptions::new();
-    options
-        .read(true)
-        .custom_flags(libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW);
-    let mut directory = options
-        .open(Path::new("/"))
-        .with_context(|| format!("open filesystem root while resolving {label}"))?;
-    for component in path.components() {
-        match component {
-            std::path::Component::RootDir => {}
-            std::path::Component::Normal(name) => {
-                let name = os_str_to_c_string(name, label)?;
-                let raw = unsafe {
-                    libc::openat(
-                        directory.as_raw_fd(),
-                        name.as_ptr(),
-                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                    )
-                };
-                if raw < 0 {
-                    return Err(std::io::Error::last_os_error()).with_context(|| {
-                        format!("open trusted {label} component {}", path.display())
-                    });
-                }
-                directory = unsafe { File::from_raw_fd(raw) };
-            }
-            std::path::Component::CurDir
-            | std::path::Component::ParentDir
-            | std::path::Component::Prefix(_) => {
-                bail!("{label} path contains a non-canonical component");
-            }
-        }
-    }
-    Ok(directory)
-}
-
-#[cfg(unix)]
-fn os_str_to_c_string(value: &OsStr, label: &str) -> Result<std::ffi::CString> {
-    std::ffi::CString::new(value.as_bytes())
-        .with_context(|| format!("{label} path component contains NUL"))
-}
-
 pub(super) fn acknowledge_pool_migration_launch(
     context: PoolMigrationLaunchContext<'_>,
 ) -> Result<AcknowledgedPoolMigrationLaunch> {
@@ -1497,6 +1558,8 @@ pub(super) fn acknowledge_pool_migration_launch(
         binary_sha256: &request.binary.sha256,
         argv_sha256: argv_sha256(&request.argv),
         controller_state_sha256: &request.controller.state.sha256,
+        checkpoint_broker_pid: request.checkpoint_broker.pid,
+        checkpoint_broker_proc_start_time_ticks: request.checkpoint_broker.proc_start_time_ticks,
         source_writers_fenced: second.controller_state.source_writers_fenced,
         target_writers_fenced: second.controller_state.target_writers_fenced,
         fence_held_until_completion: second.controller_state.fence_held_until_completion,
@@ -1543,6 +1606,7 @@ pub(super) fn acknowledge_pool_migration_launch(
             )
         })?;
     let attempt = rendezvous.into_attempt();
+    let acknowledgement_sha256 = sha256_bytes(&ack_bytes);
 
     println!("Pool migration launch acknowledged: {}", ack_path.display());
     let source = second.paths.source_runtime_path();
@@ -1550,12 +1614,24 @@ pub(super) fn acknowledge_pool_migration_launch(
     let pool = second.paths.pool_runtime_path();
     Ok(AcknowledgedPoolMigrationLaunch {
         cursor: second.cursor,
+        final_stopped_pass: matches!(
+            request.controller.phase.as_str(),
+            "final-stopped-source" | "final-stopped-full"
+        ),
+        final_stopped_source_pass: request.controller.phase == "final-stopped-source",
         final_stopped_full_pass: request.controller.phase == "final-stopped-full",
         source,
         source_external,
         pool,
         controller_state_authority: request.controller.state.clone(),
         controller_state: second.controller_state,
+        request: request.clone(),
+        request_sha256,
+        acknowledgement_sha256,
+        checkpoint_state: Mutex::new(CheckpointChainState {
+            next_sequence: 0,
+            previous_ack_sha256: None,
+        }),
         cursor_authority: Mutex::new(request.cursor.clone()),
         attempt,
         pins: second.paths,
@@ -1620,6 +1696,27 @@ fn validate_request_shape(
         &request.controller.executable.sha256,
     )?;
     validate_sha256("controller state", &request.controller.state.sha256)?;
+    if request.checkpoint_broker.pid == 0
+        || request.checkpoint_broker.proc_start_time_ticks == 0
+        || request.checkpoint_broker.timeout_seconds == 0
+        || request.checkpoint_broker.timeout_seconds > 300
+    {
+        bail!("checkpoint broker PID/starttime/timeout authority is invalid");
+    }
+    require_controller_systemd_service_name(&request.checkpoint_broker.systemd_unit)?;
+    require_lower_hex(
+        "checkpoint broker systemd invocation ID",
+        &request.checkpoint_broker.systemd_invocation_id,
+        32,
+    )?;
+    validate_sha256(
+        "checkpoint broker systemd fragment",
+        &request.checkpoint_broker.systemd_fragment_sha256,
+    )?;
+    validate_sha256(
+        "checkpoint broker systemd environment file",
+        &request.checkpoint_broker.systemd_environment_file_sha256,
+    )?;
     validate_sha256("source baseline", &request.source.baseline.sha256)?;
     validate_sha256("Pool topology", &request.pool.topology.sha256)?;
 
@@ -1710,6 +1807,13 @@ fn validate_request_shape(
         (None, None) => {}
         _ => bail!("source external path and identity must be present or absent together"),
     }
+    let final_stopped = matches!(
+        request.controller.phase.as_str(),
+        "final-stopped-source" | "final-stopped-full"
+    );
+    if final_stopped != request.source.read_only_mounts.is_some() {
+        bail!("stopped-final phase and source read-only mount authority must be present together");
+    }
     validate_file_identity("migration cursor parent", request.cursor.parent_identity)?;
     Ok(())
 }
@@ -1731,24 +1835,35 @@ fn validate_launch_authority(
     request: &PoolMigrationLaunchRequestV3,
     context: &PoolMigrationLaunchContext<'_>,
 ) -> Result<ValidatedLaunch> {
+    let mut host_paths = vec![
+        (context.launch_request, "Pool migration launch request"),
+        (context.source, "source LMDB"),
+        (context.pool, "target Pool catalog"),
+    ];
+    if let Some(path) = context.source_external_dir {
+        host_paths.push((path, "source external corpus"));
+    }
+    require_host_execution_namespace(&host_paths)?;
+    validate_pool_migration_release_phase(&request.controller.phase)?;
+
     match request.controller.phase.as_str() {
         "online-bounded" => {
             if context.max_items.is_none() {
                 bail!("online-bounded Pool migration launch requires --max-items");
             }
         }
-        "final-stopped-full" => {
+        "final-stopped-source" | "final-stopped-full" => {
             if context.max_items.is_some() {
-                bail!("final-stopped-full Pool migration launch forbids --max-items");
+                bail!("stopped final Pool migration launch forbids --max-items");
             }
             if request.cursor.exists {
                 bail!(
-                    "final-stopped-full Pool migration launch requires a fresh absent cursor and full rescan"
+                    "stopped final Pool migration launch requires a fresh absent cursor and full rescan"
                 );
             }
         }
         phase => bail!(
-            "unsupported Pool migration controller phase {phase}; expected online-bounded or final-stopped-full"
+            "unsupported Pool migration controller phase {phase}; expected online-bounded, final-stopped-source, or final-stopped-full"
         ),
     }
 
@@ -1760,6 +1875,7 @@ fn validate_launch_authority(
             boot_id
         );
     }
+    validate_root_broker_service(&request.checkpoint_broker)?;
 
     let invocation_id = std::env::var(SYSTEMD_INVOCATION_ID_ENV)
         .context("Pool migration launch requires systemd INVOCATION_ID")?;
@@ -1822,6 +1938,26 @@ fn validate_launch_authority(
     }
 
     validate_file_authority(&request.controller.executable, "controller executable")?;
+    validate_file_authority(
+        &FileAuthorityV3 {
+            path: request.checkpoint_broker.systemd_fragment_path.clone(),
+            sha256: request.checkpoint_broker.systemd_fragment_sha256.clone(),
+        },
+        "checkpoint broker systemd fragment",
+    )?;
+    validate_file_authority(
+        &FileAuthorityV3 {
+            path: request
+                .checkpoint_broker
+                .systemd_environment_file_path
+                .clone(),
+            sha256: request
+                .checkpoint_broker
+                .systemd_environment_file_sha256
+                .clone(),
+        },
+        "checkpoint broker systemd environment file",
+    )?;
     validate_file_authority(&request.systemd_fragment, "systemd unit fragment")?;
     validate_file_authority(
         &request.systemd_environment_file,
@@ -1834,6 +1970,14 @@ fn validate_launch_authority(
         validate_named_file_authority(authority)?;
     }
     let pool_topology = pin_pool_topology(&request.pool.topology, &request.pool.path)?;
+    let mut topology_paths = Vec::with_capacity(pool_topology.topology.members.len() * 2);
+    for member in &pool_topology.topology.members {
+        topology_paths.push((member.path.as_path(), "target Pool member LMDB"));
+        if let Some(path) = member.external_path.as_deref() {
+            topology_paths.push((path, "target Pool member external corpus"));
+        }
+    }
+    require_host_execution_namespace(&topology_paths)?;
 
     let requested_source =
         canonical_directory_path(&request.source.lmdb_path, "requested source LMDB")?;
@@ -1873,6 +2017,16 @@ fn validate_launch_authority(
         (None, None) => {}
         _ => bail!("source external directory authority is incomplete"),
     }
+    if let Some(mounts) = &request.source.read_only_mounts {
+        validate_source_read_only_mount_authority(
+            mounts,
+            &request.source.lmdb_path,
+            request.source.lmdb_identity,
+            request.source.external_path.as_deref(),
+            request.source.external_identity,
+        )
+        .context("validate launch source read-only mount authority")?;
+    }
 
     let requested_pool = canonical_directory_path(&request.pool.path, "requested Pool")?;
     let actual_pool = canonical_directory_path(context.pool, "Pool")?;
@@ -1906,18 +2060,48 @@ fn validate_launch_authority(
         .require_authority_identity(request.cursor.parent_identity, "migration cursor parent")?;
 
     let cursor = validate_cursor_authority(&request.cursor, &cursor_parent, &cursor_name)?;
-    let paths = PinnedMigrationPaths {
+    let PinnedPoolTopology {
+        manifest_sha256,
+        topology,
+        members,
+    } = pool_topology;
+    let mut paths = PinnedMigrationPaths {
         source,
         source_lmdb_files,
         source_external,
         pool,
         pool_lmdb_files,
-        pool_manifest_sha256: pool_topology.manifest_sha256,
-        pool_members: pool_topology.members,
+        pool_manifest_sha256: manifest_sha256,
+        pool_topology: topology,
+        pool_members: members,
+        prior_sources: Vec::new(),
         cursor_parent,
         cursor_name,
     };
     let controller_state = validate_controller_state(request, &paths, &boot_id)?;
+    let prior_receipts =
+        load_request_source_terminal_receipts(request, &controller_state, &paths, false)?;
+    paths.prior_sources = pin_prior_source_paths(&prior_receipts)?;
+    if request.controller.phase == "final-stopped-full" {
+        let matching_current = paths
+            .prior_sources
+            .iter()
+            .filter(|prior| {
+                prior.directory.same_object(&paths.source)
+                    && prior.lmdb_files.same_objects(&paths.source_lmdb_files)
+                    && match (&prior.external_directory, &paths.source_external) {
+                        (Some(left), Some(right)) => left.same_object(right),
+                        (None, None) => true,
+                        _ => false,
+                    }
+            })
+            .count();
+        if matching_current != 1 {
+            bail!(
+                "final-stopped-full current source must be exactly one validated receipt-owned source"
+            );
+        }
+    }
     paths.ensure_isolated_authority_roots(request, context.launch_request)?;
     Ok(ValidatedLaunch {
         cursor,
@@ -1984,21 +2168,58 @@ fn validate_controller_state(
         }
         previous_unit = Some(unit);
     }
-    if request.controller.phase == "final-stopped-full"
-        && (!state.source_writers_fenced
-            || !state.target_writers_fenced
-            || !state.fence_held_until_completion
-            || state.source_writer_processes_with_open_handles != 0
-            || state.target_writer_processes_with_open_handles != 0
-            || state.stopped_writer_units.is_empty())
-    {
+    let mut previous_receipt: Option<&str> = None;
+    if state.source_terminal_receipt_sha256.len() > MAX_FINAL_SOURCE_RECEIPTS {
         bail!(
-            "final-stopped-full controller state must attest source and target writer fences held through completion, zero writer processes holding store handles, and the exact stopped systemd writer units"
+            "controller source-terminal receipt set exceeds the hard maximum of {MAX_FINAL_SOURCE_RECEIPTS}"
         );
     }
-    if request.controller.phase == "final-stopped-full" {
-        validate_stopped_writer_units(&state.stopped_writer_units)?;
+    for sha256 in &state.source_terminal_receipt_sha256 {
+        validate_sha256("source-terminal receipt", sha256)?;
+        if previous_receipt.is_some_and(|previous| previous >= sha256.as_str()) {
+            bail!("controller source-terminal receipt SHA-256 set must be uniquely sorted");
+        }
+        previous_receipt = Some(sha256);
     }
+    if request.controller.phase != "final-stopped-full"
+        && !state.source_terminal_receipt_sha256.is_empty()
+    {
+        bail!("only final-stopped-full may consume source-terminal receipts");
+    }
+    let final_stopped = matches!(
+        request.controller.phase.as_str(),
+        "final-stopped-source" | "final-stopped-full"
+    );
+    if final_stopped
+        && (!state.source_writers_fenced
+            || !state.fence_held_until_completion
+            || state.source_writer_processes_with_open_handles != 0
+            || state.stopped_writer_units.is_empty()
+            || state.writer_unit_masks.is_empty())
+    {
+        bail!(
+            "stopped final controller state must attest its source writer fence held through completion, zero source writers holding store handles, and the exact stopped systemd writer units"
+        );
+    }
+    if request.controller.phase == "final-stopped-full"
+        && (!state.target_writers_fenced || state.target_writer_processes_with_open_handles != 0)
+    {
+        bail!(
+            "final-stopped-full controller state must additionally attest the target writer fence and zero target writers holding store handles"
+        );
+    }
+    if final_stopped {
+        validate_runtime_masked_writer_units(
+            &state.stopped_writer_units,
+            &state.writer_unit_masks,
+        )?;
+    } else if !state.writer_unit_masks.is_empty() {
+        bail!("online-bounded controller state must not claim final runtime writer masks");
+    }
+    validate_legacy_worker_activation_fence(
+        &state.legacy_worker_template_mask,
+        &state.legacy_worker_instance_masks,
+    )?;
     Ok(state)
 }
 
@@ -2042,6 +2263,31 @@ fn parse_systemd_properties<'a>(output: &'a str, label: &str) -> Result<HashMap<
 }
 
 #[cfg(any(target_os = "linux", test))]
+fn parse_systemd_unit_property_blocks<'a>(
+    output: &'a str,
+    label: &str,
+) -> Result<HashMap<&'a str, HashMap<&'a str, &'a str>>> {
+    let mut units = HashMap::new();
+    for block in output
+        .split("\n\n")
+        .filter(|block| !block.trim().is_empty())
+    {
+        let properties = parse_systemd_properties(block, label)?;
+        let unit = properties
+            .get("Id")
+            .copied()
+            .with_context(|| format!("{label} block omits its exact Id property"))?;
+        if unit.is_empty() || units.insert(unit, properties).is_some() {
+            bail!("{label} contains an empty or duplicate unit Id");
+        }
+    }
+    if units.is_empty() {
+        bail!("{label} contains no unit property blocks");
+    }
+    Ok(units)
+}
+
+#[cfg(any(target_os = "linux", test))]
 fn require_empty_systemd_properties(
     properties: &HashMap<&str, &str>,
     names: &[&str],
@@ -2070,26 +2316,243 @@ fn reject_nonempty_systemd_properties(
 }
 
 #[cfg(any(target_os = "linux", test))]
-fn validate_stopped_writer_property_map(
+fn validate_runtime_masked_writer_property_map(
     unit: &str,
+    mask: &WriterUnitMaskV3,
     properties: &HashMap<&str, &str>,
 ) -> Result<()> {
-    if properties.get("LoadState").copied() != Some("loaded")
+    if properties.get("LoadState").copied() != Some("masked")
+        || properties.get("UnitFileState").copied() != Some("masked-runtime")
         || properties.get("ActiveState").copied() != Some("inactive")
         || properties.get("SubState").copied() != Some("dead")
         || properties.get("MainPID").copied() != Some("0")
         || properties.get("ControlPID").copied() != Some("0")
         || properties.get("Job").copied() != Some("")
+        || properties.get("NeedDaemonReload").copied() != Some("no")
+        || properties.get("FragmentPath").copied() != mask.path.to_str()
     {
-        bail!("writer unit {unit} is not loaded, inactive/dead, process-free, and job-free");
+        bail!(
+            "writer unit {unit} is not runtime-masked by its exact authority, inactive/dead, process-free, job-free, and daemon-reloaded"
+        );
     }
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
-fn validate_stopped_writer_units(units: &[String]) -> Result<()> {
-    let systemctl = trusted_systemctl_path()?;
-    for unit in units {
+pub(super) fn validate_runtime_masked_writer_owned_properties(
+    unit: &str,
+    mask: &WriterUnitMaskV3,
+    properties: &HashMap<String, String>,
+) -> Result<()> {
+    let borrowed = properties
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect::<HashMap<_, _>>();
+    validate_runtime_masked_writer_property_map(unit, mask, &borrowed)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn validate_runtime_writer_mask_authorities(
+    units: &[String],
+    masks: &[WriterUnitMaskV3],
+) -> Result<()> {
+    if units.is_empty() || units.len() != masks.len() {
+        bail!("final writer units and runtime-mask authorities must be nonempty and one-to-one");
+    }
+    validate_runtime_mask_directory()?;
+    for (unit, mask) in units.iter().zip(masks) {
+        require_writer_systemd_service_name(unit)?;
+        validate_runtime_mask_authority(unit, mask, "writer")?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_runtime_mask_directory() -> Result<()> {
+    let runtime_dir = Path::new("/run/systemd/system");
+    let runtime_metadata =
+        std::fs::symlink_metadata(runtime_dir).context("inspect systemd runtime unit directory")?;
+    if !runtime_metadata.file_type().is_dir()
+        || runtime_metadata.uid() != 0
+        || runtime_metadata.mode() & 0o022 != 0
+    {
+        bail!("/run/systemd/system must be a root-owned non-writable directory");
+    }
+    let canonical_runtime = runtime_dir
+        .canonicalize()
+        .context("canonicalize systemd runtime unit directory")?;
+    if canonical_runtime != runtime_dir {
+        bail!("/run/systemd/system must be an exact canonical directory");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_runtime_mask_authority(unit: &str, mask: &WriterUnitMaskV3, class: &str) -> Result<()> {
+    if mask.unit != unit {
+        bail!("runtime {class}-mask authority does not bind the expected unit {unit}");
+    }
+    let expected_path = Path::new("/run/systemd/system").join(unit);
+    if mask.path != expected_path {
+        bail!(
+            "runtime {class} mask for {unit} must be exactly {}",
+            expected_path.display()
+        );
+    }
+    if mask.target != Path::new("/dev/null") {
+        bail!("runtime {class} mask for {unit} must target exactly /dev/null");
+    }
+    validate_file_identity(&format!("runtime {class} mask {unit}"), mask.identity)?;
+    let metadata = std::fs::symlink_metadata(&mask.path)
+        .with_context(|| format!("inspect runtime {class} mask {}", mask.path.display()))?;
+    if !metadata.file_type().is_symlink()
+        || metadata.uid() != 0
+        || metadata.gid() != 0
+        || metadata.nlink() != 1
+    {
+        bail!("runtime {class} mask for {unit} must be a root:root single-link symbolic link");
+    }
+    let identity = FileIdentityV3 {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    };
+    if identity != mask.identity {
+        bail!("runtime {class} mask identity changed for {unit}");
+    }
+    let target = std::fs::read_link(&mask.path)
+        .with_context(|| format!("read runtime {class} mask {}", mask.path.display()))?;
+    if target != mask.target {
+        bail!("runtime {class} mask target changed for {unit}");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn validate_legacy_worker_mask_authorities(
+    template: &WriterUnitMaskV3,
+    instances: &[WriterUnitMaskV3],
+) -> Result<()> {
+    const TEMPLATE: &str = "hashtree-pool-migrate@.service";
+    validate_runtime_mask_directory()?;
+    validate_runtime_mask_authority(TEMPLATE, template, "legacy migration-worker template")?;
+    let mut previous: Option<&str> = None;
+    for mask in instances {
+        require_legacy_worker_instance_name(&mask.unit)?;
+        if previous.is_some_and(|unit| unit >= mask.unit.as_str()) {
+            bail!("legacy migration-worker instance masks must be uniquely sorted by unit");
+        }
+        previous = Some(&mask.unit);
+        validate_runtime_mask_authority(&mask.unit, mask, "legacy migration-worker instance")?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn require_legacy_worker_instance_name(unit: &str) -> Result<()> {
+    if unit.len() > 255
+        || !unit.starts_with("hashtree-pool-migrate@")
+        || !unit.ends_with(".service")
+        || unit == "hashtree-pool-migrate@.service"
+        || unit.contains('/')
+        || !unit.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'.' | b'@' | b'\\' | b'-')
+        })
+    {
+        bail!("legacy migration worker must be an exact hashtree-pool-migrate@*.service instance");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn list_loaded_legacy_worker_instances(systemctl: &Path) -> Result<Vec<String>> {
+    let output = std::process::Command::new(systemctl)
+        .env_clear()
+        .env("LANG", "C")
+        .args([
+            "--system",
+            "--no-pager",
+            "--plain",
+            "--no-legend",
+            "list-units",
+            "--all",
+            "--type=service",
+            "hashtree-pool-migrate@*.service",
+        ])
+        .output()
+        .context("enumerate loaded legacy Pool migration worker instances")?;
+    if !output.status.success() {
+        bail!(
+            "systemctl could not enumerate loaded legacy Pool migration workers: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout =
+        String::from_utf8(output.stdout).context("legacy worker unit list is not UTF-8")?;
+    let mut units = Vec::new();
+    for line in stdout.lines() {
+        let unit = line
+            .split_ascii_whitespace()
+            .next()
+            .context("systemctl emitted an empty legacy worker unit row")?;
+        require_legacy_worker_instance_name(unit)?;
+        units.push(unit.to_string());
+    }
+    units.sort();
+    if units.windows(2).any(|pair| pair[0] == pair[1]) {
+        bail!("systemctl returned a duplicate loaded legacy migration-worker instance");
+    }
+    Ok(units)
+}
+
+#[cfg(target_os = "linux")]
+fn list_runtime_legacy_worker_instance_masks() -> Result<Vec<String>> {
+    let runtime_dir = Path::new("/run/systemd/system");
+    let mut units = Vec::new();
+    for entry in std::fs::read_dir(runtime_dir)
+        .context("enumerate runtime systemd legacy migration-worker masks")?
+    {
+        let entry = entry.context("read runtime systemd directory entry")?;
+        let name = entry.file_name();
+        let bytes = name.as_bytes();
+        if !bytes.starts_with(b"hashtree-pool-migrate@")
+            || !bytes.ends_with(b".service")
+            || bytes == b"hashtree-pool-migrate@.service"
+        {
+            continue;
+        }
+        let unit = name
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("legacy migration-worker mask name is not UTF-8"))?;
+        require_legacy_worker_instance_name(&unit)?;
+        units.push(unit);
+    }
+    units.sort();
+    if units.windows(2).any(|pair| pair[0] == pair[1]) {
+        bail!("runtime systemd directory contains duplicate legacy worker mask names");
+    }
+    Ok(units)
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn validate_legacy_worker_activation_fence_with_systemctl(
+    systemctl: &Path,
+    template: &WriterUnitMaskV3,
+    instances: &[WriterUnitMaskV3],
+) -> Result<()> {
+    validate_legacy_worker_mask_authorities(template, instances)?;
+    let expected = instances
+        .iter()
+        .map(|mask| mask.unit.clone())
+        .collect::<Vec<_>>();
+    if list_runtime_legacy_worker_instance_masks()? != expected {
+        bail!(
+            "legacy migration-worker authority does not exactly cover every runtime instance mask"
+        );
+    }
+    if !list_loaded_legacy_worker_instances(systemctl)?.is_empty() {
+        bail!("a legacy migration-worker instance remains loaded despite the exact runtime masks");
+    }
+    for mask in instances {
         let output = std::process::Command::new(systemctl)
             .env_clear()
             .env("LANG", "C")
@@ -2097,9 +2560,11 @@ fn validate_stopped_writer_units(units: &[String]) -> Result<()> {
                 "--system",
                 "--no-pager",
                 "show",
-                unit,
+                &mask.unit,
                 "--property",
                 "LoadState",
+                "--property",
+                "UnitFileState",
                 "--property",
                 "ActiveState",
                 "--property",
@@ -2110,26 +2575,286 @@ fn validate_stopped_writer_units(units: &[String]) -> Result<()> {
                 "ControlPID",
                 "--property",
                 "Job",
+                "--property",
+                "NeedDaemonReload",
+                "--property",
+                "FragmentPath",
             ])
             .output()
-            .with_context(|| format!("inspect stopped writer unit {unit}"))?;
+            .with_context(|| {
+                format!(
+                    "inspect runtime-masked legacy migration worker {}",
+                    mask.unit
+                )
+            })?;
         if !output.status.success() {
             bail!(
-                "systemctl could not verify stopped writer unit {unit}: {}",
-                String::from_utf8_lossy(&output.stderr)
+                "systemctl could not verify runtime-masked legacy migration worker {}: {}",
+                mask.unit,
+                String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        let stdout = String::from_utf8(output.stdout)
-            .with_context(|| format!("decode stopped writer unit {unit} properties"))?;
-        let properties =
-            parse_systemd_properties(&stdout, &format!("stopped writer unit {unit} output"))?;
-        validate_stopped_writer_property_map(unit, &properties)?;
+        let stdout = String::from_utf8(output.stdout).with_context(|| {
+            format!(
+                "decode runtime-masked legacy migration worker {} properties",
+                mask.unit
+            )
+        })?;
+        let properties = parse_systemd_properties(
+            &stdout,
+            &format!("runtime-masked legacy migration worker {}", mask.unit),
+        )?;
+        validate_runtime_masked_writer_property_map(&mask.unit, mask, &properties)?;
+    }
+    if !list_loaded_legacy_worker_instances(systemctl)?.is_empty() {
+        bail!("a legacy migration-worker instance became loaded during fence validation");
+    }
+    if list_runtime_legacy_worker_instance_masks()? != expected {
+        bail!("legacy migration-worker runtime instance-mask set changed during validation");
+    }
+    validate_legacy_worker_mask_authorities(template, instances)
+}
+
+#[cfg(target_os = "linux")]
+fn validate_legacy_worker_activation_fence(
+    template: &WriterUnitMaskV3,
+    instances: &[WriterUnitMaskV3],
+) -> Result<()> {
+    validate_legacy_worker_activation_fence_with_systemctl(
+        trusted_systemctl_path()?,
+        template,
+        instances,
+    )
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn validate_runtime_masked_writer_units_with_systemctl(
+    systemctl: &Path,
+    units: &[String],
+    masks: &[WriterUnitMaskV3],
+) -> Result<()> {
+    validate_runtime_writer_mask_authorities(units, masks)?;
+    let mut command = std::process::Command::new(systemctl);
+    command
+        .env_clear()
+        .env("LANG", "C")
+        .args(["--system", "--no-pager", "show"])
+        .args(units)
+        .args([
+            "--property",
+            "Id",
+            "--property",
+            "LoadState",
+            "--property",
+            "UnitFileState",
+            "--property",
+            "ActiveState",
+            "--property",
+            "SubState",
+            "--property",
+            "MainPID",
+            "--property",
+            "ControlPID",
+            "--property",
+            "Job",
+            "--property",
+            "NeedDaemonReload",
+            "--property",
+            "FragmentPath",
+        ]);
+    let output = command
+        .output()
+        .context("inspect all runtime-masked writer units in one systemctl query")?;
+    if !output.status.success() {
+        bail!(
+            "systemctl could not verify the runtime-masked writer-unit set: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .context("decode batched runtime-masked writer-unit properties")?;
+    let mut unit_properties =
+        parse_systemd_unit_property_blocks(&stdout, "batched runtime-masked writer-unit output")?;
+    for (unit, mask) in units.iter().zip(masks) {
+        let properties = unit_properties
+            .remove(unit.as_str())
+            .with_context(|| format!("systemctl omitted runtime-masked writer unit {unit}"))?;
+        validate_runtime_masked_writer_property_map(unit, mask, &properties)?;
+    }
+    if !unit_properties.is_empty() {
+        bail!("systemctl returned an unrequested runtime-masked writer unit");
     }
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+pub(super) fn validate_batched_runtime_masked_final_fence_with_systemctl(
+    systemctl: &Path,
+    writer_units: &[String],
+    writer_masks: &[WriterUnitMaskV3],
+    legacy_template: &WriterUnitMaskV3,
+    legacy_instances: &[WriterUnitMaskV3],
+) -> Result<()> {
+    validate_runtime_writer_mask_authorities(writer_units, writer_masks)?;
+    validate_legacy_worker_mask_authorities(legacy_template, legacy_instances)?;
+    let expected_legacy_instances = legacy_instances
+        .iter()
+        .map(|mask| mask.unit.clone())
+        .collect::<Vec<_>>();
+    if list_runtime_legacy_worker_instance_masks()? != expected_legacy_instances {
+        bail!(
+            "legacy migration-worker authority does not exactly cover every runtime instance mask"
+        );
+    }
+
+    let mut units = writer_units.to_vec();
+    units.push(legacy_template.unit.clone());
+    units.extend(legacy_instances.iter().map(|mask| mask.unit.clone()));
+    let mut command = std::process::Command::new(systemctl);
+    command
+        .env_clear()
+        .env("LANG", "C")
+        .args(["--system", "--no-pager", "show"])
+        .args(&units)
+        .args([
+            "--property",
+            "Id",
+            "--property",
+            "LoadState",
+            "--property",
+            "UnitFileState",
+            "--property",
+            "ActiveState",
+            "--property",
+            "SubState",
+            "--property",
+            "MainPID",
+            "--property",
+            "ControlPID",
+            "--property",
+            "Job",
+            "--property",
+            "NeedDaemonReload",
+            "--property",
+            "FragmentPath",
+        ]);
+    let output = command
+        .output()
+        .context("inspect the complete runtime-masked final fence in one systemctl query")?;
+    if !output.status.success() {
+        bail!(
+            "systemctl could not verify the complete runtime-masked final fence: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .context("decode batched runtime-masked final-fence properties")?;
+    let mut unit_properties =
+        parse_systemd_unit_property_blocks(&stdout, "batched runtime-masked final-fence output")?;
+    for (unit, mask) in writer_units.iter().zip(writer_masks) {
+        let properties = unit_properties
+            .remove(unit.as_str())
+            .with_context(|| format!("systemctl omitted runtime-masked writer unit {unit}"))?;
+        validate_runtime_masked_writer_property_map(unit, mask, &properties)?;
+    }
+    for mask in std::iter::once(legacy_template).chain(legacy_instances) {
+        let properties = unit_properties
+            .remove(mask.unit.as_str())
+            .with_context(|| {
+                format!(
+                    "systemctl omitted runtime-masked legacy migration worker {}",
+                    mask.unit
+                )
+            })?;
+        validate_runtime_masked_writer_property_map(&mask.unit, mask, &properties)?;
+    }
+    if !unit_properties.is_empty() {
+        bail!("systemctl returned an unrequested runtime-masked final-fence unit");
+    }
+
+    validate_runtime_writer_mask_authorities(writer_units, writer_masks)?;
+    validate_legacy_worker_mask_authorities(legacy_template, legacy_instances)?;
+    if list_runtime_legacy_worker_instance_masks()? != expected_legacy_instances {
+        bail!("legacy migration-worker runtime instance-mask set changed during validation");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_batched_runtime_masked_final_fence(
+    writer_units: &[String],
+    writer_masks: &[WriterUnitMaskV3],
+    legacy_template: &WriterUnitMaskV3,
+    legacy_instances: &[WriterUnitMaskV3],
+) -> Result<()> {
+    validate_batched_runtime_masked_final_fence_with_systemctl(
+        trusted_systemctl_path()?,
+        writer_units,
+        writer_masks,
+        legacy_template,
+        legacy_instances,
+    )
+}
+
 #[cfg(not(target_os = "linux"))]
-fn validate_stopped_writer_units(_units: &[String]) -> Result<()> {
+fn validate_batched_runtime_masked_final_fence(
+    _writer_units: &[String],
+    _writer_masks: &[WriterUnitMaskV3],
+    _legacy_template: &WriterUnitMaskV3,
+    _legacy_instances: &[WriterUnitMaskV3],
+) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn validate_batched_runtime_masked_final_fence_with_systemctl(
+    _systemctl: &Path,
+    _writer_units: &[String],
+    _writer_masks: &[WriterUnitMaskV3],
+    _legacy_template: &WriterUnitMaskV3,
+    _legacy_instances: &[WriterUnitMaskV3],
+) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_runtime_masked_writer_units(
+    units: &[String],
+    masks: &[WriterUnitMaskV3],
+) -> Result<()> {
+    let systemctl = trusted_systemctl_path()?;
+    validate_runtime_masked_writer_units_with_systemctl(systemctl, units, masks)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_runtime_masked_writer_units(
+    _units: &[String],
+    _masks: &[WriterUnitMaskV3],
+) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_runtime_writer_mask_authorities(
+    _units: &[String],
+    _masks: &[WriterUnitMaskV3],
+) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_legacy_worker_mask_authorities(
+    _template: &WriterUnitMaskV3,
+    _instances: &[WriterUnitMaskV3],
+) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_legacy_worker_activation_fence(
+    _template: &WriterUnitMaskV3,
+    _instances: &[WriterUnitMaskV3],
+) -> Result<()> {
     Ok(())
 }
 
@@ -2252,6 +2977,14 @@ fn validate_pending_request_location(path: &Path) -> Result<PinnedDirectory> {
             "terminal Pool audit receipt already exists; create a fresh {ATTEMPT_NAMESPACE_NAME} nonce"
         );
     }
+    if attempt.entry_exists(
+        OsStr::new(SOURCE_TERMINAL_FILE_NAME),
+        "source-terminal receipt",
+    )? {
+        bail!(
+            "source-terminal receipt already exists; create a fresh {ATTEMPT_NAMESPACE_NAME} nonce"
+        );
+    }
     Ok(attempt)
 }
 
@@ -2262,10 +2995,7 @@ fn validate_attempt_namespace_ownership(namespace: &Path, attempt: &PinnedDirect
     if !namespace.file_type().is_dir() || namespace.uid() != 0 || namespace.mode() & 0o022 != 0 {
         bail!("Pool migration attempts-v3 namespace must be a root-owned non-writable directory");
     }
-    let metadata = attempt
-        .file
-        .metadata()
-        .context("inspect Pool migration attempt directory ownership")?;
+    let metadata = attempt.metadata("Pool migration attempt directory ownership")?;
     if metadata.uid() != 0
         || metadata.gid() != unsafe { libc::getegid() }
         || metadata.mode() & libc::S_ISVTX == 0
@@ -2314,6 +3044,46 @@ fn validate_launch_request_ownership(metadata: &std::fs::Metadata) -> Result<()>
 
 #[cfg(not(target_os = "linux"))]
 fn validate_launch_request_ownership(_metadata: &std::fs::Metadata) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_checkpoint_ack_ownership(metadata: &std::fs::Metadata) -> Result<()> {
+    if !metadata.file_type().is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != unsafe { libc::getegid() }
+        || metadata.mode() & 0o022 != 0
+        || metadata.mode() & 0o040 == 0
+    {
+        bail!(
+            "migration checkpoint acknowledgement must be root-owned, service-group-readable, and non-writable by group/others"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_checkpoint_ack_ownership(_metadata: &std::fs::Metadata) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_controller_terminal_cursor_ownership(metadata: &std::fs::Metadata) -> Result<()> {
+    if !metadata.file_type().is_file()
+        || metadata.uid() != 0
+        || metadata.gid() != unsafe { libc::getegid() }
+        || metadata.mode() & 0o7777 != 0o440
+        || metadata.nlink() != 1
+    {
+        bail!(
+            "controller terminal cursor must be root-owned, service-group-readable, mode 0440, and single-link"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_controller_terminal_cursor_ownership(_metadata: &std::fs::Metadata) -> Result<()> {
     Ok(())
 }
 
@@ -2404,8 +3174,8 @@ fn validate_cursor_checkpoint(
 }
 
 fn validate_cursor_value(value: &str) -> Result<()> {
-    if value == "complete" {
-        bail!("a complete migration cursor is terminal and must never be launched");
+    if matches!(value, "complete" | "source-complete") {
+        bail!("a completed migration cursor is terminal and must never be launched");
     }
     require_lower_hex("migration cursor", value, 64)?;
     let _: [u8; 32] = from_hex(value).context("decode migration cursor")?;
@@ -2413,7 +3183,7 @@ fn validate_cursor_value(value: &str) -> Result<()> {
 }
 
 fn validate_cursor_write_value(value: &str) -> Result<()> {
-    if value == "complete" {
+    if matches!(value, "complete" | "source-complete") {
         return Ok(());
     }
     validate_cursor_value(value)
@@ -2426,8 +3196,12 @@ fn replace_cursor_checkpoint(
     value: &str,
 ) -> Result<()> {
     validate_cursor_write_value(value)?;
-    if authority.value.as_deref() == Some("complete") {
-        bail!("a complete migration cursor is terminal and cannot be overwritten");
+    if authority
+        .value
+        .as_deref()
+        .is_some_and(|value| matches!(value, "complete" | "source-complete"))
+    {
+        bail!("a completed migration cursor is terminal and cannot be overwritten");
     }
     validate_cursor_checkpoint(authority, parent, name)?;
     let mut bytes = value.as_bytes().to_vec();
@@ -2507,6 +3281,7 @@ fn pin_pool_topology(
         bail!("Pool topology must pin at least one member");
     }
 
+    let topology_authority = topology.clone();
     let mut last_id: Option<String> = None;
     let mut paths = HashSet::new();
     let mut pinned = Vec::with_capacity(topology.members.len());
@@ -2602,8 +3377,17 @@ fn pin_pool_topology(
     }
     Ok(PinnedPoolTopology {
         manifest_sha256,
+        topology: topology_authority,
         members: pinned,
     })
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn validate_pool_migration_topology_authority(
+    authority: &FileAuthorityV3,
+    expected_pool_path: &Path,
+) -> Result<()> {
+    pin_pool_topology(authority, expected_pool_path).map(|_| ())
 }
 
 fn validate_marker_authority(
@@ -2768,9 +3552,9 @@ fn require_safe_component(label: &str, value: &str, max_len: usize) -> Result<()
 fn require_systemd_service_name(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 255
-        || !value.starts_with("hashtree-pool-migrate@")
+        || !value.starts_with("hashtree-pool-migration-worker@")
         || !value.ends_with(".service")
-        || value == "hashtree-pool-migrate@.service"
+        || value == "hashtree-pool-migration-worker@.service"
         || value.contains('/')
         || value == "."
         || value == ".."
@@ -2778,7 +3562,25 @@ fn require_systemd_service_name(value: &str) -> Result<()> {
             byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'_' | b'.' | b'@' | b'\\' | b'-')
         })
     {
-        bail!("request systemd unit must be an exact bounded .service unit name");
+        bail!(
+            "request systemd unit must be an exact bounded hashtree-pool-migration-worker@*.service name"
+        );
+    }
+    Ok(())
+}
+
+fn require_controller_systemd_service_name(value: &str) -> Result<()> {
+    if value.len() > 255
+        || !value.starts_with("hashtree-pool-migration-controller@")
+        || !value.ends_with(".service")
+        || value == "hashtree-pool-migration-controller@.service"
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'@' | b'.' | b'_' | b':' | b'\\' | b'-')
+        })
+    {
+        bail!(
+            "checkpoint broker unit must be an exact bounded hashtree-pool-migration-controller@*.service name"
+        );
     }
     Ok(())
 }
@@ -3054,9 +3856,9 @@ fn validate_systemd_membership(
 fn validate_systemd_fragment_authority(authority: &FileAuthorityV3) -> Result<()> {
     let fragment = canonical_regular_path(&authority.path, "systemd unit fragment")?;
     if fragment.file_name().and_then(|value| value.to_str())
-        != Some("hashtree-pool-migrate@.service")
+        != Some("hashtree-pool-migration-worker@.service")
     {
-        bail!("systemd unit fragment must be named hashtree-pool-migrate@.service");
+        bail!("systemd unit fragment must be named hashtree-pool-migration-worker@.service");
     }
     let metadata = std::fs::symlink_metadata(&fragment)
         .context("inspect systemd Pool migration unit fragment")?;
@@ -3345,6 +4147,7 @@ fn sha256_bytes(bytes: &[u8]) -> String {
 
 fn argv_sha256(argv: &[String]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"hashtree-pool-migration-argv/v3\0");
     for argument in argv {
         hasher.update((argument.len() as u64).to_be_bytes());
         hasher.update(argument.as_bytes());
@@ -3505,6 +4308,53 @@ fn current_boot_id() -> Result<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn stopped_final_batch_size_is_fixed_to_bound_checkpoint_files() {
+        validate_stopped_final_batch_size(false, 1)
+            .expect("online bounded passes may use a smaller batch");
+        validate_stopped_final_batch_size(true, MAX_FINAL_BATCH_SIZE)
+            .expect("the fixed stopped-final batch is accepted");
+        for batch_size in [1, MAX_FINAL_BATCH_SIZE - 1, MAX_FINAL_BATCH_SIZE + 1] {
+            let error = validate_stopped_final_batch_size(true, batch_size)
+                .expect_err("stopped-final batch amplification must fail closed");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&MAX_FINAL_BATCH_SIZE.to_string()),
+                "unexpected stopped-final batch error: {error:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_phase_refuses_online_without_exact_target_audit_receipt() {
+        validate_pool_migration_release_phase("final-stopped-source")
+            .expect("source-final is a supported release phase");
+        validate_pool_migration_release_phase("final-stopped-full")
+            .expect("full-final is a supported release phase");
+        let error = validate_pool_migration_release_phase("online-bounded")
+            .expect_err("online bounded must remain fail-closed");
+        assert!(
+            error
+                .to_string()
+                .contains("exact target-state audit receipt"),
+            "unexpected online-bounded error: {error:#}"
+        );
+    }
+
+    #[test]
+    fn source_read_concurrency_has_a_hard_process_cap() {
+        validate_source_read_concurrency(1).expect("one source reader is accepted");
+        validate_source_read_concurrency(MAX_FINAL_SOURCE_READ_CONCURRENCY)
+            .expect("the exact source reader cap is accepted");
+        let error = validate_source_read_concurrency(MAX_FINAL_SOURCE_READ_CONCURRENCY + 1)
+            .expect_err("one source reader above the cap must fail");
+        assert!(
+            error.to_string().contains("hard maximum"),
+            "unexpected source concurrency error: {error:#}"
+        );
+    }
+
     fn absent_cursor(path: PathBuf, parent: &PinnedDirectory) -> CursorAuthorityV3 {
         CursorAuthorityV3 {
             path,
@@ -3556,21 +4406,31 @@ mod tests {
 
     #[test]
     fn systemd_required_property_validation_fails_closed_on_missing_properties() {
+        let mask = WriterUnitMaskV3 {
+            unit: "writer.service".to_string(),
+            path: PathBuf::from("/run/systemd/system/writer.service"),
+            identity: FileIdentityV3 {
+                device: 1,
+                inode: 2,
+            },
+            target: PathBuf::from("/dev/null"),
+        };
         let stopped = parse_systemd_properties(
-            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\nJob=\n",
+            "LoadState=masked\nUnitFileState=masked-runtime\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\nJob=\nNeedDaemonReload=no\nFragmentPath=/run/systemd/system/writer.service\n",
             "test stopped writer",
         )
         .expect("parse complete stopped writer properties");
-        validate_stopped_writer_property_map("writer.service", &stopped)
+        validate_runtime_masked_writer_property_map("writer.service", &mask, &stopped)
             .expect("complete stopped writer properties");
 
         let missing_job = parse_systemd_properties(
-            "LoadState=loaded\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\n",
+            "LoadState=masked\nUnitFileState=masked-runtime\nActiveState=inactive\nSubState=dead\nMainPID=0\nControlPID=0\nNeedDaemonReload=no\nFragmentPath=/run/systemd/system/writer.service\n",
             "test stopped writer",
         )
         .expect("parse missing-Job stopped writer properties");
-        let error = validate_stopped_writer_property_map("writer.service", &missing_job)
-            .expect_err("missing Job must not prove a job-free writer");
+        let error =
+            validate_runtime_masked_writer_property_map("writer.service", &mask, &missing_job)
+                .expect_err("missing Job must not prove a job-free writer");
         assert!(error.to_string().contains("job-free"));
 
         let empty_properties =
@@ -3597,6 +4457,55 @@ mod tests {
             parse_systemd_properties("Environment=\nEnvironment=\n", "test migration unit")
                 .expect_err("duplicate properties must be rejected");
         assert!(duplicate.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn batched_systemd_unit_properties_are_exactly_partitioned_by_id() {
+        let output = concat!(
+            "Id=writer-a.service\n",
+            "LoadState=masked\n",
+            "UnitFileState=masked-runtime\n",
+            "\n",
+            "Id=writer-b.service\n",
+            "LoadState=masked\n",
+            "UnitFileState=masked-runtime\n",
+        );
+        let mut blocks = parse_systemd_unit_property_blocks(output, "test batched writers")
+            .expect("parse exact systemd unit blocks");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            blocks
+                .remove("writer-a.service")
+                .expect("writer A block")
+                .get("UnitFileState"),
+            Some(&"masked-runtime")
+        );
+        assert_eq!(
+            blocks
+                .remove("writer-b.service")
+                .expect("writer B block")
+                .get("LoadState"),
+            Some(&"masked")
+        );
+        assert!(blocks.is_empty());
+
+        let duplicate = concat!(
+            "Id=writer-a.service\n",
+            "LoadState=masked\n",
+            "\n",
+            "Id=writer-a.service\n",
+            "LoadState=masked\n",
+        );
+        let error = parse_systemd_unit_property_blocks(duplicate, "duplicate writer blocks")
+            .expect_err("duplicate unit blocks must fail closed");
+        assert!(error.to_string().contains("duplicate unit Id"));
+
+        let error = parse_systemd_unit_property_blocks(
+            "LoadState=masked\nUnitFileState=masked-runtime\n",
+            "missing writer Id",
+        )
+        .expect_err("a block without Id must fail closed");
+        assert!(error.to_string().contains("omits its exact Id"));
     }
 
     #[test]

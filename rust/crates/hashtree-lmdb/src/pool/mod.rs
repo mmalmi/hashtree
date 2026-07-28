@@ -29,6 +29,7 @@ pub use self::model::{
 };
 use self::move_catalog::{
     move_cleanup_state_key, move_state_key, rebuild_move_cleanup_member_index_txn,
+    validate_move_cleanup_member_index,
 };
 pub use self::read_only::{
     ReadOnlyPoolCatalogAudit, ReadOnlyPoolManifestMember, ReadOnlyPoolManifestSnapshot,
@@ -241,16 +242,22 @@ impl PoolStore {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
         };
-        let requested = config
-            .catalog_map_size_bytes
-            .max(existing_size.saturating_add(existing_size / 10))
-            .max(MIN_MEMBER_MAP_SIZE_BYTES);
+        let requested = if controlled {
+            config.catalog_map_size_bytes.max(MIN_MEMBER_MAP_SIZE_BYTES)
+        } else {
+            config
+                .catalog_map_size_bytes
+                .max(existing_size.saturating_add(existing_size / 10))
+                .max(MIN_MEMBER_MAP_SIZE_BYTES)
+        };
         let map_size = usize::try_from(requested)
             .map_err(|_| StoreError::Other("pool catalog map size exceeds usize".into()))?;
 
         let mut options = EnvOpenOptions::new();
+        if !controlled {
+            options.map_size(map_size);
+        }
         options
-            .map_size(map_size)
             .max_dbs(CATALOG_DATABASES)
             .max_readers(CATALOG_MAX_READERS);
         unsafe {
@@ -265,7 +272,16 @@ impl PoolStore {
         .map_err(|error| {
             StoreError::Other(format!("open pool catalog {}: {error}", path.display()))
         })?;
-        let _ = env.clear_stale_readers();
+        if controlled && env.info().map_size < map_size {
+            return Err(StoreError::Other(format!(
+                "controlled Pool catalog map is {} bytes, below its manifest-owned {} bytes; pre-size it before exact migration",
+                env.info().map_size,
+                map_size
+            )));
+        }
+        if !controlled {
+            let _ = env.clear_stale_readers();
+        }
         let (manifest_db, locations, by_member, pins, last_accessed, temperature_state) =
             if controlled {
                 let rtxn = env.read_txn().map_err(map_heed)?;
@@ -341,28 +357,25 @@ impl PoolStore {
                     temperature_state,
                 )
             };
-        if env.info().map_size < map_size {
+        if !controlled && env.info().map_size < map_size {
             unsafe { env.resize(map_size) }.map_err(map_heed)?;
         }
 
-        let mut wtxn = env.write_txn().map_err(map_heed)?;
-        if let Some(expected) = config.expected_manifest_sha256 {
-            let manifest_bytes = manifest_db
-                .get(&wtxn, MANIFEST_KEY)
-                .map_err(map_heed)?
-                .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
-            validate_controlled_manifest(manifest_bytes, expected, &member_runtime_paths)?;
-        }
-        let cleanup_rebuild_started = Instant::now();
-        let cleanup_rebuild_count =
-            rebuild_move_cleanup_member_index_txn(&temperature_state, &by_member, &mut wtxn)?;
-        let cleanup_rebuild_elapsed = cleanup_rebuild_started.elapsed();
-        wtxn.commit().map_err(map_heed)?;
-        if cleanup_rebuild_count > 0 || cleanup_rebuild_elapsed >= Duration::from_millis(10) {
-            eprintln!(
-                "Pool cleanup ownership index rebuild: entries {cleanup_rebuild_count}, elapsed {} us",
-                cleanup_rebuild_elapsed.as_micros()
-            );
+        if controlled {
+            validate_move_cleanup_member_index(&temperature_state, &by_member, &env)?;
+        } else {
+            let mut wtxn = env.write_txn().map_err(map_heed)?;
+            let cleanup_rebuild_started = Instant::now();
+            let cleanup_rebuild_count =
+                rebuild_move_cleanup_member_index_txn(&temperature_state, &by_member, &mut wtxn)?;
+            let cleanup_rebuild_elapsed = cleanup_rebuild_started.elapsed();
+            wtxn.commit().map_err(map_heed)?;
+            if cleanup_rebuild_count > 0 || cleanup_rebuild_elapsed >= Duration::from_millis(10) {
+                eprintln!(
+                    "Pool cleanup ownership index rebuild: entries {cleanup_rebuild_count}, elapsed {} us",
+                    cleanup_rebuild_elapsed.as_micros()
+                );
+            }
         }
 
         let temperature_config = config.temperature.clone();
@@ -958,6 +971,31 @@ impl PoolStore {
             .collect()
     }
 
+    /// Return the exact catalog state for one sorted source page using a
+    /// single read transaction.
+    ///
+    /// Migration reconciliation uses this to distinguish a terminal
+    /// size-matched `Stored` record from `Missing`, crash-left `Pending`, and
+    /// non-terminal `Moving` without loading target payload bytes.
+    pub fn catalog_locations_in_sorted_candidates(
+        &self,
+        sorted_hashes: &[Hash],
+    ) -> Result<Vec<PoolCatalogLocation>, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        sorted_hashes
+            .iter()
+            .map(|hash| {
+                let record = self
+                    .locations
+                    .get(&rtxn, hash)
+                    .map_err(map_heed)?
+                    .map(LocationRecord::decode)
+                    .transpose()?;
+                Ok(PoolCatalogLocation::from_record(record))
+            })
+            .collect()
+    }
+
     /// Largest map size among members that are available in this process.
     ///
     /// The pool catalog is a separate LMDB environment and is intentionally
@@ -1496,6 +1534,47 @@ impl PoolStore {
             .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
         for store in runtime.stores.values() {
             store.force_sync()?;
+        }
+        Ok(())
+    }
+
+    /// Exhaustively prove every controlled member's physical indexes and
+    /// persisted aggregate counters before the first migration mutation.
+    ///
+    /// Controlled reopen performs only constant-time structural checks so
+    /// bounded mapping epochs do not rescan the complete target. The caller
+    /// must hold the external writer fence while this one full proof runs and
+    /// must keep that fence held until migration completion.
+    pub fn validate_controlled_member_state_exact(&self) -> Result<(), StoreError> {
+        if self.expected_manifest_sha256.is_none() {
+            return Err(StoreError::Other(
+                "exact controlled member validation requires an exact manifest SHA-256".into(),
+            ));
+        }
+        self.refresh_members()?;
+        let manifest = self.read_manifest()?;
+        let runtime = self
+            .runtime
+            .read()
+            .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
+        if runtime.stores.len() != manifest.members.len() {
+            return Err(StoreError::Other(
+                "not every authority-pinned Pool member is open for exact validation".into(),
+            ));
+        }
+        for member in manifest.members {
+            let store = runtime.stores.get(&member.id).ok_or_else(|| {
+                StoreError::Other(format!(
+                    "controlled Pool member {} is unavailable for exact validation",
+                    member.id
+                ))
+            })?;
+            store.validate_exact_member_state().map_err(|error| {
+                StoreError::Other(format!(
+                    "controlled Pool member {} failed exact state validation: {error}",
+                    member.id
+                ))
+            })?;
         }
         Ok(())
     }

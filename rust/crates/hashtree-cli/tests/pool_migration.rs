@@ -3,8 +3,8 @@ mod common;
 use common::htree_bin;
 use hashtree_core::{sha256, to_hex};
 use hashtree_lmdb::{
-    ExternalBlobOptions, LmdbBlobStore, PoolMemberConfig, PoolStore, PoolStoreConfig,
-    PoolStoreReader, SHARED_BLOB_POOL_DIR_NAME,
+    migrate_lmdb_batch, ExternalBlobOptions, LmdbBlobReader, LmdbBlobStore, PoolMemberConfig,
+    PoolStore, PoolStoreConfig, PoolStoreReader, SHARED_BLOB_POOL_DIR_NAME,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -30,6 +30,66 @@ const TEST_INVOCATION_ID: &str = "0123456789abcdef0123456789abcdef";
 const TEST_NONCE: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 #[cfg(target_os = "linux")]
 static SYSTEM_MANAGER_TEST: Mutex<()> = Mutex::new(());
+#[cfg(target_os = "linux")]
+static CONTROLLER_UNIT_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+#[test]
+fn migration_includes_a_real_first_byte_zero_hash_and_crosses_its_cursor_boundary() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let source_path = temp.path().join("source-first-byte-zero");
+    let source = LmdbBlobStore::with_map_size(&source_path, 64 * 1024 * 1024)
+        .expect("open real source LMDB");
+    let first = (0u64..)
+        .map(|counter| {
+            let mut bytes = b"generated Pool migration range-boundary event ".to_vec();
+            bytes.extend_from_slice(&counter.to_be_bytes());
+            (sha256(&bytes), bytes)
+        })
+        .find(|(hash, _)| hash[0] == 0)
+        .expect("find generated first-byte-00 hash");
+    let later = (0u64..)
+        .map(|counter| {
+            let mut bytes = b"generated Pool migration later event ".to_vec();
+            bytes.extend_from_slice(&counter.to_be_bytes());
+            (sha256(&bytes), bytes)
+        })
+        .find(|(hash, _)| hash[0] >= 0x80)
+        .expect("find generated later hash");
+    assert_eq!(
+        source
+            .put_many_sync(&[first.clone(), later.clone()])
+            .unwrap(),
+        2
+    );
+    source.force_sync().expect("sync real source LMDB");
+    drop(source);
+
+    let target = PoolStore::open(
+        temp.path().join("target-catalog"),
+        PoolStoreConfig::default(),
+    )
+    .expect("open real target Pool");
+    target
+        .add_member(PoolMemberConfig::new(
+            temp.path().join("target-member"),
+            64 * 1024 * 1024,
+        ))
+        .expect("add real target member");
+    let reader = LmdbBlobReader::open(&source_path, None).expect("open real source reader");
+
+    let first_page =
+        migrate_lmdb_batch(&reader, &target, None, 1).expect("migrate initial range page");
+    assert_eq!(first_page.last_hash, Some(first.0));
+    assert_eq!(first_page.inserted, 1);
+    assert_eq!(target.get_sync(&first.0).unwrap(), Some(first.1));
+
+    let second_page = migrate_lmdb_batch(&reader, &target, first_page.last_hash, 1)
+        .expect("migrate range page after first-byte-00 cursor");
+    assert_eq!(second_page.last_hash, Some(later.0));
+    assert_eq!(second_page.inserted, 1);
+    assert_eq!(target.get_sync(&later.0).unwrap(), Some(later.1));
+}
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 struct MigrationScenario {
@@ -145,6 +205,8 @@ impl MigrationScenario {
             "sourceWriterProcessesWithOpenHandles": 0,
             "targetWriterProcessesWithOpenHandles": 0,
             "stoppedWriterUnits": ["hashtree-pool-writer-placeholder.service"],
+            "writerUnitMasks": [],
+            "sourceTerminalReceiptSha256": [],
         });
         let source_baseline = rollout.join("source-baseline.txt");
         write_file(&source_baseline, b"generated source baseline\n");
@@ -175,7 +237,7 @@ impl MigrationScenario {
             .expect("serialize generated controller state");
         controller_state_bytes.push(b'\n');
         write_file(&controller_state, &controller_state_bytes);
-        let systemd_fragment = rollout.join("hashtree-pool-migrate@.service");
+        let systemd_fragment = rollout.join("hashtree-pool-migration-worker@.service");
         write_file(&systemd_fragment, b"[Service]\nType=oneshot\nRestart=no\n");
         let systemd_environment_file = rollout.join("pool-migrate-generated.env");
         write_file(
@@ -229,7 +291,7 @@ impl MigrationScenario {
             "nonce": TEST_NONCE,
             "bootId": current_boot_id(),
             "systemdInvocationId": TEST_INVOCATION_ID,
-            "systemdUnit": "hashtree-pool-migrate@generated-test.service",
+            "systemdUnit": "hashtree-pool-migration-worker@generated-test.service",
             "systemdManager": "system",
             "systemdFragment": file_authority(&systemd_fragment),
             "systemdEnvironmentFile": file_authority(&systemd_environment_file),
@@ -354,11 +416,18 @@ impl MigrationScenario {
             "hashtree-pool-migrate@process-test-{}-{sequence}.service",
             std::process::id()
         );
-        let writer_unit = format!(
-            "hashtree-pool-writer-fence-test-{}-{sequence}.service",
+        let writer_template_name = format!(
+            "hashtree-pool-writer-fence-test-{}-{sequence}@.service",
             std::process::id()
         );
-        let writer_fragment = PathBuf::from(format!("/run/systemd/system/{writer_unit}"));
+        let writer_unit = format!(
+            "hashtree-pool-writer-fence-test-{}-{sequence}@migration.service",
+            std::process::id()
+        );
+        let writer_fragment = PathBuf::from(format!("/run/systemd/system/{writer_template_name}"));
+        let writer_mask = PathBuf::from(format!("/run/systemd/system/{writer_unit}"));
+        let final_phase = self.request_template["controller"]["phase"]
+            == Value::String("final-stopped-full".into());
         let runtime_stem = format!(
             "/run/hashtree-pool-migration-v3-test-{}-{sequence}",
             std::process::id()
@@ -401,6 +470,7 @@ impl MigrationScenario {
             unit: unit.clone(),
             fragment: fragment.clone(),
             writer_fragment: writer_fragment.clone(),
+            writer_mask: final_phase.then_some(writer_mask.clone()),
             controller_state: PathBuf::from(
                 self.request_template["controller"]["state"]["path"]
                     .as_str()
@@ -494,6 +564,21 @@ impl MigrationScenario {
         .expect("parse generated controller state");
         controller_state["stoppedWriterUnits"] =
             Value::Array(vec![Value::String(writer_unit.clone())]);
+        if final_phase {
+            sudo_success(&[
+                "/usr/bin/ln",
+                "-s",
+                "/dev/null",
+                writer_mask.to_str().expect("UTF-8 writer mask"),
+            ]);
+            sudo_success(&["/usr/bin/systemctl", "--system", "daemon-reload"]);
+            controller_state["writerUnitMasks"] = Value::Array(vec![json!({
+                "unit": writer_unit,
+                "path": writer_mask,
+                "identity": symlink_identity(&writer_mask),
+                "target": "/dev/null",
+            })]);
+        }
         let mut controller_state_bytes =
             serde_json::to_vec(&controller_state).expect("serialize controller state");
         controller_state_bytes.push(b'\n');
@@ -1327,6 +1412,413 @@ fn migration_launch_is_bound_to_a_real_systemd_invocation() {
 }
 
 #[cfg(target_os = "linux")]
+#[test]
+#[ignore = "release gate: requires passwordless sudo and system systemd"]
+fn root_v3_controller_preflight_is_non_mutating_then_launches_the_real_worker() {
+    let _serialized = SYSTEM_MANAGER_TEST
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scenario = MigrationScenario::generated(Some(1));
+    let (guard, controller_args) = prepare_root_controller_systemd(&scenario);
+    let pool_data = scenario.pool_path.join("data.mdb");
+    let source_data = scenario.source_dir.join("data.mdb");
+    let pool_before = file_snapshot(&pool_data);
+    let source_before = file_snapshot(&source_data);
+    let rollout_before = authority_tree_snapshot(&guard.rollout);
+
+    let preflight = run_root_controller(&guard.installed_binary, &controller_args, true);
+    assert_success(&preflight);
+    let preflight_json: Value =
+        serde_json::from_slice(&preflight.stdout).expect("parse controller preflight JSON");
+    assert_eq!(preflight_json["status"], "ok");
+    assert_eq!(preflight_json["mutation"], false);
+    assert!(
+        !guard.installed_environment.exists(),
+        "preflight created the systemd environment file"
+    );
+    assert_eq!(
+        authority_tree_snapshot(&guard.rollout),
+        rollout_before,
+        "preflight mutated the rollout authority tree"
+    );
+    assert_eq!(file_snapshot(&pool_data), pool_before);
+    assert_eq!(file_snapshot(&source_data), source_before);
+    assert_eq!(
+        systemd_property(&guard.unit, "InvocationID"),
+        "",
+        "preflight started the systemd unit"
+    );
+
+    let launched = run_root_controller(&guard.installed_binary, &controller_args, false);
+    assert_success(&launched);
+    let result: Value =
+        serde_json::from_slice(&launched.stdout).expect("parse controller result JSON");
+    assert_eq!(result["status"], "acknowledged");
+    let request = PathBuf::from(result["requestPath"].as_str().expect("request path"));
+    let ack = PathBuf::from(result["ackPath"].as_str().expect("ack path"));
+    assert!(request.is_file(), "controller request is not durable");
+    assert!(ack.is_file(), "worker acknowledgement is not durable");
+    assert_eq!(
+        file_sha256(&request),
+        result["requestSha256"].as_str().expect("request SHA-256")
+    );
+    assert_eq!(
+        file_sha256(&ack),
+        result["ackSha256"].as_str().expect("ack SHA-256")
+    );
+    let worker_exit_status = wait_for_systemd_terminal(&guard.unit);
+    let worker_stdout = sudo_read_to_string(&guard.stdout_path);
+    let worker_stderr = sudo_read_to_string(&guard.stderr_path);
+    assert_eq!(
+        worker_exit_status, 0,
+        "controller-launched worker failed\nstdout:\n{}\nstderr:\n{}",
+        worker_stdout, worker_stderr
+    );
+    assert_eq!(scenario.pool_count(), 1);
+}
+
+#[cfg(target_os = "linux")]
+struct RootControllerSystemdGuard {
+    unit: String,
+    fragment: PathBuf,
+    installed_binary: PathBuf,
+    installed_environment: PathBuf,
+    stdout_path: PathBuf,
+    stderr_path: PathBuf,
+    rollout: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for RootControllerSystemdGuard {
+    fn drop(&mut self) {
+        sudo_best_effort(&["/usr/bin/systemctl", "--system", "stop", &self.unit]);
+        sudo_best_effort(&["/usr/bin/systemctl", "--system", "reset-failed", &self.unit]);
+        for path in [
+            &self.fragment,
+            &self.installed_binary,
+            &self.installed_environment,
+            &self.stdout_path,
+            &self.stderr_path,
+        ] {
+            sudo_best_effort(&[
+                "/usr/bin/rm",
+                "-f",
+                "--",
+                path.to_str().expect("UTF-8 generated controller path"),
+            ]);
+        }
+        sudo_best_effort(&["/usr/bin/systemctl", "--system", "daemon-reload"]);
+        restore_test_tree_ownership(&self.rollout);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_root_controller_systemd(
+    scenario: &MigrationScenario,
+) -> (RootControllerSystemdGuard, Vec<String>) {
+    let sequence = CONTROLLER_UNIT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let unit = format!(
+        "hashtree-pool-migrate@controller-test-{}-{sequence}.service",
+        std::process::id()
+    );
+    let runtime_stem = format!(
+        "/run/hashtree-pool-controller-test-{}-{sequence}",
+        std::process::id()
+    );
+    let fragment = PathBuf::from("/run/systemd/system/hashtree-pool-migrate@.service");
+    assert!(
+        !fragment.exists(),
+        "refusing to overwrite pre-existing migration template {}",
+        fragment.display()
+    );
+    let installed_binary = PathBuf::from(format!("{runtime_stem}-htree"));
+    let installed_environment = PathBuf::from(format!("{runtime_stem}.env"));
+    let stdout_path = PathBuf::from(format!("{runtime_stem}.stdout"));
+    let stderr_path = PathBuf::from(format!("{runtime_stem}.stderr"));
+    for path in [
+        &installed_binary,
+        &installed_environment,
+        &stdout_path,
+        &stderr_path,
+    ] {
+        assert!(
+            !path.exists(),
+            "refusing to overwrite generated controller path {}",
+            path.display()
+        );
+    }
+
+    let rollout = scenario
+        .request
+        .parent()
+        .expect("attempt")
+        .parent()
+        .expect("attempt namespace")
+        .parent()
+        .expect("rollout")
+        .to_path_buf();
+    let local_fragment = rollout.join("generated-root-controller-template.service");
+    let template = format!(
+        "[Unit]\nDescription=Generated root Pool migration v3 controller integration\n\n\
+[Service]\nType=oneshot\nUser={}\nGroup={}\nEnvironmentFile={}\n\
+ExecStart={} --data-dir ${{HTREE_POOL_TARGET_DATA_DIR}} storage pool migrate-lmdb --launch-request ${{HTREE_POOL_LAUNCH_REQUEST}} --launch-request-wait-seconds ${{HTREE_POOL_LAUNCH_WAIT_SECONDS}} --source ${{HTREE_POOL_SOURCE_LMDB_DIR}} $HTREE_POOL_SOURCE_EXTERNAL_ARGS --state-file ${{HTREE_POOL_STATE_FILE}} --batch-size ${{HTREE_POOL_BATCH_SIZE}} --max-buffer-mib ${{HTREE_POOL_MAX_BUFFER_MIB}} --source-read-concurrency ${{HTREE_POOL_SOURCE_READ_CONCURRENCY}} --reopen-batches ${{HTREE_POOL_REOPEN_BATCHES}} $HTREE_POOL_LIMIT_ARGS --resume\n\
+Restart=no\nTimeoutStartSec=infinity\nNoNewPrivileges=true\nPrivateNetwork=true\n\
+UnsetEnvironment=LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH HTREE_LMDB_NO_SYNC HTREE_LMDB_NO_META_SYNC\n\
+UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
+        unsafe { libc::geteuid() },
+        unsafe { libc::getegid() },
+        installed_environment.display(),
+        installed_binary.display(),
+        stdout_path.display(),
+        stderr_path.display(),
+    );
+    write_file(&local_fragment, template.as_bytes());
+    sudo_success(&[
+        "/usr/bin/install",
+        "-s",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        "-m",
+        "0555",
+        &scenario.args[0],
+        installed_binary.to_str().expect("UTF-8 installed binary"),
+    ]);
+    sudo_success(&[
+        "/usr/bin/install",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        "-m",
+        "0644",
+        local_fragment.to_str().expect("UTF-8 local fragment"),
+        fragment.to_str().expect("UTF-8 installed fragment"),
+    ]);
+
+    let controller_state = PathBuf::from(
+        scenario.request_template["controller"]["state"]["path"]
+            .as_str()
+            .expect("controller-state input"),
+    );
+    let source_baseline = PathBuf::from(
+        scenario.request_template["source"]["baseline"]["path"]
+            .as_str()
+            .expect("source-baseline input"),
+    );
+    let safety_cas = PathBuf::from(
+        scenario.request_template["cas"][0]["path"]
+            .as_str()
+            .expect("additional safety CAS"),
+    );
+    let source_external = PathBuf::from(
+        scenario.request_template["source"]["externalPath"]
+            .as_str()
+            .expect("source external path"),
+    );
+    let group = unsafe { libc::getegid() }.to_string();
+    sudo_success(&[
+        "/usr/bin/chown",
+        "-R",
+        "root:root",
+        rollout.to_str().expect("UTF-8 rollout"),
+    ]);
+    sudo_success(&[
+        "/usr/bin/chmod",
+        "0755",
+        rollout.to_str().expect("UTF-8 rollout"),
+    ]);
+    sudo_success(&[
+        "/usr/bin/chmod",
+        "0755",
+        scenario
+            .request
+            .parent()
+            .expect("attempt")
+            .parent()
+            .expect("attempt namespace")
+            .to_str()
+            .expect("UTF-8 attempt namespace"),
+    ]);
+    sudo_success(&[
+        "/usr/bin/chmod",
+        "0555",
+        rollout
+            .join("controller.sh")
+            .to_str()
+            .expect("UTF-8 generated controller"),
+    ]);
+    for path in [
+        &controller_state,
+        &source_baseline,
+        &scenario.pool_topology,
+        &safety_cas,
+    ] {
+        sudo_success(&[
+            "/usr/bin/chown",
+            &format!("root:{group}"),
+            path.to_str().expect("UTF-8 controller evidence"),
+        ]);
+        sudo_success(&[
+            "/usr/bin/chmod",
+            "0440",
+            path.to_str().expect("UTF-8 controller evidence"),
+        ]);
+    }
+    sudo_success(&["/usr/bin/systemctl", "--system", "daemon-reload"]);
+
+    let target_data = scenario.pool_path.parent().expect("target data directory");
+    let arguments = vec![
+        "storage".to_string(),
+        "pool".to_string(),
+        "launch-migrate-lmdb-v3".to_string(),
+        "--rollout-dir".to_string(),
+        rollout.display().to_string(),
+        "--rollout-id".to_string(),
+        "rollout-v3-test".to_string(),
+        "--phase".to_string(),
+        "online-bounded".to_string(),
+        "--controller-executable".to_string(),
+        installed_binary.display().to_string(),
+        "--controller-state-input".to_string(),
+        controller_state.display().to_string(),
+        "--source-baseline-input".to_string(),
+        source_baseline.display().to_string(),
+        "--pool-topology-input".to_string(),
+        scenario.pool_topology.display().to_string(),
+        "--cas".to_string(),
+        format!("generated-safety-authority={}", safety_cas.display()),
+        "--systemd-unit".to_string(),
+        unit.clone(),
+        "--systemctl".to_string(),
+        "/usr/bin/systemctl".to_string(),
+        "--systemd-fragment".to_string(),
+        fragment.display().to_string(),
+        "--systemd-environment-file".to_string(),
+        installed_environment.display().to_string(),
+        "--service-gid".to_string(),
+        group,
+        "--migration-binary".to_string(),
+        installed_binary.display().to_string(),
+        "--target-data-dir".to_string(),
+        target_data.display().to_string(),
+        "--pool".to_string(),
+        scenario.pool_path.display().to_string(),
+        "--source".to_string(),
+        scenario.source_dir.display().to_string(),
+        "--source-external-dir".to_string(),
+        source_external.display().to_string(),
+        "--state-file".to_string(),
+        scenario.cursor.display().to_string(),
+        "--batch-size".to_string(),
+        "1".to_string(),
+        "--max-buffer-mib".to_string(),
+        "64".to_string(),
+        "--source-read-concurrency".to_string(),
+        "4".to_string(),
+        "--reopen-batches".to_string(),
+        "2".to_string(),
+        "--max-items".to_string(),
+        "1".to_string(),
+        "--launch-request-wait-seconds".to_string(),
+        "30".to_string(),
+        "--acknowledgement-wait-seconds".to_string(),
+        "30".to_string(),
+    ];
+    (
+        RootControllerSystemdGuard {
+            unit,
+            fragment,
+            installed_binary,
+            installed_environment,
+            stdout_path,
+            stderr_path,
+            rollout,
+        },
+        arguments,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn run_root_controller(binary: &Path, arguments: &[String], preflight: bool) -> Output {
+    let mut command = Command::new("/usr/bin/sudo");
+    command.arg("-n").arg("/usr/bin/env");
+    for variable in [
+        "LD_PRELOAD",
+        "LD_AUDIT",
+        "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "HTREE_LMDB_NO_SYNC",
+        "HTREE_LMDB_NO_META_SYNC",
+    ] {
+        command.arg("-u").arg(variable);
+    }
+    command.arg(binary).args(arguments);
+    if preflight {
+        command.arg("--preflight");
+    }
+    command
+        .output()
+        .expect("run root Pool migration controller")
+}
+
+#[cfg(target_os = "linux")]
+fn authority_tree_snapshot(root: &Path) -> Vec<(PathBuf, u32, u64, String)> {
+    let mut snapshot = walkdir::WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .map(|entry| entry.expect("walk authority tree"))
+        .filter(|entry| entry.path() != root)
+        .map(|entry| {
+            let path = entry.path();
+            let relative = path.strip_prefix(root).expect("relative authority path");
+            let metadata = fs::symlink_metadata(path).expect("authority metadata");
+            let digest = if metadata.file_type().is_file() {
+                file_sha256(path)
+            } else if metadata.file_type().is_dir() {
+                "directory".to_string()
+            } else {
+                "other".to_string()
+            };
+            (
+                relative.to_path_buf(),
+                metadata.mode(),
+                metadata.len(),
+                digest,
+            )
+        })
+        .collect::<Vec<_>>();
+    snapshot.sort_by(|left, right| left.0.cmp(&right.0));
+    snapshot
+}
+
+#[cfg(target_os = "linux")]
+fn systemd_property(unit: &str, property: &str) -> String {
+    let output = Command::new("/usr/bin/systemctl")
+        .args([
+            "--system",
+            "--no-pager",
+            "show",
+            unit,
+            &format!("--property={property}"),
+            "--value",
+        ])
+        .output()
+        .expect("query systemd property");
+    assert!(
+        output.status.success(),
+        "systemctl property query failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 systemd property")
+        .trim()
+        .to_string()
+}
+
+#[cfg(target_os = "linux")]
 fn assert_success(output: &Output) {
     assert!(
         output.status.success(),
@@ -1480,6 +1972,7 @@ struct SystemManagerTestGuard {
     unit: String,
     fragment: PathBuf,
     writer_fragment: PathBuf,
+    writer_mask: Option<PathBuf>,
     controller_state: PathBuf,
     installed_binary: PathBuf,
     installed_environment: PathBuf,
@@ -1506,6 +1999,14 @@ impl Drop for SystemManagerTestGuard {
                 "-f",
                 "--",
                 path.to_str().expect("UTF-8 generated systemd test path"),
+            ]);
+        }
+        if let Some(path) = &self.writer_mask {
+            sudo_best_effort(&[
+                "/usr/bin/rm",
+                "-f",
+                "--",
+                path.to_str().expect("UTF-8 generated writer-mask path"),
             ]);
         }
         sudo_best_effort(&["/usr/bin/systemctl", "--system", "daemon-reload"]);
@@ -1561,6 +2062,28 @@ fn sudo_best_effort(arguments: &[&str]) {
 }
 
 #[cfg(target_os = "linux")]
+fn sudo_read_to_string(path: &Path) -> String {
+    let output = Command::new("/usr/bin/sudo")
+        .args([
+            "-n",
+            "/usr/bin/cat",
+            "--",
+            path.to_str().expect("UTF-8 generated systemd log path"),
+        ])
+        .output()
+        .expect("read generated systemd log as root");
+    if output.status.success() {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    } else {
+        format!(
+            "unable to read {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn systemd_quote(value: &str) -> String {
     assert!(
         !value.contains('\n') && !value.contains('\r'),
@@ -1586,6 +2109,21 @@ fn file_authority(path: &Path) -> Value {
 fn file_identity(path: &Path) -> Value {
     let metadata = fs::metadata(path)
         .unwrap_or_else(|error| panic!("inspect identity {}: {error}", path.display()));
+    json!({
+        "device": metadata.dev(),
+        "inode": metadata.ino(),
+    })
+}
+
+#[cfg(unix)]
+fn symlink_identity(path: &Path) -> Value {
+    let metadata = fs::symlink_metadata(path)
+        .unwrap_or_else(|error| panic!("inspect symlink identity {}: {error}", path.display()));
+    assert!(
+        metadata.file_type().is_symlink(),
+        "{} is not a generated symlink authority",
+        path.display()
+    );
     json!({
         "device": metadata.dev(),
         "inode": metadata.ino(),

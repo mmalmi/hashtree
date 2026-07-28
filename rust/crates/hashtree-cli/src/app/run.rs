@@ -11,6 +11,7 @@ use hashtree_cli::{
 use hashtree_core::{
     from_hex, nhash_decode, Cid, HashTree, HashTreeConfig, HashTreeError, NHashData,
 };
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::future::Future;
 use std::io::{IsTerminal, Write};
@@ -21,8 +22,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::add::{run_add, AddOptions};
 use super::args::{
-    Cli, Commands, MirrorCommands, NostrIndexCommands, PoolCommands, PrCommands, PwaCommands,
-    ReleaseCommands, SocialGraphCommands, SocialGraphIndexArgs, StorageCommands,
+    Cli, Commands, MirrorCommands, NostrIndexCommands, PoolCommands, PoolMigrationControllerArgs,
+    PrCommands, PwaCommands, ReleaseCommands, SocialGraphCommands, SocialGraphIndexArgs,
+    StorageCommands,
 };
 use super::blossom::push_to_blossom;
 use super::cashu_delegate::run_cashu_helper;
@@ -49,9 +51,20 @@ use super::nostr_index::{
     SocialGraphIndexOptions,
 };
 use super::peers::list_peers;
+use super::pool_migration_controller::{
+    run_pool_migration_controller, PoolMigrationControllerOptions,
+};
+use super::pool_migration_evidence::SourceEvidenceUnionReaderV3;
 #[cfg(test)]
 use super::pool_migration_launch::write_durable_pool_migration_cursor;
-use super::pool_migration_launch::{acknowledge_pool_migration_launch, PoolMigrationLaunchContext};
+use super::pool_migration_launch::{
+    acknowledge_pool_migration_launch, validate_source_read_concurrency,
+    validate_stopped_final_batch_size, PoolMigrationLaunchContext, PoolMigrationSourceUnionAuditV3,
+    MAX_FINAL_REOPEN_BATCHES,
+};
+use super::pool_migration_receipt::{
+    validate_frozen_source_generation, PoolMigrationSourceTerminalReceiptV3, SourceContentAuditV3,
+};
 use super::pwa::run_export;
 use super::release::publish_release_version;
 use super::resolve::{
@@ -312,7 +325,7 @@ pub(crate) fn should_spawn_background_update(cli: &Cli) -> bool {
         &cli.command,
         Commands::Storage {
             command: StorageCommands::Pool {
-                command: PoolCommands::MigrateLmdb { .. },
+                command: PoolCommands::MigrateLmdb { .. } | PoolCommands::LaunchMigrateLmdbV3(_),
             },
         }
     )
@@ -1800,6 +1813,77 @@ pub(crate) async fn run() -> Result<()> {
             // before any config read/create path.
             let command = match command {
                 StorageCommands::Pool {
+                    command: PoolCommands::LaunchMigrateLmdbV3(arguments),
+                } => {
+                    let PoolMigrationControllerArgs {
+                        preflight,
+                        rollout_dir,
+                        rollout_id,
+                        phase,
+                        controller_executable,
+                        controller_systemd_unit,
+                        controller_systemd_fragment,
+                        controller_systemd_environment_file,
+                        controller_state_input,
+                        source_baseline_input,
+                        pool_topology_input,
+                        additional_cas,
+                        writer_units,
+                        systemd_unit,
+                        systemctl,
+                        systemd_fragment,
+                        systemd_environment_file,
+                        service_gid,
+                        migration_binary,
+                        target_data_dir,
+                        pool,
+                        source,
+                        source_external_dir,
+                        state_file,
+                        batch_size,
+                        max_buffer_mib,
+                        source_read_concurrency,
+                        reopen_batches,
+                        max_items,
+                        launch_request_wait_seconds,
+                        acknowledgement_wait_seconds,
+                    } = *arguments;
+                    run_pool_migration_controller(PoolMigrationControllerOptions {
+                        preflight,
+                        rollout_dir,
+                        rollout_id,
+                        phase,
+                        controller_executable,
+                        controller_systemd_unit,
+                        controller_systemd_fragment,
+                        controller_systemd_environment_file,
+                        controller_state_input,
+                        source_baseline_input,
+                        pool_topology_input,
+                        additional_cas,
+                        writer_units,
+                        systemd_unit,
+                        systemctl,
+                        systemd_fragment,
+                        systemd_environment_file,
+                        service_gid,
+                        migration_binary,
+                        target_data_dir,
+                        pool,
+                        source,
+                        source_external_dir,
+                        state_file,
+                        batch_size,
+                        max_buffer_mib,
+                        source_read_concurrency,
+                        reopen_batches,
+                        max_items,
+                        launch_request_wait: Duration::from_secs(launch_request_wait_seconds),
+                        acknowledgement_wait: Duration::from_secs(acknowledgement_wait_seconds),
+                    })?;
+                    return Ok(());
+                }
+                StorageCommands::Pool {
                     command: command @ PoolCommands::MigrateLmdb { .. },
                 } => {
                     let data_dir = cli.data_dir.clone().context(
@@ -2419,8 +2503,9 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 resume,
             } => {
                 use hashtree_lmdb::{
-                    migrate_lmdb_batch_with_max_buffer_bytes, ExternalBlobOptions, LmdbBlobReader,
-                    PoolStoreReader,
+                    migrate_lmdb_batch_with_max_buffer_bytes_and_authorizer,
+                    reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer,
+                    ExternalBlobOptions, LmdbBlobReader,
                 };
 
                 if batch_size == 0
@@ -2433,6 +2518,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         "migration batch size, max buffer MiB, source read concurrency, reopen batches, and max items must be non-zero"
                     );
                 }
+                validate_source_read_concurrency(source_read_concurrency)?;
                 let max_buffer_bytes = max_buffer_mib
                     .checked_mul(1024 * 1024)
                     .and_then(|bytes| usize::try_from(bytes).ok())
@@ -2450,13 +2536,41 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                     max_items,
                     request_wait: Duration::from_secs(launch_request_wait_seconds),
                 })?;
+                if launch.final_stopped_pass && reopen_batches > MAX_FINAL_REOPEN_BATCHES {
+                    bail!(
+                        "stopped final migration requires --reopen-batches <= {MAX_FINAL_REOPEN_BATCHES} for bounded fence revalidation"
+                    );
+                }
+                validate_stopped_final_batch_size(launch.final_stopped_pass, batch_size)?;
+                if launch.final_stopped_source_pass {
+                    run_final_stopped_source_audit(
+                        &launch,
+                        batch_size,
+                        max_buffer_bytes,
+                        source_read_concurrency,
+                        reopen_batches,
+                    )?;
+                    println!("Cursor: {}", state_file.display());
+                    return Ok(());
+                }
+                if launch.final_stopped_full_pass {
+                    run_final_stopped_full_reconciliation(
+                        &launch,
+                        batch_size,
+                        max_buffer_bytes,
+                        source_read_concurrency,
+                        reopen_batches,
+                    )?;
+                    println!("Cursor: {}", state_file.display());
+                    return Ok(());
+                }
                 let mut cursor = launch.cursor;
                 let mut verified = 0usize;
                 let mut scanned = 0usize;
                 let mut already_present = 0usize;
                 let mut inserted = 0usize;
                 let mut inserted_bytes = 0u64;
-                let mut completed = false;
+                let completed = false;
                 'mapping_epochs: loop {
                     if max_items.is_some_and(|maximum| scanned >= maximum) {
                         break;
@@ -2506,52 +2620,42 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                             break 'mapping_epochs;
                         }
                         let limit = batch_size.min(remaining);
-                        let batch = migrate_lmdb_batch_with_max_buffer_bytes(
-                            &reader,
-                            &pool,
-                            cursor,
-                            limit,
-                            max_buffer_bytes,
-                        )?;
+                        launch.ensure_final_writer_masks()?;
+                        let mut authorize_target_write = |batch_cursor, write_count| {
+                            launch
+                                .authorize_checkpoint(
+                                    "migration-batch",
+                                    batch_cursor,
+                                    Some(write_count),
+                                )
+                                .map_err(|error| {
+                                    hashtree_core::store::StoreError::Other(format!(
+                                        "root checkpoint rejected target mutation: {error:#}"
+                                    ))
+                                })
+                        };
+                        let batch = if launch.final_stopped_full_pass {
+                            reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer(
+                                &reader,
+                                &pool,
+                                cursor,
+                                limit,
+                                max_buffer_bytes,
+                                &mut authorize_target_write,
+                            )?
+                        } else {
+                            migrate_lmdb_batch_with_max_buffer_bytes_and_authorizer(
+                                &reader,
+                                &pool,
+                                cursor,
+                                limit,
+                                max_buffer_bytes,
+                                &mut authorize_target_write,
+                            )?
+                        };
+                        launch.ensure_checkpoint_broker_alive()?;
+                        launch.ensure_final_writer_masks()?;
                         if batch.source_exhausted {
-                            if !launch.final_stopped_full_pass {
-                                break 'mapping_epochs;
-                            }
-                            let source_audit = reader.validate_terminal_migration_keyset()?;
-                            pool.validate_controlled_authority_and_sync()?;
-                            drop(reader);
-                            drop(pool);
-                            launch.ensure_store_paths()?;
-                            launch.ensure_final_writer_fence()?;
-                            let terminal_reader =
-                                PoolStoreReader::open(launch.pool(), pool_config)?;
-                            let terminal_audit =
-                                terminal_reader.validate_terminal_catalog_and_payloads()?;
-                            if terminal_audit.manifest_sha256 != launch.pool_manifest_sha256() {
-                                bail!("terminal Pool audit manifest differs from launch authority");
-                            }
-                            drop(terminal_reader);
-                            launch.ensure_store_paths()?;
-                            launch.ensure_final_writer_fence()?;
-                            launch.write_terminal_audit_receipt(&source_audit, &terminal_audit)?;
-                            launch.ensure_store_paths()?;
-                            launch.ensure_final_writer_fence()?;
-                            launch.write_cursor("complete")?;
-                            println!(
-                                "Terminal source audit: {} blob keys / {} metadata keys (legacy blob-only: {}), keyset {}",
-                                source_audit.blob_entries,
-                                source_audit.metadata_entries,
-                                source_audit.legacy_blob_only,
-                                hashtree_core::to_hex(&source_audit.sha256),
-                            );
-                            println!(
-                                "Terminal Pool audit: stored {} blobs / {} bytes, catalog {}, payloads {}",
-                                terminal_audit.stored_locations,
-                                terminal_audit.stored_bytes,
-                                hashtree_core::to_hex(&terminal_audit.catalog_sha256),
-                                hashtree_core::to_hex(&terminal_audit.payload_sha256),
-                            );
-                            completed = true;
                             break 'mapping_epochs;
                         }
                         scanned = scanned.saturating_add(batch.scanned);
@@ -2563,7 +2667,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         let cursor_hash = cursor.expect("non-empty migration batch has a cursor");
                         pool.validate_controlled_authority_and_sync()?;
                         launch.ensure_store_paths()?;
-                        if !launch.final_stopped_full_pass {
+                        if !launch.final_stopped_pass {
                             launch.write_cursor(&hashtree_core::to_hex(&cursor_hash))?;
                         }
                         println!(
@@ -2594,6 +2698,9 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 );
                 println!("Cursor: {}", state_file.display());
             }
+            PoolCommands::LaunchMigrateLmdbV3(_) => {
+                bail!("Pool migration v3 controller must dispatch before configuration loading");
+            }
             PoolCommands::Remove { id } => {
                 let pool = open_existing()?;
                 let id: PoolMemberId = id.parse()?;
@@ -2609,6 +2716,387 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
         let _ = (data_dir, command);
         bail!("LMDB support not enabled in this build");
     }
+}
+
+#[cfg(feature = "lmdb")]
+fn run_final_stopped_source_audit(
+    launch: &super::pool_migration_launch::AcknowledgedPoolMigrationLaunch,
+    batch_size: usize,
+    max_buffer_bytes: usize,
+    source_read_concurrency: usize,
+    reopen_batches: usize,
+) -> Result<()> {
+    use hashtree_lmdb::{
+        audit_lmdb_source_batch_with_max_buffer_bytes, ExternalBlobOptions, LmdbBlobReader,
+        LmdbEnvironmentGeneration,
+    };
+
+    let mut cursor = None;
+    let mut scanned = 0usize;
+    let mut verified = 0usize;
+    let mut verified_bytes = 0u64;
+    let mut source_content_hasher = Sha256::new();
+    source_content_hasher.update(b"hashtree-pool-migration-source-content/v3\0");
+    let mut source_evidence = launch.create_source_evidence_writer()?;
+    let mut generation: Option<LmdbEnvironmentGeneration> = None;
+    loop {
+        launch.ensure_source_paths()?;
+        launch.ensure_final_writer_fence()?;
+        let external = launch.source_external().map(|path| ExternalBlobOptions {
+            base_path: path.to_path_buf(),
+            min_bytes: 1,
+            sync: true,
+            pack_target_bytes: None,
+        });
+        let reader = LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+            launch.source(),
+            external,
+            source_read_concurrency,
+            launch.source_lmdb_identity(),
+        )?;
+        let opened_generation = reader.environment_generation();
+        if generation.is_some_and(|expected| expected != opened_generation) {
+            bail!("source LMDB generation changed across mapping reopen");
+        }
+        generation = Some(opened_generation);
+        let mut epoch_batches = 0usize;
+        loop {
+            launch.ensure_final_writer_masks()?;
+            let batch = audit_lmdb_source_batch_with_max_buffer_bytes(
+                &reader,
+                cursor,
+                batch_size,
+                max_buffer_bytes,
+            )?;
+            launch.ensure_checkpoint_broker_alive()?;
+            launch.ensure_final_writer_masks()?;
+            for (hash, bytes) in &batch.verified_source_entries {
+                source_content_hasher.update(hash);
+                source_content_hasher.update(bytes.to_be_bytes());
+            }
+            source_evidence.append(&batch.verified_source_entries)?;
+            verified_bytes = verified_bytes
+                .checked_add(batch.verified_bytes)
+                .context("source audit byte total overflow")?;
+            if batch.source_exhausted {
+                launch.authorize_checkpoint("source-keyset-audit", cursor, None)?;
+                let source_audit = reader.validate_terminal_migration_keyset()?;
+                launch.ensure_checkpoint_broker_alive()?;
+                if reader.environment_generation() != opened_generation {
+                    bail!("source LMDB generation changed during terminal source audit");
+                }
+                drop(reader);
+                launch.ensure_source_paths()?;
+                launch.ensure_final_writer_fence()?;
+                launch.authorize_checkpoint("source-evidence-publication", cursor, None)?;
+                let source_evidence = source_evidence.finish()?;
+                launch.ensure_checkpoint_broker_alive()?;
+                launch.authorize_checkpoint("source-generation-fingerprint", cursor, None)?;
+                let source_generation = launch.capture_source_generation(opened_generation)?;
+                launch.ensure_checkpoint_broker_alive()?;
+                let content = SourceContentAuditV3 {
+                    verified_entries: verified as u64,
+                    verified_bytes,
+                    sha256: source_content_hasher.finalize().into(),
+                };
+                launch.authorize_checkpoint("source-terminal-publication", cursor, None)?;
+                launch.write_source_terminal_receipt(
+                    &source_audit,
+                    &content,
+                    source_evidence,
+                    source_generation,
+                )?;
+                launch.ensure_checkpoint_broker_alive()?;
+                launch.ensure_source_paths()?;
+                launch.ensure_final_writer_fence()?;
+                launch.authorize_checkpoint("terminal-readiness", cursor, None)?;
+                println!(
+                    "Terminal source audit: {} raw blob keys / {} metadata keys / {} blob-only / {} inline / {} loose external / {} packed external / {} verified bytes, keyset {}, locations {}, content {}",
+                    source_audit.blob_entries,
+                    source_audit.metadata_entries,
+                    source_audit.blob_only_entries,
+                    source_audit.inline_entries,
+                    source_audit.loose_external_entries,
+                    source_audit.packed_external_entries,
+                    content.verified_bytes,
+                    hashtree_core::to_hex(&source_audit.sha256),
+                    hashtree_core::to_hex(&source_audit.catalog_location_sha256),
+                    hashtree_core::to_hex(&content.sha256),
+                );
+                println!(
+                    "Source audit pass: scanned {scanned}, verified {verified}, target writes 0, completed: true"
+                );
+                return Ok(());
+            }
+            scanned = scanned
+                .checked_add(batch.scanned)
+                .context("source audit scan count overflow")?;
+            verified = verified
+                .checked_add(batch.verified)
+                .context("source audit verified count overflow")?;
+            cursor = batch.last_hash;
+            let cursor_hash = cursor.context("non-empty source audit batch has no cursor")?;
+            println!(
+                "Source audit batch: scanned {}, verified {}, verified bytes {}, peak buffered {} bytes, scan {} us, source read {} us, source verify {} us",
+                batch.scanned,
+                batch.verified,
+                batch.verified_bytes,
+                batch.peak_buffered_bytes,
+                batch.scan_micros,
+                batch.source_read_micros,
+                batch.source_verify_micros,
+            );
+            epoch_batches = epoch_batches.saturating_add(1);
+            if epoch_batches >= reopen_batches {
+                println!(
+                    "Source audit mappings reopened after {epoch_batches} batches at cursor {}",
+                    hashtree_core::to_hex(&cursor_hash)
+                );
+                break;
+            }
+        }
+    }
+}
+
+#[cfg(feature = "lmdb")]
+fn run_final_stopped_full_reconciliation(
+    launch: &super::pool_migration_launch::AcknowledgedPoolMigrationLaunch,
+    batch_size: usize,
+    max_buffer_bytes: usize,
+    source_read_concurrency: usize,
+    reopen_batches: usize,
+) -> Result<()> {
+    use hashtree_lmdb::{
+        reconcile_lmdb_source_union_page_with_max_buffer_bytes_and_authorizer, ExternalBlobOptions,
+        LmdbBlobReader, PinnedLmdbFileIdentity, PinnedLmdbIdentity, PoolMemberRuntimePaths,
+        PoolStore, PoolStoreConfig, PoolStoreReader,
+    };
+
+    struct SourcePlan {
+        receipt: PoolMigrationSourceTerminalReceiptV3,
+        runtime_path: PathBuf,
+        runtime_external_path: Option<PathBuf>,
+    }
+
+    let source_plans = launch.source_terminal_runtime_plans()?;
+    if source_plans.is_empty() {
+        bail!("final-stopped-full requires a nonempty exact source-terminal receipt set");
+    }
+    let receipt_sha256 = source_plans
+        .iter()
+        .map(|plan| plan.validated.authority_sha256.clone())
+        .collect::<Vec<_>>();
+    let mut sources = Vec::with_capacity(source_plans.len());
+    for plan in source_plans {
+        let receipt = plan.validated.receipt;
+        sources.push(SourcePlan {
+            receipt,
+            runtime_path: plan.runtime_path,
+            runtime_external_path: plan.runtime_external_path,
+        });
+    }
+    let evidence_authorities = sources
+        .iter()
+        .map(|source| source.receipt.source_evidence.clone())
+        .collect::<Vec<_>>();
+    let mut union = SourceEvidenceUnionReaderV3::open(&evidence_authorities)?;
+
+    let mut pool_config = PoolStoreConfig::default();
+    pool_config.temperature.enabled = false;
+    pool_config.catalog_lmdb_identity = Some(launch.pool_catalog_lmdb_identity());
+    pool_config.expected_manifest_sha256 = Some(launch.pool_manifest_sha256());
+    pool_config.member_runtime_paths = launch
+        .pool_member_runtime_paths()
+        .into_iter()
+        .map(|paths| {
+            Ok(PoolMemberRuntimePaths {
+                id: paths.id.parse()?,
+                configured_path: paths.configured_path,
+                runtime_path: paths.runtime_path,
+                configured_external_path: paths.configured_external_path,
+                runtime_external_path: paths.runtime_external_path,
+                lmdb_identity: paths.lmdb_identity,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    launch.ensure_store_paths()?;
+    launch.ensure_final_writer_fence()?;
+
+    let mut source_exhausted = false;
+    let mut target_member_state_validated = false;
+    loop {
+        let body_readers = sources
+            .iter()
+            .map(|source| {
+                let identity = PinnedLmdbIdentity {
+                    data: PinnedLmdbFileIdentity {
+                        device: source.receipt.source_lmdb_identity.data.device,
+                        inode: source.receipt.source_lmdb_identity.data.inode,
+                    },
+                    lock: PinnedLmdbFileIdentity {
+                        device: source.receipt.source_lmdb_identity.lock.device,
+                        inode: source.receipt.source_lmdb_identity.lock.inode,
+                    },
+                };
+                let external =
+                    source
+                        .runtime_external_path
+                        .as_ref()
+                        .map(|path| ExternalBlobOptions {
+                            base_path: path.clone(),
+                            min_bytes: 1,
+                            sync: true,
+                            pack_target_bytes: None,
+                        });
+                LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+                    &source.runtime_path,
+                    external,
+                    source_read_concurrency,
+                    identity,
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let pool = PoolStore::open(launch.pool(), pool_config.clone())?;
+        if !target_member_state_validated {
+            launch.ensure_final_writer_masks()?;
+            pool.validate_controlled_member_state_exact()?;
+            launch.ensure_checkpoint_broker_alive()?;
+            launch.ensure_final_writer_masks()?;
+            target_member_state_validated = true;
+        }
+        let mut epoch_pages = 0usize;
+        while epoch_pages < reopen_batches {
+            let mut page = Vec::with_capacity(batch_size);
+            while page.len() < batch_size {
+                let Some(entry) = union.next_entry()? else {
+                    source_exhausted = true;
+                    break;
+                };
+                page.push(entry);
+            }
+            if page.is_empty() {
+                break;
+            }
+
+            let entries = page
+                .iter()
+                .map(|entry| (entry.hash, entry.size, entry.body_source))
+                .collect::<Vec<_>>();
+            let source_readers = body_readers.iter().collect::<Vec<_>>();
+            launch.ensure_final_writer_masks()?;
+            let mut authorize_target_write = |batch_cursor, write_count| {
+                launch
+                    .authorize_checkpoint("migration-batch", batch_cursor, Some(write_count))
+                    .map_err(|error| {
+                        hashtree_core::store::StoreError::Other(format!(
+                            "root checkpoint rejected target mutation: {error:#}"
+                        ))
+                    })
+            };
+            let batch = reconcile_lmdb_source_union_page_with_max_buffer_bytes_and_authorizer(
+                &source_readers,
+                &pool,
+                &entries,
+                max_buffer_bytes,
+                &mut authorize_target_write,
+            )?;
+            launch.ensure_checkpoint_broker_alive()?;
+            launch.ensure_final_writer_masks()?;
+            println!(
+                "Final union page: {} keys, exact Stored {}, {} source read groups, source bodies read {}, inserted {} blobs / {} bytes",
+                batch.scanned,
+                batch.already_present,
+                batch.source_read_groups,
+                batch.verified,
+                batch.inserted,
+                batch.inserted_bytes,
+            );
+            epoch_pages = epoch_pages.saturating_add(1);
+        }
+        pool.validate_controlled_authority_and_sync()?;
+        drop(pool);
+        drop(body_readers);
+        launch.ensure_store_paths()?;
+        launch.ensure_final_writer_fence()?;
+        if source_exhausted {
+            break;
+        }
+        println!("Final reconciliation mappings reopened after {epoch_pages} pages");
+    }
+
+    let source_summaries = union.validated_source_summaries()?;
+    let union_summary = union.validated_union_summary()?;
+    for (source, evidence) in sources.iter().zip(source_summaries) {
+        if evidence.entries != source.receipt.source_verified_entries
+            || evidence.bytes != source.receipt.source_verified_bytes
+            || hashtree_core::to_hex(&evidence.content_sha256)
+                != source.receipt.source_content_sha256
+        {
+            bail!(
+                "source evidence manifest {} differs from its terminal receipt",
+                source.receipt.source_evidence.path.display()
+            );
+        }
+        validate_frozen_source_generation(
+            &source.receipt,
+            &source.runtime_path,
+            source.runtime_external_path.as_deref(),
+        )?;
+        launch.authorize_checkpoint("source-evidence-consumed", None, None)?;
+        launch.ensure_checkpoint_broker_alive()?;
+    }
+    let revalidated_receipts = launch.source_terminal_receipts(false)?;
+    let revalidated_sha256 = revalidated_receipts
+        .into_iter()
+        .map(|validated| validated.authority_sha256)
+        .collect::<Vec<_>>();
+    if revalidated_sha256 != receipt_sha256 {
+        bail!("source-terminal receipt authority set changed during final reconciliation");
+    }
+
+    launch.ensure_store_paths()?;
+    launch.ensure_final_writer_fence()?;
+    launch.authorize_checkpoint("target-terminal-audit", None, None)?;
+    let terminal_reader = PoolStoreReader::open(launch.pool(), pool_config)?;
+    let terminal_audit = terminal_reader.validate_terminal_catalog_and_payloads()?;
+    launch.ensure_checkpoint_broker_alive()?;
+    if terminal_audit.manifest_sha256 != launch.pool_manifest_sha256() {
+        bail!("terminal Pool audit manifest differs from launch authority");
+    }
+    drop(terminal_reader);
+
+    let source_union = PoolMigrationSourceUnionAuditV3 {
+        receipt_sha256,
+        source_count: sources.len() as u64,
+        entries: union_summary.entries,
+        bytes: union_summary.bytes,
+        sha256: union_summary.content_sha256,
+    };
+    launch.ensure_store_paths()?;
+    launch.ensure_final_writer_fence()?;
+    launch.authorize_checkpoint("terminal-receipt-publication", None, None)?;
+    launch.write_terminal_audit_receipt(&source_union, &terminal_audit)?;
+    launch.ensure_checkpoint_broker_alive()?;
+    launch.ensure_store_paths()?;
+    launch.ensure_final_writer_fence()?;
+    launch.authorize_checkpoint("terminal-readiness", None, None)?;
+
+    println!(
+        "Final source union: {} sources / {} entries / {} bytes, reconciliation {}",
+        source_union.source_count,
+        source_union.entries,
+        source_union.bytes,
+        hashtree_core::to_hex(&source_union.sha256),
+    );
+    println!(
+        "Single terminal Pool audit: stored {} blobs / {} bytes, catalog {}, payloads {}",
+        terminal_audit.stored_locations,
+        terminal_audit.stored_bytes,
+        hashtree_core::to_hex(&terminal_audit.catalog_sha256),
+        hashtree_core::to_hex(&terminal_audit.payload_sha256),
+    );
+    Ok(())
 }
 
 #[cfg(feature = "lmdb")]

@@ -12,8 +12,13 @@ pub use configured::{
 };
 pub use heed::{PinnedLmdbFileIdentity, PinnedLmdbIdentity};
 pub use migration::{
-    migrate_lmdb_batch, migrate_lmdb_batch_with_max_buffer_bytes, PoolMigrationBatch,
-    DEFAULT_POOL_MIGRATION_MAX_BUFFER_BYTES,
+    audit_lmdb_source_batch_with_max_buffer_bytes, migrate_lmdb_batch,
+    migrate_lmdb_batch_with_max_buffer_bytes,
+    migrate_lmdb_batch_with_max_buffer_bytes_and_authorizer,
+    reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer,
+    reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer,
+    reconcile_lmdb_source_union_page_with_max_buffer_bytes_and_authorizer, LmdbSourceAuditBatch,
+    PoolMigrationBatch, DEFAULT_POOL_MIGRATION_MAX_BUFFER_BYTES,
 };
 pub use pool::{
     PoolCatalogLocation, PoolMaintenanceReport, PoolManifestIdentity, PoolMemberConfig,
@@ -86,7 +91,7 @@ struct BlobMeta {
     last_accessed_at: u64,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct StoreTotals {
     count: u64,
     total_bytes: u64,
@@ -680,14 +685,30 @@ pub struct LmdbBlobReader {
 pub struct LmdbSourceKeysetAudit {
     pub blob_entries: u64,
     pub metadata_entries: u64,
+    pub blob_only_entries: u64,
     pub legacy_blob_only: bool,
+    pub inline_entries: u64,
+    pub loose_external_entries: u64,
+    pub packed_external_entries: u64,
     pub sha256: Hash,
+    pub catalog_location_sha256: Hash,
+}
+
+/// Stable LMDB generation fields used to bind a source-terminal receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LmdbEnvironmentGeneration {
+    pub map_size: u64,
+    pub last_page_number: u64,
+    pub last_txn_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LmdbTerminalMemberKeysetAudit {
     pub blob_entries: u64,
     pub metadata_entries: u64,
+    pub total_bytes: u64,
+    pub pinned_count: u64,
+    pub pinned_bytes: u64,
     pub sha256: Hash,
 }
 
@@ -814,6 +835,31 @@ impl LmdbBlobReader {
         limit: usize,
     ) -> Result<Vec<Hash>, StoreError> {
         self.store.scan_hashes_after(after, limit)
+    }
+
+    /// Resolve exact logical sizes without loading blob payloads.
+    ///
+    /// Legacy loose external rows have no metadata size, so this stats the
+    /// content-addressed external file; pack rows use their encoded interval.
+    pub fn sizes_for_sorted_hashes(&self, hashes: &[Hash]) -> Result<Vec<u64>, StoreError> {
+        let rtxn = self.store.env.read_txn().map_err(map_heed_error)?;
+        hashes
+            .iter()
+            .map(|hash| {
+                self.store
+                    .blob_size_in_txn(&rtxn, hash)?
+                    .ok_or_else(|| StoreError::Other(format!("source lost blob {hash:?}")))
+            })
+            .collect()
+    }
+
+    pub fn environment_generation(&self) -> LmdbEnvironmentGeneration {
+        let info = self.store.env.info();
+        LmdbEnvironmentGeneration {
+            map_size: info.map_size as u64,
+            last_page_number: info.last_page_number as u64,
+            last_txn_id: info.last_txn_id as u64,
+        }
     }
 
     /// Read a present set of hashes with one LMDB transaction and physically
@@ -1012,177 +1058,130 @@ impl LmdbBlobReader {
         Ok((blob_entries, metadata_entries))
     }
 
-    /// Prove that a Pool member has one valid metadata row for every blob and
-    /// no metadata-only rows.
+    /// Prove the exact terminal physical indexes and aggregate state of one
+    /// Pool member.
     ///
-    /// Pool members are never accepted as legacy blob-only stores. The digest
-    /// binds every exact hash key and encoded metadata value so a terminal
-    /// receipt identifies the complete physical member index, not only its
-    /// entry count.
+    /// Pool members are never accepted as legacy blob-only stores. Metadata
+    /// sizes must match exact inline/loose/packed body lengths, every metadata
+    /// row must have its exact eviction key, every nonzero pin must reference
+    /// metadata, and the recomputed totals must equal persisted counters. The
+    /// digest binds all of that state, not only entry counts.
     pub(crate) fn validate_terminal_member_keyset(
         &self,
     ) -> Result<LmdbTerminalMemberKeysetAudit, StoreError> {
-        let rtxn = self.store.env.read_txn().map_err(map_heed_error)?;
-        let blob_entries = self.store.blobs.len(&rtxn).map_err(map_heed_error)?;
-        let metadata_entries = self.store.metadata.len(&rtxn).map_err(map_heed_error)?;
-        let mut digest = Sha256::new();
-        digest.update(b"hashtree-lmdb-terminal-member-keyset/v1\0");
-        digest.update(blob_entries.to_be_bytes());
-        digest.update(metadata_entries.to_be_bytes());
-        let mut blobs = self.store.blobs.iter(&rtxn).map_err(map_heed_error)?;
-        let mut metadata = self.store.metadata.iter(&rtxn).map_err(map_heed_error)?;
-
-        loop {
-            let blob = blobs.next().transpose().map_err(map_heed_error)?;
-            let meta = metadata.next().transpose().map_err(map_heed_error)?;
-            match (blob, meta) {
-                (Some((blob_key, _)), Some((meta_key, meta_bytes))) => {
-                    let blob_hash: Hash = blob_key.try_into().map_err(|_| {
-                        StoreError::Other(
-                            "terminal Pool member has an invalid blob hash key".into(),
-                        )
-                    })?;
-                    let meta_hash: Hash = meta_key.try_into().map_err(|_| {
-                        StoreError::Other(
-                            "terminal Pool member has an invalid metadata hash key".into(),
-                        )
-                    })?;
-                    if blob_hash != meta_hash {
-                        let detail = if blob_hash < meta_hash {
-                            format!("blob {} has no metadata row", to_hex(&blob_hash))
-                        } else {
-                            format!("metadata {} has no blob row", to_hex(&meta_hash))
-                        };
-                        return Err(StoreError::Other(format!(
-                            "terminal Pool member blobs/metadata key sets differ: {detail}"
-                        )));
-                    }
-                    LmdbBlobStore::decode_blob_meta(meta_bytes)?;
-                    digest.update(blob_hash);
-                    digest.update((meta_bytes.len() as u64).to_be_bytes());
-                    digest.update(meta_bytes);
-                }
-                (Some((blob_key, _)), None) => {
-                    let hash: Hash = blob_key.try_into().map_err(|_| {
-                        StoreError::Other(
-                            "terminal Pool member has an invalid blob hash key".into(),
-                        )
-                    })?;
-                    return Err(StoreError::Other(format!(
-                        "terminal Pool member blobs/metadata key sets differ: blob {} has no metadata row",
-                        to_hex(&hash)
-                    )));
-                }
-                (None, Some((meta_key, _))) => {
-                    let hash: Hash = meta_key.try_into().map_err(|_| {
-                        StoreError::Other(
-                            "terminal Pool member has an invalid metadata hash key".into(),
-                        )
-                    })?;
-                    return Err(StoreError::Other(format!(
-                        "terminal Pool member blobs/metadata key sets differ: metadata {} has no blob row",
-                        to_hex(&hash)
-                    )));
-                }
-                (None, None) => break,
-            }
-        }
-        drop(blobs);
-        drop(metadata);
-        rtxn.commit().map_err(map_heed_error)?;
-
-        Ok(LmdbTerminalMemberKeysetAudit {
-            blob_entries,
-            metadata_entries,
-            sha256: digest.finalize().into(),
-        })
+        self.store.validate_exact_member_state()
     }
 
-    /// Prove that the final migration scan's selected key source is complete.
+    /// Prove the complete raw source catalog and every encoded storage
+    /// location used by the final migration scan.
     ///
-    /// A wholly legacy store with an empty metadata database is valid because
-    /// [`Self::scan_hashes_after`] selects `blobs`. Once metadata contains any
-    /// row, migration selects it for compact scans, so its sorted key set must
-    /// exactly equal `blobs`; otherwise legacy blob-only rows could be omitted.
+    /// `blobs` is the membership authority. Missing metadata is valid for
+    /// legacy rows, including in a partially upgraded database; metadata with
+    /// no corresponding blob row is invalid. The keyset digest binds every raw
+    /// catalog key, while the location digest binds whether each value is
+    /// inline, a loose external marker, or an exact external pack marker.
     /// Callers must keep every source writer fenced throughout this scan.
     pub fn validate_terminal_migration_keyset(&self) -> Result<LmdbSourceKeysetAudit, StoreError> {
         let rtxn = self.store.env.read_txn().map_err(map_heed_error)?;
         let blob_entries = self.store.blobs.len(&rtxn).map_err(map_heed_error)?;
         let metadata_entries = self.store.metadata.len(&rtxn).map_err(map_heed_error)?;
         let legacy_blob_only = metadata_entries == 0;
-        let mut digest = Sha256::new();
-        digest.update(b"hashtree-lmdb-terminal-source-keyset/v1\0");
-        digest.update(blob_entries.to_be_bytes());
-        digest.update(metadata_entries.to_be_bytes());
-        digest.update([u8::from(legacy_blob_only)]);
+        let mut keyset_digest = Sha256::new();
+        keyset_digest.update(b"hashtree-lmdb-terminal-source-keyset/v2\0");
+        keyset_digest.update(blob_entries.to_be_bytes());
+        keyset_digest.update(metadata_entries.to_be_bytes());
+        let mut location_digest = Sha256::new();
+        location_digest.update(b"hashtree-lmdb-terminal-source-locations/v1\0");
+        location_digest.update(blob_entries.to_be_bytes());
+        location_digest.update(metadata_entries.to_be_bytes());
+        let mut blob_only_entries = 0u64;
+        let mut inline_entries = 0u64;
+        let mut loose_external_entries = 0u64;
+        let mut packed_external_entries = 0u64;
 
-        if legacy_blob_only {
-            for item in self.store.blobs.iter(&rtxn).map_err(map_heed_error)? {
-                let (key, _) = item.map_err(map_heed_error)?;
-                let hash: Hash = key.try_into().map_err(|_| {
-                    StoreError::Other("terminal source has an invalid blob hash key".into())
+        let blobs = self.store.blobs.iter(&rtxn).map_err(map_heed_error)?;
+        let mut metadata = self.store.metadata.iter(&rtxn).map_err(map_heed_error)?;
+        let mut next_metadata = metadata.next().transpose().map_err(map_heed_error)?;
+        for item in blobs {
+            let (blob_key, blob_value) = item.map_err(map_heed_error)?;
+            let blob_hash: Hash = blob_key.try_into().map_err(|_| {
+                StoreError::Other("terminal source has an invalid blob hash key".into())
+            })?;
+            while next_metadata
+                .as_ref()
+                .is_some_and(|(metadata_key, _)| *metadata_key < blob_key)
+            {
+                let metadata_key = next_metadata
+                    .as_ref()
+                    .expect("checked present metadata key")
+                    .0;
+                let metadata_hash: Hash = metadata_key.try_into().map_err(|_| {
+                    StoreError::Other("terminal source has an invalid metadata hash key".into())
                 })?;
-                digest.update(hash);
+                return Err(StoreError::Other(format!(
+                    "terminal source metadata {} has no raw blob row",
+                    to_hex(&metadata_hash)
+                )));
             }
-        } else {
-            let mut blobs = self.store.blobs.iter(&rtxn).map_err(map_heed_error)?;
-            let mut metadata = self.store.metadata.iter(&rtxn).map_err(map_heed_error)?;
-            loop {
-                let blob = blobs.next().transpose().map_err(map_heed_error)?;
-                let meta = metadata.next().transpose().map_err(map_heed_error)?;
-                match (blob, meta) {
-                    (Some((blob_key, _)), Some((meta_key, _))) => {
-                        let blob_hash: Hash = blob_key.try_into().map_err(|_| {
-                            StoreError::Other("terminal source has an invalid blob hash key".into())
-                        })?;
-                        let meta_hash: Hash = meta_key.try_into().map_err(|_| {
-                            StoreError::Other(
-                                "terminal source has an invalid metadata hash key".into(),
-                            )
-                        })?;
-                        if blob_hash != meta_hash {
-                            let detail = if blob_hash < meta_hash {
-                                format!("blob {} has no metadata row", to_hex(&blob_hash))
-                            } else {
-                                format!("metadata {} has no blob row", to_hex(&meta_hash))
-                            };
-                            return Err(StoreError::Other(format!(
-                                "terminal source blobs/metadata key sets differ: {detail}"
-                            )));
-                        }
-                        digest.update(blob_hash);
-                    }
-                    (Some((blob_key, _)), None) => {
-                        let hash: Hash = blob_key.try_into().map_err(|_| {
-                            StoreError::Other("terminal source has an invalid blob hash key".into())
-                        })?;
-                        return Err(StoreError::Other(format!(
-                            "terminal source blobs/metadata key sets differ: blob {} has no metadata row",
-                            to_hex(&hash)
-                        )));
-                    }
-                    (None, Some((meta_key, _))) => {
-                        let hash: Hash = meta_key.try_into().map_err(|_| {
-                            StoreError::Other(
-                                "terminal source has an invalid metadata hash key".into(),
-                            )
-                        })?;
-                        return Err(StoreError::Other(format!(
-                            "terminal source blobs/metadata key sets differ: metadata {} has no blob row",
-                            to_hex(&hash)
-                        )));
-                    }
-                    (None, None) => break,
-                }
+            if next_metadata
+                .as_ref()
+                .is_some_and(|(metadata_key, _)| *metadata_key == blob_key)
+            {
+                next_metadata = metadata.next().transpose().map_err(map_heed_error)?;
+            } else {
+                blob_only_entries = blob_only_entries
+                    .checked_add(1)
+                    .ok_or_else(|| StoreError::Other("source blob-only count overflow".into()))?;
+            }
+
+            keyset_digest.update(blob_hash);
+            location_digest.update(blob_hash);
+            if self.store.is_external_blob_ref(&blob_hash, blob_value) {
+                loose_external_entries =
+                    loose_external_entries.checked_add(1).ok_or_else(|| {
+                        StoreError::Other("source loose-external count overflow".into())
+                    })?;
+                location_digest.update(b"L");
+                location_digest.update((blob_value.len() as u64).to_be_bytes());
+                location_digest.update(blob_value);
+            } else if LmdbBlobStore::decode_external_pack_ref(blob_value)?.is_some() {
+                packed_external_entries =
+                    packed_external_entries.checked_add(1).ok_or_else(|| {
+                        StoreError::Other("source packed-external count overflow".into())
+                    })?;
+                location_digest.update(b"P");
+                location_digest.update((blob_value.len() as u64).to_be_bytes());
+                location_digest.update(blob_value);
+            } else {
+                inline_entries = inline_entries
+                    .checked_add(1)
+                    .ok_or_else(|| StoreError::Other("source inline count overflow".into()))?;
+                location_digest.update(b"I");
+                location_digest.update((blob_value.len() as u64).to_be_bytes());
             }
         }
+        if let Some((metadata_key, _)) = next_metadata.as_ref() {
+            let metadata_hash: Hash = (*metadata_key).try_into().map_err(|_| {
+                StoreError::Other("terminal source has an invalid metadata hash key".into())
+            })?;
+            return Err(StoreError::Other(format!(
+                "terminal source metadata {} has no raw blob row",
+                to_hex(&metadata_hash)
+            )));
+        }
+        drop(metadata);
         rtxn.commit().map_err(map_heed_error)?;
 
         Ok(LmdbSourceKeysetAudit {
             blob_entries,
             metadata_entries,
+            blob_only_entries,
             legacy_blob_only,
-            sha256: digest.finalize().into(),
+            inline_entries,
+            loose_external_entries,
+            packed_external_entries,
+            sha256: keyset_digest.finalize().into(),
+            catalog_location_sha256: location_digest.finalize().into(),
         })
     }
 
@@ -1461,7 +1460,8 @@ impl LmdbBlobStore {
         F: FnOnce(&Path) -> Option<ExternalBlobConfig>,
     {
         let path_ref = path.as_ref();
-        if pinned_identity.is_none() {
+        let controlled = pinned_identity.is_some();
+        if !controlled {
             std::fs::create_dir_all(path_ref).map_err(StoreError::Io)?;
         }
         let existing_map_size = match pinned_identity {
@@ -1470,7 +1470,7 @@ impl LmdbBlobStore {
                 .map(|metadata| metadata.len())
                 .unwrap_or(0),
         };
-        let existing_headroom = if existing_map_size == 0 || !add_reopen_headroom {
+        let existing_headroom = if controlled || existing_map_size == 0 || !add_reopen_headroom {
             0
         } else {
             existing_map_size
@@ -1484,8 +1484,10 @@ impl LmdbBlobStore {
         .unwrap_or(usize::MAX);
 
         let mut env_options = EnvOpenOptions::new();
+        if !controlled {
+            env_options.map_size(map_size);
+        }
         env_options
-            .map_size(map_size)
             .max_dbs(DATABASE_COUNT)
             .max_readers(DEFAULT_MAX_READERS);
         unsafe {
@@ -1498,31 +1500,77 @@ impl LmdbBlobStore {
             }
             .map_err(map_heed_error)?
         };
-        let _ = env.clear_stale_readers();
-        if env.info().map_size < map_size {
+        if controlled && env.info().map_size < map_size {
+            return Err(StoreError::Other(format!(
+                "controlled LMDB member map is {} bytes, below its manifest-owned {} bytes; pre-size it before exact migration",
+                env.info().map_size,
+                map_size
+            )));
+        }
+        if !controlled {
+            let _ = env.clear_stale_readers();
+        }
+        if !controlled && env.info().map_size < map_size {
             unsafe { env.resize(map_size) }.map_err(map_heed_error)?;
         }
 
-        let mut wtxn = env.write_txn().map_err(map_heed_error)?;
-        let blobs = env
-            .create_database(&mut wtxn, Some("blobs"))
-            .map_err(map_heed_error)?;
-        let metadata = env
-            .create_database(&mut wtxn, Some("metadata"))
-            .map_err(map_heed_error)?;
-        let eviction_order = env
-            .create_database(&mut wtxn, Some("eviction_order"))
-            .map_err(map_heed_error)?;
-        let pins = env
-            .create_database(&mut wtxn, Some("pins"))
-            .map_err(map_heed_error)?;
-        let stats = env
-            .create_database(&mut wtxn, Some("stats"))
-            .map_err(map_heed_error)?;
-        wtxn.commit().map_err(map_heed_error)?;
-
-        let totals = Self::load_or_rebuild_totals(&env, metadata, pins, stats)?;
-        let next_order = Self::load_or_initialize_next_order(&env, stats, totals.count > 0)?;
+        let (blobs, metadata, eviction_order, pins, stats, next_order) = if controlled {
+            let rtxn = env.read_txn().map_err(map_heed_error)?;
+            let open_bytes = |name| -> Result<Database<Bytes, Bytes>, StoreError> {
+                env.open_database(&rtxn, Some(name))
+                    .map_err(map_heed_error)?
+                    .ok_or_else(|| {
+                        StoreError::Other(format!(
+                            "controlled LMDB member is missing required database {name}"
+                        ))
+                    })
+            };
+            let open_unit = |name| -> Result<Database<Bytes, Unit>, StoreError> {
+                env.open_database(&rtxn, Some(name))
+                    .map_err(map_heed_error)?
+                    .ok_or_else(|| {
+                        StoreError::Other(format!(
+                            "controlled LMDB member is missing required database {name}"
+                        ))
+                    })
+            };
+            let blobs = open_bytes("blobs")?;
+            let metadata = open_bytes("metadata")?;
+            let eviction_order = open_unit("eviction_order")?;
+            let pins = open_bytes("pins")?;
+            let stats = open_bytes("stats")?;
+            let next_order = Self::validate_controlled_member_state(
+                &rtxn,
+                blobs,
+                metadata,
+                eviction_order,
+                pins,
+                stats,
+            )?;
+            rtxn.commit().map_err(map_heed_error)?;
+            (blobs, metadata, eviction_order, pins, stats, next_order)
+        } else {
+            let mut wtxn = env.write_txn().map_err(map_heed_error)?;
+            let blobs = env
+                .create_database(&mut wtxn, Some("blobs"))
+                .map_err(map_heed_error)?;
+            let metadata = env
+                .create_database(&mut wtxn, Some("metadata"))
+                .map_err(map_heed_error)?;
+            let eviction_order = env
+                .create_database(&mut wtxn, Some("eviction_order"))
+                .map_err(map_heed_error)?;
+            let pins = env
+                .create_database(&mut wtxn, Some("pins"))
+                .map_err(map_heed_error)?;
+            let stats = env
+                .create_database(&mut wtxn, Some("stats"))
+                .map_err(map_heed_error)?;
+            wtxn.commit().map_err(map_heed_error)?;
+            let totals = Self::load_or_rebuild_totals(&env, metadata, pins, stats)?;
+            let next_order = Self::load_or_initialize_next_order(&env, stats, totals.count > 0)?;
+            (blobs, metadata, eviction_order, pins, stats, next_order)
+        };
 
         let external_blobs = external_blobs(path_ref)
             .map(ExternalBlobConfig::prepare_runtime)
@@ -1537,6 +1585,210 @@ impl LmdbBlobStore {
             max_bytes: AtomicU64::new(0),
             next_order: AtomicU64::new(next_order),
             external_blobs,
+        })
+    }
+
+    fn validate_controlled_member_state(
+        txn: &heed::RoTxn<'_>,
+        blobs: Database<Bytes, Bytes>,
+        metadata: Database<Bytes, Bytes>,
+        eviction_order: Database<Bytes, Unit>,
+        pins: Database<Bytes, Bytes>,
+        stats: Database<Bytes, Bytes>,
+    ) -> Result<u64, StoreError> {
+        let totals = Self::read_store_totals(stats, txn)?.ok_or_else(|| {
+            StoreError::Other("controlled LMDB member is missing persisted aggregate totals".into())
+        })?;
+        let next_order = Self::read_next_order(stats, txn)?.ok_or_else(|| {
+            StoreError::Other(
+                "controlled LMDB member is missing persisted next-order authority".into(),
+            )
+        })?;
+        let blob_entries = blobs.len(txn).map_err(map_heed_error)?;
+        let metadata_entries = metadata.len(txn).map_err(map_heed_error)?;
+        let eviction_entries = eviction_order.len(txn).map_err(map_heed_error)?;
+        let pin_entries = pins.len(txn).map_err(map_heed_error)?;
+        if blob_entries != totals.count
+            || metadata_entries != totals.count
+            || eviction_entries != totals.count
+            || pin_entries != totals.pinned_count
+            || totals.pinned_count > totals.count
+            || totals.pinned_bytes > totals.total_bytes
+            || next_order < totals.count
+        {
+            return Err(StoreError::Other(format!(
+                "controlled LMDB member secondary/stat counts are stale: blobs {blob_entries}, metadata {metadata_entries}, eviction {eviction_entries}, pins {pin_entries}, totals {totals:?}, next order {next_order}"
+            )));
+        }
+        Ok(next_order)
+    }
+
+    fn validate_exact_member_state(&self) -> Result<LmdbTerminalMemberKeysetAudit, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+        let persisted = Self::read_store_totals(self.stats, &rtxn)?.ok_or_else(|| {
+            StoreError::Other("LMDB member is missing persisted aggregate totals".into())
+        })?;
+        let next_order = Self::read_next_order(self.stats, &rtxn)?.ok_or_else(|| {
+            StoreError::Other("LMDB member is missing persisted next-order authority".into())
+        })?;
+        let blob_entries = self.blobs.len(&rtxn).map_err(map_heed_error)?;
+        let metadata_entries = self.metadata.len(&rtxn).map_err(map_heed_error)?;
+        let eviction_entries = self.eviction_order.len(&rtxn).map_err(map_heed_error)?;
+        let pin_entries = self.pins.len(&rtxn).map_err(map_heed_error)?;
+        if blob_entries != metadata_entries {
+            return Err(StoreError::Other(format!(
+                "terminal Pool member blobs/metadata key sets differ: {blob_entries} blob rows, {metadata_entries} metadata rows"
+            )));
+        }
+        if eviction_entries != metadata_entries {
+            return Err(StoreError::Other(format!(
+                "terminal Pool member eviction/metadata key sets differ: {eviction_entries} eviction rows, {metadata_entries} metadata rows"
+            )));
+        }
+
+        let mut computed = StoreTotals::default();
+        let mut digest = Sha256::new();
+        digest.update(b"hashtree-lmdb-terminal-member-state/v2\0");
+        digest.update(blob_entries.to_be_bytes());
+        digest.update(metadata_entries.to_be_bytes());
+        digest.update(eviction_entries.to_be_bytes());
+        digest.update(pin_entries.to_be_bytes());
+        digest.update(next_order.to_be_bytes());
+
+        for item in self.metadata.iter(&rtxn).map_err(map_heed_error)? {
+            let (metadata_key, metadata_bytes) = item.map_err(map_heed_error)?;
+            let hash: Hash = metadata_key.try_into().map_err(|_| {
+                StoreError::Other("terminal Pool member has an invalid metadata hash key".into())
+            })?;
+            let meta = Self::decode_blob_meta(metadata_bytes)?;
+            let blob_value = self
+                .blobs
+                .get(&rtxn, &hash)
+                .map_err(map_heed_error)?
+                .ok_or_else(|| {
+                    StoreError::Other(format!(
+                        "terminal Pool member blobs/metadata key sets differ: metadata {} has no blob row",
+                        to_hex(&hash)
+                    ))
+                })?;
+            let actual_size = if self.is_external_blob_ref(&hash, blob_value) {
+                let config = self.external_blobs.as_ref().ok_or_else(|| {
+                    StoreError::Other(
+                        "terminal Pool member has an external blob marker but no external directory"
+                            .into(),
+                    )
+                })?;
+                config
+                    .open_relative(&ExternalBlobConfig::relative_blob_path(&hash))?
+                    .metadata()
+                    .map_err(StoreError::Io)?
+                    .len()
+            } else if let Some(pack_ref) = Self::decode_external_pack_ref(blob_value)? {
+                self.external_blobs.as_ref().ok_or_else(|| {
+                    StoreError::Other(
+                        "terminal Pool member has an external pack marker but no external directory"
+                            .into(),
+                    )
+                })?;
+                pack_ref.offset.checked_add(pack_ref.len).ok_or_else(|| {
+                    StoreError::Other("terminal Pool member external pack range overflow".into())
+                })?;
+                pack_ref.len
+            } else {
+                blob_value.len() as u64
+            };
+            if meta.size != actual_size {
+                return Err(StoreError::Other(format!(
+                    "terminal Pool member metadata size {} for {} differs from exact body size {actual_size}",
+                    meta.size,
+                    to_hex(&hash)
+                )));
+            }
+            let order_key = Self::encode_order_key(meta.order, &hash);
+            if self
+                .eviction_order
+                .get(&rtxn, &order_key)
+                .map_err(map_heed_error)?
+                .is_none()
+            {
+                return Err(StoreError::Other(format!(
+                    "terminal Pool member eviction/metadata key sets differ: metadata {} has no exact eviction row",
+                    to_hex(&hash)
+                )));
+            }
+            if meta.order >= next_order {
+                return Err(StoreError::Other(format!(
+                    "terminal Pool member metadata order {} for {} is not below next order {next_order}",
+                    meta.order,
+                    to_hex(&hash)
+                )));
+            }
+            computed.count = computed
+                .count
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Other("LMDB member blob count overflow".into()))?;
+            computed.total_bytes = computed
+                .total_bytes
+                .checked_add(meta.size)
+                .ok_or_else(|| StoreError::Other("LMDB member byte total overflow".into()))?;
+            digest.update(hash);
+            digest.update((metadata_bytes.len() as u64).to_be_bytes());
+            digest.update(metadata_bytes);
+        }
+
+        for item in self.pins.iter(&rtxn).map_err(map_heed_error)? {
+            let (pin_key, pin_bytes) = item.map_err(map_heed_error)?;
+            let hash: Hash = pin_key.try_into().map_err(|_| {
+                StoreError::Other("terminal Pool member has an invalid pin hash key".into())
+            })?;
+            let pin_count = Self::decode_pin_count(pin_bytes)?;
+            if pin_count == 0 {
+                return Err(StoreError::Other(format!(
+                    "terminal Pool member has a zero-count pin row for {}",
+                    to_hex(&hash)
+                )));
+            }
+            let metadata_bytes = self
+                .metadata
+                .get(&rtxn, &hash)
+                .map_err(map_heed_error)?
+                .ok_or_else(|| {
+                    StoreError::Other(format!(
+                        "terminal Pool member pin {} has no metadata row",
+                        to_hex(&hash)
+                    ))
+                })?;
+            let meta = Self::decode_blob_meta(metadata_bytes)?;
+            computed.pinned_count = computed
+                .pinned_count
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Other("LMDB member pinned count overflow".into()))?;
+            computed.pinned_bytes =
+                computed
+                    .pinned_bytes
+                    .checked_add(meta.size)
+                    .ok_or_else(|| {
+                        StoreError::Other("LMDB member pinned byte total overflow".into())
+                    })?;
+            digest.update(hash);
+            digest.update(pin_count.to_be_bytes());
+        }
+
+        if computed != persisted {
+            return Err(StoreError::Other(format!(
+                "LMDB member persisted aggregate totals are stale: persisted {persisted:?}, exact {computed:?}"
+            )));
+        }
+        digest.update(Self::encode_store_totals(computed));
+        rtxn.commit().map_err(map_heed_error)?;
+
+        Ok(LmdbTerminalMemberKeysetAudit {
+            blob_entries,
+            metadata_entries,
+            total_bytes: computed.total_bytes,
+            pinned_count: computed.pinned_count,
+            pinned_bytes: computed.pinned_bytes,
+            sha256: digest.finalize().into(),
         })
     }
 
@@ -2029,7 +2281,7 @@ impl LmdbBlobStore {
             .map_err(|e| StoreError::Other(e.to_string()))?;
 
         let mut hashes = Vec::new();
-        for item in self.metadata.iter(&rtxn).map_err(map_heed_error)? {
+        for item in self.blobs.iter(&rtxn).map_err(map_heed_error)? {
             let (hash, _) = item.map_err(|e| StoreError::Other(e.to_string()))?;
             let hash_arr: Hash = hash
                 .try_into()
@@ -2037,28 +2289,16 @@ impl LmdbBlobStore {
             hashes.push(hash_arr);
         }
 
-        if hashes.is_empty() {
-            for item in self
-                .blobs
-                .iter(&rtxn)
-                .map_err(|e| StoreError::Other(e.to_string()))?
-            {
-                let (hash, _) = item.map_err(|e| StoreError::Other(e.to_string()))?;
-                let hash_arr: Hash = hash
-                    .try_into()
-                    .map_err(|_| StoreError::Other("invalid hash length".into()))?;
-                hashes.push(hash_arr);
-            }
-        }
-
         Ok(hashes)
     }
 
-    /// Scan hashes in lexicographic order without materializing the whole store.
+    /// Scan every raw blob-catalog hash in lexicographic order without
+    /// materializing the whole store.
     ///
     /// `after` is exclusive, so callers can persist the final returned hash as a
-    /// resumable cursor. Legacy stores without metadata are scanned from the blob
-    /// database instead.
+    /// resumable cursor. The `blobs` database is authoritative for membership:
+    /// a partially upgraded legacy store may contain metadata for only a subset
+    /// of its blob rows, and selecting `metadata` would silently omit the rest.
     pub fn scan_hashes_after(
         &self,
         after: Option<Hash>,
@@ -2068,11 +2308,6 @@ impl LmdbBlobStore {
             return Ok(Vec::new());
         }
         let rtxn = self.env.read_txn().map_err(map_heed_error)?;
-        let database = if self.metadata.is_empty(&rtxn).map_err(map_heed_error)? {
-            self.blobs
-        } else {
-            self.metadata
-        };
         let mut hashes = Vec::with_capacity(limit);
         let decode_hash = |hash: &[u8]| -> Result<Hash, StoreError> {
             hash.try_into()
@@ -2082,7 +2317,7 @@ impl LmdbBlobStore {
             Some(after) => {
                 use std::ops::Bound;
                 let range = (Bound::Excluded(after.as_slice()), Bound::<&[u8]>::Unbounded);
-                for item in database.range(&rtxn, &range).map_err(map_heed_error)? {
+                for item in self.blobs.range(&rtxn, &range).map_err(map_heed_error)? {
                     let (hash, _) = item.map_err(map_heed_error)?;
                     hashes.push(decode_hash(hash)?);
                     if hashes.len() >= limit {
@@ -2091,7 +2326,7 @@ impl LmdbBlobStore {
                 }
             }
             None => {
-                for item in database.iter(&rtxn).map_err(map_heed_error)? {
+                for item in self.blobs.iter(&rtxn).map_err(map_heed_error)? {
                     let (hash, _) = item.map_err(map_heed_error)?;
                     hashes.push(decode_hash(hash)?);
                     if hashes.len() >= limit {
@@ -2802,10 +3037,29 @@ impl LmdbBlobStore {
             return Ok(Some(meta.size));
         }
 
-        self.blobs
+        let Some(value) = self
+            .blobs
             .get(txn, hash)
-            .map_err(|e| StoreError::Other(e.to_string()))
-            .map(|data| data.map(|bytes| bytes.len() as u64))
+            .map_err(|e| StoreError::Other(e.to_string()))?
+        else {
+            return Ok(None);
+        };
+        if self.is_external_blob_ref(hash, value) {
+            let config = self.external_blobs.as_ref().ok_or_else(|| {
+                StoreError::Other(
+                    "external LMDB blob marker found but external blobs are disabled".into(),
+                )
+            })?;
+            let path = Self::external_blob_path_for_config(config, hash);
+            return path
+                .metadata()
+                .map(|metadata| Some(metadata.len()))
+                .map_err(StoreError::Io);
+        }
+        if let Some(pack_ref) = Self::decode_external_pack_ref(value)? {
+            return Ok(Some(pack_ref.len));
+        }
+        Ok(Some(value.len() as u64))
     }
 
     fn read_pin_count(&self, txn: &heed::RoTxn, hash: &[u8]) -> Result<u32, StoreError> {
@@ -4020,16 +4274,30 @@ mod tests {
     }
 
     #[test]
-    fn terminal_migration_keyset_rejects_mixed_legacy_and_metadata_rows() -> Result<(), StoreError>
-    {
+    fn generated_partial_metadata_source_scans_and_audits_every_raw_blob_row(
+    ) -> Result<(), StoreError> {
         let temp = TempDir::new().unwrap();
         let path = temp.path().join("blobs");
-        let legacy_data = b"legacy blob without metadata";
+        let external_dir = temp.path().join("external");
+        let legacy_data = b"generated legacy loose external blob without metadata";
         let legacy_hash = sha256(legacy_data);
-        let new_data = b"new blob with metadata";
+        let new_data = b"new inline";
         let new_hash = sha256(new_data);
 
-        let store = LmdbBlobStore::new(&path)?;
+        let store = LmdbBlobStore::with_map_size_and_settings(
+            &path,
+            16 * 1024 * 1024,
+            EnvFlags::empty(),
+            |_| {
+                Some(ExternalBlobConfig {
+                    base_path: external_dir.clone(),
+                    min_bytes: 16,
+                    sync: true,
+                    pack_target_bytes: None,
+                    pinned_root: None,
+                })
+            },
+        )?;
         store.put_sync(legacy_hash, legacy_data)?;
         let mut wtxn = store.env.write_txn().map_err(map_heed_error)?;
         store
@@ -4037,31 +4305,99 @@ mod tests {
             .delete(&mut wtxn, &legacy_hash)
             .map_err(map_heed_error)?;
         wtxn.commit().map_err(map_heed_error)?;
-        store.force_sync()?;
-        drop(store);
-
-        let legacy_reader = LmdbBlobReader::open(&path, None)?;
-        let legacy_audit = legacy_reader.validate_terminal_migration_keyset()?;
-        assert_eq!(legacy_audit.blob_entries, 1);
-        assert_eq!(legacy_audit.metadata_entries, 0);
-        assert!(legacy_audit.legacy_blob_only);
-        drop(legacy_reader);
-
-        let store = LmdbBlobStore::new(&path)?;
         store.put_sync(new_hash, new_data)?;
         store.force_sync()?;
         drop(store);
 
-        let mixed_reader = LmdbBlobReader::open(&path, None)?;
+        let mixed_reader = LmdbBlobReader::open(
+            &path,
+            Some(ExternalBlobOptions {
+                base_path: external_dir,
+                min_bytes: 1,
+                sync: true,
+                pack_target_bytes: None,
+            }),
+        )?;
+        let mut expected = vec![legacy_hash, new_hash];
+        expected.sort_unstable();
+        assert_eq!(mixed_reader.scan_hashes_after(None, 8)?, expected);
+        let audit = mixed_reader.validate_terminal_migration_keyset()?;
+        assert_eq!(audit.blob_entries, 2);
+        assert_eq!(audit.metadata_entries, 1);
+        assert_eq!(audit.blob_only_entries, 1);
+        assert!(!audit.legacy_blob_only);
+        assert_eq!(audit.inline_entries, 1);
+        assert_eq!(audit.loose_external_entries, 1);
+        assert_eq!(audit.packed_external_entries, 0);
+        let mut cursor = None;
+        let mut evidence = Vec::new();
+        loop {
+            let source = crate::migration::audit_lmdb_source_batch_with_max_buffer_bytes(
+                &mixed_reader,
+                cursor,
+                1,
+                1024 * 1024,
+            )?;
+            if source.source_exhausted {
+                break;
+            }
+            assert_eq!(source.scanned, 1);
+            assert_eq!(source.verified, 1);
+            cursor = source.last_hash;
+            evidence.extend(source.verified_source_entries);
+        }
         assert_eq!(
-            mixed_reader.scan_hashes_after(None, 8)?,
-            vec![new_hash],
-            "compact migration scan demonstrates why the terminal proof is required"
+            evidence.iter().map(|(hash, _)| *hash).collect::<Vec<_>>(),
+            expected
         );
-        let error = mixed_reader
+
+        let pool = PoolStore::open(temp.path().join("pool"), PoolStoreConfig::default())?;
+        pool.add_member(PoolMemberConfig::new(
+            temp.path().join("pool-member"),
+            16 * 1024 * 1024,
+        ))?;
+        let union = evidence
+            .iter()
+            .map(|(hash, size)| (*hash, *size, 0usize))
+            .collect::<Vec<_>>();
+        let migrated =
+            crate::migration::reconcile_lmdb_source_union_page_with_max_buffer_bytes_and_authorizer(
+                &[&mixed_reader],
+                &pool,
+                &union,
+                1024 * 1024,
+                &mut |_, _| Ok(()),
+            )?;
+        assert_eq!(migrated.scanned, 2);
+        assert_eq!(migrated.verified, 2);
+        assert_eq!(migrated.inserted, 2);
+        assert_eq!(pool.get_sync(&legacy_hash)?, Some(legacy_data.to_vec()));
+        assert_eq!(pool.get_sync(&new_hash)?, Some(new_data.to_vec()));
+        Ok(())
+    }
+
+    #[test]
+    fn generated_metadata_without_raw_blob_row_is_rejected() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("blobs");
+        let data = b"generated metadata-only row";
+        let hash = sha256(data);
+        let store = LmdbBlobStore::new(&path)?;
+        store.put_sync(hash, data)?;
+        let mut wtxn = store.env.write_txn().map_err(map_heed_error)?;
+        store
+            .blobs
+            .delete(&mut wtxn, &hash)
+            .map_err(map_heed_error)?;
+        wtxn.commit().map_err(map_heed_error)?;
+        store.force_sync()?;
+        drop(store);
+
+        let reader = LmdbBlobReader::open(&path, None)?;
+        let error = reader
             .validate_terminal_migration_keyset()
-            .expect_err("mixed legacy/metadata key sets must withhold completion");
-        assert!(error.to_string().contains("has no metadata row"));
+            .expect_err("metadata without a raw blob row must withhold completion");
+        assert!(error.to_string().contains("has no raw blob row"));
         Ok(())
     }
 

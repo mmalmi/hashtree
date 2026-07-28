@@ -1,0 +1,18 @@
+[Unit]
+Description=Root-brokered Hashtree Pool migration controller (%i)
+Documentation=https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree
+After=local-fs.target
+
+[Service]
+Type=exec
+User=root
+Group=root
+EnvironmentFile=/etc/hashtree/pool-migration-controller-%i.env
+ExecStart=/usr/local/bin/htree-pool-migration-controller $HTREE_POOL_CONTROLLER_ARGS
+Restart=no
+TimeoutStartSec=infinity
+KillMode=control-group
+PrivateNetwork=true
+NoNewPrivileges=true
+UnsetEnvironment=LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH HTREE_LMDB_NO_SYNC HTREE_LMDB_NO_META_SYNC
+UMask=0027

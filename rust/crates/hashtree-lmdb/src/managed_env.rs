@@ -478,4 +478,32 @@ int open64(const char *path, int flags, ...) {
         assert!(path.join("data.mdb").is_file());
         assert!(path.join("lock.mdb").is_file());
     }
+
+    #[test]
+    fn read_transactions_are_object_owned_across_worker_threads() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("multithread-readers");
+        fs::create_dir(&path).expect("create multithread reader environment");
+        let env = unsafe { ManagedEnv::open(&options(), &path) }.expect("open multithread LMDB");
+        assert!(
+            env.flags()
+                .expect("read LMDB environment flags")
+                .is_some_and(|flags| flags.contains(heed::EnvFlags::NO_TLS)),
+            "all Hashtree LMDB environments must use MDB_NOTLS"
+        );
+
+        for _ in 0..512 {
+            let txn = env.read_txn().expect("begin cross-thread read transaction");
+            thread::scope(|scope| {
+                scope
+                    .spawn(move || drop(txn))
+                    .join()
+                    .expect("drop read transaction on another worker thread");
+            });
+            env.read_txn()
+                .expect("reader slot remains reusable after worker migration")
+                .commit()
+                .expect("commit reader after worker migration");
+        }
+    }
 }

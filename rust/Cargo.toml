@@ -58,7 +58,7 @@ aws-sdk-s3 = "1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 
 # Storage
-heed = { package = "hashtree-heed", version = "=0.20.5-hashtree.1", path = "vendor/heed" }
+heed = { package = "hashtree-heed", version = "=0.20.5-hashtree.1", path = "vendor/heed", features = ["read-txn-no-tls"] }
 tempfile = "3"
 
 # HTTP/Web

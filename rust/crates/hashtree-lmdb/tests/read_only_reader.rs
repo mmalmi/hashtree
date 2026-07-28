@@ -1,10 +1,13 @@
 use hashtree_core::{sha256, to_hex};
 use hashtree_lmdb::{
-    migrate_lmdb_batch, migrate_lmdb_batch_with_max_buffer_bytes, ExternalBlobOptions,
+    migrate_lmdb_batch, migrate_lmdb_batch_with_max_buffer_bytes,
+    reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer,
+    reconcile_lmdb_source_union_page_with_max_buffer_bytes_and_authorizer, ExternalBlobOptions,
     LmdbBlobReader, LmdbBlobStore, PoolMemberConfig, PoolStore, PoolStoreConfig,
 };
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -201,6 +204,208 @@ fn read_only_reader_adopts_existing_map_and_reads_inline_and_external_blobs() {
     assert_eq!(pool.stats().expect("pool stats").count, 2);
     std::fs::write(control.join("stop"), b"stop").expect("stop writer");
     assert!(writer.wait().expect("wait writer").success());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn generated_reader_survives_tokio_worker_migration_without_bad_rslot() {
+    let temp = TempDir::new().expect("generated multithread reader root");
+    let source = temp.path().join("source");
+    let store = LmdbBlobStore::new(&source).expect("open generated source");
+    let entries = (0..128u32)
+        .map(|index| {
+            let bytes = format!("generated multithread LMDB body {index:08}").into_bytes();
+            (sha256(&bytes), bytes)
+        })
+        .collect::<Vec<_>>();
+    store
+        .put_many_sync(&entries)
+        .expect("write generated multithread corpus");
+    store
+        .force_sync()
+        .expect("sync generated multithread corpus");
+    drop(store);
+
+    let reader = Arc::new(LmdbBlobReader::open(&source, None).expect("open production reader"));
+    let mut tasks = Vec::new();
+    for task_index in 0..32usize {
+        let reader = Arc::clone(&reader);
+        let entries = entries.clone();
+        tasks.push(tokio::spawn(async move {
+            for round in 0..256usize {
+                tokio::task::yield_now().await;
+                let (hash, expected) = &entries[(round + task_index) % entries.len()];
+                assert_eq!(
+                    reader.get_sync(hash).expect("Tokio worker LMDB read"),
+                    Some(expected.clone())
+                );
+                if round % 16 == 0 {
+                    assert_eq!(
+                        reader
+                            .scan_hashes_after(None, entries.len())
+                            .expect("Tokio worker LMDB scan")
+                            .len(),
+                        entries.len()
+                    );
+                }
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.expect("multithread LMDB reader task");
+    }
+}
+
+#[test]
+fn receipt_reconciliation_reads_only_target_missing_source_bodies() {
+    let temp = TempDir::new().expect("temp dir");
+    let source = temp.path().join("source");
+    let external = temp.path().join("external");
+    let options = unpacked_external_options(external.clone());
+    let source_store = LmdbBlobStore::with_map_size_and_external_blob_options(
+        &source,
+        64 * 1024 * 1024,
+        Some(options.clone()),
+    )
+    .expect("open generated source");
+    let stored_data = b"already Stored in the target".repeat(128);
+    let missing_data = b"absent from the target".repeat(128);
+    let stored_hash = sha256(&stored_data);
+    let missing_hash = sha256(&missing_data);
+    source_store
+        .put_many_sync(&[
+            (stored_hash, stored_data.clone()),
+            (missing_hash, missing_data.clone()),
+        ])
+        .expect("write generated source data");
+    source_store.force_sync().expect("sync generated source");
+    drop(source_store);
+
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+        .expect("open target Pool");
+    pool.add_member(PoolMemberConfig::new(
+        temp.path().join("member"),
+        64 * 1024 * 1024,
+    ))
+    .expect("add target member");
+    pool.put_sync(stored_hash, &stored_data)
+        .expect("prepopulate exact Stored target");
+
+    let stored_source_path = unpacked_external_path(&external, &stored_hash);
+    std::fs::write(&stored_source_path, vec![0xa5; stored_data.len()])
+        .expect("replace Stored source body with same-size corruption");
+    let reader = LmdbBlobReader::open(&source, Some(options)).expect("open source reader");
+    let mut source_evidence = vec![
+        (stored_hash, stored_data.len() as u64),
+        (missing_hash, missing_data.len() as u64),
+    ];
+    source_evidence.sort_unstable_by_key(|(hash, _)| *hash);
+    let mut authorizations = Vec::new();
+    let batch = reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer(
+        &reader,
+        &pool,
+        &source_evidence,
+        usize::MAX,
+        &mut |cursor, writes| {
+            authorizations.push((cursor, writes));
+            Ok(())
+        },
+    )
+    .expect("reconcile without reading exact Stored source body");
+
+    assert_eq!(batch.scanned, 2);
+    assert_eq!(batch.source_entries.len(), 2);
+    assert_eq!(batch.already_present, 1);
+    assert_eq!(batch.verified, 1);
+    assert_eq!(batch.inserted, 1);
+    assert_eq!(authorizations, vec![(Some(missing_hash), 1)]);
+    assert_eq!(
+        pool.get_sync(&stored_hash).expect("read Stored target"),
+        Some(stored_data)
+    );
+    assert_eq!(
+        pool.get_sync(&missing_hash)
+            .expect("read reconciled target"),
+        Some(missing_data)
+    );
+}
+
+#[test]
+fn interleaved_receipt_union_groups_source_reads_per_page() {
+    let temp = TempDir::new().expect("temp dir");
+    let first_path = temp.path().join("first-source");
+    let second_path = temp.path().join("second-source");
+    let first_store =
+        LmdbBlobStore::with_map_size(&first_path, 64 * 1024 * 1024).expect("open first source");
+    let second_store =
+        LmdbBlobStore::with_map_size(&second_path, 64 * 1024 * 1024).expect("open second source");
+    let mut generated = (0..128)
+        .map(|index| {
+            let bytes = format!("generated alternating source body {index:04}")
+                .repeat(8)
+                .into_bytes();
+            (sha256(&bytes), bytes)
+        })
+        .collect::<Vec<_>>();
+    generated.sort_unstable_by_key(|(hash, _)| *hash);
+    let first_items = generated
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| index % 2 == 0)
+        .map(|(_, item)| item.clone())
+        .collect::<Vec<_>>();
+    let second_items = generated
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| index % 2 == 1)
+        .map(|(_, item)| item.clone())
+        .collect::<Vec<_>>();
+    first_store
+        .put_many_sync(&first_items)
+        .expect("populate first source");
+    second_store
+        .put_many_sync(&second_items)
+        .expect("populate second source");
+    first_store.force_sync().expect("sync first source");
+    second_store.force_sync().expect("sync second source");
+    drop(first_store);
+    drop(second_store);
+
+    let first_reader = LmdbBlobReader::open(&first_path, None).expect("open first reader");
+    let second_reader = LmdbBlobReader::open(&second_path, None).expect("open second reader");
+    let pool = PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default())
+        .expect("open target Pool");
+    pool.add_member(PoolMemberConfig::new(
+        temp.path().join("member"),
+        64 * 1024 * 1024,
+    ))
+    .expect("add target member");
+    let entries = generated
+        .iter()
+        .enumerate()
+        .map(|(index, (hash, bytes))| (*hash, bytes.len() as u64, index % 2))
+        .collect::<Vec<_>>();
+    let mut authorizations = Vec::new();
+    let batch = reconcile_lmdb_source_union_page_with_max_buffer_bytes_and_authorizer(
+        &[&first_reader, &second_reader],
+        &pool,
+        &entries,
+        usize::MAX,
+        &mut |cursor, writes| {
+            authorizations.push((cursor, writes));
+            Ok(())
+        },
+    )
+    .expect("reconcile alternating generated union page");
+
+    assert_eq!(batch.scanned, generated.len());
+    assert_eq!(batch.source_read_groups, 2);
+    assert_eq!(batch.verified, generated.len());
+    assert_eq!(batch.inserted, generated.len());
+    assert_eq!(authorizations.len(), 1);
+    assert_eq!(
+        authorizations[0],
+        (generated.last().map(|(hash, _)| *hash), generated.len())
+    );
 }
 
 #[test]

@@ -5,6 +5,7 @@ use std::thread;
 use tempfile::TempDir;
 #[cfg(target_os = "linux")]
 use {
+    crate::{StoreTotals, STORE_TOTALS_KEY},
     heed::{PinnedLmdbFileIdentity, PinnedLmdbIdentity},
     std::fs::File,
     std::os::fd::AsRawFd,
@@ -33,6 +34,40 @@ fn test_lmdb_identity(path: &Path) -> PinnedLmdbIdentity {
             inode: lock.ino(),
         },
     }
+}
+
+#[cfg(target_os = "linux")]
+fn generated_controlled_config(
+    pool: &PoolStore,
+    catalog: &Path,
+    members: &[(PoolMemberId, PathBuf)],
+) -> (PathBuf, PoolStoreConfig, Vec<File>) {
+    let manifest_sha256 = pool
+        .read_manifest_with_identity()
+        .expect("read generated controlled manifest")
+        .1;
+    let mut retained = Vec::with_capacity(members.len() + 1);
+    let catalog_file = File::open(catalog).expect("pin generated controlled catalog");
+    let catalog_runtime = PathBuf::from(format!("/proc/self/fd/{}", catalog_file.as_raw_fd()));
+    retained.push(catalog_file);
+    let mut config = PoolStoreConfig::default();
+    config.temperature.enabled = false;
+    config.catalog_lmdb_identity = Some(test_lmdb_identity(catalog));
+    config.expected_manifest_sha256 = Some(manifest_sha256);
+    for (id, path) in members {
+        let directory = File::open(path).expect("pin generated controlled member");
+        let runtime_path = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+        config.member_runtime_paths.push(PoolMemberRuntimePaths {
+            id: *id,
+            configured_path: path.clone(),
+            runtime_path,
+            configured_external_path: None,
+            runtime_external_path: None,
+            lmdb_identity: test_lmdb_identity(path),
+        });
+        retained.push(directory);
+    }
+    (catalog_runtime, config, retained)
 }
 
 #[derive(serde::Serialize)]
@@ -1343,6 +1378,278 @@ fn controlled_writer_resumes_pending_before_and_after_member_write() {
         reader.get_sync(&present_hash).expect("read finalized body"),
         Some(present_data.to_vec())
     );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn controlled_open_is_data_nonmutating_and_rejects_missing_or_stale_member_stats() {
+    for state in ["valid", "missing", "stale"] {
+        let temp = TempDir::new().expect("create generated controlled-open root");
+        let catalog = temp.path().join("catalog");
+        let member_path = temp.path().join("member");
+        let mut ordinary_config = PoolStoreConfig::default();
+        ordinary_config.temperature.enabled = false;
+        let pool =
+            PoolStore::open(&catalog, ordinary_config).expect("open generated ordinary Pool");
+        let member = pool
+            .add_member(PoolMemberConfig::new(member_path.clone(), 16 * 1024 * 1024))
+            .expect("add generated member");
+        let data = format!("generated controlled-open {state}").into_bytes();
+        pool.put_sync(sha256(&data), &data)
+            .expect("write generated controlled-open blob");
+
+        if state != "valid" {
+            let store = pool.get_member(member).expect("open generated member");
+            let mut wtxn = store.env.write_txn().expect("open generated stats txn");
+            match state {
+                "missing" => {
+                    store
+                        .stats
+                        .delete(&mut wtxn, STORE_TOTALS_KEY)
+                        .expect("delete generated totals");
+                }
+                "stale" => {
+                    LmdbBlobStore::write_store_totals(
+                        store.stats,
+                        &mut wtxn,
+                        StoreTotals::default(),
+                    )
+                    .expect("write stale generated totals");
+                }
+                _ => unreachable!(),
+            }
+            wtxn.commit().expect("commit generated stats state");
+            store.force_sync().expect("sync generated member stats");
+        }
+        pool.force_sync().expect("sync generated Pool");
+        let (catalog_runtime, controlled_config, retained) =
+            generated_controlled_config(&pool, &catalog, &[(member, member_path.clone())]);
+        drop(pool);
+        let catalog_before =
+            fs::read(catalog.join("data.mdb")).expect("snapshot generated catalog data");
+        let member_before =
+            fs::read(member_path.join("data.mdb")).expect("snapshot generated member data");
+
+        let opened = PoolStore::open(&catalog_runtime, controlled_config);
+        match state {
+            "valid" => {
+                drop(opened.expect("open exact nonmutating controlled Pool"));
+            }
+            "missing" => {
+                let error = opened
+                    .err()
+                    .expect("missing member totals must fail closed");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("missing persisted aggregate totals"),
+                    "unexpected missing-stat error: {error}"
+                );
+            }
+            "stale" => {
+                let error = opened.err().expect("stale member totals must fail closed");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("secondary/stat counts are stale"),
+                    "unexpected stale-stat error: {error}"
+                );
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            fs::read(catalog.join("data.mdb")).expect("reinspect generated catalog data"),
+            catalog_before,
+            "controlled open changed catalog data for {state} member stats"
+        );
+        assert_eq!(
+            fs::read(member_path.join("data.mdb")).expect("reinspect generated member data"),
+            member_before,
+            "controlled open changed member data for {state} member stats"
+        );
+        drop(retained);
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exact_controlled_and_terminal_audits_reject_byte_only_stale_member_totals() {
+    let temp = TempDir::new().expect("create generated byte-total audit root");
+    let catalog = temp.path().join("catalog");
+    let member_path = temp.path().join("member");
+    let mut ordinary_config = PoolStoreConfig::default();
+    ordinary_config.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, ordinary_config).expect("open generated ordinary Pool");
+    let member = pool
+        .add_member(PoolMemberConfig::new(member_path.clone(), 16 * 1024 * 1024))
+        .expect("add generated member");
+    let data = b"generated byte-only stale aggregate";
+    pool.put_sync(sha256(data), data)
+        .expect("write generated controlled-open blob");
+
+    let store = pool.get_member(member).expect("open generated member");
+    let mut wtxn = store.env.write_txn().expect("open generated stats txn");
+    LmdbBlobStore::write_store_totals(
+        store.stats,
+        &mut wtxn,
+        StoreTotals {
+            count: 1,
+            total_bytes: 0,
+            pinned_count: 0,
+            pinned_bytes: 0,
+        },
+    )
+    .expect("write byte-only stale generated totals");
+    wtxn.commit().expect("commit generated stats state");
+    store.force_sync().expect("sync generated member stats");
+    drop(store);
+    pool.force_sync().expect("sync generated Pool");
+    let (catalog_runtime, controlled_config, retained) =
+        generated_controlled_config(&pool, &catalog, &[(member, member_path.clone())]);
+    drop(pool);
+    let catalog_before =
+        fs::read(catalog.join("data.mdb")).expect("snapshot generated catalog data");
+    let member_before =
+        fs::read(member_path.join("data.mdb")).expect("snapshot generated member data");
+
+    let controlled = PoolStore::open(&catalog_runtime, controlled_config.clone())
+        .expect("constant-time controlled open accepts matching counts");
+    let error = controlled
+        .validate_controlled_member_state_exact()
+        .expect_err("exact pre-mutation audit must reject stale byte total");
+    assert!(
+        error
+            .to_string()
+            .contains("persisted aggregate totals are stale"),
+        "unexpected exact aggregate error: {error}"
+    );
+    drop(controlled);
+
+    let terminal = PoolStoreReader::open(&catalog_runtime, controlled_config)
+        .expect("open exact read-only terminal reader");
+    let error = terminal
+        .validate_terminal_catalog_and_payloads()
+        .expect_err("terminal audit must reject stale byte total");
+    assert!(
+        error
+            .to_string()
+            .contains("persisted aggregate totals are stale"),
+        "unexpected terminal aggregate error: {error}"
+    );
+    drop(terminal);
+
+    assert_eq!(
+        fs::read(catalog.join("data.mdb")).expect("reinspect generated catalog data"),
+        catalog_before,
+        "exact aggregate validation changed catalog data"
+    );
+    assert_eq!(
+        fs::read(member_path.join("data.mdb")).expect("reinspect generated member data"),
+        member_before,
+        "exact aggregate validation changed member data"
+    );
+    drop(retained);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn controlled_open_rejects_missing_cleanup_index_without_repairing_it() {
+    let temp = TempDir::new().expect("create generated cleanup-index root");
+    let catalog = temp.path().join("catalog");
+    let source_path = temp.path().join("source");
+    let target_path = temp.path().join("target");
+    let mut ordinary_config = PoolStoreConfig::default();
+    ordinary_config.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, ordinary_config).expect("open generated Pool");
+    let source = pool
+        .add_member(PoolMemberConfig::new(source_path.clone(), 16 * 1024 * 1024))
+        .expect("add generated source member");
+    let target = pool
+        .add_member(PoolMemberConfig::new(target_path.clone(), 16 * 1024 * 1024))
+        .expect("add generated target member");
+    let hash = sha256(b"generated missing cleanup index");
+    let moving = LocationRecord::Moving {
+        source,
+        target,
+        size: 1,
+    };
+    let mut wtxn = pool.env.write_txn().expect("open generated catalog txn");
+    pool.set_location_txn(&mut wtxn, hash, Some(moving))
+        .expect("write generated moving record");
+    wtxn.commit().expect("commit generated moving record");
+    pool.finish_move_records(&[(hash, source, target, 1)])
+        .expect("finish generated move");
+    let mut wtxn = pool
+        .env
+        .write_txn()
+        .expect("open generated stale-index txn");
+    pool.by_member
+        .delete(&mut wtxn, &member_hash_key(source, hash))
+        .expect("remove generated cleanup index");
+    wtxn.commit().expect("commit generated missing index");
+    pool.force_sync().expect("sync generated missing index");
+    let (catalog_runtime, controlled_config, retained) = generated_controlled_config(
+        &pool,
+        &catalog,
+        &[(source, source_path), (target, target_path)],
+    );
+    drop(pool);
+    let catalog_before =
+        fs::read(catalog.join("data.mdb")).expect("snapshot missing-index catalog");
+
+    let error = PoolStore::open(&catalog_runtime, controlled_config)
+        .err()
+        .expect("controlled open must not repair a missing cleanup index");
+    assert!(
+        error
+            .to_string()
+            .contains("missing move-cleanup member index"),
+        "unexpected cleanup-index error: {error}"
+    );
+    assert_eq!(
+        fs::read(catalog.join("data.mdb")).expect("reinspect missing-index catalog"),
+        catalog_before,
+        "controlled open repaired the missing cleanup index before authorization"
+    );
+    drop(retained);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn controlled_open_rejects_undersized_catalog_without_resizing_it() {
+    let temp = TempDir::new().expect("create generated map-size root");
+    let catalog = temp.path().join("catalog");
+    let member_path = temp.path().join("member");
+    let mut ordinary_config = PoolStoreConfig::default();
+    ordinary_config.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, ordinary_config).expect("open generated Pool");
+    let member = pool
+        .add_member(PoolMemberConfig::new(member_path.clone(), 16 * 1024 * 1024))
+        .expect("add generated member");
+    pool.force_sync().expect("sync generated map-size Pool");
+    let actual_map_size = u64::try_from(pool.env.info().map_size).expect("catalog map size");
+    let (catalog_runtime, mut controlled_config, retained) =
+        generated_controlled_config(&pool, &catalog, &[(member, member_path)]);
+    controlled_config.catalog_map_size_bytes =
+        actual_map_size.saturating_add(MIN_MEMBER_MAP_SIZE_BYTES);
+    drop(pool);
+    let catalog_before = fs::read(catalog.join("data.mdb")).expect("snapshot undersized catalog");
+
+    let error = PoolStore::open(&catalog_runtime, controlled_config)
+        .err()
+        .expect("controlled open must not resize an undersized catalog");
+    assert!(
+        error
+            .to_string()
+            .contains("pre-size it before exact migration"),
+        "unexpected map-size error: {error}"
+    );
+    assert_eq!(
+        fs::read(catalog.join("data.mdb")).expect("reinspect undersized catalog"),
+        catalog_before,
+        "controlled open resized catalog data before authorization"
+    );
+    drop(retained);
 }
 
 #[test]

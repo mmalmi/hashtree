@@ -1,0 +1,24 @@
+[Unit]
+Description=Controller-bound Hash-verified Hashtree Pool migration worker (%i)
+Documentation=https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree
+After=local-fs.target
+BindsTo=hashtree-pool-migration-controller@%i.service
+After=hashtree-pool-migration-controller@%i.service
+
+[Service]
+Type=oneshot
+User=hashtree
+Group=hashtree
+EnvironmentFile=/etc/hashtree/pool-migration-worker-%i.env
+ExecStart=/usr/local/bin/htree-pool-migration --data-dir ${HTREE_POOL_TARGET_DATA_DIR} storage pool migrate-lmdb --launch-request ${HTREE_POOL_LAUNCH_REQUEST} --launch-request-wait-seconds ${HTREE_POOL_LAUNCH_WAIT_SECONDS} --source ${HTREE_POOL_SOURCE_LMDB_DIR} $HTREE_POOL_SOURCE_EXTERNAL_ARGS --state-file ${HTREE_POOL_STATE_FILE} --batch-size ${HTREE_POOL_BATCH_SIZE} --max-buffer-mib ${HTREE_POOL_MAX_BUFFER_MIB} --source-read-concurrency ${HTREE_POOL_SOURCE_READ_CONCURRENCY} --reopen-batches ${HTREE_POOL_REOPEN_BATCHES} $HTREE_POOL_LIMIT_ARGS --resume
+# An acknowledged request is deliberately single-use. Recovery must create a
+# fresh attempts-v3 nonce and explicit controller request, never auto-restart.
+Restart=no
+TimeoutStartSec=infinity
+Nice=10
+IOSchedulingClass=idle
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateNetwork=true
+UnsetEnvironment=LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH HTREE_LMDB_NO_SYNC HTREE_LMDB_NO_META_SYNC
+UMask=0027

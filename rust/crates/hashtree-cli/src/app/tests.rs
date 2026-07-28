@@ -835,6 +835,90 @@ fn test_storage_pool_add_and_migration_args() {
         zero_launch_wait.is_err(),
         "Pool migration must reject an unbounded zero-second rendezvous"
     );
+
+    let controller = Cli::try_parse_from([
+        "htree",
+        "storage",
+        "pool",
+        "launch-migrate-lmdb-v3",
+        "--preflight",
+        "--rollout-dir",
+        "/authority/rollout-v3",
+        "--rollout-id",
+        "rollout-v3",
+        "--phase",
+        "online-bounded",
+        "--controller-executable",
+        "/authority/htree-controller",
+        "--controller-systemd-unit",
+        "hashtree-pool-migration-controller@rollout-v3.service",
+        "--controller-systemd-fragment",
+        "/etc/systemd/system/hashtree-pool-migration-controller@.service",
+        "--controller-systemd-environment-file",
+        "/etc/hashtree/pool-migration-controller-rollout-v3.env",
+        "--controller-state-input",
+        "/authority/controller-state-input.json",
+        "--source-baseline-input",
+        "/authority/source-baseline-input.manifest",
+        "--pool-topology-input",
+        "/authority/pool-topology-input.json",
+        "--cas",
+        "safety=/authority/safety.cas",
+        "--systemd-unit",
+        "hashtree-pool-migration-worker@rollout-v3.service",
+        "--systemctl",
+        "/usr/bin/systemctl",
+        "--systemd-fragment",
+        "/etc/systemd/system/hashtree-pool-migration-worker@.service",
+        "--systemd-environment-file",
+        "/etc/hashtree/pool-migration-worker-rollout-v3.env",
+        "--service-gid",
+        "123",
+        "--migration-binary",
+        "/usr/local/bin/htree-pool-migration",
+        "--target-data-dir",
+        "/var/lib/hashtree",
+        "--pool",
+        "/var/lib/hashtree/blob-pool-v1",
+        "--source",
+        "/mnt/legacy/blobs",
+        "--source-external-dir",
+        "/mnt/legacy/blob-files-v1",
+        "--state-file",
+        "/var/lib/hashtree/cursors/legacy.cursor",
+        "--batch-size",
+        "256",
+        "--max-buffer-mib",
+        "64",
+        "--source-read-concurrency",
+        "4",
+        "--reopen-batches",
+        "256",
+        "--max-items",
+        "100000",
+        "--launch-request-wait-seconds",
+        "120",
+        "--acknowledgement-wait-seconds",
+        "30",
+    ])
+    .expect("parse explicit Pool migration v3 controller");
+    assert!(
+        !should_spawn_background_update(&controller),
+        "root Pool migration controller must not launch the generic background updater"
+    );
+    let Commands::Storage {
+        command: StorageCommands::Pool { command },
+    } = controller.command
+    else {
+        panic!("expected storage pool controller command");
+    };
+    let PoolCommands::LaunchMigrateLmdbV3(arguments) = command else {
+        panic!("expected Pool migration v3 controller");
+    };
+    assert!(arguments.preflight);
+    assert_eq!(arguments.service_gid, 123);
+    assert_eq!(arguments.batch_size, 256);
+    assert_eq!(arguments.max_items, Some(100000));
 }
 
 #[test]

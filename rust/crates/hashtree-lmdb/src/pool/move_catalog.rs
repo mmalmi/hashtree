@@ -264,6 +264,42 @@ pub(super) fn rebuild_move_cleanup_member_index_txn(
     Ok(cleanups.len())
 }
 
+pub(super) fn validate_move_cleanup_member_index(
+    temperature_state: &Database<Bytes, Bytes>,
+    by_member: &Database<Bytes, Unit>,
+    env: &heed::Env,
+) -> Result<(), StoreError> {
+    let rtxn = env.read_txn().map_err(map_heed)?;
+    for item in temperature_state
+        .prefix_iter(&rtxn, &[MOVE_CLEANUP_KEY_PREFIX])
+        .map_err(map_heed)?
+    {
+        let (key, value) = item.map_err(map_heed)?;
+        if key.len() != 33 {
+            return Err(StoreError::Other("invalid pool move-cleanup key".into()));
+        }
+        let hash: Hash = key[1..]
+            .try_into()
+            .map_err(|_| StoreError::Other("invalid pool move-cleanup hash".into()))?;
+        let LocationRecord::Moving { source, .. } = LocationRecord::decode(value)? else {
+            return Err(StoreError::Other(
+                "pool move-cleanup contains a non-moving record".into(),
+            ));
+        };
+        if by_member
+            .get(&rtxn, &member_hash_key(source, hash))
+            .map_err(map_heed)?
+            .is_none()
+        {
+            return Err(StoreError::Other(format!(
+                "controlled Pool open found a missing move-cleanup member index for {}",
+                hashtree_core::to_hex(&hash)
+            )));
+        }
+    }
+    rtxn.commit().map_err(map_heed)
+}
+
 pub(super) fn move_state_key(hash: Hash) -> [u8; 33] {
     move_record_key(MOVE_KEY_PREFIX, hash)
 }

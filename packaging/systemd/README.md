@@ -26,25 +26,40 @@ root even though the service itself uses `User=hashtree`.
 
 ## Resumable LMDB-to-Pool migration
 
-`hashtree-pool-migrate@.service` runs one hash-verified migration pass as the
-unprivileged `hashtree` user. It is deliberately not a restartable daemon.
-Every invocation is inert until a root controller publishes an exact v3
-request and htree durably acknowledges it before opening either LMDB store.
+`hashtree-pool-migration-controller@.service` is the root checkpoint broker
+and the only unit an operator starts. It validates the rollout authorities,
+creates a fresh attempt, starts the bound
+`hashtree-pool-migration-worker@.service`, and keeps the writer fences and
+checkpoint protocol alive until that worker terminates. The worker runs as the
+unprivileged `hashtree` user and is inert until the controller publishes an
+exact v3 request that it durably acknowledges before opening either LMDB
+store. Neither unit is restartable.
 
-Install an immutable migration binary and the exact unit fragment:
+Install two immutable copies of the same release binary and both exact unit
+fragments:
 
 ```bash
 sudo install -o root -g root -m 0555 target/release/htree \
   /usr/local/bin/htree-pool-migration
+sudo install -o root -g root -m 0555 target/release/htree \
+  /usr/local/bin/htree-pool-migration-controller
 sudo install -o root -g root -m 0644 \
-  packaging/systemd/hashtree-pool-migrate@.service \
-  /etc/systemd/system/hashtree-pool-migrate@.service
+  packaging/systemd/hashtree-pool-migration-controller@.service \
+  /etc/systemd/system/hashtree-pool-migration-controller@.service
+sudo install -o root -g root -m 0644 \
+  packaging/systemd/hashtree-pool-migration-worker@.service \
+  /etc/systemd/system/hashtree-pool-migration-worker@.service
+sudo install -d -o root -g root -m 0755 /etc/hashtree
 sudo install -d -o hashtree -g hashtree -m 0750 \
   /var/lib/hashtree/pool-migration/cursors
+sudo systemctl daemon-reload
 ```
 
-The loaded unit must have no drop-ins, conditions, start/stop helpers, reload
-helpers, restart, or control process. It must retain `Type=oneshot`,
+Never start the worker directly. Its `BindsTo=` and `After=` relationship to
+the same-name controller instance is part of the release authority.
+
+The loaded worker unit must have no drop-ins, conditions, start/stop helpers,
+reload helpers, restart, or control process. It must retain `Type=oneshot`,
 `Restart=no`, `TimeoutStartSec=infinity`, `PrivateNetwork=true`,
 `NoNewPrivileges=true`, the loader-variable `UnsetEnvironment` list, and one
 direct `ExecStart`. The binary, fragment, and environment file must be
@@ -58,7 +73,7 @@ hook is rejected.
 
 ### Strict environment file
 
-Create `/etc/hashtree/pool-migrate-NAME.env` as a root-owned `0644` file.
+Create `/etc/hashtree/pool-migration-worker-NAME.env` as a root-owned `0644` file.
 Only the keys understood by the v3 validator are legal:
 
 ```text
@@ -68,19 +83,38 @@ HTREE_POOL_LAUNCH_WAIT_SECONDS=120
 HTREE_POOL_SOURCE_LMDB_DIR=/mnt/old-store/blobs
 HTREE_POOL_SOURCE_EXTERNAL_ARGS=--source-external-dir /mnt/old-store/blob-files-v1
 HTREE_POOL_STATE_FILE=/var/lib/hashtree/pool-migration/cursors/old-store.cursor
-HTREE_POOL_BATCH_SIZE=256
+HTREE_POOL_BATCH_SIZE=4096
 HTREE_POOL_MAX_BUFFER_MIB=64
 HTREE_POOL_SOURCE_READ_CONCURRENCY=4
 HTREE_POOL_REOPEN_BATCHES=256
-HTREE_POOL_LIMIT_ARGS=--max-items 100000
+HTREE_POOL_LIMIT_ARGS=
 ```
 
 Use an empty `HTREE_POOL_SOURCE_EXTERNAL_ARGS=` when the source has no
-external directory. `HTREE_POOL_LIMIT_ARGS` is exactly `--max-items N` for an
-`online-bounded` pass and is empty for a `final-stopped-full` pass. Unknown,
-duplicate, quoted, or loader-affecting assignments are rejected. Htree binds
-the file path, inode, bytes, SHA-256, systemd-loaded path, and resulting
-process environment.
+external directory. `HTREE_POOL_LIMIT_ARGS` must be empty for both supported
+stopped-final phases. Stopped-final batch size is fixed at 4096 to keep the
+durable checkpoint namespace practical; source read concurrency is hard
+capped at 64. Unknown, duplicate, quoted, or loader-affecting assignments are
+rejected. Htree binds the file path, inode, bytes, SHA-256, systemd-loaded
+path, and resulting process environment.
+
+Create `/etc/hashtree/pool-migration-controller-NAME.env` as a root-owned
+`0644` file containing one unquoted `HTREE_POOL_CONTROLLER_ARGS=` assignment.
+Its value is the complete argument vector beginning with:
+
+```text
+--data-dir /var/lib/hashtree storage pool launch-migrate-lmdb-v3
+```
+
+and must include the exact absolute `--rollout-dir`, `--rollout-id`, `--phase`,
+controller executable/unit/fragment/environment paths, controller-state,
+source-baseline and Pool-topology inputs, every `--cas` and sorted
+`--writer-unit`, the worker unit/fragment/environment/binary, service GID,
+target data/Pool/source/external/cursor paths, `--batch-size 4096`,
+`--max-buffer-mib`, `--source-read-concurrency`, `--reopen-batches`, and both
+launch/acknowledgement waits. Do not add `--max-items`. The controller
+reconstructs and validates the worker argv and environment; it does not trust
+an operator-authored launch request.
 
 ### Single-use attempt directories
 
@@ -129,14 +163,14 @@ expanded argument exactly as `/proc/MAINPID/cmdline` exposes it.
   "nonce": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "bootId": "canonical-lowercase-boot-uuid",
   "systemdInvocationId": "0123456789abcdef0123456789abcdef",
-  "systemdUnit": "hashtree-pool-migrate@NAME.service",
+  "systemdUnit": "hashtree-pool-migration-worker@NAME.service",
   "systemdManager": "system",
   "systemdFragment": {
-    "path": "/etc/systemd/system/hashtree-pool-migrate@.service",
+    "path": "/etc/systemd/system/hashtree-pool-migration-worker@.service",
     "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
   },
   "systemdEnvironmentFile": {
-    "path": "/etc/hashtree/pool-migrate-NAME.env",
+    "path": "/etc/hashtree/pool-migration-worker-NAME.env",
     "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
   },
   "mainPid": 1234,
@@ -154,18 +188,17 @@ expanded argument exactly as `/proc/MAINPID/cmdline` exposes it.
     "--source", "/mnt/old-store/blobs",
     "--source-external-dir", "/mnt/old-store/blob-files-v1",
     "--state-file", "/var/lib/hashtree/pool-migration/cursors/old-store.cursor",
-    "--batch-size", "256",
+    "--batch-size", "4096",
     "--max-buffer-mib", "64",
     "--source-read-concurrency", "4",
     "--reopen-batches", "256",
-    "--max-items", "100000",
     "--resume"
   ],
   "controller": {
     "rolloutId": "ROLLOUT",
-    "phase": "online-bounded",
+    "phase": "final-stopped-full",
     "executable": {
-      "path": "/absolute/controller",
+      "path": "/usr/local/bin/htree-pool-migration-controller",
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     },
     "state": {
@@ -210,6 +243,10 @@ expanded argument exactly as `/proc/MAINPID/cmdline` exposes it.
     "label": "controller-safety-cas",
     "path": "/absolute/ROLLOUT/safety.cas",
     "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }, {
+    "label": "source-terminal-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "path": "/absolute/ROLLOUT/attempts-v3/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef/source-terminal.json",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
   }]
 }
 ```
@@ -249,21 +286,45 @@ LMDB identities, and full Pool manifest as the request:
   "stoppedWriterUnits": [
     "hashtree.service",
     "iris-audio-crawler.service"
+  ],
+  "writerUnitMasks": [{
+    "unit": "hashtree.service",
+    "path": "/run/systemd/system/hashtree.service",
+    "identity": {"device": 5, "inode": 50},
+    "target": "/dev/null"
+  }, {
+    "unit": "iris-audio-crawler.service",
+    "path": "/run/systemd/system/iris-audio-crawler.service",
+    "identity": {"device": 5, "inode": 52},
+    "target": "/dev/null"
+  }],
+  "legacyWorkerTemplateMask": {
+    "unit": "hashtree-pool-migrate@.service",
+    "path": "/run/systemd/system/hashtree-pool-migrate@.service",
+    "identity": {"device": 5, "inode": 51},
+    "target": "/dev/null"
+  },
+  "legacyWorkerInstanceMasks": [],
+  "sourceTerminalReceiptSha256": [
+    "0000000000000000000000000000000000000000000000000000000000000000"
   ]
 }
 ```
 
 `sourceExternalIdentity` is JSON `null` when the source has no external root.
 The topology hash binds every target member LMDB and external-root identity.
-`stoppedWriterUnits` is nonempty, uniquely sorted, and names the complete
-systemd service set whose processes can write any bound source or target
-object. Before each
-final-pass Pool open and immediately before `complete`, htree revalidates the
-controller-state CAS and requires every named unit to remain loaded,
+`stoppedWriterUnits` and its exact runtime mask set are nonempty, uniquely
+sorted, and name the complete systemd service set whose processes can write
+any bound source or target object. The legacy worker template and every loaded
+legacy instance are separately runtime-masked. Before each final-pass Pool
+open and immediately before `complete`, htree revalidates the controller-state
+CAS and requires every named unit to remain loaded,
 inactive/dead, without a main PID, control PID, or pending job. The root
 controller must also prevent those units from restarting and keep both writer
 fences held until htree has durably published `complete`; the state file is an
 attestation, not a substitute for the controller's process/open-handle audit.
+`sourceTerminalReceiptSha256` is empty for `final-stopped-source` and contains
+the uniquely sorted exact receipt set for `final-stopped-full`.
 
 The topology CAS is strict JSON:
 
@@ -301,55 +362,117 @@ Every LMDB data/lock inode must also be globally unique; distinct directories
 cannot hide hardlinked aliases. The manifest hash covers the full stored
 generation, order, state, and configuration, not only member IDs.
 
-### Online and final passes
+### Supported stopped-final flow
 
-An `online-bounded` request requires a positive `--max-items`, may resume an
-authorized hex cursor, and never writes `complete`, even if it reaches the
-current source end. Each new process uses a fresh attempt nonce while
-continuing the same cursor authority. Before acknowledgement, the process
-takes a nonblocking exclusive kernel lease on the pinned cursor-parent
-directory and revalidates the cursor under that lease. Every cursor
-publication compares the live canonical bytes with the last acknowledged or
-published value before replacing them, so concurrent v3 attempts cannot
-regress a cursor or overwrite `complete`.
+`online-bounded` is deliberately refused in this release. It remains disabled
+until a rollout-bound exact target-state audit receipt can be reused across
+tranches; count-only controlled reopen is not sufficient authority for online
+placement. Do not bypass this gate or invoke the worker directly.
 
-For cutover, fence every source and target writer and keep both fences held
-through durable completion. While all Pool writers and handles remain fenced,
-remove only an exactly audited list of physically absent `Pending` records
-with `cleanup_stale_pending_exact_offline_sync`; generic `delete_many_sync` is
-not a safe substitute. Allocate a fresh cursor path whose file is absent, set
-`HTREE_POOL_LIMIT_ARGS=` so argv has no `--max-items`, and use phase
-`final-stopped-full`. This pass rescans the source from the beginning, verifies
-source bytes even for already-catalogued hashes, compares committed target
-bytes, and syncs the catalog and every member. Its terminal source proof also
-scans the complete `blobs` and `metadata` key sets. A wholly legacy source with
-no metadata is accepted; once any metadata exists, the two key sets must agree
-exactly so a mixed legacy store cannot silently omit blob-only rows.
+The supported full migration is two-stage:
 
-Before writing `complete`, the same process performs an exhaustive,
-authority-pinned terminal target audit. Every target catalog entry, including
-target-only entries, must be `Stored`; every body must match its declared
-SHA-256 and size; the complete by-member index, member blob/metadata counts,
-exact per-member blob/metadata key sets and metadata bytes, manifest, and move
-state must agree exactly. Any `Pending`, `Moving`, invalid, missing, corrupt,
-or addressable orphan payload or metadata row withholds `complete`. The process
-first durably publishes the source/target counts and audit digests as the
-attempt's O_EXCL `terminal-audit.json`, rechecks paths and writer-fence evidence,
-and only then publishes `complete`. Never reuse an online cursor for the final
-pass: new hashes can sort below it.
+1. Fence every writer that can open the source, install its exact runtime unit
+   masks, prove no process retains source LMDB or external-corpus handles, and
+   run `final-stopped-source`. The source LMDB `blobs` database is the raw key
+   authority: legacy blob-only and partially populated metadata stores are
+   accepted, while metadata-only rows are rejected. The worker verifies every
+   raw blob body, publishes bounded source evidence and
+   `source-terminal.json`, and the controller certifies it while retaining the
+   read-only source mounts.
+2. Keep those source fences and mounts intact, additionally fence every target
+   Pool writer/handle, and run `final-stopped-full` with a fresh absent cursor.
+   The controller-state `sourceTerminalReceiptSha256` set must contain every
+   uniquely sorted source receipt digest, and each receipt is passed as
+   `--cas source-terminal-NONCE=/absolute/attempt/source-terminal.json`. At
+   most 64 source receipts/environments are accepted. The worker merges their
+   sorted evidence, reconciles missing bodies into the Pool, closes and reopens
+   all source/target mappings after the bounded epoch, and then performs one
+   exhaustive terminal target audit.
 
-The controller sequence is:
+Before either stage, remove only an exactly audited list of physically absent
+`Pending` records with `cleanup_stale_pending_exact_offline_sync`; generic
+`delete_many_sync` is not a safe substitute. Every source, target and legacy
+migration writer unit must remain stopped and runtime-masked for the complete
+stage. Immutable readers may remain available only when the controller's
+handle census and mount policy explicitly permit them.
+
+The full-final target audit requires every catalog entry, including
+target-only entries, to be `Stored`; every body must match its declared
+SHA-256 and size; the by-member and cleanup indexes, exact member
+blob/metadata/eviction/pin state, persisted byte aggregates, manifest, and
+move state must agree. Any `Pending`, `Moving`, invalid, missing, corrupt, or
+addressable orphan row withholds completion. The worker first publishes
+O_EXCL `terminal-audit.json`; the controller replays the exhaustive audit
+with its own exact read-only Pool open and handle census before it tears down
+source mounts or publishes the durable `complete` cursor. Source-final uses
+the same root replay rule for the frozen source receipt before
+`source-complete` and its certification are published.
+
+Read-only source/keyset and full-union page scans do not create root
+checkpoints and do not invoke `systemctl`. A checkpoint exists only for a
+bounded target mutation or a terminal publication boundary. Each checkpoint
+uses exactly one batched `systemctl show` for the controller, worker, complete
+writer set, legacy template, and legacy instances; worker-side liveness and
+idle controller polling use pinned files plus `/proc`, without subprocesses.
+Each pre/post page fence validates the deduplicated current/prior source mount
+set against one `/proc/self/mountinfo` snapshot; receipt files are not opened
+on that path. Mapping-epoch and pre/post terminal-audit writer/legacy fence
+checks each use one batched `systemctl show`, independent of source count.
+The controller result reports both `authorizedCheckpoints` and
+`checkpointSystemctlSubprocesses`; they must be equal.
+
+Before scheduling downtime, run the installed controller and worker units
+against a real, complete corpus snapshot with the production unit/mask set.
+Do not use a generated fixture for this gate. Capture checkpoint request and
+acknowledgement boottime fields plus controller/worker wall time, and require:
+
+- `checkpointSystemctlSubprocesses == authorizedCheckpoints`;
+- no `source-audit-batch` or `migration-page-scan` checkpoint artifacts;
+- p99 request-to-authorization latency at most 100 ms and maximum at most
+  250 ms;
+- measured end-to-end time, projected from the real Stored/write ratio and
+  corpus size, fits the approved downtime window with at least 25% reserve.
+
+Also verify on that installed systemd version that the single batched
+`systemctl show` returns an exact `Id=hashtree-pool-migrate@.service` block
+with `LoadState=masked` and `UnitFileState=masked-runtime` for the bare legacy
+template. A failed template query or any subprocess/latency mismatch blocks
+the rollout.
+
+For each stage, install fresh root-owned controller and worker environment
+files using the same instance name, then start only the controller:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl start --no-block hashtree-pool-migrate@NAME.service
-# Read InvocationID/MainPID and /proc/MAINPID/stat field 22.
-# Publish the exact root-owned request, then require its matching durable ack.
-systemctl status hashtree-pool-migrate@NAME.service
-journalctl -u hashtree-pool-migrate@NAME.service
+sudo systemctl start --no-block hashtree-pool-migration-controller@NAME.service
+systemctl status hashtree-pool-migration-controller@NAME.service
+systemctl status hashtree-pool-migration-worker@NAME.service
+journalctl -u hashtree-pool-migration-controller@NAME.service \
+  -u hashtree-pool-migration-worker@NAME.service
 ```
 
-Require the final pass's terminal audit and durable `complete` before cutover.
-Retain the source, rollout evidence, claims, requests, acknowledgements, and
-cursors through the rollback window. Remove the temporary unit and migration
-binary only after that window closes.
+For `final-stopped-source`, require a controller-certified
+`source-terminal.json` and `source-complete` cursor. Build a new
+`final-stopped-full` controller-state/environment from that exact receipt;
+never edit or reuse the completed source attempt. For full-final, require
+`terminal-audit.json`, the controller's terminal-publication receipt, and the
+durable `complete` cursor before cutover.
+
+If either unit fails or the machine reboots, keep all stores fenced. Do not
+delete an attempt, request, acknowledgement, receipt, checkpoint, or cursor,
+and do not start a second attempt over an unfinished terminal publication.
+Restart the same installed controller invocation inputs so recovery can
+revalidate current-boot masks/censuses and replay the exact terminal audit; a
+prior-boot unfinished terminal attempt is not accepted. On the same boot,
+source-final reconstructs an exact missing retention receipt from its
+pre-acknowledgement terminal journal. Full-final reconstructs a missing
+teardown intent from the terminal publication, launch-request digest, and
+adopted lifecycle mounts, completes the non-lazy teardown, then re-audits
+before publishing the cursor. A crash during reconstructed teardown replays
+the durable step chain. Mixed mount disappearance fails closed and never
+tears down the surviving mounts.
+
+Retain every source, read-only mount authority, rollout input, mask record,
+attempt, request, acknowledgement, receipt, checkpoint namespace, audit, and
+cursor through the rollback window. Remove the temporary units and binaries
+only after that window closes.
