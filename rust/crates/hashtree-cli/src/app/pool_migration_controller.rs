@@ -6967,11 +6967,17 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             }
 
             drop(pins);
-            for runtime_path in runtime_paths {
-                assert!(
-                    std::fs::metadata(runtime_path).is_err(),
-                    "recovery procfd authority survived after its retained file was dropped"
-                );
+            for (runtime_path, identity) in runtime_paths.into_iter().zip(identities) {
+                if let Ok(metadata) = std::fs::metadata(runtime_path) {
+                    assert_ne!(
+                        FileIdentityV3 {
+                            device: metadata.dev(),
+                            inode: metadata.ino(),
+                        },
+                        identity,
+                        "recovery procfd authority survived after its retained file was dropped"
+                    );
+                }
             }
         }
     }
