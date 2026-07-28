@@ -868,10 +868,14 @@ impl AcknowledgedPoolMigrationLaunch {
             pool_manifest_sha256: hex::encode(self.pins.pool_manifest_sha256),
             audit_store_path,
             audit_binding_sha256: hex::encode(audit_binding),
+            source_evidence_kind: super::pool_migration_online_audit::SOURCE_EVIDENCE_KIND
+                .to_string(),
             source_verified_entries: source_summary.entries,
             source_verified_bytes: source_summary.bytes,
             source_content_sha256: hashtree_core::to_hex(&source_summary.content_sha256),
             source_evidence,
+            target_evidence_kind: super::pool_migration_online_audit::TARGET_EVIDENCE_KIND
+                .to_string(),
             target_verified_entries: target_summary.entries,
             target_verified_bytes: target_summary.bytes,
             target_content_sha256: hashtree_core::to_hex(&target_summary.content_sha256),

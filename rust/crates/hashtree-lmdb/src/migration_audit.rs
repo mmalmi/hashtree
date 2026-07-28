@@ -22,16 +22,17 @@ pub struct PoolMigrationAuditSummary {
     pub content_sha256: Hash,
 }
 
-/// Durable, provenance-separated source and target body proofs.
+/// Durable, provenance-separated source reconciliation and target body proofs.
 ///
-/// A source proof means the source body and exact target body were both
-/// hash-verified. A target proof means only the target body was hash-verified;
-/// it must never satisfy the stopped source-boundary check. The root
-/// controller owns the writable instance. Workers open it read-only.
+/// A source entry means root independently observed the exact source
+/// hash/size metadata and an exact-size terminal `Stored` target catalog
+/// location. It is not a source-body or target-body proof. A target entry
+/// means the target body was independently hash-verified. The root controller
+/// owns the writable instance. Workers open it read-only.
 pub struct PoolMigrationAuditStore {
     path: PathBuf,
     env: ManagedEnv,
-    source_verified: Database<Bytes, Bytes>,
+    source_reconciled: Database<Bytes, Bytes>,
     target_verified: Database<Bytes, Bytes>,
     metadata: Database<Bytes, Bytes>,
     binding: Hash,
@@ -47,8 +48,8 @@ impl PoolMigrationAuditStore {
             .max_dbs(AUDIT_DATABASE_COUNT);
         let env = unsafe { ManagedEnv::open(&options, path) }.map_err(map_heed_error)?;
         let mut wtxn = env.write_txn().map_err(map_heed_error)?;
-        let source_verified = env
-            .create_database(&mut wtxn, Some("source_verified"))
+        let source_reconciled = env
+            .create_database(&mut wtxn, Some("source_reconciled"))
             .map_err(map_heed_error)?;
         let target_verified = env
             .create_database(&mut wtxn, Some("target_verified"))
@@ -72,7 +73,7 @@ impl PoolMigrationAuditStore {
         Ok(Self {
             path: path.to_path_buf(),
             env,
-            source_verified,
+            source_reconciled,
             target_verified,
             metadata,
             binding,
@@ -88,11 +89,13 @@ impl PoolMigrationAuditStore {
         }
         let env = unsafe { ManagedEnv::open(&options, path) }.map_err(map_heed_error)?;
         let rtxn = env.read_txn().map_err(map_heed_error)?;
-        let source_verified = env
-            .open_database(&rtxn, Some("source_verified"))
+        let source_reconciled = env
+            .open_database(&rtxn, Some("source_reconciled"))
             .map_err(map_heed_error)?
             .ok_or_else(|| {
-                StoreError::Other("online migration source audit database is missing".into())
+                StoreError::Other(
+                    "online migration source reconciliation database is missing".into(),
+                )
             })?;
         let target_verified = env
             .open_database(&rtxn, Some("target_verified"))
@@ -121,7 +124,7 @@ impl PoolMigrationAuditStore {
         Ok(Self {
             path: path.to_path_buf(),
             env,
-            source_verified,
+            source_reconciled,
             target_verified,
             metadata,
             binding,
@@ -137,13 +140,14 @@ impl PoolMigrationAuditStore {
         self.binding
     }
 
-    /// Return whether each sorted candidate already has an exact durable
-    /// hash/size proof. A conflicting size is corruption, never a cache miss.
-    pub fn contains_source_exact_sorted(
+    /// Return whether each sorted source candidate already has an exact
+    /// durable hash/size reconciliation. A conflicting size is corruption,
+    /// never a cache miss.
+    pub fn contains_source_reconciled_exact_sorted(
         &self,
         candidates: &[(Hash, u64)],
     ) -> Result<Vec<bool>, StoreError> {
-        self.contains_exact_sorted_in(self.source_verified, candidates, "source")
+        self.contains_exact_sorted_in(self.source_reconciled, candidates, "source reconciliation")
     }
 
     pub fn contains_target_exact_sorted(
@@ -153,18 +157,23 @@ impl PoolMigrationAuditStore {
         self.contains_exact_sorted_in(self.target_verified, candidates, "target")
     }
 
-    /// Root-commit source proofs after the broker independently verifies both
-    /// bodies. The same entries are also durable target proofs; ordinary
-    /// Pool writers cannot replace content at an existing hash.
-    pub fn record_verified_source(&self, entries: &[(Hash, u64)]) -> Result<(), StoreError> {
+    /// Root-commit exact source-to-target catalog reconciliations.
+    ///
+    /// These entries deliberately do not enter `target_verified`: the
+    /// exhaustive target audit must still read and hash every target body.
+    pub fn record_reconciled_source(&self, entries: &[(Hash, u64)]) -> Result<(), StoreError> {
         self.require_writable()?;
         require_sorted_candidates(entries)?;
         if entries.is_empty() {
             return Ok(());
         }
         let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
-        self.put_verified_txn(&mut wtxn, self.source_verified, entries, "source")?;
-        self.put_verified_txn(&mut wtxn, self.target_verified, entries, "target")?;
+        self.put_verified_txn(
+            &mut wtxn,
+            self.source_reconciled,
+            entries,
+            "source reconciliation",
+        )?;
         wtxn.commit().map_err(map_heed_error)?;
         self.env.force_sync().map_err(map_heed_error)
     }
@@ -264,13 +273,13 @@ impl PoolMigrationAuditStore {
         self.env.force_sync().map_err(map_heed_error)
     }
 
-    /// Stream every verified hash/size record in canonical hash order.
-    pub fn for_each_source_verified_batch(
+    /// Stream every reconciled source hash/size record in canonical order.
+    pub fn for_each_source_reconciled_batch(
         &self,
         batch_size: usize,
         visit: impl FnMut(&[(Hash, u64)]) -> Result<(), StoreError>,
     ) -> Result<PoolMigrationAuditSummary, StoreError> {
-        self.for_each_verified_batch_in(self.source_verified, batch_size, visit)
+        self.for_each_verified_batch_in(self.source_reconciled, batch_size, visit)
     }
 
     pub fn for_each_target_verified_batch(
@@ -333,7 +342,7 @@ impl PoolMigrationAuditStore {
     ///
     /// The scan reads only source catalog metadata (and external file lengths
     /// for legacy rows), never payload bodies.
-    pub fn first_unverified_source(
+    pub fn first_unreconciled_source(
         &self,
         source: &crate::LmdbBlobReader,
         page_size: usize,
@@ -351,7 +360,7 @@ impl PoolMigrationAuditStore {
             }
             let sizes = source.sizes_for_sorted_hashes(&hashes)?;
             let entries = hashes.iter().copied().zip(sizes).collect::<Vec<_>>();
-            let covered = self.contains_source_exact_sorted(&entries)?;
+            let covered = self.contains_source_reconciled_exact_sorted(&entries)?;
             if let Some((entry, _)) = entries.iter().zip(covered).find(|(_, present)| !present) {
                 return Ok(Some(*entry));
             }
@@ -474,13 +483,13 @@ mod tests {
         {
             let audit = PoolMigrationAuditStore::open(&path, binding).expect("create audit");
             audit
-                .record_verified_source(&entries)
+                .record_reconciled_source(&entries)
                 .expect("record verified entries");
         }
         let audit = PoolMigrationAuditStore::open(&path, binding).expect("reopen audit");
         assert_eq!(
             audit
-                .contains_source_exact_sorted(&entries)
+                .contains_source_reconciled_exact_sorted(&entries)
                 .expect("query exact entries"),
             vec![true, true]
         );
@@ -488,10 +497,19 @@ mod tests {
             audit
                 .contains_target_exact_sorted(&entries)
                 .expect("query target provenance"),
+            vec![false, false]
+        );
+        audit
+            .record_verified_target_page(&entries, entries.last().expect("last entry").0)
+            .expect("record independent target-body proof");
+        assert_eq!(
+            audit
+                .contains_target_exact_sorted(&entries)
+                .expect("query independent target provenance"),
             vec![true, true]
         );
         assert!(audit
-            .contains_source_exact_sorted(&[(first, 18)])
+            .contains_source_reconciled_exact_sorted(&[(first, 18)])
             .expect_err("conflicting size must fail")
             .to_string()
             .contains("changed"));
@@ -527,20 +545,20 @@ mod tests {
         )
         .expect("create online audit");
         audit
-            .record_verified_source(&[(first, first_body.len() as u64)])
+            .record_reconciled_source(&[(first, first_body.len() as u64)])
             .expect("record first source");
         assert_eq!(
             audit
-                .first_unverified_source(&reader, 1)
+                .first_unreconciled_source(&reader, 1)
                 .expect("scan coverage"),
             Some((second, second_body.len() as u64))
         );
         audit
-            .record_verified_source(&[(second, second_body.len() as u64)])
+            .record_reconciled_source(&[(second, second_body.len() as u64)])
             .expect("record second source");
         assert_eq!(
             audit
-                .first_unverified_source(&reader, 1)
+                .first_unreconciled_source(&reader, 1)
                 .expect("scan complete coverage"),
             None
         );
@@ -592,7 +610,7 @@ mod tests {
         let binding = sha256(b"resumable real migration authority");
         let audit = PoolMigrationAuditStore::open(&audit_path, binding).expect("create audit");
         audit
-            .record_verified_source(&first.verified_source_entries)
+            .record_reconciled_source(&first.verified_source_entries)
             .expect("record first verified page");
         drop(audit);
 
@@ -604,7 +622,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             audit
-                .contains_source_exact_sorted(&entries)
+                .contains_source_reconciled_exact_sorted(&entries)
                 .expect("query resumed coverage"),
             vec![true, true, false]
         );
@@ -619,11 +637,11 @@ mod tests {
         .expect("resume only missing explicit body");
         pool.force_sync().expect("sync resumed target");
         audit
-            .record_verified_source(&resumed.verified_source_entries)
+            .record_reconciled_source(&resumed.verified_source_entries)
             .expect("record resumed page");
         assert_eq!(
             audit
-                .contains_source_exact_sorted(&entries)
+                .contains_source_reconciled_exact_sorted(&entries)
                 .expect("query complete coverage"),
             vec![true, true, true]
         );
@@ -638,15 +656,20 @@ mod tests {
         let pre_fence = sha256(b"pre-fence target");
         let fenced = sha256(b"fenced target");
         let root = PoolMigrationAuditStore::open(&path, binding).expect("create root ledger");
-        root.record_verified_source(&[(pre_fence, 16)])
-            .expect("record source proof before target fence");
+        root.record_reconciled_source(&[(pre_fence, 16)])
+            .expect("record source reconciliation before target fence");
+        assert_eq!(
+            root.contains_target_exact_sorted(&[(pre_fence, 16)])
+                .expect("query target proof before target audit"),
+            vec![false]
+        );
+        root.record_verified_target_page(&[(pre_fence, 16)], pre_fence)
+            .expect("record pre-fence target page");
         assert_eq!(
             root.contains_target_exact_sorted(&[(pre_fence, 16)])
                 .expect("query pre-fence target proof"),
             vec![true]
         );
-        root.record_verified_target_page(&[(pre_fence, 16)], pre_fence)
-            .expect("record pre-fence target page");
         assert_eq!(
             root.target_cursor().expect("read pre-fence cursor"),
             Some(pre_fence)
@@ -677,7 +700,7 @@ mod tests {
             vec![true, true]
         );
         assert!(worker
-            .record_verified_source(&[(pre_fence, 16)])
+            .record_reconciled_source(&[(pre_fence, 16)])
             .expect_err("worker ledger writes must fail")
             .to_string()
             .contains("read-only"));

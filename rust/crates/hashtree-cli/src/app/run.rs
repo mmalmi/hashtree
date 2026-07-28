@@ -2509,8 +2509,8 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 resume,
             } => {
                 use hashtree_lmdb::{
-                    migrate_lmdb_hashes_with_max_buffer_bytes_and_authorizer, ExternalBlobOptions,
-                    LmdbBlobReader, PoolMigrationAuditStore,
+                    reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer,
+                    ExternalBlobOptions, LmdbBlobReader, PoolMigrationAuditStore,
                 };
 
                 if batch_size == 0
@@ -2692,12 +2692,12 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                             launch.ensure_checkpoint_broker_alive()?;
                             launch.ensure_final_writer_masks()?;
                             if let Some((missing, size)) =
-                                online_audit.first_unverified_source(&reader, batch_size)?
+                                online_audit.first_unreconciled_source(&reader, batch_size)?
                             {
                                 launch.reset_online_cursor()?;
                                 cursor = None;
                                 println!(
-                                    "Online audit catch-up: source {} / {} bytes is not yet in the durable verified set; restarting the metadata scan",
+                                    "Online source reconciliation catch-up: source {} / {} bytes is not yet in the durable reconciled set; restarting the metadata scan",
                                     hashtree_core::to_hex(&missing),
                                     size,
                                 );
@@ -2711,20 +2711,21 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         }
                         let sizes = reader.sizes_for_sorted_hashes(&hashes)?;
                         let source_entries = hashes.iter().copied().zip(sizes).collect::<Vec<_>>();
-                        let covered = online_audit.contains_source_exact_sorted(&source_entries)?;
-                        let missing_hashes = source_entries
+                        let covered = online_audit
+                            .contains_source_reconciled_exact_sorted(&source_entries)?;
+                        let missing_entries = source_entries
                             .iter()
                             .zip(&covered)
-                            .filter_map(|((hash, _), present)| (!present).then_some(*hash))
+                            .filter_map(|(entry, present)| (!present).then_some(*entry))
                             .collect::<Vec<_>>();
-                        let mut batch = migrate_lmdb_hashes_with_max_buffer_bytes_and_authorizer(
-                            &reader,
-                            &pool,
-                            &missing_hashes,
-                            cursor,
-                            max_buffer_bytes,
-                            &mut authorize_target_write,
-                        )?;
+                        let mut batch =
+                            reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer(
+                                &reader,
+                                &pool,
+                                &missing_entries,
+                                max_buffer_bytes,
+                                &mut authorize_target_write,
+                            )?;
                         batch.scanned = hashes.len();
                         batch.last_hash = hashes.last().copied();
                         batch.source_entries = source_entries;
@@ -2739,18 +2740,18 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         inserted_bytes = inserted_bytes.saturating_add(batch.inserted_bytes);
                         cursor = batch.last_hash;
                         let cursor_hash = cursor.expect("non-empty migration batch has a cursor");
-                        if !batch.verified_source_entries.is_empty() {
+                        if !missing_entries.is_empty() {
                             pool.validate_controlled_authority_and_sync()?;
                             launch.authorize_online_source_audit_batch(
                                 cursor_hash,
                                 batch.scanned,
-                                &batch.verified_source_entries,
+                                &missing_entries,
                             )?;
                         }
                         launch.ensure_store_paths()?;
                         launch.write_cursor(&hashtree_core::to_hex(&cursor_hash))?;
                         println!(
-                            "Migration batch: scanned {}, audit reused {}, already present {}, verified {}, writes {}, peak buffered {} bytes, scan {} us, catalog probe {} us, source read {} us, source verify {} us, target write {} us",
+                            "Migration batch: scanned {}, reconciliation reused {}, exact Stored {}, source bodies read+verified {}, writes {}, peak buffered {} bytes, scan {} us, catalog probe {} us, source read {} us, source verify {} us, target write {} us",
                             batch.scanned,
                             covered.iter().filter(|present| **present).count(),
                             batch.already_present,
@@ -2874,22 +2875,6 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                                 .zip(&covered)
                                 .filter_map(|(entry, present)| (!present).then_some(*entry))
                                 .collect::<Vec<_>>();
-                            for (hash, size) in &missing {
-                                let data = pool.get_sync(hash)?.with_context(|| {
-                                    format!(
-                                        "target Pool lost {} during online content audit",
-                                        hashtree_core::to_hex(hash)
-                                    )
-                                })?;
-                                if data.len() as u64 != *size
-                                    || hashtree_core::sha256(&data) != *hash
-                                {
-                                    bail!(
-                                        "target Pool content differs from catalog hash/size for {}",
-                                        hashtree_core::to_hex(hash)
-                                    );
-                                }
-                            }
                             let page_cursor = page
                                 .last()
                                 .map(|(hash, _)| *hash)
@@ -2930,7 +2915,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                     launch.authorize_checkpoint("online-evidence-publication", cursor, None)?;
                     let mut source_evidence = launch.create_source_evidence_writer()?;
                     let source_summary =
-                        online_audit.for_each_source_verified_batch(batch_size, |entries| {
+                        online_audit.for_each_source_reconciled_batch(batch_size, |entries| {
                             source_evidence.append(entries).map_err(|error| {
                                 hashtree_core::store::StoreError::Other(format!(
                                     "append online source evidence: {error:#}"
@@ -2962,7 +2947,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                     launch.authorize_checkpoint("online-readiness", cursor, None)?;
                 }
                 println!(
-                    "Migration pass: scanned {scanned}, source audit reused {audit_reused}, target audit reused {target_audit_reused}, already present {already_present}, verified {verified}, inserted {inserted} blobs / {inserted_bytes} bytes, source covered: {source_completed}, target covered: {target_completed}, source fence held: {}, target fence held: {}, completed: {completed}",
+                    "Migration pass: scanned {scanned}, source reconciliation reused {audit_reused}, target body audit reused {target_audit_reused}, exact Stored {already_present}, source bodies read+verified {verified}, inserted {inserted} blobs / {inserted_bytes} bytes, source reconciled: {source_completed}, target bodies covered: {target_completed}, source fence held: {}, target fence held: {}, completed: {completed}",
                     launch.source_writers_fenced(),
                     launch.target_writers_fenced(),
                 );
@@ -3125,7 +3110,7 @@ fn run_final_stopped_source_audit(
                 launch.ensure_final_writer_fence()?;
                 launch.authorize_checkpoint("terminal-readiness", cursor, None)?;
                 println!(
-                    "Terminal source boundary: {} raw blob keys / {} metadata keys / {} blob-only / {} inline / {} loose external / {} packed external / {} online-verified bytes, keyset {}, locations {}, content {}",
+                    "Terminal source boundary: {} raw blob keys / {} metadata keys / {} blob-only / {} inline / {} loose external / {} packed external / {} online-reconciled bytes, keyset {}, locations {}, content {}",
                     source_audit.blob_entries,
                     source_audit.metadata_entries,
                     source_audit.blob_only_entries,
@@ -3138,7 +3123,7 @@ fn run_final_stopped_source_audit(
                     hashtree_core::to_hex(&content.sha256),
                 );
                 println!(
-                    "Source boundary pass: scanned {scanned}, reused online proof {verified}, target writes 0, completed: true"
+                    "Source boundary pass: scanned {scanned}, reused online reconciliation evidence {verified}, target writes 0, completed: true"
                 );
                 return Ok(());
             }
@@ -3189,7 +3174,7 @@ fn run_final_stopped_source_audit(
             cursor = hashes.last().copied();
             let cursor_hash = cursor.context("non-empty source audit batch has no cursor")?;
             println!(
-                "Source boundary batch: scanned {}, reused online proof {}, payload bytes read 0",
+                "Source boundary batch: scanned {}, reused online reconciliation evidence {}, payload bytes read 0",
                 entries.len(),
                 entries.len(),
             );

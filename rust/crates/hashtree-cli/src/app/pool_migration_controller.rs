@@ -118,7 +118,8 @@ mod linux {
         load_validated_online_target_audit, online_audit_path, OnlineTargetAuditExpectationV3,
         PoolMigrationOnlineTargetAuditCertificationV3, PoolMigrationOnlineTargetAuditReceiptV3,
         ONLINE_TARGET_AUDIT_CERTIFICATION_FILE_NAME, ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA,
-        ONLINE_TARGET_AUDIT_FILE_NAME, ONLINE_TARGET_AUDIT_SCHEMA,
+        ONLINE_TARGET_AUDIT_FILE_NAME, ONLINE_TARGET_AUDIT_SCHEMA, SOURCE_EVIDENCE_KIND,
+        TARGET_EVIDENCE_KIND,
     };
     use super::super::pool_migration_pinned::PinnedDirectory;
     use super::super::pool_migration_receipt::{
@@ -2168,12 +2169,11 @@ mod linux {
                 })
                 .collect::<Result<Vec<_>>>()?;
             if checkpoint.operation == "online-source-audit-batch" {
-                self.verify_online_source_entries(&entries)?;
-            }
-            self.verify_online_target_entries(&entries)?;
-            if checkpoint.operation == "online-source-audit-batch" {
-                audit.record_verified_source(&entries)?;
+                self.verify_online_source_reconciliation_entries(&entries)?;
+                self.verify_online_target_entries(&entries, false)?;
+                audit.record_reconciled_source(&entries)?;
             } else {
+                self.verify_online_target_entries(&entries, true)?;
                 let cursor: [u8; 32] = hashtree_core::from_hex(
                     checkpoint
                         .audit_target_cursor
@@ -2186,39 +2186,26 @@ mod linux {
             Ok(())
         }
 
-        fn verify_online_source_entries(&self, entries: &[([u8; 32], u64)]) -> Result<()> {
+        fn verify_online_source_reconciliation_entries(
+            &self,
+            entries: &[([u8; 32], u64)],
+        ) -> Result<()> {
             if entries.is_empty() {
-                bail!("root source audit requires a nonempty exact entry set");
+                bail!("root source reconciliation requires a nonempty exact entry set");
             }
             let reader = self.open_online_source_audit_reader()?;
-            let byte_limit = self
-                .options
-                .max_buffer_mib
-                .checked_mul(1024 * 1024)
-                .context("root source audit buffer limit overflow")?;
             let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
-            let mut offset = 0usize;
-            while offset < hashes.len() {
-                let bodies = reader
-                    .reader
-                    .read_hashes_bounded(&hashes[offset..], byte_limit)
-                    .context("root-read online source audit bodies")?;
-                if bodies.is_empty() {
-                    bail!("root source audit body reader made no progress");
-                }
-                for ((actual_hash, data), (expected_hash, expected_size)) in
-                    bodies.iter().zip(&entries[offset..])
-                {
-                    if actual_hash != expected_hash
-                        || data.len() as u64 != *expected_size
-                        || hashtree_core::sha256(data) != *expected_hash
-                    {
-                        bail!("root source audit body differs from checkpoint hash/size authority");
-                    }
-                }
-                offset = offset
-                    .checked_add(bodies.len())
-                    .context("root source audit offset overflow")?;
+            let sizes = reader
+                .reader
+                .sizes_for_sorted_hashes(&hashes)
+                .context("root-read online source reconciliation metadata")?;
+            if sizes.len() != entries.len()
+                || entries
+                    .iter()
+                    .zip(sizes)
+                    .any(|((_, expected_size), actual_size)| *expected_size != actual_size)
+            {
+                bail!("root source reconciliation metadata differs from checkpoint authority");
             }
             Ok(())
         }
@@ -2282,7 +2269,7 @@ mod linux {
         fn verify_online_source_coverage(&self, audit: &PoolMigrationAuditStore) -> Result<()> {
             let reader = self.open_online_source_audit_reader()?;
             if let Some((hash, size)) =
-                audit.first_unverified_source(&reader.reader, self.options.batch_size)?
+                audit.first_unreconciled_source(&reader.reader, self.options.batch_size)?
             {
                 bail!(
                     "root source coverage found unverified entry {} / {} bytes",
@@ -2293,7 +2280,11 @@ mod linux {
             Ok(())
         }
 
-        fn verify_online_target_entries(&self, entries: &[([u8; 32], u64)]) -> Result<()> {
+        fn verify_online_target_entries(
+            &self,
+            entries: &[([u8; 32], u64)],
+            verify_payloads: bool,
+        ) -> Result<()> {
             if entries.is_empty() {
                 return Ok(());
             }
@@ -2392,6 +2383,9 @@ mod linux {
                         expected_size
                     );
                 }
+            }
+            if !verify_payloads {
+                return Ok(());
             }
             let byte_limit = self
                 .options
@@ -2502,6 +2496,8 @@ mod linux {
                 || receipt.pool_manifest_sha256 != self.controller_state.pool_manifest_sha256
                 || receipt.audit_store_path != online_audit_path(&request.cursor.path)?
                 || receipt.audit_binding_sha256 != hashtree_core::to_hex(&audit_binding)
+                || receipt.source_evidence_kind != SOURCE_EVIDENCE_KIND
+                || receipt.target_evidence_kind != TARGET_EVIDENCE_KIND
                 || receipt.source_evidence.path != self.attempt_dir.join(SOURCE_EVIDENCE_FILE_NAME)
                 || receipt.target_evidence.path
                     != self.attempt_dir.join(ONLINE_TARGET_EVIDENCE_FILE_NAME)
@@ -2533,7 +2529,7 @@ mod linux {
             while source_evidence.next_entry()?.is_some() {}
             let source_summary = source_evidence.validated_summary()?;
             let root_source_summary =
-                audit.for_each_source_verified_batch(self.options.batch_size, |_| Ok(()))?;
+                audit.for_each_source_reconciled_batch(self.options.batch_size, |_| Ok(()))?;
             if source_summary.entries != receipt.source_verified_entries
                 || source_summary.bytes != receipt.source_verified_bytes
                 || hashtree_core::to_hex(&source_summary.content_sha256)
