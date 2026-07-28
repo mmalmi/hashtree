@@ -1382,6 +1382,57 @@ fn controlled_writer_resumes_pending_before_and_after_member_write() {
 
 #[cfg(target_os = "linux")]
 #[test]
+fn controlled_authority_revalidation_rejects_a_manifest_change() {
+    let temp = TempDir::new().expect("create controlled authority root");
+    let catalog = temp.path().join("catalog");
+    let member_path = temp.path().join("member");
+    let mut ordinary_config = PoolStoreConfig::default();
+    ordinary_config.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, ordinary_config).expect("open ordinary Pool");
+    let member = pool
+        .add_member(PoolMemberConfig::new(member_path.clone(), 16 * 1024 * 1024))
+        .expect("add controlled member");
+    pool.force_sync().expect("sync generated Pool");
+    let (catalog_runtime, controlled_config, retained) =
+        generated_controlled_config(&pool, &catalog, &[(member, member_path)]);
+    drop(pool);
+
+    let controlled =
+        PoolStore::open(&catalog_runtime, controlled_config).expect("open controlled Pool");
+    controlled
+        .validate_controlled_authority()
+        .expect("unchanged controlled authority is valid");
+
+    let mut manifest = controlled
+        .read_manifest()
+        .expect("read controlled manifest");
+    manifest.generation = manifest.generation.saturating_add(1);
+    let encoded = encode_manifest(&manifest).expect("encode changed manifest");
+    let mut wtxn = controlled
+        .env
+        .write_txn()
+        .expect("open manifest mutation transaction");
+    controlled
+        .manifest
+        .put(&mut wtxn, MANIFEST_KEY, &encoded)
+        .expect("write changed manifest");
+    wtxn.commit().expect("commit changed manifest");
+
+    let error = controlled
+        .validate_controlled_authority()
+        .expect_err("changed manifest must fail no-sync authority revalidation");
+    assert!(
+        error
+            .to_string()
+            .contains("manifest SHA-256 differs from controlled authority"),
+        "unexpected controlled authority error: {error}"
+    );
+    drop(controlled);
+    drop(retained);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
 fn controlled_open_is_data_nonmutating_and_rejects_missing_or_stale_member_stats() {
     for state in ["valid", "missing", "stale"] {
         let temp = TempDir::new().expect("create generated controlled-open root");

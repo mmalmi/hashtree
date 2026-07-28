@@ -2741,7 +2741,11 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         cursor = batch.last_hash;
                         let cursor_hash = cursor.expect("non-empty migration batch has a cursor");
                         if !missing_entries.is_empty() {
-                            pool.validate_controlled_authority_and_sync()?;
+                            if batch.write_batches == 0 {
+                                pool.validate_controlled_authority()?;
+                            } else {
+                                pool.validate_controlled_authority_and_sync()?;
+                            }
                             launch.authorize_online_source_audit_batch(
                                 cursor_hash,
                                 batch.scanned,
@@ -2879,7 +2883,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                                 .last()
                                 .map(|(hash, _)| *hash)
                                 .context("nonempty target catalog page has no cursor")?;
-                            pool.validate_controlled_authority_and_sync()?;
+                            pool.validate_controlled_authority()?;
                             launch.authorize_online_target_audit_batch(
                                 page_cursor,
                                 page.len(),

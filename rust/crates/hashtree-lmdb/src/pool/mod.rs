@@ -1648,16 +1648,20 @@ impl PoolStore {
         Ok(())
     }
 
-    /// Revalidate every controlled authority and force the catalog/member
-    /// commits durable before an external migration cursor may advance.
-    pub fn validate_controlled_authority_and_sync(&self) -> Result<(), StoreError> {
+    /// Revalidate every controlled catalog/member authority without forcing
+    /// unrelated writer commits to storage.
+    ///
+    /// This is sufficient before advancing a migration cursor when the
+    /// migration observed exact `Stored` rows and performed no target writes.
+    /// Any batch that attempted target writes must use
+    /// [`Self::validate_controlled_authority_and_sync`] instead.
+    pub fn validate_controlled_authority(&self) -> Result<(), StoreError> {
         if self.expected_manifest_sha256.is_none() {
             return Err(StoreError::Other(
                 "controlled authority validation requires an exact manifest SHA-256".into(),
             ));
         }
         self.refresh_members()?;
-        self.env.force_sync().map_err(map_heed)?;
         {
             let runtime = self
                 .runtime
@@ -1668,11 +1672,25 @@ impl PoolStore {
                     "not every authority-pinned Pool member is open".into(),
                 ));
             }
+        }
+        self.refresh_members()
+    }
+
+    /// Revalidate every controlled authority and force the catalog/member
+    /// commits durable before an external migration cursor may advance.
+    pub fn validate_controlled_authority_and_sync(&self) -> Result<(), StoreError> {
+        self.validate_controlled_authority()?;
+        self.env.force_sync().map_err(map_heed)?;
+        {
+            let runtime = self
+                .runtime
+                .read()
+                .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
             for store in runtime.stores.values() {
                 store.force_sync()?;
             }
         }
-        self.refresh_members()
+        self.validate_controlled_authority()
     }
 
     fn refresh_members(&self) -> Result<(), StoreError> {

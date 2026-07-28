@@ -96,6 +96,10 @@
   major page fault per inline value page during multi-terabyte ordered audits.
   Online source key/metadata reconciliation stays sparse so its cursor does not
   prefetch unneeded inline payload overflow pages.
+- No-write online Pool reconciliation and target-audit pages now revalidate
+  their exact controlled catalog/member authority without force-syncing
+  unrelated active target writers; pages that attempt writes retain the full
+  durability sync.
 - Root-brokered online source audits now open their exact source LMDB and
   external corpus through retained directory descriptors before validating a
   checkpoint page, keeping both directory pins alive for the reader's complete
