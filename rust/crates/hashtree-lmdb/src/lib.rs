@@ -3,6 +3,7 @@
 mod configured;
 mod managed_env;
 mod migration;
+mod migration_audit;
 mod pool;
 
 pub use configured::{
@@ -15,17 +16,20 @@ pub use migration::{
     audit_lmdb_source_batch_with_max_buffer_bytes, migrate_lmdb_batch,
     migrate_lmdb_batch_with_max_buffer_bytes,
     migrate_lmdb_batch_with_max_buffer_bytes_and_authorizer,
+    migrate_lmdb_hashes_with_max_buffer_bytes_and_authorizer,
     reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer,
     reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer,
     reconcile_lmdb_source_union_page_with_max_buffer_bytes_and_authorizer, LmdbSourceAuditBatch,
     PoolMigrationBatch, DEFAULT_POOL_MIGRATION_MAX_BUFFER_BYTES,
 };
+pub use migration_audit::{PoolMigrationAuditStore, PoolMigrationAuditSummary};
 pub use pool::{
     PoolCatalogLocation, PoolMaintenanceReport, PoolManifestIdentity, PoolMemberConfig,
-    PoolMemberId, PoolMemberRuntimePaths, PoolMemberState, PoolMemberStatus, PoolReadBatchItem,
-    PoolStalePending, PoolStalePendingCleanupReport, PoolStore, PoolStoreConfig, PoolStoreReader,
-    PoolTemperatureConfig, PoolTemperatureReport, PoolTerminalAudit, ReadOnlyPoolCatalogAudit,
-    ReadOnlyPoolManifestMember, ReadOnlyPoolManifestSnapshot, ReadOnlyPoolStore,
+    PoolMemberId, PoolMemberRuntimePaths, PoolMemberState, PoolMemberStatus, PoolPhysicalAudit,
+    PoolReadBatchItem, PoolStalePending, PoolStalePendingCleanupReport, PoolStore, PoolStoreConfig,
+    PoolStoreReader, PoolTemperatureConfig, PoolTemperatureReport, PoolTerminalAudit,
+    ReadOnlyPoolCatalogAudit, ReadOnlyPoolManifestMember, ReadOnlyPoolManifestSnapshot,
+    ReadOnlyPoolStore,
 };
 
 use async_trait::async_trait;
@@ -35,7 +39,7 @@ use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
 use managed_env::ManagedEnv;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 #[cfg(unix)]
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File};
@@ -709,6 +713,7 @@ pub(crate) struct LmdbTerminalMemberKeysetAudit {
     pub total_bytes: u64,
     pub pinned_count: u64,
     pub pinned_bytes: u64,
+    pub ownership_sha256: Hash,
     pub sha256: Hash,
 }
 
@@ -1654,6 +1659,9 @@ impl LmdbBlobStore {
         digest.update(eviction_entries.to_be_bytes());
         digest.update(pin_entries.to_be_bytes());
         digest.update(next_order.to_be_bytes());
+        let mut ownership_digest = Sha256::new();
+        ownership_digest.update(b"hashtree-pool-member-ownership/v1\0");
+        let mut external_pack_lengths = HashMap::<String, u64>::new();
 
         for item in self.metadata.iter(&rtxn).map_err(map_heed_error)? {
             let (metadata_key, metadata_bytes) = item.map_err(map_heed_error)?;
@@ -1678,23 +1686,50 @@ impl LmdbBlobStore {
                             .into(),
                     )
                 })?;
-                config
+                let size = config
                     .open_relative(&ExternalBlobConfig::relative_blob_path(&hash))?
                     .metadata()
                     .map_err(StoreError::Io)?
-                    .len()
+                    .len();
+                digest.update(b"L");
+                digest.update((blob_value.len() as u64).to_be_bytes());
+                digest.update(blob_value);
+                size
             } else if let Some(pack_ref) = Self::decode_external_pack_ref(blob_value)? {
-                self.external_blobs.as_ref().ok_or_else(|| {
+                let config = self.external_blobs.as_ref().ok_or_else(|| {
                     StoreError::Other(
                         "terminal Pool member has an external pack marker but no external directory"
                             .into(),
                     )
                 })?;
-                pack_ref.offset.checked_add(pack_ref.len).ok_or_else(|| {
+                let end = pack_ref.offset.checked_add(pack_ref.len).ok_or_else(|| {
                     StoreError::Other("terminal Pool member external pack range overflow".into())
                 })?;
+                let pack_size = match external_pack_lengths.get(&pack_ref.name) {
+                    Some(size) => *size,
+                    None => {
+                        let size = config
+                            .open_relative(&ExternalBlobConfig::relative_pack_path(&pack_ref.name))?
+                            .metadata()
+                            .map_err(StoreError::Io)?
+                            .len();
+                        external_pack_lengths.insert(pack_ref.name.clone(), size);
+                        size
+                    }
+                };
+                if end > pack_size {
+                    return Err(StoreError::Other(format!(
+                        "terminal Pool member external pack range {}..{end} exceeds physical pack size {pack_size}",
+                        pack_ref.offset
+                    )));
+                }
+                digest.update(b"P");
+                digest.update((blob_value.len() as u64).to_be_bytes());
+                digest.update(blob_value);
                 pack_ref.len
             } else {
+                digest.update(b"I");
+                digest.update((blob_value.len() as u64).to_be_bytes());
                 blob_value.len() as u64
             };
             if meta.size != actual_size {
@@ -1731,6 +1766,8 @@ impl LmdbBlobStore {
                 .total_bytes
                 .checked_add(meta.size)
                 .ok_or_else(|| StoreError::Other("LMDB member byte total overflow".into()))?;
+            ownership_digest.update(hash);
+            ownership_digest.update(meta.size.to_be_bytes());
             digest.update(hash);
             digest.update((metadata_bytes.len() as u64).to_be_bytes());
             digest.update(metadata_bytes);
@@ -1788,6 +1825,7 @@ impl LmdbBlobStore {
             total_bytes: computed.total_bytes,
             pinned_count: computed.pinned_count,
             pinned_bytes: computed.pinned_bytes,
+            ownership_sha256: ownership_digest.finalize().into(),
             sha256: digest.finalize().into(),
         })
     }
@@ -4159,6 +4197,53 @@ mod tests {
         assert!(store.delete_sync(&first_hash)?);
         assert!(pack_path.exists());
         assert_eq!(store.get_sync(&second_hash)?, Some(second));
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_member_audit_rejects_truncated_external_pack() -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let external_dir = temp.path().join("external");
+        let store = LmdbBlobStore::with_map_size_and_settings(
+            temp.path().join("blobs"),
+            16 * 1024 * 1024,
+            EnvFlags::empty(),
+            |_| {
+                Some(ExternalBlobConfig {
+                    base_path: external_dir,
+                    min_bytes: 8,
+                    sync: true,
+                    pack_target_bytes: Some(1024 * 1024),
+                    pinned_root: None,
+                })
+            },
+        )?;
+        let first = b"first packed audit body".to_vec();
+        let second = b"second packed audit body".to_vec();
+        let items = vec![(sha256(&first), first), (sha256(&second), second)];
+        assert_eq!(store.put_many_sync(&items)?, 2);
+        store.validate_exact_member_state()?;
+
+        let rtxn = store.env.read_txn().map_err(map_heed_error)?;
+        let marker = store
+            .blobs
+            .get(&rtxn, &items[0].0)
+            .map_err(map_heed_error)?
+            .expect("external pack marker");
+        let pack =
+            LmdbBlobStore::decode_external_pack_ref(marker)?.expect("decoded external pack marker");
+        drop(rtxn);
+        let pack_path = store.external_pack_path(&pack).expect("external pack path");
+        let pack_len = std::fs::metadata(&pack_path)?.len();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(pack_path)?
+            .set_len(pack_len - 1)?;
+
+        let error = store
+            .validate_exact_member_state()
+            .expect_err("truncated external pack must fail physical audit");
+        assert!(error.to_string().contains("exceeds physical pack size"));
         Ok(())
     }
 

@@ -415,6 +415,29 @@ impl PinnedDirectory {
         staged.replace(name, label)?;
         Ok(())
     }
+
+    pub(super) fn durable_remove_regular(&self, name: &OsStr, label: &str) -> Result<()> {
+        validate_leaf(name, label)?;
+        let file = self
+            .open_regular_optional(name, label)?
+            .with_context(|| format!("{label} is absent beneath {}", self.path.display()))?;
+        if !file.metadata()?.is_file() {
+            bail!("{label} is not a regular file");
+        }
+        #[cfg(unix)]
+        {
+            let name = os_str_to_c_string(name, label)?;
+            if unsafe { libc::unlinkat(self.file.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+                return Err(std::io::Error::last_os_error())
+                    .with_context(|| format!("remove {label}"));
+            }
+        }
+        #[cfg(not(unix))]
+        std::fs::remove_file(self.path.join(name))?;
+        self.file
+            .sync_all()
+            .with_context(|| format!("fsync {label} parent after removal"))
+    }
 }
 
 impl PinnedRegularEntry {

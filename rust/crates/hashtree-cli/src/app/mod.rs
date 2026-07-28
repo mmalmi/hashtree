@@ -19,6 +19,7 @@ pub(crate) mod pool_migration_evidence;
 pub(crate) mod pool_migration_launch;
 pub(crate) mod pool_migration_mount;
 pub(crate) mod pool_migration_mount_lifecycle;
+pub(crate) mod pool_migration_online_audit;
 pub(crate) mod pool_migration_pinned;
 pub(crate) mod pool_migration_protocol;
 pub(crate) mod pool_migration_receipt;

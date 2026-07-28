@@ -91,12 +91,13 @@ HTREE_POOL_LIMIT_ARGS=
 ```
 
 Use an empty `HTREE_POOL_SOURCE_EXTERNAL_ARGS=` when the source has no
-external directory. `HTREE_POOL_LIMIT_ARGS` must be empty for both supported
-stopped-final phases. Stopped-final batch size is fixed at 4096 to keep the
-durable checkpoint namespace practical; source read concurrency is hard
-capped at 64. Unknown, duplicate, quoted, or loader-affecting assignments are
-rejected. Htree binds the file path, inode, bytes, SHA-256, systemd-loaded
-path, and resulting process environment.
+external directory. Set `HTREE_POOL_LIMIT_ARGS=--max-items N` for each
+`online-bounded` tranche and leave it empty for both stopped-final phases.
+Stopped-final batch size is fixed at 4096 to keep the durable checkpoint
+namespace practical; source read concurrency is hard capped at 64. Unknown,
+duplicate, quoted, or loader-affecting assignments are rejected. Htree binds
+the file path, inode, bytes, SHA-256, systemd-loaded path, and resulting
+process environment.
 
 Create `/etc/hashtree/pool-migration-controller-NAME.env` as a root-owned
 `0644` file containing one unquoted `HTREE_POOL_CONTROLLER_ARGS=` assignment.
@@ -112,9 +113,10 @@ source-baseline and Pool-topology inputs, every `--cas` and sorted
 `--writer-unit`, the worker unit/fragment/environment/binary, service GID,
 target data/Pool/source/external/cursor paths, `--batch-size 4096`,
 `--max-buffer-mib`, `--source-read-concurrency`, `--reopen-batches`, and both
-launch/acknowledgement waits. Do not add `--max-items`. The controller
-reconstructs and validates the worker argv and environment; it does not trust
-an operator-authored launch request.
+launch/acknowledgement waits. Add a nonzero `--max-items N` only for
+`online-bounded`; stopped-final phases reject it. The controller reconstructs
+and validates the worker argv and environment; it does not trust an
+operator-authored launch request.
 
 ### Single-use attempt directories
 
@@ -362,58 +364,102 @@ Every LMDB data/lock inode must also be globally unique; distinct directories
 cannot hide hardlinked aliases. The manifest hash covers the full stored
 generation, order, state, and configuration, not only member IDs.
 
-### Supported stopped-final flow
+### Supported online and stopped-final flow
 
-`online-bounded` is deliberately refused in this release. It remains disabled
-until a rollout-bound exact target-state audit receipt can be reused across
-tranches; count-only controlled reopen is not sufficient authority for online
-placement. Do not bypass this gate or invoke the worker directly.
+The supported full migration is four-stage:
 
-The supported full migration is two-stage:
-
-1. Fence every writer that can open the source, install its exact runtime unit
-   masks, prove no process retains source LMDB or external-corpus handles, and
-   run `final-stopped-source`. The source LMDB `blobs` database is the raw key
-   authority: legacy blob-only and partially populated metadata stores are
-   accepted, while metadata-only rows are rejected. The worker verifies every
-   raw blob body, publishes bounded source evidence and
-   `source-terminal.json`, and the controller certifies it while retaining the
-   read-only source mounts.
-2. Keep those source fences and mounts intact, additionally fence every target
-   Pool writer/handle, and run `final-stopped-full` with a fresh absent cursor.
-   The controller-state `sourceTerminalReceiptSha256` set must contain every
-   uniquely sorted source receipt digest, and each receipt is passed as
+1. While ordinary writers remain online, run repeated `online-bounded`
+   tranches with a nonzero `--max-items`. The worker keeps an
+   authority-bound durable verified ledger at
+   `<state-file>.online-audit-v3`. For a hash absent from that ledger it reads
+   and SHA-256-verifies the source body, compares an existing target body
+   byte-for-byte or durably writes it, force-syncs the target, then force-syncs
+   the root-owned source and target proof sets before advancing the source
+   cursor. After source coverage, the same tranches scan the complete target
+   catalog and root-verify target-only bodies. A crash may leave a proof set
+   ahead of either cursor; replay safely skips only exact hash/size proofs.
+   Tail coverage scans detect an old unproved prefix or a newly inserted lower
+   hash and reset the corresponding cursor without rereading already proved
+   bodies. Ordinary unfenced tranches deliberately publish no certification.
+   Keep restarting fresh controller attempts with the exact same installed
+   worker binary, source baseline, rollout, source, Pool, and cursor
+   authorities until both scans report covered.
+2. Start the stopped boundary by installing the exact complete runtime mask
+   set for every target writer and every source writer needed by the following
+   phase. Stop them all, attest both writer fences, prove no other process
+   retains a source, target LMDB, or external-corpus/member handle, and run a
+   final `online-bounded` tranche with `targetWritersFenced=true`,
+   `sourceWritersFenced=true`, and `fenceHeldUntilCompletion=true`. The first
+   transition to this exact target-fence authority resets the target catalog
+   cursor but retains the root-verified hash/size body proofs. The worker
+   revisits every final catalog row under the held fence, fails on
+   `Pending`/`Moving`/`Missing`, and reads only a body whose exact proof is
+   absent. Completion publishes separate immutable sorted source and target
+   evidence, `online-target-audit.json`, and the root-owned
+   `online-target-audit-certification.json`. Keep every mask and both fences
+   continuously held after this point; never return this audit ledger to an
+   unfenced online tranche.
+3. Pass that exact certification as
+   `--cas online-target-audit-NONCE=/absolute/attempt/online-target-audit-certification.json`,
+   retain the exact same stopped-writer units and mask authorities, re-prove
+   zero source and target handles, and run `final-stopped-source`. The source
+   LMDB `blobs` database is the raw key authority:
+   legacy blob-only and partially populated metadata stores are accepted,
+   while metadata-only rows are rejected. The worker scans the fresh stopped
+   hash/size boundary against the certified online evidence. It reads zero payload bodies
+   and publishes exact current-source evidence plus
+   `source-terminal.json`. A new or size-changed source row fails closed with
+   an instruction to recover the stopped attempt and rerun online catch-up.
+4. Keep all source and target fences and mounts intact and run
+   `final-stopped-full` with a fresh absent cursor. The controller-state
+   `sourceTerminalReceiptSha256` set must contain every uniquely sorted source
+   receipt digest, and each receipt is passed as
    `--cas source-terminal-NONCE=/absolute/attempt/source-terminal.json`. At
    most 64 source receipts/environments are accepted. The worker merges their
-   sorted evidence, reconciles missing bodies into the Pool, closes and reopens
-   all source/target mappings after the bounded epoch, and then performs one
-   exhaustive terminal target audit.
+   sorted source evidence, reads and hash-verifies only bodies needed to
+   repair missing or interrupted target records, replays every terminal
+   target catalog row against the propagated certified target-evidence union,
+   closes and reopens all source/target mappings after the bounded epoch, and
+   then performs one exhaustive catalog-to-physical-member parity audit.
 
-Before either stage, remove only an exactly audited list of physically absent
-`Pending` records with `cleanup_stale_pending_exact_offline_sync`; generic
-`delete_many_sync` is not a safe substitute. Every source, target and legacy
-migration writer unit must remain stopped and runtime-masked for the complete
+Before either stopped-final stage, remove only an exactly audited list of
+physically absent `Pending` records with
+`cleanup_stale_pending_exact_offline_sync`; generic `delete_many_sync` is not
+a safe substitute. Every writer unit named by that phase, plus every legacy
+migration writer, must remain stopped and runtime-masked for the complete
 stage. Immutable readers may remain available only when the controller's
 handle census and mount policy explicitly permit them.
 
 The full-final target audit requires every catalog entry, including
-target-only entries, to be `Stored`; every body must match its declared
-SHA-256 and size; the by-member and cleanup indexes, exact member
+target-only entries, to be `Stored`; the by-member index, exact member
+hash/size ownership, physical inline/loose/packed sizes, pack ranges,
 blob/metadata/eviction/pin state, persisted byte aggregates, manifest, and
-move state must agree. Any `Pending`, `Moving`, invalid, missing, corrupt, or
-addressable orphan row withholds completion. The worker first publishes
-O_EXCL `terminal-audit.json`; the controller replays the exhaustive audit
-with its own exact read-only Pool open and handle census before it tears down
-source mounts or publishes the durable `complete` cursor. Source-final uses
-the same root replay rule for the frozen source receipt before
-`source-complete` and its certification are published.
+move state must agree. Content authority comes from the root-certified online
+body proof plus hash-verified repair writes; the stopped audit does not reread
+the complete multi-terabyte payload corpus. Any `Pending`, `Moving`, invalid,
+missing, size-mismatched, or addressable orphan row withholds completion. The
+worker first publishes O_EXCL `terminal-audit.json`; the controller replays
+the exact physical audit with its own read-only Pool open and handle census
+before it tears down source mounts or publishes the durable `complete`
+cursor. Source-final uses the same root replay rule for the frozen source
+receipt before `source-complete` and its certification are published.
 
-Read-only source/keyset and full-union page scans do not create root
-checkpoints and do not invoke `systemctl`. A checkpoint exists only for a
-bounded target mutation or a terminal publication boundary. Each checkpoint
-uses exactly one batched `systemctl show` for the controller, worker, complete
-writer set, legacy template, and legacy instances; worker-side liveness and
-idle controller polling use pinned files plus `/proc`, without subprocesses.
+Reusing a pre-fence body proof relies on Pool's normal write contract: keys
+are content hashes, writes verify the bytes, and an existing hash is not
+replaced with different content. The target-fenced tranche still rescans the
+entire final catalog, so removed rows may remain harmless evidence supersets
+and every retained row must have an exact hash/size proof. This proof does not
+detect arbitrary same-size mutation performed outside Pool, malicious raw
+disk writes, or media bitrot after the body was verified; detecting those
+requires rereading the full payload corpus under the fence.
+
+Read-only source/keyset, already-proved online pages, and full-union page scans
+do not create root checkpoints and do not invoke `systemctl`. A checkpoint
+exists only for a bounded target mutation, a newly durable online audit page,
+or a terminal publication boundary. Each checkpoint uses exactly one batched
+`systemctl show` for the controller, worker, complete writer set, legacy
+template, and legacy instances; worker-side liveness and idle controller
+polling use pinned files plus `/proc`, without subprocesses.
 Each pre/post page fence validates the deduplicated current/prior source mount
 set against one `/proc/self/mountinfo` snapshot; receipt files are not opened
 on that path. Mapping-epoch and pre/post terminal-audit writer/legacy fence
@@ -451,12 +497,14 @@ journalctl -u hashtree-pool-migration-controller@NAME.service \
   -u hashtree-pool-migration-worker@NAME.service
 ```
 
-For `final-stopped-source`, require a controller-certified
-`source-terminal.json` and `source-complete` cursor. Build a new
-`final-stopped-full` controller-state/environment from that exact receipt;
-never edit or reuse the completed source attempt. For full-final, require
-`terminal-audit.json`, the controller's terminal-publication receipt, and the
-durable `complete` cursor before cutover.
+For the target-fenced online tranche, require
+`online-target-audit-certification.json` and record its exact controller
+result authority. For `final-stopped-source`, require a
+controller-certified `source-terminal.json` and `source-complete` cursor.
+Build a new `final-stopped-full` controller-state/environment from that exact
+receipt; never edit or reuse the completed source attempt. For full-final,
+require `terminal-audit.json`, the controller's terminal-publication receipt,
+and the durable `complete` cursor before cutover.
 
 If either unit fails or the machine reboots, keep all stores fenced. Do not
 delete an attempt, request, acknowledgement, receipt, checkpoint, or cursor,
@@ -476,3 +524,8 @@ Retain every source, read-only mount authority, rollout input, mask record,
 attempt, request, acknowledgement, receipt, checkpoint namespace, audit, and
 cursor through the rollback window. Remove the temporary units and binaries
 only after that window closes.
+
+The audit binding includes the exact worker binary and source baseline. An
+audit directory created by a different binary, baseline, or authority set is
+not reusable: allocate a new rollout and state path and retain the old
+artifacts rather than deleting or rewriting them.

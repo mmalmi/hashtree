@@ -5,7 +5,14 @@ use std::time::Duration;
 
 pub(super) const CHECKPOINT_REQUEST_SCHEMA: &str = "hashtree-pool-migration-checkpoint-request/v3";
 pub(super) const CHECKPOINT_ACK_SCHEMA: &str = "hashtree-pool-migration-checkpoint-ack/v3";
-pub(super) const MAX_CHECKPOINT_BYTES: u64 = 64 * 1024;
+pub(super) const MAX_CHECKPOINT_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct MigrationCheckpointAuditEntryV3 {
+    pub(super) hash: String,
+    pub(super) size: u64,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -30,6 +37,8 @@ pub(super) struct MigrationCheckpointRequestV3 {
     pub(super) operation: String,
     pub(super) cursor: Option<String>,
     pub(super) range_limit: Option<u64>,
+    pub(super) audit_entries: Vec<MigrationCheckpointAuditEntryV3>,
+    pub(super) audit_target_cursor: Option<String>,
     pub(super) worker_pid: u32,
     pub(super) worker_proc_start_time_ticks: u64,
     pub(super) broker_pid: u32,
@@ -75,6 +84,12 @@ pub(super) fn validate_checkpoint_operation(value: &str) -> Result<()> {
     if !matches!(
         value,
         "migration-batch"
+            | "online-source-audit-batch"
+            | "online-target-audit-batch"
+            | "online-target-audit-reset"
+            | "online-evidence-publication"
+            | "online-audit-publication"
+            | "online-readiness"
             | "source-keyset-audit"
             | "source-evidence-publication"
             | "source-evidence-consumed"

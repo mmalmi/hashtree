@@ -59,6 +59,7 @@ pub(super) fn run_pool_migration_controller(options: PoolMigrationControllerOpti
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
+    use hashtree_lmdb::PoolMigrationAuditStore;
     use rand::{rngs::OsRng, RngCore};
     use serde::Deserialize;
     use sha2::{Digest, Sha256};
@@ -79,6 +80,11 @@ mod linux {
         validate_checkpoint_operation, CheckpointBrokerAuthorityV3, MigrationCheckpointAckV3,
         MigrationCheckpointRequestV3, CHECKPOINT_ACK_SCHEMA, CHECKPOINT_REQUEST_SCHEMA,
         MAX_CHECKPOINT_BYTES,
+    };
+    use super::super::pool_migration_evidence::{
+        validate_source_evidence_metadata, validate_terminal_catalog_target_evidence,
+        SourceEvidenceManifestReaderV3, SourceEvidenceUnionReaderV3,
+        ONLINE_TARGET_EVIDENCE_FILE_NAME, SOURCE_EVIDENCE_FILE_NAME,
     };
     use super::super::pool_migration_launch::{
         validate_batched_runtime_masked_final_fence_with_systemctl,
@@ -105,6 +111,13 @@ mod linux {
         record_full_mount_lifecycle_closed, record_source_mounts_created,
         record_source_mounts_retained, recover_rollout_mount_lifecycle_state,
         PreparedMountLifecycleV3,
+    };
+    use super::super::pool_migration_online_audit::{
+        compute_online_audit_binding, compute_online_target_fence_binding,
+        load_validated_online_target_audit, online_audit_path, OnlineTargetAuditExpectationV3,
+        PoolMigrationOnlineTargetAuditCertificationV3, PoolMigrationOnlineTargetAuditReceiptV3,
+        ONLINE_TARGET_AUDIT_CERTIFICATION_FILE_NAME, ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA,
+        ONLINE_TARGET_AUDIT_FILE_NAME, ONLINE_TARGET_AUDIT_SCHEMA,
     };
     use super::super::pool_migration_pinned::PinnedDirectory;
     use super::super::pool_migration_receipt::{
@@ -377,6 +390,9 @@ mod linux {
 
     #[derive(Clone, Default)]
     struct CheckpointProgress {
+        online_evidence_published: bool,
+        online_audit_published: bool,
+        online_ready: bool,
         source_keyset_audited: bool,
         source_evidence_published: bool,
         source_reconciliations: u64,
@@ -394,6 +410,7 @@ mod linux {
         mount_teardown_receipt: Option<FileAuthorityV3>,
         terminal_publication_receipt: Option<FileAuthorityV3>,
         source_terminal_certification: Option<FileAuthorityV3>,
+        online_target_audit_certification: Option<FileAuthorityV3>,
     }
 
     struct PreparedMountTeardown {
@@ -769,6 +786,44 @@ mod linux {
                     "source-terminal receipt CAS set differs from the exact controller-state receipt set"
                 );
             }
+            let online_target_audit = load_validated_online_target_audit(
+                &receipt_authorities,
+                &OnlineTargetAuditExpectationV3 {
+                    rollout_id: &options.rollout_id,
+                    worker_binary_sha256: &migration_binary.sha256,
+                    source_baseline_sha256: &source_baseline_input.sha256,
+                    source_path: &source,
+                    source_lmdb_identity: source_identity,
+                    source_external_path: options.source_external_dir.as_deref(),
+                    source_external_identity,
+                    pool_path: &pool,
+                    pool_lmdb_identity: pool_identity,
+                    pool_topology_sha256: &pool_topology_input.sha256,
+                    pool_manifest_sha256: &controller_state.pool_manifest_sha256,
+                    target_writer_units: &controller_state.stopped_writer_units,
+                    target_writer_unit_masks: &controller_state.writer_unit_masks,
+                    legacy_worker_template_mask: &controller_state.legacy_worker_template_mask,
+                    legacy_worker_instance_masks: &controller_state.legacy_worker_instance_masks,
+                    expected_service_gid: options.service_gid,
+                    validate_evidence_content: false,
+                },
+            )?;
+            match options.phase {
+                PoolMigrationControllerPhase::FinalStoppedSource
+                    if online_target_audit.is_none() =>
+                {
+                    bail!(
+                        "final-stopped-source requires one root-certified online target audit CAS"
+                    )
+                }
+                PoolMigrationControllerPhase::OnlineBounded
+                | PoolMigrationControllerPhase::FinalStoppedFull
+                    if online_target_audit.is_some() =>
+                {
+                    bail!("online target audit CAS is accepted only by final-stopped-source")
+                }
+                _ => {}
+            }
 
             validate_authority_isolation(
                 &rollout_dir,
@@ -921,6 +976,7 @@ mod linux {
                 &self.migration_binary.path,
                 &self.options.controller_systemd_unit,
             )?;
+            let online_audit = self.prepare_online_audit_store()?;
 
             let mount_lifecycle = self.prepare_mount_lifecycle()?;
             if let Err(start_error) = systemctl_success(
@@ -944,7 +1000,7 @@ mod linux {
                 unit: self.options.systemd_unit.clone(),
                 armed: true,
             };
-            let result = self.complete_launch(mount_lifecycle.as_ref());
+            let result = self.complete_launch(mount_lifecycle.as_ref(), online_audit.as_ref());
             if result.is_ok() {
                 guard.armed = false;
                 return result;
@@ -1007,6 +1063,106 @@ mod linux {
             }
         }
 
+        fn prepare_online_audit_store(&self) -> Result<Option<PoolMigrationAuditStore>> {
+            if self.options.phase != PoolMigrationControllerPhase::OnlineBounded {
+                return Ok(None);
+            }
+            let path = online_audit_path(&self.options.state_file)?;
+            let created = match std::fs::create_dir(&path) {
+                Ok(()) => true,
+                Err(error) if error.kind() == ErrorKind::AlreadyExists => false,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("create root-owned online audit {}", path.display())
+                    })
+                }
+            };
+            if created {
+                set_root_service_path_authority(
+                    &path,
+                    true,
+                    self.options.service_gid,
+                    0o750,
+                    "online audit directory",
+                )?;
+                File::open(
+                    path.parent()
+                        .context("online audit directory has no parent")?,
+                )?
+                .sync_all()
+                .context("fsync online audit parent")?;
+            } else {
+                validate_root_service_path_authority(
+                    &path,
+                    true,
+                    self.options.service_gid,
+                    0o750,
+                    "online audit directory",
+                )?;
+                for (name, mode) in [("data.mdb", 0o640), ("lock.mdb", 0o660)] {
+                    validate_root_service_path_authority(
+                        &path.join(name),
+                        false,
+                        self.options.service_gid,
+                        mode,
+                        &format!("online audit {name}"),
+                    )?;
+                }
+            }
+            let manifest_sha256 =
+                hashtree_core::from_hex(&self.controller_state.pool_manifest_sha256)
+                    .context("decode online audit Pool manifest authority")?;
+            let binding = compute_online_audit_binding(
+                &self.options.rollout_id,
+                &self.migration_binary.sha256,
+                &self.source_baseline_input.sha256,
+                self.source_identity,
+                self.source_external_identity,
+                self.pool_identity,
+                &self.pool_topology_input.sha256,
+                manifest_sha256,
+            )?;
+            let store = PoolMigrationAuditStore::open(&path, binding)
+                .context("open root-owned online migration audit")?;
+            if self.controller_state.target_writers_fenced {
+                let target_fence_binding = compute_online_target_fence_binding(
+                    &self.options.rollout_id,
+                    &self.controller_state.stopped_writer_units,
+                    &self.controller_state.writer_unit_masks,
+                    &self.controller_state.legacy_worker_template_mask,
+                    &self.controller_state.legacy_worker_instance_masks,
+                )?;
+                store
+                    .begin_target_fenced_epoch(target_fence_binding)
+                    .context("start or resume root-owned target-fenced proof epoch")?;
+            } else if store.target_fence_binding()?.is_some() {
+                bail!(
+                    "online migration target-fence epoch already began; keep the exact target fence held"
+                );
+            }
+            if created {
+                set_root_service_path_authority(
+                    &path.join("data.mdb"),
+                    false,
+                    self.options.service_gid,
+                    0o640,
+                    "online audit data.mdb",
+                )?;
+                set_root_service_path_authority(
+                    &path.join("lock.mdb"),
+                    false,
+                    self.options.service_gid,
+                    0o660,
+                    "online audit lock.mdb",
+                )?;
+                File::open(&path)?
+                    .sync_all()
+                    .context("fsync online audit directory")?;
+            }
+            store.validate_binding()?;
+            Ok(Some(store))
+        }
+
         fn recover_failed_mount_state(&self) -> Result<()> {
             recover_rollout_teardown_state(
                 &self.attempts_dir,
@@ -1046,6 +1202,7 @@ mod linux {
         fn complete_launch(
             &self,
             mount_lifecycle: Option<&PreparedMountLifecycleV3>,
+            online_audit: Option<&PoolMigrationAuditStore>,
         ) -> Result<()> {
             let process = wait_for_process_identity(&ProcessIdentityExpectation {
                 systemctl: &self.options.systemctl,
@@ -1070,6 +1227,10 @@ mod linux {
                 PoolMigrationControllerPhase::OnlineBounded => {
                     if mount_lifecycle.is_some() {
                         bail!("online-bounded launch unexpectedly has a mount lifecycle");
+                    }
+                    if self.controller_state.target_writers_fenced {
+                        self.revalidate_masks_and_census(&process, true)
+                            .context("pre-launch target-fenced online writer-handle census")?;
                     }
                     None
                 }
@@ -1153,8 +1314,10 @@ mod linux {
                 &process,
                 &request,
                 &request_sha256,
+                &launch_ack_sha256,
                 mount_lifecycle,
                 mounted_lifecycle_authority.as_ref(),
+                online_audit,
             )?;
             println!(
                 "{}",
@@ -1178,6 +1341,7 @@ mod linux {
                     "mountTeardownReceipt": completion.mount_teardown_receipt,
                     "terminalPublicationReceipt": completion.terminal_publication_receipt,
                     "sourceTerminalCertification": completion.source_terminal_certification,
+                    "onlineTargetAuditCertification": completion.online_target_audit_certification,
                 }))
                 .context("serialize Pool migration controller result")?
             );
@@ -1206,8 +1370,10 @@ mod linux {
             process: &ProcessIdentity,
             request: &PoolMigrationLaunchRequestV3,
             launch_request_sha256: &str,
+            launch_ack_sha256: &str,
             mount_lifecycle: Option<&PreparedMountLifecycleV3>,
             mounted_lifecycle_authority: Option<&FileAuthorityV3>,
+            online_audit: Option<&PoolMigrationAuditStore>,
         ) -> Result<CheckpointBrokerCompletion> {
             let mut sequence = 0u64;
             let mut previous_ack_sha256 = None;
@@ -1240,6 +1406,35 @@ mod linux {
                         &mut next_progress,
                     )?;
                     self.validate_checkpoint_systemd_fence(process)?;
+                    let online_target_fenced = self.options.phase
+                        == PoolMigrationControllerPhase::OnlineBounded
+                        && self.controller_state.target_writers_fenced;
+                    if online_target_fenced {
+                        let deep_external_census = matches!(
+                            checkpoint.operation.as_str(),
+                            "online-source-audit-batch"
+                                | "online-target-audit-batch"
+                                | "online-evidence-publication"
+                                | "online-audit-publication"
+                                | "online-readiness"
+                        );
+                        self.revalidate_process_census(process, deep_external_census)
+                            .context("pre-checkpoint target-fenced online handle census")?;
+                    }
+                    if checkpoint.operation.starts_with("online-")
+                        && matches!(
+                            checkpoint.operation.as_str(),
+                            "online-source-audit-batch"
+                                | "online-target-audit-batch"
+                                | "online-target-audit-reset"
+                        )
+                    {
+                        self.apply_online_audit_checkpoint(
+                            &checkpoint,
+                            online_audit
+                                .context("online audit checkpoint has no root-owned audit store")?,
+                        )?;
+                    }
                     if self.options.phase.is_final_stopped() {
                         let mount_authority =
                             request.source.read_only_mounts.as_ref().context(
@@ -1256,6 +1451,16 @@ mod linux {
                             mount_authority,
                             deep_external_census,
                         )?;
+                    } else if online_target_fenced {
+                        let deep_external_census = matches!(
+                            checkpoint.operation.as_str(),
+                            "online-target-audit-batch"
+                                | "online-evidence-publication"
+                                | "online-audit-publication"
+                                | "online-readiness"
+                        );
+                        self.revalidate_process_census(process, deep_external_census)
+                            .context("revalidate target-fenced online handle census")?;
                     }
                     let authorized_at = boottime_millis()?;
                     if authorized_at > checkpoint.start_before_boottime_millis {
@@ -1420,10 +1625,38 @@ mod linux {
                             self.validate_terminal_worker_outputs(process, &progress, sequence)?;
                         if terminal_receipt_authority.as_ref()
                             != prepared_terminal_authority.as_ref()
+                            && self.options.phase.is_final_stopped()
                         {
                             bail!(
                                 "worker terminal receipt changed after root authorized terminal readiness"
                             );
+                        }
+                        if self.options.phase == PoolMigrationControllerPhase::OnlineBounded {
+                            let certification = terminal_receipt_authority
+                                .as_ref()
+                                .map(|authority| {
+                                    self.certify_online_target_audit(
+                                        process,
+                                        request,
+                                        launch_request_sha256,
+                                        launch_ack_sha256,
+                                        authority,
+                                        online_audit.context(
+                                            "online certification has no root-owned audit store",
+                                        )?,
+                                    )
+                                })
+                                .transpose()?;
+                            return Ok(CheckpointBrokerCompletion {
+                                checkpoint_count: sequence,
+                                checkpoint_systemctl_subprocess_count: sequence,
+                                terminal_receipt_sha256: terminal_receipt_authority
+                                    .map(|authority| authority.sha256),
+                                mount_teardown_receipt: None,
+                                terminal_publication_receipt: None,
+                                source_terminal_certification: None,
+                                online_target_audit_certification: certification,
+                            });
                         }
                         let terminal_publication_intent = prepared_terminal_publication
                             .as_ref()
@@ -1499,6 +1732,7 @@ mod linux {
                                 .map(|completion| completion.receipt.clone()),
                             source_terminal_certification: terminal_publication
                                 .and_then(|completion| completion.source_certification),
+                            online_target_audit_certification: None,
                         });
                     }
                     "failed" => {
@@ -1751,20 +1985,52 @@ mod linux {
                     &self.controller_state,
                     &self.pool_topology,
                     &self.source_receipts,
-                    process.main_pid,
-                    process.start_time_ticks,
-                    deep_external_census,
-                )
-                .context("checkpoint source/target handle census"),
-                PoolMigrationControllerPhase::FinalStoppedSource => census_source_writer_handles(
-                    &self.controller_state,
                     self.options.source_external_dir.as_deref(),
                     self.source_external_identity,
                     process.main_pid,
                     process.start_time_ticks,
                     deep_external_census,
                 )
-                .context("checkpoint source writer-handle census"),
+                .context("checkpoint source/target handle census"),
+                PoolMigrationControllerPhase::FinalStoppedSource => census_store_process_handles(
+                    &self.controller_state,
+                    &self.pool_topology,
+                    &self.source_receipts,
+                    self.options.source_external_dir.as_deref(),
+                    self.source_external_identity,
+                    process.main_pid,
+                    process.start_time_ticks,
+                    deep_external_census,
+                )
+                .context("checkpoint source/target handle census"),
+                PoolMigrationControllerPhase::OnlineBounded
+                    if self.controller_state.target_writers_fenced
+                        && self.controller_state.source_writers_fenced =>
+                {
+                    census_store_process_handles(
+                        &self.controller_state,
+                        &self.pool_topology,
+                        &[],
+                        self.options.source_external_dir.as_deref(),
+                        self.source_external_identity,
+                        process.main_pid,
+                        process.start_time_ticks,
+                        deep_external_census,
+                    )
+                    .context("checkpoint source/target writer-handle census")
+                }
+                PoolMigrationControllerPhase::OnlineBounded
+                    if self.controller_state.target_writers_fenced =>
+                {
+                    census_target_writer_handles(
+                        &self.controller_state,
+                        &self.pool_topology,
+                        process.main_pid,
+                        process.start_time_ticks,
+                        deep_external_census,
+                    )
+                    .context("checkpoint target writer-handle census")
+                }
                 PoolMigrationControllerPhase::OnlineBounded => Ok(()),
             }
         }
@@ -1776,7 +2042,21 @@ mod linux {
             checkpoint_count: u64,
         ) -> Result<Option<BoundedFileAuthorityV3>> {
             match self.options.phase {
-                PoolMigrationControllerPhase::OnlineBounded => Ok(None),
+                PoolMigrationControllerPhase::OnlineBounded => {
+                    if !progress.online_evidence_published
+                        && !progress.online_audit_published
+                        && !progress.online_ready
+                    {
+                        return Ok(None);
+                    }
+                    if !progress.online_evidence_published
+                        || !progress.online_audit_published
+                        || !progress.online_ready
+                    {
+                        bail!("online worker exited during its terminal audit checkpoint sequence");
+                    }
+                    self.capture_phase_terminal_authority(process).map(Some)
+                }
                 PoolMigrationControllerPhase::FinalStoppedSource => {
                     if checkpoint_count == 0
                         || !progress.source_keyset_audited
@@ -1824,10 +2104,489 @@ mod linux {
                     0o600,
                     "terminal Pool audit receipt",
                 ),
-                PoolMigrationControllerPhase::OnlineBounded => {
-                    bail!("online-bounded migration has no terminal worker receipt")
+                PoolMigrationControllerPhase::OnlineBounded => validate_worker_terminal_file(
+                    &self.attempt_dir.join(ONLINE_TARGET_AUDIT_FILE_NAME),
+                    process.uid,
+                    process.gid,
+                    0o640,
+                    "online target audit receipt",
+                ),
+            }
+        }
+
+        fn apply_online_audit_checkpoint(
+            &self,
+            checkpoint: &MigrationCheckpointRequestV3,
+            audit: &PoolMigrationAuditStore,
+        ) -> Result<()> {
+            audit.validate_binding()?;
+            match checkpoint.operation.as_str() {
+                "online-target-audit-reset" => {
+                    audit.reset_target_cursor()?;
+                    return Ok(());
+                }
+                "online-source-audit-batch" | "online-target-audit-batch" => {}
+                _ => bail!("unsupported root online audit checkpoint operation"),
+            }
+            let entries = checkpoint
+                .audit_entries
+                .iter()
+                .map(|entry| {
+                    let hash: [u8; 32] = hashtree_core::from_hex(&entry.hash)
+                        .context("decode online audit checkpoint hash")?;
+                    Ok((hash, entry.size))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            if checkpoint.operation == "online-source-audit-batch" {
+                self.verify_online_source_entries(&entries)?;
+            }
+            self.verify_online_target_entries(&entries)?;
+            if checkpoint.operation == "online-source-audit-batch" {
+                audit.record_verified_source(&entries)?;
+            } else {
+                let cursor: [u8; 32] = hashtree_core::from_hex(
+                    checkpoint
+                        .audit_target_cursor
+                        .as_deref()
+                        .context("online target audit checkpoint has no cursor")?,
+                )
+                .context("decode online target audit cursor")?;
+                audit.record_verified_target_page(&entries, cursor)?;
+            }
+            Ok(())
+        }
+
+        fn verify_online_source_entries(&self, entries: &[([u8; 32], u64)]) -> Result<()> {
+            if entries.is_empty() {
+                bail!("root source audit requires a nonempty exact entry set");
+            }
+            let reader = self.open_online_source_audit_reader()?;
+            let byte_limit = self
+                .options
+                .max_buffer_mib
+                .checked_mul(1024 * 1024)
+                .context("root source audit buffer limit overflow")?;
+            let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+            let mut offset = 0usize;
+            while offset < hashes.len() {
+                let bodies = reader
+                    .read_hashes_bounded(&hashes[offset..], byte_limit)
+                    .context("root-read online source audit bodies")?;
+                if bodies.is_empty() {
+                    bail!("root source audit body reader made no progress");
+                }
+                for ((actual_hash, data), (expected_hash, expected_size)) in
+                    bodies.iter().zip(&entries[offset..])
+                {
+                    if actual_hash != expected_hash
+                        || data.len() as u64 != *expected_size
+                        || hashtree_core::sha256(data) != *expected_hash
+                    {
+                        bail!("root source audit body differs from checkpoint hash/size authority");
+                    }
+                }
+                offset = offset
+                    .checked_add(bodies.len())
+                    .context("root source audit offset overflow")?;
+            }
+            Ok(())
+        }
+
+        fn open_online_source_audit_reader(&self) -> Result<hashtree_lmdb::LmdbBlobReader> {
+            let external = self.options.source_external_dir.as_ref().map(|path| {
+                hashtree_lmdb::ExternalBlobOptions {
+                    base_path: path.clone(),
+                    min_bytes: 1,
+                    sync: true,
+                    pack_target_bytes: None,
+                }
+            });
+            hashtree_lmdb::LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+                &self.options.source,
+                external,
+                self.options.source_read_concurrency,
+                hashtree_lmdb::PinnedLmdbIdentity {
+                    data: hashtree_lmdb::PinnedLmdbFileIdentity {
+                        device: self.source_identity.data.device,
+                        inode: self.source_identity.data.inode,
+                    },
+                    lock: hashtree_lmdb::PinnedLmdbFileIdentity {
+                        device: self.source_identity.lock.device,
+                        inode: self.source_identity.lock.inode,
+                    },
+                },
+            )
+            .context("root-open exact online source audit reader")
+        }
+
+        fn verify_online_source_coverage(&self, audit: &PoolMigrationAuditStore) -> Result<()> {
+            let reader = self.open_online_source_audit_reader()?;
+            if let Some((hash, size)) =
+                audit.first_unverified_source(&reader, self.options.batch_size)?
+            {
+                bail!(
+                    "root source coverage found unverified entry {} / {} bytes",
+                    hashtree_core::to_hex(&hash),
+                    size
+                );
+            }
+            Ok(())
+        }
+
+        fn verify_online_target_entries(&self, entries: &[([u8; 32], u64)]) -> Result<()> {
+            if entries.is_empty() {
+                return Ok(());
+            }
+            let catalog =
+                PinnedDirectory::open_exact(&self.options.pool, "online audit target Pool")?;
+            catalog.require_authority_identity(
+                self.pool_identity.directory,
+                "online audit target Pool",
+            )?;
+            let mut retained_members = Vec::with_capacity(self.pool_topology.members.len());
+            for member in &self.pool_topology.members {
+                let directory = PinnedDirectory::open_exact(
+                    &member.path,
+                    &format!("online audit Pool member {} directory", member.id),
+                )?;
+                directory.require_authority_identity(
+                    member.directory_identity,
+                    &format!("online audit Pool member {} directory", member.id),
+                )?;
+                let external = match (
+                    member.external_path.as_deref(),
+                    member.external_directory_identity,
+                ) {
+                    (Some(path), Some(identity)) => {
+                        let external = PinnedDirectory::open_exact(
+                            path,
+                            &format!("online audit Pool member {} external", member.id),
+                        )?;
+                        external.require_authority_identity(
+                            identity,
+                            &format!("online audit Pool member {} external", member.id),
+                        )?;
+                        Some(external)
+                    }
+                    (None, None) => None,
+                    _ => bail!(
+                        "online audit Pool member {} external authority is incomplete",
+                        member.id
+                    ),
+                };
+                retained_members.push((member, directory, external));
+            }
+            let mut config = hashtree_lmdb::PoolStoreConfig::default();
+            config.temperature.enabled = false;
+            config.catalog_lmdb_identity = Some(hashtree_lmdb::PinnedLmdbIdentity {
+                data: hashtree_lmdb::PinnedLmdbFileIdentity {
+                    device: self.pool_identity.data.device,
+                    inode: self.pool_identity.data.inode,
+                },
+                lock: hashtree_lmdb::PinnedLmdbFileIdentity {
+                    device: self.pool_identity.lock.device,
+                    inode: self.pool_identity.lock.inode,
+                },
+            });
+            config.expected_manifest_sha256 = Some(
+                hashtree_core::from_hex(&self.pool_topology.manifest_sha256)
+                    .context("decode online audit Pool manifest")?,
+            );
+            config.member_runtime_paths = retained_members
+                .iter()
+                .map(|(member, directory, external)| {
+                    Ok(hashtree_lmdb::PoolMemberRuntimePaths {
+                        id: member.id.parse()?,
+                        configured_path: member.path.clone(),
+                        runtime_path: directory.runtime_path(),
+                        configured_external_path: member.external_path.clone(),
+                        runtime_external_path: external.as_ref().map(PinnedDirectory::runtime_path),
+                        lmdb_identity: hashtree_lmdb::PinnedLmdbIdentity {
+                            data: hashtree_lmdb::PinnedLmdbFileIdentity {
+                                device: member.lmdb_identity.data.device,
+                                inode: member.lmdb_identity.data.inode,
+                            },
+                            lock: hashtree_lmdb::PinnedLmdbFileIdentity {
+                                device: member.lmdb_identity.lock.device,
+                                inode: member.lmdb_identity.lock.inode,
+                            },
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let reader = hashtree_lmdb::PoolStoreReader::open(catalog.runtime_path(), config)
+                .context("root-open exact online target audit reader")?;
+            let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+            let locations = reader
+                .blob_catalog_locations(&hashes)
+                .context("root-read online target audit catalog")?;
+            for ((hash, expected_size), location) in entries.iter().zip(&locations) {
+                if !matches!(
+                    location,
+                    hashtree_lmdb::PoolCatalogLocation::Stored { size, .. }
+                        if size == expected_size
+                ) {
+                    bail!(
+                        "root target audit requires exact Stored location for {} / {} bytes",
+                        hashtree_core::to_hex(hash),
+                        expected_size
+                    );
                 }
             }
+            let byte_limit = self
+                .options
+                .max_buffer_mib
+                .checked_mul(1024 * 1024)
+                .context("root target audit buffer limit overflow")?;
+            let mut offset = 0usize;
+            while offset < hashes.len() {
+                let bodies = reader
+                    .read_hashes_bounded(&hashes[offset..], byte_limit)
+                    .context("root-read online target audit bodies")?;
+                if bodies.is_empty() {
+                    bail!("root target audit body reader made no progress");
+                }
+                for (body, (expected_hash, expected_size)) in bodies.iter().zip(&entries[offset..])
+                {
+                    if body.hash != *expected_hash
+                        || body.declared_size != Some(*expected_size)
+                        || body.data.as_ref().map(|data| data.len() as u64) != Some(*expected_size)
+                        || body.error.is_some()
+                    {
+                        bail!("root target audit body differs from checkpoint hash/size authority");
+                    }
+                }
+                offset = offset
+                    .checked_add(bodies.len())
+                    .context("root target audit offset overflow")?;
+            }
+            let final_locations = reader
+                .blob_catalog_locations(&hashes)
+                .context("root-revalidate online target audit catalog")?;
+            if final_locations != locations {
+                bail!("online target catalog changed during root content verification");
+            }
+            Ok(())
+        }
+
+        fn certify_online_target_audit(
+            &self,
+            process: &ProcessIdentity,
+            request: &PoolMigrationLaunchRequestV3,
+            launch_request_sha256: &str,
+            launch_ack_sha256: &str,
+            authority: &BoundedFileAuthorityV3,
+            audit: &PoolMigrationAuditStore,
+        ) -> Result<FileAuthorityV3> {
+            let expected_path = self.attempt_dir.join(ONLINE_TARGET_AUDIT_FILE_NAME);
+            if authority.path != expected_path {
+                bail!("online target audit receipt has an unexpected attempt path");
+            }
+            let bytes = read_bounded_file_authority(authority, "online target audit receipt")?;
+            let receipt: PoolMigrationOnlineTargetAuditReceiptV3 =
+                serde_json::from_slice(&bytes)
+                    .context("parse online target audit receipt for root certification")?;
+            let terminal_cursor =
+                capture_cursor_authority(&self.options.state_file, self.options.phase)?;
+            let pool_manifest_sha256 =
+                hashtree_core::from_hex(&self.controller_state.pool_manifest_sha256)
+                    .context("decode online audit Pool manifest authority")?;
+            let audit_binding = compute_online_audit_binding(
+                &request.controller.rollout_id,
+                &request.binary.sha256,
+                &request.source.baseline.sha256,
+                request.source.lmdb_identity,
+                request.source.external_identity,
+                request.pool.lmdb_identity,
+                &request.pool.topology.sha256,
+                pool_manifest_sha256,
+            )?;
+            let target_fence_binding = compute_online_target_fence_binding(
+                &request.controller.rollout_id,
+                &self.controller_state.stopped_writer_units,
+                &self.controller_state.writer_unit_masks,
+                &self.controller_state.legacy_worker_template_mask,
+                &self.controller_state.legacy_worker_instance_masks,
+            )?;
+            if receipt.schema != ONLINE_TARGET_AUDIT_SCHEMA
+                || receipt.status != "verified"
+                || receipt.phase != "online-bounded"
+                || receipt.rollout_id != self.options.rollout_id
+                || receipt.boot_id != request.boot_id
+                || receipt.attempt_namespace != request.attempt_namespace
+                || receipt.attempt_namespace_identity != request.attempt_namespace_identity
+                || receipt.attempt_identity != request.attempt_identity
+                || receipt.attempt_nonce != self.nonce
+                || receipt.request_path != self.request_path
+                || receipt.request_sha256 != launch_request_sha256
+                || receipt.acknowledgement_path != self.ack_path
+                || receipt.acknowledgement_sha256 != launch_ack_sha256
+                || receipt.terminal_cursor != terminal_cursor
+                || receipt.worker_binary != request.binary
+                || receipt.worker_argv_sha256 != argv_sha256(&request.argv)
+                || receipt.systemd_unit != request.systemd_unit
+                || receipt.systemd_invocation_id != process.invocation_id
+                || receipt.systemd_fragment != request.systemd_fragment
+                || receipt.systemd_environment_file != request.systemd_environment_file
+                || receipt.main_pid != process.main_pid
+                || receipt.proc_start_time_ticks != process.start_time_ticks
+                || receipt.controller_state_sha256 != request.controller.state.sha256
+                || receipt.source_path != request.source.lmdb_path
+                || receipt.source_lmdb_identity != request.source.lmdb_identity
+                || receipt.source_external_path != request.source.external_path
+                || receipt.source_external_identity != request.source.external_identity
+                || receipt.source_baseline_sha256 != request.source.baseline.sha256
+                || receipt.pool_path != request.pool.path
+                || receipt.pool_lmdb_identity != request.pool.lmdb_identity
+                || receipt.pool_topology_sha256 != request.pool.topology.sha256
+                || receipt.pool_manifest_sha256 != self.controller_state.pool_manifest_sha256
+                || receipt.audit_store_path != online_audit_path(&request.cursor.path)?
+                || receipt.audit_binding_sha256 != hashtree_core::to_hex(&audit_binding)
+                || receipt.source_evidence.path != self.attempt_dir.join(SOURCE_EVIDENCE_FILE_NAME)
+                || receipt.target_evidence.path
+                    != self.attempt_dir.join(ONLINE_TARGET_EVIDENCE_FILE_NAME)
+                || receipt.source_evidence.entries != receipt.source_verified_entries
+                || receipt.target_evidence.entries != receipt.target_verified_entries
+                || receipt.target_fence_binding_sha256
+                    != hashtree_core::to_hex(&target_fence_binding)
+                || receipt.target_writer_units != self.controller_state.stopped_writer_units
+                || receipt.target_writer_unit_masks != self.controller_state.writer_unit_masks
+                || receipt.legacy_worker_template_mask
+                    != self.controller_state.legacy_worker_template_mask
+                || receipt.legacy_worker_instance_masks
+                    != self.controller_state.legacy_worker_instance_masks
+            {
+                bail!("online target audit receipt differs from the exact live launch authority");
+            }
+            validate_source_evidence_metadata(
+                &receipt.source_evidence,
+                Some(self.options.service_gid),
+                false,
+            )?;
+            validate_source_evidence_metadata(
+                &receipt.target_evidence,
+                Some(self.options.service_gid),
+                false,
+            )?;
+            let mut source_evidence =
+                SourceEvidenceManifestReaderV3::open(&receipt.source_evidence)?;
+            while source_evidence.next_entry()?.is_some() {}
+            let source_summary = source_evidence.validated_summary()?;
+            let root_source_summary =
+                audit.for_each_source_verified_batch(self.options.batch_size, |_| Ok(()))?;
+            if source_summary.entries != receipt.source_verified_entries
+                || source_summary.bytes != receipt.source_verified_bytes
+                || hashtree_core::to_hex(&source_summary.content_sha256)
+                    != receipt.source_content_sha256
+                || root_source_summary.entries != source_summary.entries
+                || root_source_summary.bytes != source_summary.bytes
+                || root_source_summary.content_sha256 != source_summary.content_sha256
+            {
+                bail!("online source evidence differs from its receipt or root-owned ledger");
+            }
+            self.verify_online_source_coverage(audit)?;
+            let mut target_evidence =
+                SourceEvidenceManifestReaderV3::open(&receipt.target_evidence)?;
+            while target_evidence.next_entry()?.is_some() {}
+            let target_summary = target_evidence.validated_summary()?;
+            let root_target_summary =
+                audit.for_each_target_verified_batch(self.options.batch_size, |_| Ok(()))?;
+            if target_summary.entries != receipt.target_verified_entries
+                || target_summary.bytes != receipt.target_verified_bytes
+                || hashtree_core::to_hex(&target_summary.content_sha256)
+                    != receipt.target_content_sha256
+                || root_target_summary.entries != target_summary.entries
+                || root_target_summary.bytes != target_summary.bytes
+                || root_target_summary.content_sha256 != target_summary.content_sha256
+            {
+                bail!("online target evidence differs from its receipt or root-owned ledger");
+            }
+            if audit.target_fence_binding()? != Some(target_fence_binding) {
+                bail!("root-owned target proof ledger is not bound to this exact writer fence");
+            }
+            if !self.controller_state.target_writers_fenced {
+                bail!("online target audit certification requires the held target-writer fence");
+            }
+            if !self.controller_state.source_writers_fenced {
+                bail!("online target audit certification requires the held source-writer fence");
+            }
+            validate_runtime_masked_writer_units_with_systemctl(
+                &self.systemctl.path,
+                &self.controller_state.stopped_writer_units,
+                &self.controller_state.writer_unit_masks,
+            )
+            .context("revalidate target writer-unit masks before online certification")?;
+            census_recovery_target_handles(&self.controller_state, &self.pool_topology)
+                .context("revalidate target writer-handle census before online certification")?;
+            census_recovery_source_handles(
+                &self.controller_state,
+                &self.options.source,
+                self.options.source_external_dir.as_deref(),
+                self.source_external_identity,
+            )
+            .context("revalidate source writer-handle census before online certification")?;
+            let (_, target_content) = audit_recoverable_target_pool(
+                &self.options.pool,
+                self.pool_identity,
+                &self.pool_topology,
+                &self.pool_topology_input.sha256,
+                std::slice::from_ref(&receipt.target_evidence),
+                self.options.batch_size,
+            )
+            .context("root replay target catalog coverage before online certification")?;
+            if target_content.evidence.as_slice() != std::slice::from_ref(&target_summary) {
+                bail!("root target catalog replay used unexpected target evidence");
+            }
+            validate_runtime_masked_writer_units_with_systemctl(
+                &self.systemctl.path,
+                &self.controller_state.stopped_writer_units,
+                &self.controller_state.writer_unit_masks,
+            )
+            .context("revalidate target writer-unit masks after online certification replay")?;
+            census_recovery_target_handles(&self.controller_state, &self.pool_topology).context(
+                "revalidate target writer-handle census after online certification replay",
+            )?;
+            census_recovery_source_handles(
+                &self.controller_state,
+                &self.options.source,
+                self.options.source_external_dir.as_deref(),
+                self.source_external_identity,
+            )
+            .context("revalidate source writer-handle census after online certification replay")?;
+            let certification = PoolMigrationOnlineTargetAuditCertificationV3 {
+                schema: ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA.to_string(),
+                status: "certified".to_string(),
+                rollout_id: self.options.rollout_id.clone(),
+                controller_state_sha256: self.controller_state_input.sha256.clone(),
+                receipt: FileAuthorityV3 {
+                    path: authority.path.clone(),
+                    sha256: authority.sha256.clone(),
+                },
+                source_evidence: receipt.source_evidence,
+                target_evidence: receipt.target_evidence,
+                certified_at_unix_seconds: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .context("system clock precedes Unix epoch")?
+                    .as_secs(),
+            };
+            let mut certification_bytes = serde_json::to_vec(&certification)
+                .context("serialize online target audit certification")?;
+            certification_bytes.push(b'\n');
+            let path = self
+                .attempt_dir
+                .join(ONLINE_TARGET_AUDIT_CERTIFICATION_FILE_NAME);
+            durable_create_atomic(
+                &path,
+                &certification_bytes,
+                0o440,
+                0,
+                self.options.service_gid,
+                &self.nonce,
+            )?;
+            Ok(FileAuthorityV3 {
+                path,
+                sha256: sha256_bytes(&certification_bytes),
+            })
         }
 
         fn prepare_completed_source_mount_teardown_intent(
@@ -2276,11 +3035,6 @@ mod linux {
         if options.phase.is_final_stopped() && options.writer_units.is_empty() {
             bail!("stopped final migration requires a nonempty complete --writer-unit set");
         }
-        if options.phase == PoolMigrationControllerPhase::OnlineBounded
-            && !options.writer_units.is_empty()
-        {
-            bail!("online-bounded migration must not claim stopped --writer-unit fences");
-        }
         if options.phase.is_final_stopped() && options.reopen_batches > MAX_FINAL_REOPEN_BATCHES {
             bail!(
                 "stopped final migration requires --reopen-batches <= {MAX_FINAL_REOPEN_BATCHES} for bounded fence revalidation"
@@ -2707,26 +3461,43 @@ mod linux {
                 "controller-state stopped writer units differ from the explicit complete --writer-unit set"
             );
         }
+        let online_target_fenced = options.phase == PoolMigrationControllerPhase::OnlineBounded
+            && !options.writer_units.is_empty();
         if options.phase.is_final_stopped()
             && (!state.source_writers_fenced
+                || !state.target_writers_fenced
                 || !state.fence_held_until_completion
                 || state.source_writer_processes_with_open_handles != 0
+                || state.target_writer_processes_with_open_handles != 0
                 || state.stopped_writer_units.is_empty()
                 || state.writer_unit_masks.is_empty())
         {
             bail!(
-                "stopped final controller state must attest its held source writer fence, zero source writer handles, and stopped writer units"
+                "stopped final controller state must attest held source and target writer fences, zero source and target writer handles, and stopped writer units"
             );
         }
-        if options.phase == PoolMigrationControllerPhase::FinalStoppedFull
+        if online_target_fenced
             && (!state.target_writers_fenced
-                || state.target_writer_processes_with_open_handles != 0)
+                || !state.fence_held_until_completion
+                || state.target_writer_processes_with_open_handles != 0
+                || (state.source_writers_fenced
+                    && state.source_writer_processes_with_open_handles != 0)
+                || state.writer_unit_masks.is_empty())
         {
             bail!(
-                "final-stopped-full controller state must additionally attest its target writer fence and zero target writer handles"
+                "target-fenced online-bounded state must attest its held target fence, zero target writer handles, and exact writer masks"
             );
         }
-        if options.phase.is_final_stopped() {
+        if options.phase == PoolMigrationControllerPhase::OnlineBounded
+            && !online_target_fenced
+            && (state.source_writers_fenced
+                || state.target_writers_fenced
+                || state.fence_held_until_completion
+                || !state.writer_unit_masks.is_empty())
+        {
+            bail!("ordinary online-bounded state must not claim writer fences or masks");
+        }
+        if options.phase.is_final_stopped() || online_target_fenced {
             validate_runtime_masked_writer_units_with_systemctl(
                 systemctl,
                 &state.stopped_writer_units,
@@ -3396,6 +4167,57 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             .with_context(|| format!("chmod {label} {}", path.display()))
     }
 
+    fn set_root_service_path_authority(
+        path: &Path,
+        directory: bool,
+        gid: u32,
+        mode: u32,
+        label: &str,
+    ) -> Result<()> {
+        let mut options = OpenOptions::new();
+        options.read(true).custom_flags(
+            libc::O_CLOEXEC | libc::O_NOFOLLOW | if directory { libc::O_DIRECTORY } else { 0 },
+        );
+        let file = options
+            .open(path)
+            .with_context(|| format!("open {label} {}", path.display()))?;
+        if unsafe { libc::fchown(file.as_raw_fd(), 0, gid) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("set {label} ownership"));
+        }
+        if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+            return Err(std::io::Error::last_os_error())
+                .with_context(|| format!("set {label} mode"));
+        }
+        file.sync_all()
+            .with_context(|| format!("fsync {label} after authority update"))?;
+        validate_root_service_path_authority(path, directory, gid, mode, label)
+    }
+
+    fn validate_root_service_path_authority(
+        path: &Path,
+        directory: bool,
+        gid: u32,
+        mode: u32,
+        label: &str,
+    ) -> Result<()> {
+        let metadata =
+            std::fs::symlink_metadata(path).with_context(|| format!("inspect {label}"))?;
+        let type_valid = if directory {
+            metadata.file_type().is_dir()
+        } else {
+            metadata.file_type().is_file() && metadata.nlink() == 1
+        };
+        if !type_valid
+            || metadata.uid() != 0
+            || metadata.gid() != gid
+            || metadata.mode() & 0o7777 != mode
+        {
+            bail!("{label} ownership/mode differs from root audit authority");
+        }
+        Ok(())
+    }
+
     fn durable_create_atomic(
         path: &Path,
         bytes: &[u8],
@@ -3960,6 +4782,17 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         if let Some(cursor) = &checkpoint.cursor {
             require_lower_hex("checkpoint cursor", cursor, 64)?;
         }
+        if let Some(cursor) = &checkpoint.audit_target_cursor {
+            require_lower_hex("checkpoint audit target cursor", cursor, 64)?;
+        }
+        let mut previous_audit_hash: Option<&str> = None;
+        for entry in &checkpoint.audit_entries {
+            require_lower_hex("checkpoint audit hash", &entry.hash, 64)?;
+            if previous_audit_hash.is_some_and(|previous| previous >= entry.hash.as_str()) {
+                bail!("checkpoint audit entries must be unique and strictly sorted");
+            }
+            previous_audit_hash = Some(&entry.hash);
+        }
         let timeout = timeout_millis(Duration::from_secs(
             launch.checkpoint_broker.timeout_seconds,
         ))?;
@@ -3991,14 +4824,64 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             }
             Ok(())
         };
+        let require_no_audit = || -> Result<()> {
+            if !checkpoint.audit_entries.is_empty() || checkpoint.audit_target_cursor.is_some() {
+                bail!("non-audit checkpoint must not carry audit state");
+            }
+            Ok(())
+        };
 
         match phase {
-            PoolMigrationControllerPhase::OnlineBounded => {
-                if checkpoint.operation != "migration-batch" {
-                    bail!("online migration requested a non-migration checkpoint operation");
+            PoolMigrationControllerPhase::OnlineBounded => match checkpoint.operation.as_str() {
+                "migration-batch" if !progress.online_evidence_published => {
+                    require_batch_range()?;
+                    require_no_audit()?;
                 }
-                require_batch_range()?;
-            }
+                "online-source-audit-batch" if !progress.online_evidence_published => {
+                    require_batch_range()?;
+                    if checkpoint.audit_entries.is_empty()
+                        || checkpoint.audit_entries.len() as u64
+                            > checkpoint.range_limit.unwrap_or(0)
+                        || checkpoint.audit_target_cursor.is_some()
+                    {
+                        bail!("online source audit checkpoint has invalid proof entries");
+                    }
+                }
+                "online-target-audit-batch" if !progress.online_evidence_published => {
+                    require_batch_range()?;
+                    if checkpoint.audit_entries.len() as u64 > checkpoint.range_limit.unwrap_or(0)
+                        || checkpoint.audit_target_cursor != checkpoint.cursor
+                        || checkpoint.audit_target_cursor.is_none()
+                    {
+                        bail!("online target audit checkpoint has invalid proof/cursor state");
+                    }
+                }
+                "online-target-audit-reset" if !progress.online_evidence_published => {
+                    require_no_range()?;
+                    require_no_audit()?;
+                }
+                "online-evidence-publication" if !progress.online_evidence_published => {
+                    require_no_range()?;
+                    require_no_audit()?;
+                    progress.online_evidence_published = true;
+                }
+                "online-audit-publication"
+                    if progress.online_evidence_published && !progress.online_audit_published =>
+                {
+                    require_no_range()?;
+                    require_no_audit()?;
+                    progress.online_audit_published = true;
+                }
+                "online-readiness" if progress.online_audit_published && !progress.online_ready => {
+                    require_no_range()?;
+                    require_no_audit()?;
+                    progress.online_ready = true;
+                }
+                _ => bail!(
+                    "online checkpoint operation {} is out of order",
+                    checkpoint.operation
+                ),
+            },
             PoolMigrationControllerPhase::FinalStoppedSource => match checkpoint.operation.as_str()
             {
                 "source-keyset-audit" if !progress.source_keyset_audited => {
@@ -4076,6 +4959,9 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 ),
             },
         }
+        if phase != PoolMigrationControllerPhase::OnlineBounded {
+            require_no_audit()?;
+        }
         Ok(())
     }
 
@@ -4095,10 +4981,10 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         )?;
         let value: Value =
             serde_json::from_slice(&bytes).with_context(|| format!("parse strict {label} JSON"))?;
-        let expected_schema = if label == "source-terminal receipt" {
-            "hashtree-pool-migration-source-terminal/v3"
-        } else {
-            "hashtree-pool-migration-terminal-audit/v3"
+        let expected_schema = match label {
+            "source-terminal receipt" => "hashtree-pool-migration-source-terminal/v3",
+            "online target audit receipt" => ONLINE_TARGET_AUDIT_SCHEMA,
+            _ => "hashtree-pool-migration-terminal-audit/v3",
         };
         if value.get("schema").and_then(Value::as_str) != Some(expected_schema)
             || value.get("status").and_then(Value::as_str) != Some("verified")
@@ -4150,10 +5036,13 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         source_entries: u64,
         source_bytes: u64,
         source_reconciliation_sha256: String,
+        target_content_proof_entries: u64,
+        target_content_proof_bytes: u64,
+        target_content_proof_sha256: String,
         target_stored_locations: u64,
         target_stored_bytes: u64,
         target_catalog_sha256: String,
-        target_payload_sha256: String,
+        target_physical_sha256: String,
         target_manifest_sha256: String,
     }
 
@@ -4212,6 +5101,7 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 authorize_full_terminal_recovery(
                     publication,
                     options,
+                    current_boot_id,
                     state,
                     controller_state_sha256,
                     topology,
@@ -4255,6 +5145,58 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         let receipt: PoolMigrationSourceTerminalReceiptV3 =
             serde_json::from_slice(&bytes).context("parse recoverable source-terminal receipt")?;
         validate_source_terminal_receipt_shape(&receipt)?;
+        let online_authorities = parse_additional_cas(&options.additional_cas)?
+            .into_iter()
+            .filter(|(label, _)| label.starts_with("online-target-audit-"))
+            .map(|(label, path)| {
+                let file = PinnedAuthorityFile::open_bytes(
+                    &path,
+                    "recoverable online target audit certification",
+                    MAX_ADDITIONAL_CAS_BYTES,
+                )?;
+                Ok(NamedFileAuthorityV3 {
+                    label,
+                    path: file.path,
+                    sha256: file.sha256,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let migration_binary =
+            PinnedAuthorityFile::open_hashed(&options.migration_binary, "migration binary")?;
+        let online_target = load_validated_online_target_audit(
+            &online_authorities,
+            &OnlineTargetAuditExpectationV3 {
+                rollout_id: &options.rollout_id,
+                worker_binary_sha256: &migration_binary.sha256,
+                source_baseline_sha256,
+                source_path: &options.source,
+                source_lmdb_identity: source_identity,
+                source_external_path: options.source_external_dir.as_deref(),
+                source_external_identity,
+                pool_path: &options.pool,
+                pool_lmdb_identity: pool_identity,
+                pool_topology_sha256: topology_sha256,
+                pool_manifest_sha256: &state.pool_manifest_sha256,
+                target_writer_units: &state.stopped_writer_units,
+                target_writer_unit_masks: &state.writer_unit_masks,
+                legacy_worker_template_mask: &state.legacy_worker_template_mask,
+                legacy_worker_instance_masks: &state.legacy_worker_instance_masks,
+                expected_service_gid: options.service_gid,
+                validate_evidence_content: true,
+            },
+        )?
+        .context("recoverable source-terminal receipt has no online target audit")?;
+        if receipt.online_target_audit_certification_sha256 != online_target.certification_sha256
+            || receipt.online_target_verified_entries
+                != online_target.receipt.target_verified_entries
+            || receipt.online_target_verified_bytes != online_target.receipt.target_verified_bytes
+            || receipt.online_target_content_sha256 != online_target.receipt.target_content_sha256
+            || receipt.online_target_evidence != online_target.receipt.target_evidence
+        {
+            bail!(
+                "recoverable source-terminal receipt does not propagate the exact certified online target proof"
+            );
+        }
         if receipt.schema != SOURCE_TERMINAL_SCHEMA
             || receipt.status != "verified"
             || receipt.phase != "final-stopped-source"
@@ -4297,12 +5239,19 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             source_external_identity,
         )
         .context("revalidate retained source mounts before terminal recovery")?;
+        validate_source_evidence_metadata(
+            &receipt.source_evidence,
+            Some(options.service_gid),
+            true,
+        )
+        .context("revalidate frozen source evidence authority before terminal recovery")?;
         census_recovery_source_handles(
             state,
             &options.source,
             options.source_external_dir.as_deref(),
             source_external_identity,
         )?;
+        census_recovery_target_handles(state, topology)?;
         let source_directory =
             PinnedDirectory::open_exact(&options.source, "recoverable source LMDB directory")?;
         source_directory.require_authority_identity(
@@ -4334,6 +5283,18 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 .as_deref(),
         )
         .context("revalidate exact frozen source generation before terminal recovery")?;
+        validate_frozen_source_receipt_evidence(
+            &receipt,
+            &online_target.receipt,
+            &source_directory.runtime_path(),
+            source_external_directory
+                .as_ref()
+                .map(PinnedDirectory::runtime_path)
+                .as_deref(),
+            options.batch_size,
+            options.source_read_concurrency,
+        )
+        .context("root replay frozen source catalog against terminal and online evidence")?;
         drop(source_external_directory);
         drop(source_directory);
         census_recovery_source_handles(
@@ -4341,12 +5302,168 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             &options.source,
             options.source_external_dir.as_deref(),
             source_external_identity,
-        )
+        )?;
+        census_recovery_target_handles(state, topology)
+    }
+
+    fn validate_frozen_source_receipt_evidence(
+        receipt: &PoolMigrationSourceTerminalReceiptV3,
+        online: &PoolMigrationOnlineTargetAuditReceiptV3,
+        source_runtime_path: &Path,
+        source_external_runtime_path: Option<&Path>,
+        page_size: usize,
+        source_read_concurrency: usize,
+    ) -> Result<()> {
+        if page_size == 0 {
+            bail!("frozen source evidence replay page size must be non-zero");
+        }
+        let external =
+            source_external_runtime_path.map(|path| hashtree_lmdb::ExternalBlobOptions {
+                base_path: path.to_path_buf(),
+                min_bytes: 1,
+                sync: true,
+                pack_target_bytes: None,
+            });
+        let reader =
+            hashtree_lmdb::LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+                source_runtime_path,
+                external,
+                source_read_concurrency,
+                hashtree_lmdb::PinnedLmdbIdentity {
+                    data: hashtree_lmdb::PinnedLmdbFileIdentity {
+                        device: receipt.source_lmdb_identity.data.device,
+                        inode: receipt.source_lmdb_identity.data.inode,
+                    },
+                    lock: hashtree_lmdb::PinnedLmdbFileIdentity {
+                        device: receipt.source_lmdb_identity.lock.device,
+                        inode: receipt.source_lmdb_identity.lock.inode,
+                    },
+                },
+            )
+            .context("root-open frozen source for evidence replay")?;
+        let generation = reader.environment_generation();
+        let keyset = reader
+            .validate_terminal_migration_keyset()
+            .context("root-audit frozen source keyset")?;
+        if keyset.blob_entries != receipt.source_blob_entries
+            || keyset.metadata_entries != receipt.source_metadata_entries
+            || keyset.blob_only_entries != receipt.source_blob_only_entries
+            || keyset.legacy_blob_only != receipt.source_legacy_blob_only
+            || keyset.inline_entries != receipt.source_inline_entries
+            || keyset.loose_external_entries != receipt.source_loose_external_entries
+            || keyset.packed_external_entries != receipt.source_packed_external_entries
+            || hashtree_core::to_hex(&keyset.sha256) != receipt.source_keyset_sha256
+            || hashtree_core::to_hex(&keyset.catalog_location_sha256)
+                != receipt.source_catalog_location_sha256
+        {
+            bail!("root frozen source keyset differs from its terminal receipt");
+        }
+
+        let mut terminal = SourceEvidenceManifestReaderV3::open(&receipt.source_evidence)?;
+        let mut next_terminal = terminal.next_entry()?;
+        let mut online_evidence = SourceEvidenceManifestReaderV3::open(&online.source_evidence)?;
+        let mut next_online = online_evidence.next_entry()?;
+        let mut cursor = None;
+        let mut entries = 0u64;
+        let mut bytes = 0u64;
+        let mut hasher = Sha256::new();
+        hasher.update(b"hashtree-pool-migration-source-content/v3\0");
+        loop {
+            let hashes = reader.scan_hashes_after(cursor, page_size)?;
+            if hashes.is_empty() {
+                break;
+            }
+            let sizes = reader.sizes_for_sorted_hashes(&hashes)?;
+            for (hash, size) in hashes.iter().copied().zip(sizes) {
+                match next_terminal {
+                    Some((evidence_hash, evidence_size))
+                        if evidence_hash == hash && evidence_size == size =>
+                    {
+                        next_terminal = terminal.next_entry()?;
+                    }
+                    Some((evidence_hash, evidence_size)) => bail!(
+                        "terminal source evidence {} / {} bytes differs from frozen source {} / {} bytes",
+                        hashtree_core::to_hex(&evidence_hash),
+                        evidence_size,
+                        hashtree_core::to_hex(&hash),
+                        size
+                    ),
+                    None => bail!(
+                        "frozen source {} / {} bytes is absent from terminal source evidence",
+                        hashtree_core::to_hex(&hash),
+                        size
+                    ),
+                }
+                while next_online.is_some_and(|(online_hash, _)| online_hash < hash) {
+                    next_online = online_evidence.next_entry()?;
+                }
+                match next_online {
+                    Some((online_hash, online_size))
+                        if online_hash == hash && online_size == size =>
+                    {
+                        next_online = online_evidence.next_entry()?;
+                    }
+                    Some((online_hash, online_size)) if online_hash == hash => bail!(
+                        "frozen source size {} for {} differs from certified online size {}",
+                        size,
+                        hashtree_core::to_hex(&hash),
+                        online_size
+                    ),
+                    _ => bail!(
+                        "frozen source {} / {} bytes is absent from certified online source evidence",
+                        hashtree_core::to_hex(&hash),
+                        size
+                    ),
+                }
+                entries = entries
+                    .checked_add(1)
+                    .context("frozen source evidence entry count overflow")?;
+                bytes = bytes
+                    .checked_add(size)
+                    .context("frozen source evidence byte count overflow")?;
+                hasher.update(hash);
+                hasher.update(size.to_be_bytes());
+            }
+            cursor = hashes.last().copied();
+        }
+        if let Some((hash, size)) = next_terminal {
+            bail!(
+                "terminal source evidence has extra entry {} / {} bytes",
+                hashtree_core::to_hex(&hash),
+                size
+            );
+        }
+        while next_online.is_some() {
+            next_online = online_evidence.next_entry()?;
+        }
+        let terminal_summary = terminal.validated_summary()?;
+        let online_summary = online_evidence.validated_summary()?;
+        let content_sha256: [u8; 32] = hasher.finalize().into();
+        if entries != receipt.source_verified_entries
+            || bytes != receipt.source_verified_bytes
+            || hashtree_core::to_hex(&content_sha256) != receipt.source_content_sha256
+            || terminal_summary.entries != entries
+            || terminal_summary.bytes != bytes
+            || terminal_summary.content_sha256 != content_sha256
+        {
+            bail!("root frozen source content differs from its terminal evidence or receipt");
+        }
+        if online_summary.entries != online.source_verified_entries
+            || online_summary.bytes != online.source_verified_bytes
+            || hashtree_core::to_hex(&online_summary.content_sha256) != online.source_content_sha256
+        {
+            bail!("certified online source evidence changed during root frozen-source replay");
+        }
+        if reader.environment_generation() != generation {
+            bail!("frozen source LMDB generation changed during root evidence replay");
+        }
+        Ok(())
     }
 
     fn authorize_full_terminal_recovery(
         publication: &PreparedTerminalPublicationV3,
         options: &PoolMigrationControllerOptions,
+        current_boot_id: &str,
         state: &ControllerStateV3,
         controller_state_sha256: &str,
         topology: &PoolTopologyV3,
@@ -4376,19 +5493,80 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 "source reconciliation",
                 receipt.source_reconciliation_sha256.as_str(),
             ),
+            (
+                "target content proof",
+                receipt.target_content_proof_sha256.as_str(),
+            ),
             ("target catalog", receipt.target_catalog_sha256.as_str()),
-            ("target payload", receipt.target_payload_sha256.as_str()),
+            ("target physical", receipt.target_physical_sha256.as_str()),
             ("target manifest", receipt.target_manifest_sha256.as_str()),
         ] {
             require_lower_hex(label, value, 64)?;
         }
+        let source_receipts = load_recovery_source_receipts(
+            options,
+            current_boot_id,
+            state,
+            topology,
+            topology_sha256,
+            pool_identity,
+        )?;
+        let source_evidence = source_receipts
+            .iter()
+            .map(|source| source.receipt.source_evidence.clone())
+            .collect::<Vec<_>>();
+        let mut source_union = SourceEvidenceUnionReaderV3::open(&source_evidence)?;
+        while source_union.next_entry()?.is_some() {}
+        let source_summaries = source_union.validated_source_summaries()?;
+        for (source, evidence) in source_receipts.iter().zip(source_summaries) {
+            if evidence.entries != source.receipt.source_verified_entries
+                || evidence.bytes != source.receipt.source_verified_bytes
+                || hashtree_core::to_hex(&evidence.content_sha256)
+                    != source.receipt.source_content_sha256
+            {
+                bail!("recoverable source evidence differs from its certified source receipt");
+            }
+        }
+        let source_union_summary = source_union.validated_union_summary()?;
+        if source_union_summary.entries != receipt.source_entries
+            || source_union_summary.bytes != receipt.source_bytes
+            || hashtree_core::to_hex(&source_union_summary.content_sha256)
+                != receipt.source_reconciliation_sha256
+        {
+            bail!("recoverable source evidence union differs from terminal receipt");
+        }
+        let target_evidence = source_receipts
+            .iter()
+            .map(|source| source.receipt.online_target_evidence.clone())
+            .collect::<Vec<_>>();
         census_recovery_target_handles(state, topology)?;
-        let actual =
-            audit_recoverable_target_pool(&options.pool, pool_identity, topology, topology_sha256)?;
+        let (actual, target_content) = audit_recoverable_target_pool(
+            &options.pool,
+            pool_identity,
+            topology,
+            topology_sha256,
+            &target_evidence,
+            options.batch_size,
+        )?;
+        for (source, evidence) in source_receipts.iter().zip(&target_content.evidence) {
+            if evidence.entries != source.receipt.online_target_verified_entries
+                || evidence.bytes != source.receipt.online_target_verified_bytes
+                || hashtree_core::to_hex(&evidence.content_sha256)
+                    != source.receipt.online_target_content_sha256
+            {
+                bail!("recoverable target evidence differs from its certified source receipt");
+            }
+        }
         if actual.stored_locations != receipt.target_stored_locations
             || actual.stored_bytes != receipt.target_stored_bytes
+            || target_content.catalog.entries != receipt.target_content_proof_entries
+            || target_content.catalog.bytes != receipt.target_content_proof_bytes
+            || hashtree_core::to_hex(&target_content.catalog.content_sha256)
+                != receipt.target_content_proof_sha256
+            || target_content.catalog.entries != actual.stored_locations
+            || target_content.catalog.bytes != actual.stored_bytes
             || hashtree_core::to_hex(&actual.catalog_sha256) != receipt.target_catalog_sha256
-            || hashtree_core::to_hex(&actual.payload_sha256) != receipt.target_payload_sha256
+            || hashtree_core::to_hex(&actual.physical_sha256) != receipt.target_physical_sha256
             || hashtree_core::to_hex(&actual.manifest_sha256) != receipt.target_manifest_sha256
         {
             bail!("target Pool changed after its terminal audit and before cursor publication");
@@ -4396,12 +5574,67 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         census_recovery_target_handles(state, topology)
     }
 
+    fn load_recovery_source_receipts(
+        options: &PoolMigrationControllerOptions,
+        current_boot_id: &str,
+        state: &ControllerStateV3,
+        topology: &PoolTopologyV3,
+        topology_sha256: &str,
+        pool_identity: LmdbIdentityV3,
+    ) -> Result<Vec<ValidatedSourceTerminalReceiptV3>> {
+        let authorities = parse_additional_cas(&options.additional_cas)?
+            .into_iter()
+            .map(|(label, path)| {
+                let file = PinnedAuthorityFile::open_bytes(
+                    &path,
+                    &format!("recoverable CAS {label}"),
+                    MAX_ADDITIONAL_CAS_BYTES,
+                )?;
+                Ok(NamedFileAuthorityV3 {
+                    label,
+                    path: file.path,
+                    sha256: file.sha256,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let receipts = load_validated_prior_source_terminal_receipts(
+            &authorities,
+            &PriorSourceReceiptExpectationV3 {
+                boot_id: current_boot_id,
+                pool_path: &options.pool,
+                pool_lmdb_identity: pool_identity,
+                pool_topology_sha256: topology_sha256,
+                pool_manifest_sha256: &state.pool_manifest_sha256,
+                pool_topology: topology,
+                stopped_writer_units: &state.stopped_writer_units,
+                writer_unit_masks: &state.writer_unit_masks,
+                legacy_worker_template_mask: &state.legacy_worker_template_mask,
+                legacy_worker_instance_masks: &state.legacy_worker_instance_masks,
+                expected_service_gid: Some(options.service_gid),
+                validate_physical_generation: false,
+            },
+        )?;
+        let receipt_sha256 = receipts
+            .iter()
+            .map(|source| source.authority_sha256.clone())
+            .collect::<Vec<_>>();
+        if receipt_sha256 != state.source_terminal_receipt_sha256 {
+            bail!("recoverable source receipt set differs from controller-state authority");
+        }
+        Ok(receipts)
+    }
+
     fn audit_recoverable_target_pool(
         pool: &Path,
         pool_identity: LmdbIdentityV3,
         topology: &PoolTopologyV3,
         topology_sha256: &str,
-    ) -> Result<hashtree_lmdb::PoolTerminalAudit> {
+        target_evidence: &[super::super::pool_migration_evidence::SourceEvidenceManifestAuthorityV3],
+        page_size: usize,
+    ) -> Result<(
+        hashtree_lmdb::PoolPhysicalAudit,
+        super::super::pool_migration_evidence::TargetEvidenceReplayV3,
+    )> {
         require_lower_hex("recoverable Pool topology", topology_sha256, 64)?;
         let catalog =
             PinnedDirectory::open_exact(pool, "recoverable target Pool catalog directory")?;
@@ -4484,9 +5717,15 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             .collect::<Result<Vec<_>>>()?;
         let reader = hashtree_lmdb::PoolStoreReader::open(catalog.runtime_path(), config)
             .context("open exact target Pool for terminal recovery audit")?;
-        reader
-            .validate_terminal_catalog_and_payloads()
-            .context("replay exhaustive target Pool terminal audit during recovery")
+        let target_content =
+            validate_terminal_catalog_target_evidence(&reader, target_evidence, page_size, || {
+                Ok(())
+            })
+            .context("replay certified target content evidence during recovery")?;
+        let physical = reader
+            .validate_terminal_catalog_and_physical_state()
+            .context("replay exact target Pool catalog/physical audit during recovery")?;
+        Ok((physical, target_content))
     }
 
     fn census_recovery_source_handles(
@@ -4571,6 +5810,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         state: &ControllerStateV3,
         topology: &PoolTopologyV3,
         source_receipts: &[ValidatedSourceTerminalReceiptV3],
+        current_source_external_path: Option<&Path>,
+        current_source_external_identity: Option<FileIdentityV3>,
         waiting_worker_pid: u32,
         waiting_worker_start_time: u64,
         deep_external_census: bool,
@@ -4587,6 +5828,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             state,
             topology,
             source_receipts,
+            current_source_external_path,
+            current_source_external_identity,
             &live,
             deep_external_census,
         )?;
@@ -4599,6 +5842,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 state,
                 topology,
                 source_receipts,
+                current_source_external_path,
+                current_source_external_identity,
                 &live_after,
                 true,
             )?;
@@ -4610,6 +5855,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         state: &ControllerStateV3,
         topology: &PoolTopologyV3,
         source_receipts: &[ValidatedSourceTerminalReceiptV3],
+        current_source_external_path: Option<&Path>,
+        current_source_external_identity: Option<FileIdentityV3>,
         live: &HashMap<(u64, u64, u64), LiveProcessAuthority>,
         deep_external_census: bool,
     ) -> Result<()> {
@@ -4626,6 +5873,20 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 &format!("source LMDB {}", index + 1),
                 identity,
             )?;
+        }
+        match (
+            current_source_external_path,
+            current_source_external_identity,
+        ) {
+            (Some(path), Some(identity)) => validate_external_census_against_live(
+                live,
+                "current source external corpus",
+                path,
+                identity,
+                deep_external_census,
+            )?,
+            (None, None) => {}
+            _ => bail!("current source external census authority is incomplete"),
         }
         validate_lmdb_census_against_live(
             live,
@@ -4656,6 +5917,9 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             }
         }
         for source in source_receipts {
+            if source.receipt.source_lmdb_identity == state.source_lmdb_identity {
+                continue;
+            }
             match (
                 source.receipt.source_external_path.as_deref(),
                 source.receipt.source_external_identity,
@@ -4724,10 +5988,9 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         Ok(live)
     }
 
-    fn census_source_writer_handles(
+    fn census_target_writer_handles(
         state: &ControllerStateV3,
-        source_external_path: Option<&Path>,
-        source_external_identity: Option<FileIdentityV3>,
+        topology: &PoolTopologyV3,
         waiting_worker_pid: u32,
         waiting_worker_start_time: u64,
         deep_external_census: bool,
@@ -4736,28 +5999,52 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             &state.stopped_writer_units,
             &state.writer_unit_masks,
         )?;
-        let live = capture_live_process_authorities(Some((
-            waiting_worker_pid,
-            waiting_worker_start_time,
-        )))?;
+        let waiting_worker = Some((waiting_worker_pid, waiting_worker_start_time));
+        let live = capture_live_process_authorities(waiting_worker)?;
+        validate_target_census_against_live(state, topology, &live, deep_external_census)?;
+        if deep_external_census {
+            let live_after = capture_live_process_authorities(waiting_worker)?;
+            validate_target_census_against_live(state, topology, &live_after, true)?;
+        }
+        Ok(())
+    }
+
+    fn validate_target_census_against_live(
+        state: &ControllerStateV3,
+        topology: &PoolTopologyV3,
+        live: &HashMap<(u64, u64, u64), LiveProcessAuthority>,
+        deep_external_census: bool,
+    ) -> Result<()> {
         let mut claimed = HashMap::new();
         validate_lmdb_census_against_live(
-            &live,
+            live,
             &mut claimed,
-            "source LMDB",
-            state.source_lmdb_identity,
+            "target Pool catalog",
+            state.pool_lmdb_identity,
         )?;
-        match (source_external_path, source_external_identity) {
-            (Some(path), Some(identity)) => validate_external_census_against_live(
-                &live,
-                "source external corpus",
-                path,
-                identity,
-                deep_external_census,
-            ),
-            (None, None) => Ok(()),
-            _ => bail!("source external census authority is incomplete"),
+        for member in &topology.members {
+            validate_lmdb_census_against_live(
+                live,
+                &mut claimed,
+                &format!("Pool member {}", member.id),
+                member.lmdb_identity,
+            )?;
+            match (
+                member.external_path.as_deref(),
+                member.external_directory_identity,
+            ) {
+                (Some(path), Some(identity)) => validate_external_census_against_live(
+                    live,
+                    &format!("Pool member {} external corpus", member.id),
+                    path,
+                    identity,
+                    deep_external_census,
+                )?,
+                (None, None) => {}
+                _ => bail!("Pool member external census authority is incomplete"),
+            }
         }
+        Ok(())
     }
 
     fn validate_lmdb_census_against_live(
@@ -5560,8 +6847,9 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             let (_temp, root, identity) = generated_external_root();
             let pin = PinnedDirectory::open_exact(&root, "generated recovery self-pin")
                 .expect("pin root");
-            let live_with_pin =
-                capture_live_process_authorities(None).expect("capture controller self-pin");
+            let mut live_with_pin = HashMap::new();
+            collect_process_fd_authorities(std::process::id(), &mut live_with_pin)
+                .expect("capture controller self-pin");
             validate_external_census_against_live(
                 &live_with_pin,
                 "generated recovery self-pin corpus",
@@ -5572,8 +6860,9 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             .expect_err("controller-retained recovery pin must appear in its own census");
 
             drop(pin);
-            let live_after_drop =
-                capture_live_process_authorities(None).expect("recapture after dropping self-pin");
+            let mut live_after_drop = HashMap::new();
+            collect_process_fd_authorities(std::process::id(), &mut live_after_drop)
+                .expect("recapture after dropping self-pin");
             validate_external_census_against_live(
                 &live_after_drop,
                 "generated recovery self-pin corpus",

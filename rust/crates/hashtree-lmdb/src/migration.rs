@@ -107,7 +107,16 @@ pub fn audit_lmdb_source_batch_with_max_buffer_bytes(
         }
         let source_verify_started = Instant::now();
         let mut buffered_bytes = 0u64;
-        for (hash, data) in &items {
+        for (offset, (hash, data)) in items.iter().enumerate() {
+            let expected_hash = hashes.get(next + offset).ok_or_else(|| {
+                StoreError::Other("bounded source read exceeded the requested hash set".into())
+            })?;
+            if hash != expected_hash {
+                return Err(StoreError::Other(format!(
+                    "bounded source read returned {:?}, expected {:?}",
+                    hash, expected_hash
+                )));
+            }
             if sha256(data) != *hash {
                 return Err(StoreError::Other(format!(
                     "source returned corrupt bytes for {hash:?}"
@@ -207,14 +216,51 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes_and_authorizer(
         });
     }
 
+    let mut batch = migrate_lmdb_hashes_with_max_buffer_bytes_and_authorizer(
+        source,
+        target,
+        &hashes,
+        after,
+        max_buffer_bytes,
+        authorize_target_write,
+    )?;
+    batch.scan_micros = scan_micros;
+    Ok(batch)
+}
+
+/// Verify and migrate an explicit sorted source hash set.
+///
+/// Online audit recovery uses this after consulting its durable verified set,
+/// so a resumed or catch-up pass rereads only source bodies that have not
+/// already been proven against the exact target authority.
+pub fn migrate_lmdb_hashes_with_max_buffer_bytes_and_authorizer(
+    source: &LmdbBlobReader,
+    target: &PoolStore,
+    hashes: &[Hash],
+    checkpoint_cursor: Option<Hash>,
+    max_buffer_bytes: usize,
+    authorize_target_write: &mut dyn FnMut(Option<Hash>, usize) -> Result<(), StoreError>,
+) -> Result<PoolMigrationBatch, StoreError> {
+    if hashes.is_empty() {
+        return Ok(PoolMigrationBatch::default());
+    }
+    if max_buffer_bytes == 0 {
+        return Err(StoreError::Other(
+            "migration max buffer bytes must be non-zero".into(),
+        ));
+    }
+    if hashes.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(StoreError::Other(
+            "explicit migration hashes must be unique and strictly sorted".into(),
+        ));
+    }
     let mut batch = PoolMigrationBatch {
         scanned: hashes.len(),
-        scan_micros,
         last_hash: hashes.last().copied(),
         ..PoolMigrationBatch::default()
     };
     let catalog_probe_started = Instant::now();
-    let committed = target.committed_hashes_in_sorted_candidates(&hashes)?;
+    let committed = target.committed_hashes_in_sorted_candidates(hashes)?;
     batch.catalog_probe_micros = elapsed_micros(catalog_probe_started.elapsed());
     let max_buffer_bytes = max_buffer_bytes as u64;
     let mut next = 0usize;
@@ -268,7 +314,7 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes_and_authorizer(
         }
         let target_write_started = Instant::now();
         if !writes.is_empty() {
-            authorize_target_write(after, writes.len())?;
+            authorize_target_write(checkpoint_cursor, writes.len())?;
         }
         let report = target.put_many_report_sync(&writes)?;
         batch.target_write_micros = batch
@@ -289,8 +335,9 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes_and_authorizer(
 /// Exact-size `Stored` target records are accepted without reading either
 /// source or target payload bytes. `Missing` and exact-size `Pending` records
 /// load and hash-check only the needed source bodies. `Moving` and every
-/// declared-size mismatch fail closed; the single exhaustive terminal Pool
-/// audit remains responsible for reading and proving all target payloads.
+/// declared-size mismatch fail closed. The release path binds this
+/// reconciliation to the earlier online content proof and then proves exact
+/// terminal catalog/physical-member parity.
 pub fn reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer(
     source: &LmdbBlobReader,
     target: &PoolStore,

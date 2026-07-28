@@ -64,7 +64,13 @@ grep -F 'HTREE_POOL_BATCH_SIZE=4096' "$README" >/dev/null
 grep -F 'final-stopped-source' "$README" >/dev/null
 grep -F 'final-stopped-full' "$README" >/dev/null
 grep -F 'source-terminal.json' "$README" >/dev/null
-grep -F 'online-bounded` is deliberately refused' "$README" >/dev/null
+grep -F '<state-file>.online-audit-v3' "$README" >/dev/null
+grep -F 'online-target-audit-certification.json' "$README" >/dev/null
+grep -F 'zero payload bodies' "$README" >/dev/null
+if grep -F 'online-bounded` is deliberately refused' "$README" >/dev/null; then
+  echo "runbook must not claim the resumable online audit is disabled" >&2
+  exit 1
+fi
 grep -F 'systemctl start --no-block hashtree-pool-migration-controller@NAME.service' "$README" >/dev/null
 if grep -F 'systemctl start --no-block hashtree-pool-migration-worker@NAME.service' "$README" >/dev/null; then
   echo "runbook must never launch the bound worker directly" >&2

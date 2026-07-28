@@ -54,7 +54,9 @@ use super::peers::list_peers;
 use super::pool_migration_controller::{
     run_pool_migration_controller, PoolMigrationControllerOptions,
 };
-use super::pool_migration_evidence::SourceEvidenceUnionReaderV3;
+#[cfg(feature = "lmdb")]
+use super::pool_migration_evidence::validate_terminal_catalog_target_evidence;
+use super::pool_migration_evidence::{SourceEvidenceManifestReaderV3, SourceEvidenceUnionReaderV3};
 #[cfg(test)]
 use super::pool_migration_launch::write_durable_pool_migration_cursor;
 use super::pool_migration_launch::{
@@ -2507,9 +2509,8 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 resume,
             } => {
                 use hashtree_lmdb::{
-                    migrate_lmdb_batch_with_max_buffer_bytes_and_authorizer,
-                    reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer,
-                    ExternalBlobOptions, LmdbBlobReader,
+                    migrate_lmdb_hashes_with_max_buffer_bytes_and_authorizer, ExternalBlobOptions,
+                    LmdbBlobReader, PoolMigrationAuditStore,
                 };
 
                 if batch_size == 0
@@ -2568,13 +2569,61 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                     println!("Cursor: {}", state_file.display());
                     return Ok(());
                 }
+                launch.ensure_store_paths()?;
+                let online_audit_path = launch.online_audit_path()?;
+                if online_audit_path.canonicalize().with_context(|| {
+                    format!(
+                        "canonicalize online migration audit directory {}",
+                        online_audit_path.display()
+                    )
+                })? != online_audit_path
+                {
+                    bail!("online migration audit directory is not an exact canonical path");
+                }
+                let audit_metadata = std::fs::symlink_metadata(&online_audit_path)
+                    .context("inspect online migration audit directory")?;
+                if !audit_metadata.file_type().is_dir() {
+                    bail!("online migration audit path is not a directory");
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    let service_gid = unsafe { libc::getegid() };
+                    if audit_metadata.uid() != 0
+                        || audit_metadata.gid() != service_gid
+                        || audit_metadata.mode() & 0o7777 != 0o750
+                    {
+                        bail!(
+                            "online migration audit directory must be root-owned by the service GID with mode 0750"
+                        );
+                    }
+                    for (name, mode) in [("data.mdb", 0o640), ("lock.mdb", 0o660)] {
+                        let metadata = std::fs::symlink_metadata(online_audit_path.join(name))
+                            .with_context(|| format!("inspect online audit {name}"))?;
+                        if !metadata.file_type().is_file()
+                            || metadata.nlink() != 1
+                            || metadata.uid() != 0
+                            || metadata.gid() != service_gid
+                            || metadata.mode() & 0o7777 != mode
+                        {
+                            bail!("online audit {name} differs from root-owned authority");
+                        }
+                    }
+                }
+                let online_audit = PoolMigrationAuditStore::open_read_only(
+                    &online_audit_path,
+                    launch.online_audit_binding()?,
+                )
+                .map_err(anyhow::Error::from)?;
                 let mut cursor = launch.cursor;
                 let mut verified = 0usize;
                 let mut scanned = 0usize;
                 let mut already_present = 0usize;
+                let mut audit_reused = 0usize;
+                let mut target_audit_reused = 0usize;
                 let mut inserted = 0usize;
                 let mut inserted_bytes = 0u64;
-                let completed = false;
+                let mut source_completed = false;
                 'mapping_epochs: loop {
                     if max_items.is_some_and(|maximum| scanned >= maximum) {
                         break;
@@ -2638,45 +2687,72 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                                     ))
                                 })
                         };
-                        let batch = if launch.final_stopped_full_pass {
-                            reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer(
-                                &reader,
-                                &pool,
-                                cursor,
-                                limit,
-                                max_buffer_bytes,
-                                &mut authorize_target_write,
-                            )?
-                        } else {
-                            migrate_lmdb_batch_with_max_buffer_bytes_and_authorizer(
-                                &reader,
-                                &pool,
-                                cursor,
-                                limit,
-                                max_buffer_bytes,
-                                &mut authorize_target_write,
-                            )?
-                        };
-                        launch.ensure_checkpoint_broker_alive()?;
-                        launch.ensure_final_writer_masks()?;
-                        if batch.source_exhausted {
+                        let hashes = reader.scan_hashes_after(cursor, limit)?;
+                        if hashes.is_empty() {
+                            launch.ensure_checkpoint_broker_alive()?;
+                            launch.ensure_final_writer_masks()?;
+                            if let Some((missing, size)) =
+                                online_audit.first_unverified_source(&reader, batch_size)?
+                            {
+                                launch.reset_online_cursor()?;
+                                cursor = None;
+                                println!(
+                                    "Online audit catch-up: source {} / {} bytes is not yet in the durable verified set; restarting the metadata scan",
+                                    hashtree_core::to_hex(&missing),
+                                    size,
+                                );
+                                if max_items.is_some_and(|maximum| scanned >= maximum) {
+                                    break 'mapping_epochs;
+                                }
+                                break;
+                            }
+                            source_completed = true;
                             break 'mapping_epochs;
                         }
+                        let sizes = reader.sizes_for_sorted_hashes(&hashes)?;
+                        let source_entries = hashes.iter().copied().zip(sizes).collect::<Vec<_>>();
+                        let covered = online_audit.contains_source_exact_sorted(&source_entries)?;
+                        let missing_hashes = source_entries
+                            .iter()
+                            .zip(&covered)
+                            .filter_map(|((hash, _), present)| (!present).then_some(*hash))
+                            .collect::<Vec<_>>();
+                        let mut batch = migrate_lmdb_hashes_with_max_buffer_bytes_and_authorizer(
+                            &reader,
+                            &pool,
+                            &missing_hashes,
+                            cursor,
+                            max_buffer_bytes,
+                            &mut authorize_target_write,
+                        )?;
+                        batch.scanned = hashes.len();
+                        batch.last_hash = hashes.last().copied();
+                        batch.source_entries = source_entries;
+                        launch.ensure_checkpoint_broker_alive()?;
+                        launch.ensure_final_writer_masks()?;
                         scanned = scanned.saturating_add(batch.scanned);
+                        audit_reused = audit_reused
+                            .saturating_add(covered.iter().filter(|present| **present).count());
                         already_present = already_present.saturating_add(batch.already_present);
                         verified = verified.saturating_add(batch.verified);
                         inserted = inserted.saturating_add(batch.inserted);
                         inserted_bytes = inserted_bytes.saturating_add(batch.inserted_bytes);
                         cursor = batch.last_hash;
                         let cursor_hash = cursor.expect("non-empty migration batch has a cursor");
-                        pool.validate_controlled_authority_and_sync()?;
-                        launch.ensure_store_paths()?;
-                        if !launch.final_stopped_pass {
-                            launch.write_cursor(&hashtree_core::to_hex(&cursor_hash))?;
+                        if !batch.verified_source_entries.is_empty() {
+                            pool.validate_controlled_authority_and_sync()?;
+                            launch.authorize_online_source_audit_batch(
+                                cursor_hash,
+                                batch.scanned,
+                                &batch.verified_source_entries,
+                            )?;
                         }
+                        launch.ensure_store_paths()?;
+                        launch.write_cursor(&hashtree_core::to_hex(&cursor_hash))?;
                         println!(
-                            "Migration batch: scanned {}, already present {}, verified {}, writes {}, peak buffered {} bytes, scan {} us, catalog probe {} us, source read {} us, source verify {} us, target write {} us",
+                            "Migration batch: scanned {}, audit reused {}, already present {}, verified {}, writes {}, peak buffered {} bytes, scan {} us, catalog probe {} us, source read {} us, source verify {} us, target write {} us",
                             batch.scanned,
+                            covered.iter().filter(|present| **present).count(),
                             batch.already_present,
                             batch.verified,
                             batch.write_batches,
@@ -2697,8 +2773,198 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         }
                     }
                 }
+                let mut target_completed = false;
+                if source_completed && max_items.is_none_or(|maximum| scanned < maximum) {
+                    let require_terminal_target = launch.target_writers_fenced();
+                    let mut target_cursor = online_audit.target_cursor()?;
+                    'target_epochs: loop {
+                        if max_items.is_some_and(|maximum| scanned >= maximum) {
+                            break;
+                        }
+                        launch.ensure_store_paths()?;
+                        launch.ensure_final_writer_fence()?;
+                        let mut pool_config = PoolStoreConfig::default();
+                        pool_config.temperature.enabled = false;
+                        pool_config.catalog_lmdb_identity =
+                            Some(launch.pool_catalog_lmdb_identity());
+                        pool_config.expected_manifest_sha256 = Some(launch.pool_manifest_sha256());
+                        pool_config.member_runtime_paths = launch
+                            .pool_member_runtime_paths()
+                            .into_iter()
+                            .map(|paths| {
+                                Ok(PoolMemberRuntimePaths {
+                                    id: paths.id.parse()?,
+                                    configured_path: paths.configured_path,
+                                    runtime_path: paths.runtime_path,
+                                    configured_external_path: paths.configured_external_path,
+                                    runtime_external_path: paths.runtime_external_path,
+                                    lmdb_identity: paths.lmdb_identity,
+                                })
+                            })
+                            .collect::<Result<Vec<_>>>()?;
+                        let pool = PoolStore::open(launch.pool(), pool_config)?;
+                        let mut epoch_batches = 0usize;
+                        loop {
+                            let remaining = max_items
+                                .map(|maximum| maximum.saturating_sub(scanned))
+                                .unwrap_or(batch_size);
+                            if remaining == 0 {
+                                break 'target_epochs;
+                            }
+                            let limit = batch_size.min(remaining);
+                            launch.ensure_final_writer_masks()?;
+                            let page = pool.scan_catalog_locations_after(target_cursor, limit)?;
+                            if page.is_empty() {
+                                launch.ensure_checkpoint_broker_alive()?;
+                                launch.ensure_final_writer_masks()?;
+                                if let Some((missing, size)) = first_unverified_pool_target(
+                                    &online_audit,
+                                    &pool,
+                                    batch_size,
+                                    require_terminal_target,
+                                )? {
+                                    launch.reset_online_target_audit_cursor()?;
+                                    target_cursor = None;
+                                    println!(
+                                        "Online target audit catch-up: Pool {} / {} bytes is not yet in the root-owned target proof set; restarting the catalog scan",
+                                        hashtree_core::to_hex(&missing),
+                                        size,
+                                    );
+                                    break;
+                                }
+                                target_completed = true;
+                                break 'target_epochs;
+                            }
+                            let stored_entries = page
+                                .iter()
+                                .filter_map(|(hash, location)| match location {
+                                    hashtree_lmdb::PoolCatalogLocation::Stored { size, .. } => {
+                                        Some(Ok((*hash, *size)))
+                                    }
+                                    hashtree_lmdb::PoolCatalogLocation::Pending { .. } => {
+                                        require_terminal_target.then(|| {
+                                            bail!(
+                                                "target-fenced online audit found pending Pool location {}",
+                                                hashtree_core::to_hex(hash)
+                                            )
+                                        })
+                                    }
+                                    hashtree_lmdb::PoolCatalogLocation::Moving { .. } => {
+                                        require_terminal_target.then(|| {
+                                            bail!(
+                                                "target-fenced online audit found moving Pool location {}",
+                                                hashtree_core::to_hex(hash)
+                                            )
+                                        })
+                                    }
+                                    hashtree_lmdb::PoolCatalogLocation::Missing => {
+                                        require_terminal_target.then(|| {
+                                            bail!(
+                                                "target-fenced online audit found missing Pool location {}",
+                                                hashtree_core::to_hex(hash)
+                                            )
+                                        })
+                                    }
+                                })
+                                .collect::<Result<Vec<_>>>()?;
+                            let covered =
+                                online_audit.contains_target_exact_sorted(&stored_entries)?;
+                            let missing = stored_entries
+                                .iter()
+                                .zip(&covered)
+                                .filter_map(|(entry, present)| (!present).then_some(*entry))
+                                .collect::<Vec<_>>();
+                            for (hash, size) in &missing {
+                                let data = pool.get_sync(hash)?.with_context(|| {
+                                    format!(
+                                        "target Pool lost {} during online content audit",
+                                        hashtree_core::to_hex(hash)
+                                    )
+                                })?;
+                                if data.len() as u64 != *size
+                                    || hashtree_core::sha256(&data) != *hash
+                                {
+                                    bail!(
+                                        "target Pool content differs from catalog hash/size for {}",
+                                        hashtree_core::to_hex(hash)
+                                    );
+                                }
+                            }
+                            let page_cursor = page
+                                .last()
+                                .map(|(hash, _)| *hash)
+                                .context("nonempty target catalog page has no cursor")?;
+                            pool.validate_controlled_authority_and_sync()?;
+                            launch.authorize_online_target_audit_batch(
+                                page_cursor,
+                                page.len(),
+                                &missing,
+                            )?;
+                            launch.ensure_store_paths()?;
+                            target_cursor = Some(page_cursor);
+                            scanned = scanned.saturating_add(page.len());
+                            target_audit_reused = target_audit_reused
+                                .saturating_add(covered.iter().filter(|present| **present).count());
+                            println!(
+                                "Target audit batch: scanned {}, reused {}, newly root-verified {}",
+                                page.len(),
+                                covered.iter().filter(|present| **present).count(),
+                                missing.len(),
+                            );
+                            epoch_batches = epoch_batches.saturating_add(1);
+                            if epoch_batches >= reopen_batches {
+                                println!(
+                                    "Target audit mappings reopened after {epoch_batches} batches at cursor {}",
+                                    hashtree_core::to_hex(&page_cursor)
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+                let completed = source_completed
+                    && target_completed
+                    && launch.source_writers_fenced()
+                    && launch.target_writers_fenced();
+                if completed {
+                    launch.authorize_checkpoint("online-evidence-publication", cursor, None)?;
+                    let mut source_evidence = launch.create_source_evidence_writer()?;
+                    let source_summary =
+                        online_audit.for_each_source_verified_batch(batch_size, |entries| {
+                            source_evidence.append(entries).map_err(|error| {
+                                hashtree_core::store::StoreError::Other(format!(
+                                    "append online source evidence: {error:#}"
+                                ))
+                            })
+                        })?;
+                    let source_evidence = source_evidence.finish()?;
+                    let mut target_evidence = launch.create_online_target_evidence_writer()?;
+                    let target_summary =
+                        online_audit.for_each_target_verified_batch(batch_size, |entries| {
+                            target_evidence.append(entries).map_err(|error| {
+                                hashtree_core::store::StoreError::Other(format!(
+                                    "append online target evidence: {error:#}"
+                                ))
+                            })
+                        })?;
+                    let target_evidence = target_evidence.finish()?;
+                    launch.ensure_checkpoint_broker_alive()?;
+                    launch.authorize_checkpoint("online-audit-publication", cursor, None)?;
+                    launch.write_online_target_audit_receipt(
+                        online_audit_path,
+                        online_audit.binding(),
+                        source_evidence,
+                        &source_summary,
+                        target_evidence,
+                        &target_summary,
+                    )?;
+                    launch.ensure_checkpoint_broker_alive()?;
+                    launch.authorize_checkpoint("online-readiness", cursor, None)?;
+                }
                 println!(
-                    "Migration pass: scanned {scanned}, already present {already_present}, verified {verified}, inserted {inserted} blobs / {inserted_bytes} bytes, completed: {completed}"
+                    "Migration pass: scanned {scanned}, source audit reused {audit_reused}, target audit reused {target_audit_reused}, already present {already_present}, verified {verified}, inserted {inserted} blobs / {inserted_bytes} bytes, source covered: {source_completed}, target covered: {target_completed}, source fence held: {}, target fence held: {}, completed: {completed}",
+                    launch.source_writers_fenced(),
+                    launch.target_writers_fenced(),
                 );
                 println!("Cursor: {}", state_file.display());
             }
@@ -2723,18 +2989,66 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
 }
 
 #[cfg(feature = "lmdb")]
+fn first_unverified_pool_target(
+    audit: &hashtree_lmdb::PoolMigrationAuditStore,
+    pool: &hashtree_lmdb::PoolStore,
+    page_size: usize,
+    require_terminal: bool,
+) -> Result<Option<([u8; 32], u64)>> {
+    if page_size == 0 {
+        bail!("online target audit coverage page size must be non-zero");
+    }
+    let mut cursor = None;
+    loop {
+        let page = pool.scan_catalog_locations_after(cursor, page_size)?;
+        if page.is_empty() {
+            return Ok(None);
+        }
+        let stored = page
+            .iter()
+            .filter_map(|(hash, location)| match location {
+                hashtree_lmdb::PoolCatalogLocation::Stored { size, .. } => Some(Ok((*hash, *size))),
+                hashtree_lmdb::PoolCatalogLocation::Pending { .. } => require_terminal.then(|| {
+                    bail!(
+                        "target-fenced coverage scan found pending Pool location {}",
+                        hashtree_core::to_hex(hash)
+                    )
+                }),
+                hashtree_lmdb::PoolCatalogLocation::Moving { .. } => require_terminal.then(|| {
+                    bail!(
+                        "target-fenced coverage scan found moving Pool location {}",
+                        hashtree_core::to_hex(hash)
+                    )
+                }),
+                hashtree_lmdb::PoolCatalogLocation::Missing => require_terminal.then(|| {
+                    bail!(
+                        "target-fenced coverage scan found missing Pool location {}",
+                        hashtree_core::to_hex(hash)
+                    )
+                }),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let covered = audit.contains_target_exact_sorted(&stored)?;
+        if let Some((entry, _)) = stored.iter().zip(covered).find(|(_, present)| !present) {
+            return Ok(Some(*entry));
+        }
+        cursor = page.last().map(|(hash, _)| *hash);
+    }
+}
+
+#[cfg(feature = "lmdb")]
 fn run_final_stopped_source_audit(
     launch: &super::pool_migration_launch::AcknowledgedPoolMigrationLaunch,
     batch_size: usize,
-    max_buffer_bytes: usize,
+    _max_buffer_bytes: usize,
     source_read_concurrency: usize,
     reopen_batches: usize,
 ) -> Result<()> {
-    use hashtree_lmdb::{
-        audit_lmdb_source_batch_with_max_buffer_bytes, ExternalBlobOptions, LmdbBlobReader,
-        LmdbEnvironmentGeneration,
-    };
+    use hashtree_lmdb::{ExternalBlobOptions, LmdbBlobReader, LmdbEnvironmentGeneration};
 
+    let online = launch.online_target_audit()?.receipt.clone();
+    let mut online_evidence = SourceEvidenceManifestReaderV3::open(&online.source_evidence)?;
+    let mut next_online = online_evidence.next_entry()?;
     let mut cursor = None;
     let mut scanned = 0usize;
     let mut verified = 0usize;
@@ -2766,28 +3080,24 @@ fn run_final_stopped_source_audit(
         let mut epoch_batches = 0usize;
         loop {
             launch.ensure_final_writer_masks()?;
-            let batch = audit_lmdb_source_batch_with_max_buffer_bytes(
-                &reader,
-                cursor,
-                batch_size,
-                max_buffer_bytes,
-            )?;
+            let hashes = reader.scan_hashes_after(cursor, batch_size)?;
             launch.ensure_checkpoint_broker_alive()?;
             launch.ensure_final_writer_masks()?;
-            for (hash, bytes) in &batch.verified_source_entries {
-                source_content_hasher.update(hash);
-                source_content_hasher.update(bytes.to_be_bytes());
-            }
-            source_evidence.append(&batch.verified_source_entries)?;
-            verified_bytes = verified_bytes
-                .checked_add(batch.verified_bytes)
-                .context("source audit byte total overflow")?;
-            if batch.source_exhausted {
+            if hashes.is_empty() {
                 launch.authorize_checkpoint("source-keyset-audit", cursor, None)?;
                 let source_audit = reader.validate_terminal_migration_keyset()?;
                 launch.ensure_checkpoint_broker_alive()?;
                 if reader.environment_generation() != opened_generation {
                     bail!("source LMDB generation changed during terminal source audit");
+                }
+                while online_evidence.next_entry()?.is_some() {}
+                let online_summary = online_evidence.validated_summary()?;
+                if online_summary.entries != online.source_verified_entries
+                    || online_summary.bytes != online.source_verified_bytes
+                    || hashtree_core::to_hex(&online_summary.content_sha256)
+                        != online.source_content_sha256
+                {
+                    bail!("online target audit evidence changed during stopped boundary scan");
                 }
                 drop(reader);
                 launch.ensure_source_paths()?;
@@ -2815,7 +3125,7 @@ fn run_final_stopped_source_audit(
                 launch.ensure_final_writer_fence()?;
                 launch.authorize_checkpoint("terminal-readiness", cursor, None)?;
                 println!(
-                    "Terminal source audit: {} raw blob keys / {} metadata keys / {} blob-only / {} inline / {} loose external / {} packed external / {} verified bytes, keyset {}, locations {}, content {}",
+                    "Terminal source boundary: {} raw blob keys / {} metadata keys / {} blob-only / {} inline / {} loose external / {} packed external / {} online-verified bytes, keyset {}, locations {}, content {}",
                     source_audit.blob_entries,
                     source_audit.metadata_entries,
                     source_audit.blob_only_entries,
@@ -2828,27 +3138,60 @@ fn run_final_stopped_source_audit(
                     hashtree_core::to_hex(&content.sha256),
                 );
                 println!(
-                    "Source audit pass: scanned {scanned}, verified {verified}, target writes 0, completed: true"
+                    "Source boundary pass: scanned {scanned}, reused online proof {verified}, target writes 0, completed: true"
                 );
                 return Ok(());
             }
+            let sizes = reader.sizes_for_sorted_hashes(&hashes)?;
+            let entries = hashes.iter().copied().zip(sizes).collect::<Vec<_>>();
+            for (hash, bytes) in &entries {
+                while next_online.is_some_and(|(online_hash, _)| online_hash < *hash) {
+                    next_online = online_evidence.next_entry()?;
+                }
+                match next_online {
+                    Some((online_hash, online_size))
+                        if online_hash == *hash && online_size == *bytes =>
+                    {
+                        next_online = online_evidence.next_entry()?;
+                    }
+                    Some((online_hash, online_size)) if online_hash == *hash => {
+                        bail!(
+                            "stopped source size {} for {} differs from online target audit size {}",
+                            bytes,
+                            hashtree_core::to_hex(hash),
+                            online_size,
+                        )
+                    }
+                    _ => bail!(
+                        "stopped source {} / {} bytes is absent from the certified online target audit; rerun online-bounded catch-up",
+                        hashtree_core::to_hex(hash),
+                        bytes,
+                    ),
+                }
+                source_content_hasher.update(hash);
+                source_content_hasher.update(bytes.to_be_bytes());
+            }
+            source_evidence.append(&entries)?;
+            let page_bytes = entries.iter().try_fold(0u64, |total, (_, size)| {
+                total
+                    .checked_add(*size)
+                    .context("source page byte total overflow")
+            })?;
+            verified_bytes = verified_bytes
+                .checked_add(page_bytes)
+                .context("source audit byte total overflow")?;
             scanned = scanned
-                .checked_add(batch.scanned)
+                .checked_add(entries.len())
                 .context("source audit scan count overflow")?;
             verified = verified
-                .checked_add(batch.verified)
+                .checked_add(entries.len())
                 .context("source audit verified count overflow")?;
-            cursor = batch.last_hash;
+            cursor = hashes.last().copied();
             let cursor_hash = cursor.context("non-empty source audit batch has no cursor")?;
             println!(
-                "Source audit batch: scanned {}, verified {}, verified bytes {}, peak buffered {} bytes, scan {} us, source read {} us, source verify {} us",
-                batch.scanned,
-                batch.verified,
-                batch.verified_bytes,
-                batch.peak_buffered_bytes,
-                batch.scan_micros,
-                batch.source_read_micros,
-                batch.source_verify_micros,
+                "Source boundary batch: scanned {}, reused online proof {}, payload bytes read 0",
+                entries.len(),
+                entries.len(),
             );
             epoch_batches = epoch_batches.saturating_add(1);
             if epoch_batches >= reopen_batches {
@@ -2904,6 +3247,10 @@ fn run_final_stopped_full_reconciliation(
         .map(|source| source.receipt.source_evidence.clone())
         .collect::<Vec<_>>();
     let mut union = SourceEvidenceUnionReaderV3::open(&evidence_authorities)?;
+    let target_evidence_authorities = sources
+        .iter()
+        .map(|source| source.receipt.online_target_evidence.clone())
+        .collect::<Vec<_>>();
 
     let mut pool_config = PoolStoreConfig::default();
     pool_config.temperature.enabled = false;
@@ -2927,7 +3274,6 @@ fn run_final_stopped_full_reconciliation(
     launch.ensure_final_writer_fence()?;
 
     let mut source_exhausted = false;
-    let mut target_member_state_validated = false;
     loop {
         let body_readers = sources
             .iter()
@@ -2962,13 +3308,6 @@ fn run_final_stopped_full_reconciliation(
             })
             .collect::<Result<Vec<_>>>()?;
         let pool = PoolStore::open(launch.pool(), pool_config.clone())?;
-        if !target_member_state_validated {
-            launch.ensure_final_writer_masks()?;
-            pool.validate_controlled_member_state_exact()?;
-            launch.ensure_checkpoint_broker_alive()?;
-            launch.ensure_final_writer_masks()?;
-            target_member_state_validated = true;
-        }
         let mut epoch_pages = 0usize;
         while epoch_pages < reopen_batches {
             let mut page = Vec::with_capacity(batch_size);
@@ -3063,10 +3402,38 @@ fn run_final_stopped_full_reconciliation(
     launch.ensure_final_writer_fence()?;
     launch.authorize_checkpoint("target-terminal-audit", None, None)?;
     let terminal_reader = PoolStoreReader::open(launch.pool(), pool_config)?;
-    let terminal_audit = terminal_reader.validate_terminal_catalog_and_payloads()?;
+    let target_content = validate_terminal_catalog_target_evidence(
+        &terminal_reader,
+        &target_evidence_authorities,
+        batch_size,
+        || {
+            launch.ensure_checkpoint_broker_alive()?;
+            launch.ensure_final_writer_masks()
+        },
+    )?;
+    for (source, evidence) in sources.iter().zip(&target_content.evidence) {
+        if evidence.entries != source.receipt.online_target_verified_entries
+            || evidence.bytes != source.receipt.online_target_verified_bytes
+            || hashtree_core::to_hex(&evidence.content_sha256)
+                != source.receipt.online_target_content_sha256
+        {
+            bail!(
+                "certified target evidence manifest {} differs from its source-terminal receipt",
+                source.receipt.online_target_evidence.path.display()
+            );
+        }
+    }
+    launch.ensure_checkpoint_broker_alive()?;
+    launch.ensure_final_writer_masks()?;
+    let terminal_audit = terminal_reader.validate_terminal_catalog_and_physical_state()?;
     launch.ensure_checkpoint_broker_alive()?;
     if terminal_audit.manifest_sha256 != launch.pool_manifest_sha256() {
         bail!("terminal Pool audit manifest differs from launch authority");
+    }
+    if target_content.catalog.entries != terminal_audit.stored_locations
+        || target_content.catalog.bytes != terminal_audit.stored_bytes
+    {
+        bail!("terminal Pool catalog changed between target content proof and physical audit");
     }
     drop(terminal_reader);
 
@@ -3080,7 +3447,7 @@ fn run_final_stopped_full_reconciliation(
     launch.ensure_store_paths()?;
     launch.ensure_final_writer_fence()?;
     launch.authorize_checkpoint("terminal-receipt-publication", None, None)?;
-    launch.write_terminal_audit_receipt(&source_union, &terminal_audit)?;
+    launch.write_terminal_audit_receipt(&source_union, &target_content.catalog, &terminal_audit)?;
     launch.ensure_checkpoint_broker_alive()?;
     launch.ensure_store_paths()?;
     launch.ensure_final_writer_fence()?;
@@ -3094,11 +3461,11 @@ fn run_final_stopped_full_reconciliation(
         hashtree_core::to_hex(&source_union.sha256),
     );
     println!(
-        "Single terminal Pool audit: stored {} blobs / {} bytes, catalog {}, payloads {}",
+        "Single terminal Pool physical audit: stored {} blobs / {} bytes, catalog {}, physical {}",
         terminal_audit.stored_locations,
         terminal_audit.stored_bytes,
         hashtree_core::to_hex(&terminal_audit.catalog_sha256),
-        hashtree_core::to_hex(&terminal_audit.payload_sha256),
+        hashtree_core::to_hex(&terminal_audit.physical_sha256),
     );
     Ok(())
 }
