@@ -17,7 +17,7 @@ const SNAPSHOT_OPEN_ATTEMPTS: usize = 64;
 /// Hard cap for concurrent value-free LMDB key-range cursors.
 ///
 /// Sixteen cursors provide useful queue depth to mirrored HDDs while keeping
-/// the maximum buffered key material below 16 MiB in the ordinary scanner.
+/// buffered hash chunks to a small fixed bound independent of source size.
 pub const MAX_PARALLEL_RAW_KEY_SCAN_CONCURRENCY: usize = 16;
 
 #[derive(Debug, Clone, Copy)]
@@ -309,10 +309,12 @@ fn open_coherent_snapshot_transactions(
 ) -> Result<Vec<RoTxn<'static>>, StoreError> {
     let env = heed::Env::clone(&reader.store.env);
     for _ in 0..SNAPSHOT_OPEN_ATTEMPTS {
-        let mut transactions = Vec::with_capacity(concurrency);
-        for _ in 0..concurrency {
-            transactions.push(env.clone().static_read_txn().map_err(map_heed_error)?);
-        }
+        let transactions = hashtree_core::lmdb_runtime::with_lmdb_lock_acquisition(|| {
+            (0..concurrency)
+                .map(|_| env.clone().static_read_txn())
+                .collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(map_heed_error)?;
         let snapshot = transactions[0].id();
         if transactions
             .iter()
@@ -563,6 +565,56 @@ mod tests {
         assert!(
             drop_started.elapsed() < std::time::Duration::from_secs(5),
             "dropping a scanner with outstanding tasks must cancel and join promptly"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn parallel_raw_key_scanners_share_darwin_lock_acquisition_gate() -> Result<(), StoreError> {
+        const SCANNERS: usize = 12;
+
+        let temp = TempDir::new().map_err(StoreError::Io)?;
+        let mut readers = Vec::with_capacity(SCANNERS);
+        for index in 0..SCANNERS {
+            let store = LmdbBlobStore::new(temp.path().join(format!("source-{index}")))?;
+            let hash = hash_in_range(index as u16, index as u64);
+            insert_raw(&store, hash, b"one")?;
+            readers.push((
+                LmdbBlobReader {
+                    store,
+                    external_read_concurrency: 1,
+                },
+                hash,
+            ));
+        }
+
+        let start = Arc::new(std::sync::Barrier::new(SCANNERS));
+        let handles = readers
+            .into_iter()
+            .map(|(reader, expected)| {
+                let start = Arc::clone(&start);
+                thread::spawn(move || -> Result<(), String> {
+                    start.wait();
+                    let mut scanner = reader
+                        .parallel_raw_key_scanner(None, MAX_PARALLEL_RAW_KEY_SCAN_CONCURRENCY)
+                        .map_err(|error| error.to_string())?;
+                    let hashes = collect(&mut scanner, 1).map_err(|error| error.to_string())?;
+                    if hashes != [expected] {
+                        return Err("parallel Darwin scanner returned the wrong keyset".into());
+                    }
+                    Ok(())
+                })
+            })
+            .collect::<Vec<_>>();
+        let failures = handles
+            .into_iter()
+            .filter_map(|handle| handle.join().expect("scanner thread panicked").err())
+            .collect::<Vec<_>>();
+        assert!(
+            failures.is_empty(),
+            "Darwin LMDB lock acquisition rejected parallel scanners: {}",
+            failures.join(" | ")
         );
         Ok(())
     }
