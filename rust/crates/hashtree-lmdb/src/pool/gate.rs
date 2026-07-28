@@ -44,7 +44,28 @@ impl ConcurrencyGate {
                 .map_err(|_| StoreError::Other("pool concurrency gate poisoned".into()))?;
         }
         state.in_flight += 1;
-        Ok(ConcurrencyPermit { gate: self })
+        Ok(ConcurrencyPermit {
+            gate: self,
+            slots: 1,
+        })
+    }
+
+    /// Prevent every ordinary operation using this gate until the returned
+    /// permit is dropped.
+    pub(super) fn acquire_exclusive(&self) -> Result<ConcurrencyPermit<'_>, StoreError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StoreError::Other("pool concurrency gate poisoned".into()))?;
+        while state.in_flight != 0 {
+            state = self
+                .available
+                .wait(state)
+                .map_err(|_| StoreError::Other("pool concurrency gate poisoned".into()))?;
+        }
+        let slots = state.limit.max(1);
+        state.in_flight = slots;
+        Ok(ConcurrencyPermit { gate: self, slots })
     }
 
     pub(super) fn load_percent(&self) -> Result<u8, StoreError> {
@@ -65,13 +86,14 @@ impl ConcurrencyGate {
 
 pub(super) struct ConcurrencyPermit<'a> {
     gate: &'a ConcurrencyGate,
+    slots: usize,
 }
 
 impl Drop for ConcurrencyPermit<'_> {
     fn drop(&mut self) {
         if let Ok(mut state) = self.gate.state.lock() {
-            state.in_flight = state.in_flight.saturating_sub(1);
-            self.gate.available.notify_one();
+            state.in_flight = state.in_flight.saturating_sub(self.slots);
+            self.gate.available.notify_all();
         }
     }
 }
@@ -107,5 +129,25 @@ mod tests {
             worker.join().expect("worker");
         }
         assert_eq!(peak.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn exclusive_permit_waits_for_and_blocks_ordinary_permits() {
+        let gate = Arc::new(ConcurrencyGate::new(2));
+        let ordinary = gate.acquire().expect("ordinary permit");
+        let entered = Arc::new(AtomicUsize::new(0));
+        let worker_gate = Arc::clone(&gate);
+        let worker_entered = Arc::clone(&entered);
+        let worker = thread::spawn(move || {
+            let _exclusive = worker_gate.acquire_exclusive().expect("exclusive permit");
+            worker_entered.store(1, Ordering::SeqCst);
+            thread::sleep(Duration::from_millis(10));
+        });
+        thread::sleep(Duration::from_millis(5));
+        assert_eq!(entered.load(Ordering::SeqCst), 0);
+        drop(ordinary);
+        worker.join().expect("worker");
+        assert_eq!(entered.load(Ordering::SeqCst), 1);
+        let _ordinary = gate.acquire().expect("gate reopens after exclusive permit");
     }
 }

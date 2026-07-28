@@ -213,6 +213,42 @@ jobs:
       - name: Run isolated FIPS WebRTC release gate
         run: bash scripts/release-gate.sh --lane fips
 
+  pool-migration-systemd:
+    name: Pool Migration Systemd Release Gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag }}
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libdbus-1-dev \
+            libfuse3-dev \
+            pkg-config
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: ${{ runner.os }}-cargo-pool-migration-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-pool-migration-
+            ${{ runner.os }}-cargo-
+
+      - name: Run Pool migration systemd release gate
+        run: bash scripts/release-gate.sh --lane pool-migration-systemd
+
   build:
     name: Build ${{ matrix.target }}
     needs:
@@ -221,6 +257,7 @@ jobs:
       - gate-rust
       - gate-rust-peripheral
       - gate-fips
+      - pool-migration-systemd
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

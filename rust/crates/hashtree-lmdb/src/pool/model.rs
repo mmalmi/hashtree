@@ -1,4 +1,6 @@
 use hashtree_core::store::StoreError;
+use hashtree_core::types::Hash;
+use heed::PinnedLmdbIdentity;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::PathBuf;
@@ -207,6 +209,16 @@ pub struct PoolStoreConfig {
     pub catalog_map_size_bytes: u64,
     pub member_failure_cooldown: Duration,
     pub temperature: PoolTemperatureConfig,
+    /// Exact configured-to-runtime member path bindings for a controlled
+    /// process. When non-empty, every manifest member must match one binding
+    /// and member opens use only the runtime paths.
+    pub member_runtime_paths: Vec<PoolMemberRuntimePaths>,
+    /// Exact target catalog data/lock identities captured before a controlled
+    /// process was acknowledged.
+    pub catalog_lmdb_identity: Option<PinnedLmdbIdentity>,
+    /// SHA-256 of the exact stored manifest bytes authorized for a controlled
+    /// process, including generation, ordering, state, and all member config.
+    pub expected_manifest_sha256: Option<Hash>,
 }
 
 impl Default for PoolStoreConfig {
@@ -215,8 +227,43 @@ impl Default for PoolStoreConfig {
             catalog_map_size_bytes: DEFAULT_CATALOG_MAP_SIZE_BYTES,
             member_failure_cooldown: Duration::from_secs(5),
             temperature: PoolTemperatureConfig::default(),
+            member_runtime_paths: Vec::new(),
+            catalog_lmdb_identity: None,
+            expected_manifest_sha256: None,
         }
     }
+}
+
+/// One exact catalog record authorized for stale-`Pending` crash recovery.
+///
+/// Cleanup callers must build this list from a strict read-only audit while
+/// every legacy Pool writer is fenced. The cleanup operation compares all
+/// three fields again in one catalog transaction and never treats a `Stored`
+/// or `Moving` record as equivalent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolStalePending {
+    pub hash: Hash,
+    pub member: PoolMemberId,
+    pub size: u64,
+}
+
+/// Result of one exact stale-`Pending` recovery transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolStalePendingCleanupReport {
+    pub requested: usize,
+    pub declared_bytes: u64,
+    /// True only when the exact batch had already committed as wholly absent.
+    pub already_cleaned: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolMemberRuntimePaths {
+    pub id: PoolMemberId,
+    pub configured_path: PathBuf,
+    pub runtime_path: PathBuf,
+    pub configured_external_path: Option<PathBuf>,
+    pub runtime_external_path: Option<PathBuf>,
+    pub lmdb_identity: PinnedLmdbIdentity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -771,6 +771,12 @@ pub(crate) enum PoolCommands {
     },
     /// Hash-verified, resumable copy from an existing LMDB into the pool
     MigrateLmdb {
+        /// Exact v3 controller request to validate and acknowledge before opening the Pool
+        #[arg(long)]
+        launch_request: PathBuf,
+        /// Bounded rendezvous for the invocation-bound controller request
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=300))]
+        launch_request_wait_seconds: u64,
         /// Existing source LMDB directory
         #[arg(long)]
         source: PathBuf,
@@ -795,7 +801,7 @@ pub(crate) enum PoolCommands {
         /// Stop after this many blobs in this invocation
         #[arg(long)]
         max_items: Option<usize>,
-        /// Continue an interrupted pass; a completed cursor starts a fresh pass
+        /// Continue an interrupted pass; the v3 controller must allocate a fresh attempt
         #[arg(long)]
         resume: bool,
     },

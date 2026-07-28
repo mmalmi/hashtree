@@ -1,5 +1,5 @@
 use super::{EXTERNAL_MARKER_NAME, MEMBER_MARKER_NAME};
-use crate::{ExternalBlobOptions, LmdbBlobReader, LmdbBlobStore};
+use crate::{ExternalBlobOptions, LmdbBlobReader, LmdbBlobStore, PinnedLmdbIdentity};
 use hashtree_core::store::StoreError;
 use std::fs;
 use std::path::Path;
@@ -102,25 +102,48 @@ pub(super) fn verify_member_path(
 pub(super) fn open_member_store(
     id: PoolMemberId,
     config: &PoolMemberConfig,
+    pinned_identity: Option<PinnedLmdbIdentity>,
 ) -> Result<LmdbBlobStore, StoreError> {
     let external = member_external_blob_options(id, config)?;
     let map_size = usize::try_from(config.map_size_bytes)
         .map_err(|_| StoreError::Other("pool member map size exceeds usize".into()))?;
-    LmdbBlobStore::with_exact_map_size_and_external_blob_options(&config.path, map_size, external)
-        .map_err(|error| {
-            StoreError::Other(format!(
-                "open pool member {id} at {}: {error}",
-                config.path.display()
-            ))
-        })
+    let opened = match pinned_identity {
+        Some(identity) => LmdbBlobStore::with_exact_map_size_external_options_and_pinned_identity(
+            &config.path,
+            map_size,
+            external,
+            identity,
+        ),
+        None => LmdbBlobStore::with_exact_map_size_and_external_blob_options(
+            &config.path,
+            map_size,
+            external,
+        ),
+    };
+    opened.map_err(|error| {
+        StoreError::Other(format!(
+            "open pool member {id} at {}: {error}",
+            config.path.display()
+        ))
+    })
 }
 
 pub(super) fn open_member_reader(
     id: PoolMemberId,
     config: &PoolMemberConfig,
+    pinned_identity: Option<PinnedLmdbIdentity>,
 ) -> Result<LmdbBlobReader, StoreError> {
     let external = member_external_blob_options(id, config)?;
-    LmdbBlobReader::open(&config.path, external).map_err(|error| {
+    let opened = match pinned_identity {
+        Some(identity) => LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+            &config.path,
+            external,
+            1,
+            identity,
+        ),
+        None => LmdbBlobReader::open(&config.path, external),
+    };
+    opened.map_err(|error| {
         StoreError::Other(format!(
             "open read-only pool member {id} at {}: {error}",
             config.path.display()

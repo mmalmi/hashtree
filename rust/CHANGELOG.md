@@ -4,6 +4,42 @@
 
 ### Added
 
+- `storage pool migrate-lmdb` now requires an invocation-bound v3 controller
+  request. Before opening either the source LMDB or target PoolStore, it
+  disables background updates, durably consumes a root-controlled
+  `attempts-v3/NONCE` with an O_EXCL start claim, waits for the exact request,
+  and verifies the boot ID, systemd system-manager invocation/cgroup,
+  MainPID plus `/proc` starttime, root-owned executable, direct ExecStart,
+  sanitized root-owned environment file, exact argv, controller/source/Pool
+  evidence, complete LMDB and external-directory inode identities, exact Pool
+  manifest, cursor parent/value, and non-overlapping authority roots. It then
+  publishes a fully written unnamed file O_EXCL as `launch-ack.json`, fsyncs
+  the file and directory, and revalidates every identity before opening data.
+  Online passes are bounded and never terminal; a stopped-write final pass
+  requires a fresh absent cursor, strict source-and-target writer fences, and
+  a full rescan. A held cursor-parent lease and per-publication cursor CAS
+  serialize attempts and make `complete` terminal. `complete` is withheld
+  until the source `blobs`/`metadata` scan authority is proven complete and an
+  exhaustive authority-pinned Pool audit verifies that every target catalog
+  entry is stored, every body matches its hash and declared size, all member
+  indexes/counts agree, and no active move or addressable orphan remains.
+- Added an exact, idempotent, offline-only stale-`Pending` Pool cleanup
+  primitive for controller-audited physically absent hashes. It rejects pins,
+  live bodies, move ownership, partial batches, and changed catalog/index
+  state, and requires every Pool writer and open handle to remain fenced
+  across audit and commit.
+- The security-hardened heed and LMDB C changes used by `hashtree-lmdb` are
+  packaged as the publishable `hashtree-heed` and
+  `hashtree-lmdb-master-sys` crates. The social graph adapter is likewise
+  packaged as `hashtree-nostr-social-graph-heed`, so the CLI, blob store, and
+  social graph share one heed package and one unprefixed native LMDB archive.
+  The hardened blob-store dependency is released as `hashtree-lmdb` 0.2.87
+  rather than reusing the already-published 0.2.86 manifest. The crate release
+  also releases `git-remote-htree` 0.2.83 with an exact 0.2.87 blob-store
+  dependency rather than reusing its already-published 0.2.82 manifest. The
+  crate release plan publishes those exact versions before their consumers,
+  and a Linux packaged-downstream link gate rejects any second LMDB package
+  before release.
 - `nostr-index repair-bulk-projection-profiles` now rebuilds a complete v2
   profile root pair from an exactly pinned retained spool and rank authority.
   It verifies every retained profile signature, exhaustively reconciles all
@@ -41,6 +77,17 @@
   canonical `(follow distance, pubkey)` order instead of rank-decision JSONL
   key order. Background profile publication also owns and drains upload
   workers independently of its temporary Tokio runtime, including error exits.
+- Terminal Pool validation now merge-scans each member's complete blob and
+  metadata databases, requires exact key equality and valid metadata encoding,
+  and binds every metadata row into the audit digest. Equal-count mismatches
+  such as blob keys `A,B` with metadata keys `A,C` can no longer authorize
+  `complete`.
+- Systemd launch validation now rejects missing, duplicate, or malformed
+  scalar/environment properties. Empty environment and stopped-writer `Job`
+  properties must be explicitly present and empty. Because systemd 255
+  suppresses empty `Exec*` arrays, omitted forbidden hooks are accepted only
+  after exact fragment, empty-drop-in, and fresh-loaded-state validation; any
+  emitted nonempty hook is rejected.
 - Derived social-graph and profile projections now verify both incoming and
   stored events, then reuse the canonical stored bytes when the same event ID
   has a different valid Schnorr signature. Forced local-list reloads and

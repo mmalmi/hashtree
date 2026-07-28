@@ -35,6 +35,13 @@ grep -F '"${REPO_DIR}/scripts/release-gate.sh"' publish_release.sh >/dev/null
 grep -F 'export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/rust/target}"' scripts/release-gate.sh >/dev/null
 grep -F 'ensure_test_fd_limit' scripts/release-gate.sh >/dev/null
 grep -F 'cargo nextest run --workspace --locked' scripts/release-gate.sh >/dev/null
+grep -F 'run_pool_migration_systemd_gate' scripts/release-gate.sh >/dev/null
+grep -F 'cargo build --locked -p hashtree-cli --bin htree' scripts/release-gate.sh >/dev/null
+grep -F 'bash tests/test_unified_lmdb_link.sh' scripts/release-gate.sh >/dev/null
+grep -F 'exact_offline_stale_pending_cleanup_is_atomic_and_idempotent' scripts/release-gate.sh >/dev/null
+grep -F 'cursor_parent_lease_serializes_independent_open_descriptions' scripts/release-gate.sh >/dev/null
+grep -F 'cargo test --locked -p hashtree-cli --test pool_migration' scripts/release-gate.sh >/dev/null
+grep -F -- '-- --ignored --test-threads=1' scripts/release-gate.sh >/dev/null
 grep -F -- '--exclude hashtree-embedded-ffi' scripts/release-gate.sh >/dev/null
 grep -F -- '--exclude tauri-plugin-hashtree-updater' scripts/release-gate.sh >/dev/null
 grep -F -- '--test-threads 4' scripts/release-gate.sh >/dev/null
@@ -46,6 +53,7 @@ grep -F 'gate-typescript' .github/workflows/release.yml >/dev/null
 grep -F 'gate-rust' .github/workflows/release.yml >/dev/null
 grep -F 'gate-rust-peripheral' .github/workflows/release.yml >/dev/null
 grep -F 'gate-fips' .github/workflows/release.yml >/dev/null
+grep -F 'pool-migration-systemd:' .github/workflows/release.yml >/dev/null
 grep -F 'os: ubuntu-24.04-arm' .github/workflows/release.yml >/dev/null
 reject grep -qF 'docker/setup-qemu-action' .github/workflows/release.yml
 grep -F -- '--asset-base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}"' .github/workflows/release.yml >/dev/null
@@ -93,11 +101,12 @@ reject grep -qF 'cargo test --workspace --tests' .github/workflows/ci.yml
 [ "$(grep -Fxc '        run: bash ../scripts/release-gate.sh --lane rust' .github/workflows/ci.yml)" -eq 1 ]
 [ "$(grep -Fxc '        run: bash ../scripts/release-gate.sh --lane rust-peripheral' .github/workflows/ci.yml)" -eq 1 ]
 [ "$(grep -Fxc '        run: bash ../scripts/release-gate.sh --lane fips' .github/workflows/ci.yml)" -eq 1 ]
+[ "$(grep -Fxc '        run: bash scripts/release-gate.sh --lane pool-migration-systemd' .github/workflows/ci.yml)" -eq 1 ]
 grep -F 'rust-fuse-smoke:' .github/workflows/ci.yml >/dev/null
 [ "$(grep -Fxc '        run: bash rust/scripts/run_fuse_smoke_in_docker.sh' .github/workflows/ci.yml)" -eq 1 ]
 [ "$(grep -h 'libwebkit2gtk-4.1-dev' .github/workflows/ci.yml .github/workflows/release.yml | wc -l | tr -d ' ')" -eq 2 ]
-[ "$(grep -Fc 'libdbus-1-dev' .github/workflows/ci.yml)" -eq 4 ]
-[ "$(grep -Fc 'libdbus-1-dev' .github/workflows/release.yml)" -eq 4 ]
+[ "$(grep -Fc 'libdbus-1-dev' .github/workflows/ci.yml)" -eq 5 ]
+[ "$(grep -Fc 'libdbus-1-dev' .github/workflows/release.yml)" -eq 5 ]
 
 # The independently consumable FIPS transport has one canonical TypeScript
 # verification command. Both CI and the release gate must invoke it instead of

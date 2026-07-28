@@ -10,14 +10,16 @@ pub use configured::{
     ConfiguredLmdbBlobStore, LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, POOL_AUDIT_READ_ONLY_ENV,
     POOL_AUDIT_READ_ONLY_ERROR, SHARED_BLOB_MIN_MAP_SIZE_BYTES, SHARED_BLOB_POOL_DIR_NAME,
 };
+pub use heed::{PinnedLmdbFileIdentity, PinnedLmdbIdentity};
 pub use migration::{
     migrate_lmdb_batch, migrate_lmdb_batch_with_max_buffer_bytes, PoolMigrationBatch,
     DEFAULT_POOL_MIGRATION_MAX_BUFFER_BYTES,
 };
 pub use pool::{
     PoolCatalogLocation, PoolMaintenanceReport, PoolManifestIdentity, PoolMemberConfig,
-    PoolMemberId, PoolMemberState, PoolMemberStatus, PoolReadBatchItem, PoolStore, PoolStoreConfig,
-    PoolStoreReader, PoolTemperatureConfig, PoolTemperatureReport, ReadOnlyPoolCatalogAudit,
+    PoolMemberId, PoolMemberRuntimePaths, PoolMemberState, PoolMemberStatus, PoolReadBatchItem,
+    PoolStalePending, PoolStalePendingCleanupReport, PoolStore, PoolStoreConfig, PoolStoreReader,
+    PoolTemperatureConfig, PoolTemperatureReport, PoolTerminalAudit, ReadOnlyPoolCatalogAudit,
     ReadOnlyPoolStore,
 };
 
@@ -29,11 +31,18 @@ use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, Put
 use managed_env::ManagedEnv;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
+#[cfg(unix)]
+use std::ffi::{CString, OsStr};
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, FromRawFd};
+#[cfg(unix)]
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -91,6 +100,12 @@ struct ExternalBlobConfig {
     min_bytes: usize,
     sync: bool,
     pack_target_bytes: Option<usize>,
+    pinned_root: Option<Arc<PinnedExternalRoot>>,
+}
+
+#[derive(Debug)]
+struct PinnedExternalRoot {
+    directory: File,
 }
 
 /// Options for storing larger LMDB blobs in normal files.
@@ -136,6 +151,7 @@ impl ExternalBlobConfig {
             min_bytes,
             sync,
             pack_target_bytes,
+            pinned_root: None,
         })
     }
 }
@@ -158,7 +174,409 @@ impl From<ExternalBlobOptions> for ExternalBlobConfig {
             min_bytes: options.min_bytes,
             sync: options.sync,
             pack_target_bytes: options.pack_target_bytes,
+            pinned_root: None,
         }
+    }
+}
+
+impl ExternalBlobConfig {
+    fn prepare_runtime(self) -> Result<Self, StoreError> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut prepared = self;
+            if is_linux_proc_fd_directory(&prepared.base_path) {
+                prepared.pinned_root =
+                    Some(Arc::new(PinnedExternalRoot::open(&prepared.base_path)?));
+            }
+            return Ok(prepared);
+        }
+        #[cfg(not(target_os = "linux"))]
+        Ok(self)
+    }
+
+    fn relative_blob_path(hash: &Hash) -> PathBuf {
+        let hex = to_hex(hash);
+        PathBuf::from(&hex[..2]).join(&hex[2..4]).join(&hex[4..])
+    }
+
+    fn relative_pack_path(pack_name: &str) -> PathBuf {
+        PathBuf::from("packs").join(&pack_name[..2]).join(pack_name)
+    }
+
+    fn open_relative(&self, relative: &Path) -> Result<File, StoreError> {
+        if let Some(root) = &self.pinned_root {
+            return root.open_regular(relative);
+        }
+        File::open(self.base_path.join(relative)).map_err(StoreError::Io)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn is_linux_proc_fd_directory(path: &Path) -> bool {
+    let mut components = path.components();
+    components.next() == Some(std::path::Component::RootDir)
+        && ["proc", "self", "fd"].into_iter().all(|expected| {
+            components
+                .next()
+                .and_then(|component| component.as_os_str().to_str())
+                == Some(expected)
+        })
+        && components
+            .next()
+            .and_then(|component| component.as_os_str().to_str())
+            .is_some_and(|descriptor| {
+                !descriptor.is_empty() && descriptor.bytes().all(|byte| byte.is_ascii_digit())
+            })
+        && components.next().is_none()
+}
+
+#[cfg(target_os = "linux")]
+fn pinned_lmdb_data_len(path: &Path, identity: PinnedLmdbIdentity) -> Result<u64, StoreError> {
+    if !is_linux_proc_fd_directory(path) {
+        return Err(StoreError::Other(
+            "pinned LMDB sizing requires an exact /proc/self/fd/N directory".into(),
+        ));
+    }
+    let directory = File::open(path).map_err(StoreError::Io)?;
+    if !directory.metadata().map_err(StoreError::Io)?.is_dir() {
+        return Err(StoreError::Other(
+            "pinned LMDB sizing root is not a directory".into(),
+        ));
+    }
+    let name = CString::new("data.mdb").expect("LMDB file name has no NUL");
+    let raw = unsafe {
+        libc::openat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+        )
+    };
+    if raw < 0 {
+        return Err(StoreError::Io(std::io::Error::last_os_error()));
+    }
+    let data = unsafe { File::from_raw_fd(raw) };
+    let metadata = data.metadata().map_err(StoreError::Io)?;
+    use std::os::unix::fs::MetadataExt;
+    if !metadata.is_file()
+        || metadata.dev() != identity.data.device
+        || metadata.ino() != identity.data.inode
+    {
+        return Err(StoreError::Other(
+            "pinned LMDB data.mdb identity changed before map sizing".into(),
+        ));
+    }
+    Ok(metadata.len())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pinned_lmdb_data_len(_path: &Path, _identity: PinnedLmdbIdentity) -> Result<u64, StoreError> {
+    Err(StoreError::Other(
+        "pinned LMDB sizing is supported only on Linux".into(),
+    ))
+}
+
+#[cfg(unix)]
+impl PinnedExternalRoot {
+    #[cfg(target_os = "linux")]
+    fn open(path: &Path) -> Result<Self, StoreError> {
+        let directory = File::open(path).map_err(StoreError::Io)?;
+        if !directory.metadata().map_err(StoreError::Io)?.is_dir() {
+            return Err(StoreError::Other(
+                "pinned external blob root is not a directory".into(),
+            ));
+        }
+        Ok(Self { directory })
+    }
+
+    fn c_name(name: &OsStr) -> Result<CString, StoreError> {
+        CString::new(name.as_bytes())
+            .map_err(|_| StoreError::Other("external blob path component contains NUL".into()))
+    }
+
+    fn components(relative: &Path) -> Result<Vec<&OsStr>, StoreError> {
+        if relative.is_absolute() {
+            return Err(StoreError::Other(
+                "external blob path must be relative to its pinned root".into(),
+            ));
+        }
+        let mut names = Vec::new();
+        for component in relative.components() {
+            match component {
+                std::path::Component::Normal(name) => names.push(name),
+                _ => {
+                    return Err(StoreError::Other(
+                        "external blob path contains an unsafe component".into(),
+                    ))
+                }
+            }
+        }
+        if names.is_empty() {
+            return Err(StoreError::Other("external blob path is empty".into()));
+        }
+        Ok(names)
+    }
+
+    fn open_parent(
+        &self,
+        relative: &Path,
+        create: bool,
+        durable: bool,
+    ) -> Result<(File, CString), StoreError> {
+        let components = Self::components(relative)?;
+        let (leaf, directories) = components
+            .split_last()
+            .expect("non-empty external path checked above");
+        let mut current = self.directory.try_clone().map_err(StoreError::Io)?;
+        for component in directories {
+            let name = Self::c_name(component)?;
+            let open = || unsafe {
+                libc::openat(
+                    current.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                )
+            };
+            let mut raw = open();
+            if raw < 0
+                && create
+                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound
+            {
+                let status = unsafe { libc::mkdirat(current.as_raw_fd(), name.as_ptr(), 0o700) };
+                if status != 0
+                    && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+                {
+                    return Err(StoreError::Io(std::io::Error::last_os_error()));
+                }
+                if durable {
+                    current.sync_all().map_err(StoreError::Io)?;
+                }
+                raw = open();
+            }
+            if raw < 0 {
+                return Err(StoreError::Io(std::io::Error::last_os_error()));
+            }
+            let next = unsafe { File::from_raw_fd(raw) };
+            if !next.metadata().map_err(StoreError::Io)?.is_dir() {
+                return Err(StoreError::Other(
+                    "external blob path traverses a non-directory".into(),
+                ));
+            }
+            if durable {
+                current.sync_all().map_err(StoreError::Io)?;
+            }
+            current = next;
+        }
+        Ok((current, Self::c_name(leaf)?))
+    }
+
+    fn open_regular(&self, relative: &Path) -> Result<File, StoreError> {
+        let (parent, leaf) = self.open_parent(relative, false, false)?;
+        let raw = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                leaf.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            )
+        };
+        if raw < 0 {
+            return Err(StoreError::Io(std::io::Error::last_os_error()));
+        }
+        let file = unsafe { File::from_raw_fd(raw) };
+        if !file.metadata().map_err(StoreError::Io)?.is_file() {
+            return Err(StoreError::Other(
+                "external blob entry is not a regular file".into(),
+            ));
+        }
+        Ok(file)
+    }
+
+    fn open_regular_optional(parent: &File, leaf: &CString) -> Result<Option<File>, StoreError> {
+        let raw = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                leaf.as_ptr(),
+                libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            )
+        };
+        if raw < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::NotFound {
+                return Ok(None);
+            }
+            return Err(StoreError::Io(error));
+        }
+        let file = unsafe { File::from_raw_fd(raw) };
+        if !file.metadata().map_err(StoreError::Io)?.is_file() {
+            return Err(StoreError::Other(
+                "external blob entry is not a regular file".into(),
+            ));
+        }
+        Ok(Some(file))
+    }
+
+    fn verify_existing_blob(
+        parent: &File,
+        leaf: &CString,
+        expected_hash: &Hash,
+        expected_len: usize,
+        sync: bool,
+    ) -> Result<bool, StoreError> {
+        let Some(mut file) = Self::open_regular_optional(parent, leaf)? else {
+            return Ok(false);
+        };
+        if file.metadata().map_err(StoreError::Io)?.len() != expected_len as u64 {
+            return Err(StoreError::Other(
+                "existing pinned external blob has the wrong length".into(),
+            ));
+        }
+        let mut hasher = Sha256::new();
+        let mut buffer = vec![0u8; 1024 * 1024];
+        let read_limit = u64::try_from(expected_len)
+            .unwrap_or(u64::MAX)
+            .saturating_add(1);
+        let mut limited = Read::by_ref(&mut file).take(read_limit);
+        let mut total = 0usize;
+        loop {
+            let read = limited.read(&mut buffer).map_err(StoreError::Io)?;
+            if read == 0 {
+                break;
+            }
+            total = total.saturating_add(read);
+            hasher.update(&buffer[..read]);
+        }
+        if total != expected_len
+            || file.metadata().map_err(StoreError::Io)?.len() != expected_len as u64
+            || hasher.finalize().as_slice() != expected_hash
+        {
+            return Err(StoreError::Other(
+                "existing pinned external blob has the wrong hash".into(),
+            ));
+        }
+        if sync {
+            file.sync_all().map_err(StoreError::Io)?;
+            parent.sync_all().map_err(StoreError::Io)?;
+        }
+        Ok(true)
+    }
+
+    fn write_blob(
+        &self,
+        relative: &Path,
+        data: &[u8],
+        expected_hash: &Hash,
+        sync: bool,
+    ) -> Result<(), StoreError> {
+        let (parent, leaf) = self.open_parent(relative, true, sync)?;
+        if Self::verify_existing_blob(&parent, &leaf, expected_hash, data.len(), sync)? {
+            return Ok(());
+        }
+        let mut file = Self::create_unnamed_file(&parent)?;
+        file.write_all(data).map_err(StoreError::Io)?;
+        if sync {
+            file.sync_all().map_err(StoreError::Io)?;
+        }
+        let linked = match Self::link_open_file(&file, &parent, &leaf) {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => false,
+            Err(error) => return Err(StoreError::Io(error)),
+        };
+        let _ = linked;
+        Self::verify_existing_blob(&parent, &leaf, expected_hash, data.len(), sync)?;
+        if sync {
+            parent.sync_all().map_err(StoreError::Io)?;
+        }
+        Ok(())
+    }
+
+    fn create_file<T>(
+        &self,
+        relative: &Path,
+        sync: bool,
+        write: impl FnOnce(&mut File) -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        let (parent, leaf) = self.open_parent(relative, true, sync)?;
+        if Self::open_regular_optional(&parent, &leaf)?.is_some() {
+            return Err(StoreError::Other(
+                "generated external pack already exists".into(),
+            ));
+        }
+        let mut file = Self::create_unnamed_file(&parent)?;
+        let value = write(&mut file)?;
+        if sync {
+            file.sync_all().map_err(StoreError::Io)?;
+        }
+        Self::link_open_file(&file, &parent, &leaf).map_err(StoreError::Io)?;
+        if sync {
+            parent.sync_all().map_err(StoreError::Io)?;
+        }
+        Ok(value)
+    }
+
+    fn remove_file(&self, relative: &Path, sync: bool) -> Result<(), StoreError> {
+        let (parent, leaf) = self.open_parent(relative, false, false)?;
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), leaf.as_ptr(), 0) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::NotFound {
+                return Err(StoreError::Io(error));
+            }
+        }
+        if sync {
+            parent.sync_all().map_err(StoreError::Io)?;
+        }
+        Ok(())
+    }
+
+    fn link_open_file(file: &File, parent: &File, leaf: &CString) -> Result<(), std::io::Error> {
+        let proc_fd = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .expect("generated procfd path has no NUL");
+        let status = unsafe {
+            libc::linkat(
+                libc::AT_FDCWD,
+                proc_fd.as_ptr(),
+                parent.as_raw_fd(),
+                leaf.as_ptr(),
+                libc::AT_SYMLINK_FOLLOW,
+            )
+        };
+        if status != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let linked = Self::open_regular_optional(parent, leaf)
+            .map_err(|error| std::io::Error::other(error.to_string()))?
+            .ok_or_else(|| std::io::Error::other("linked external file disappeared"))?;
+        let source = file.metadata()?;
+        let target = linked.metadata()?;
+        use std::os::unix::fs::MetadataExt;
+        if source.dev() != target.dev() || source.ino() != target.ino() {
+            return Err(std::io::Error::other(
+                "linked external file identity differs from open writer",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn create_unnamed_file(parent: &File) -> Result<File, StoreError> {
+        let dot = CString::new(".").expect("dot has no NUL");
+        let raw = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                dot.as_ptr(),
+                libc::O_RDWR | libc::O_TMPFILE | libc::O_CLOEXEC,
+                0o600,
+            )
+        };
+        if raw < 0 {
+            return Err(StoreError::Io(std::io::Error::last_os_error()));
+        }
+        Ok(unsafe { File::from_raw_fd(raw) })
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn create_unnamed_file(_parent: &File) -> Result<File, StoreError> {
+        Err(StoreError::Other(
+            "pinned external publication is supported only on Linux".into(),
+        ))
     }
 }
 
@@ -172,11 +590,11 @@ struct ExternalPackRef {
 #[derive(Debug)]
 enum SourceBlobRead {
     ExternalBlob {
-        path: PathBuf,
+        file: ExternalSourceFile,
         expected_size: u64,
     },
     ExternalPack {
-        path: PathBuf,
+        file: ExternalSourceFile,
         offset: u64,
         len: u64,
         expected_size: u64,
@@ -186,7 +604,7 @@ enum SourceBlobRead {
 impl SourceBlobRead {
     fn physical_path(&self) -> &Path {
         match self {
-            Self::ExternalBlob { path, .. } | Self::ExternalPack { path, .. } => path,
+            Self::ExternalBlob { file, .. } | Self::ExternalPack { file, .. } => &file.path,
         }
     }
 
@@ -194,6 +612,31 @@ impl SourceBlobRead {
         match self {
             Self::ExternalBlob { .. } => 0,
             Self::ExternalPack { offset, .. } => *offset,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ExternalSourceFile {
+    path: PathBuf,
+    relative: PathBuf,
+    pinned_root: Option<Arc<PinnedExternalRoot>>,
+}
+
+impl ExternalSourceFile {
+    fn new(config: &ExternalBlobConfig, relative: PathBuf) -> Self {
+        Self {
+            path: config.base_path.join(&relative),
+            relative,
+            pinned_root: config.pinned_root.clone(),
+        }
+    }
+
+    fn open(&self) -> Result<File, StoreError> {
+        if let Some(root) = &self.pinned_root {
+            root.open_regular(&self.relative)
+        } else {
+            File::open(&self.path).map_err(StoreError::Io)
         }
     }
 }
@@ -232,6 +675,22 @@ pub struct LmdbBlobReader {
     external_read_concurrency: usize,
 }
 
+/// Exhaustive key-set proof for a terminal LMDB migration source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LmdbSourceKeysetAudit {
+    pub blob_entries: u64,
+    pub metadata_entries: u64,
+    pub legacy_blob_only: bool,
+    pub sha256: Hash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LmdbTerminalMemberKeysetAudit {
+    pub blob_entries: u64,
+    pub metadata_entries: u64,
+    pub sha256: Hash,
+}
+
 impl LmdbBlobReader {
     pub fn open<P: AsRef<Path>>(
         path: P,
@@ -250,12 +709,42 @@ impl LmdbBlobReader {
         external_blobs: Option<ExternalBlobOptions>,
         external_read_concurrency: usize,
     ) -> Result<Self, StoreError> {
+        Self::open_with_external_read_concurrency_inner(
+            path.as_ref(),
+            external_blobs,
+            external_read_concurrency,
+            None,
+        )
+    }
+
+    /// Open a migration source through a retained directory descriptor and
+    /// require the actual LMDB data/lock descriptors to match identities
+    /// captured before the launch acknowledgement.
+    pub fn open_with_external_read_concurrency_and_pinned_identity<P: AsRef<Path>>(
+        path: P,
+        external_blobs: Option<ExternalBlobOptions>,
+        external_read_concurrency: usize,
+        identity: PinnedLmdbIdentity,
+    ) -> Result<Self, StoreError> {
+        Self::open_with_external_read_concurrency_inner(
+            path.as_ref(),
+            external_blobs,
+            external_read_concurrency,
+            Some(identity),
+        )
+    }
+
+    fn open_with_external_read_concurrency_inner(
+        path: &Path,
+        external_blobs: Option<ExternalBlobOptions>,
+        external_read_concurrency: usize,
+        pinned_identity: Option<PinnedLmdbIdentity>,
+    ) -> Result<Self, StoreError> {
         if external_read_concurrency == 0 {
             return Err(StoreError::Other(
                 "external read concurrency must be non-zero".into(),
             ));
         }
-        let path = path.as_ref();
         let mut options = EnvOpenOptions::new();
         options
             .max_dbs(DATABASE_COUNT)
@@ -267,7 +756,13 @@ impl LmdbBlobReader {
             // the process cgroup's reclaimable file cache.
             options.flags(env_flags_from_env() | EnvFlags::READ_ONLY | EnvFlags::NO_READ_AHEAD);
         }
-        let env = unsafe { ManagedEnv::open(&options, path) }.map_err(map_heed_error)?;
+        let env = unsafe {
+            match pinned_identity {
+                Some(identity) => ManagedEnv::open_pinned(&options, path, identity),
+                None => ManagedEnv::open(&options, path),
+            }
+        }
+        .map_err(map_heed_error)?;
         let rtxn = env.read_txn().map_err(map_heed_error)?;
         let open_bytes = |name| -> Result<Database<Bytes, Bytes>, StoreError> {
             env.open_database(&rtxn, Some(name))
@@ -285,6 +780,10 @@ impl LmdbBlobReader {
         let pins = open_bytes("pins")?;
         let stats = open_bytes("stats")?;
         rtxn.commit().map_err(map_heed_error)?;
+        let external_blobs = external_blobs
+            .map(ExternalBlobConfig::from)
+            .map(ExternalBlobConfig::prepare_runtime)
+            .transpose()?;
         Ok(Self {
             store: LmdbBlobStore {
                 env,
@@ -295,7 +794,7 @@ impl LmdbBlobReader {
                 stats,
                 max_bytes: AtomicU64::new(0),
                 next_order: AtomicU64::new(0),
-                external_blobs: external_blobs.map(Into::into),
+                external_blobs,
             },
             external_read_concurrency,
         })
@@ -357,7 +856,7 @@ impl LmdbBlobReader {
                 })?;
             let index = values.len();
             if self.store.is_external_blob_ref(hash, value) {
-                let path = self.store.external_blob_path(hash).ok_or_else(|| {
+                let config = self.store.external_blobs.as_ref().ok_or_else(|| {
                     StoreError::Other(
                         "external LMDB blob marker found but external blobs are disabled".into(),
                     )
@@ -367,12 +866,15 @@ impl LmdbBlobReader {
                     index,
                     hash: *hash,
                     read: SourceBlobRead::ExternalBlob {
-                        path,
+                        file: ExternalSourceFile::new(
+                            config,
+                            ExternalBlobConfig::relative_blob_path(hash),
+                        ),
                         expected_size,
                     },
                 });
             } else if let Some(pack_ref) = LmdbBlobStore::decode_external_pack_ref(value)? {
-                let path = self.store.external_pack_path(&pack_ref).ok_or_else(|| {
+                let config = self.store.external_blobs.as_ref().ok_or_else(|| {
                     StoreError::Other(
                         "external LMDB pack marker found but external blobs are disabled".into(),
                     )
@@ -382,7 +884,10 @@ impl LmdbBlobReader {
                     index,
                     hash: *hash,
                     read: SourceBlobRead::ExternalPack {
-                        path,
+                        file: ExternalSourceFile::new(
+                            config,
+                            ExternalBlobConfig::relative_pack_path(&pack_ref.name),
+                        ),
                         offset: pack_ref.offset,
                         len: pack_ref.len,
                         expected_size,
@@ -440,7 +945,7 @@ impl LmdbBlobReader {
         for plan in pack_reads {
             let data = match plan.read {
                 SourceBlobRead::ExternalPack {
-                    path,
+                    file,
                     offset,
                     len,
                     expected_size,
@@ -453,9 +958,9 @@ impl LmdbBlobReader {
                     }
                     let must_open = open_pack
                         .as_ref()
-                        .is_none_or(|(open_path, _)| open_path != &path);
+                        .is_none_or(|(open_path, _)| open_path != &file.path);
                     if must_open {
-                        open_pack = Some((path.clone(), File::open(&path)?));
+                        open_pack = Some((file.path.clone(), file.open()?));
                     }
                     let (_, file) = open_pack.as_mut().expect("pack was opened");
                     file.seek(SeekFrom::Start(offset))?;
@@ -505,6 +1010,180 @@ impl LmdbBlobReader {
         let blob_entries = self.store.blobs.len(&rtxn).map_err(map_heed_error)?;
         let metadata_entries = self.store.metadata.len(&rtxn).map_err(map_heed_error)?;
         Ok((blob_entries, metadata_entries))
+    }
+
+    /// Prove that a Pool member has one valid metadata row for every blob and
+    /// no metadata-only rows.
+    ///
+    /// Pool members are never accepted as legacy blob-only stores. The digest
+    /// binds every exact hash key and encoded metadata value so a terminal
+    /// receipt identifies the complete physical member index, not only its
+    /// entry count.
+    pub(crate) fn validate_terminal_member_keyset(
+        &self,
+    ) -> Result<LmdbTerminalMemberKeysetAudit, StoreError> {
+        let rtxn = self.store.env.read_txn().map_err(map_heed_error)?;
+        let blob_entries = self.store.blobs.len(&rtxn).map_err(map_heed_error)?;
+        let metadata_entries = self.store.metadata.len(&rtxn).map_err(map_heed_error)?;
+        let mut digest = Sha256::new();
+        digest.update(b"hashtree-lmdb-terminal-member-keyset/v1\0");
+        digest.update(blob_entries.to_be_bytes());
+        digest.update(metadata_entries.to_be_bytes());
+        let mut blobs = self.store.blobs.iter(&rtxn).map_err(map_heed_error)?;
+        let mut metadata = self.store.metadata.iter(&rtxn).map_err(map_heed_error)?;
+
+        loop {
+            let blob = blobs.next().transpose().map_err(map_heed_error)?;
+            let meta = metadata.next().transpose().map_err(map_heed_error)?;
+            match (blob, meta) {
+                (Some((blob_key, _)), Some((meta_key, meta_bytes))) => {
+                    let blob_hash: Hash = blob_key.try_into().map_err(|_| {
+                        StoreError::Other(
+                            "terminal Pool member has an invalid blob hash key".into(),
+                        )
+                    })?;
+                    let meta_hash: Hash = meta_key.try_into().map_err(|_| {
+                        StoreError::Other(
+                            "terminal Pool member has an invalid metadata hash key".into(),
+                        )
+                    })?;
+                    if blob_hash != meta_hash {
+                        let detail = if blob_hash < meta_hash {
+                            format!("blob {} has no metadata row", to_hex(&blob_hash))
+                        } else {
+                            format!("metadata {} has no blob row", to_hex(&meta_hash))
+                        };
+                        return Err(StoreError::Other(format!(
+                            "terminal Pool member blobs/metadata key sets differ: {detail}"
+                        )));
+                    }
+                    LmdbBlobStore::decode_blob_meta(meta_bytes)?;
+                    digest.update(blob_hash);
+                    digest.update((meta_bytes.len() as u64).to_be_bytes());
+                    digest.update(meta_bytes);
+                }
+                (Some((blob_key, _)), None) => {
+                    let hash: Hash = blob_key.try_into().map_err(|_| {
+                        StoreError::Other(
+                            "terminal Pool member has an invalid blob hash key".into(),
+                        )
+                    })?;
+                    return Err(StoreError::Other(format!(
+                        "terminal Pool member blobs/metadata key sets differ: blob {} has no metadata row",
+                        to_hex(&hash)
+                    )));
+                }
+                (None, Some((meta_key, _))) => {
+                    let hash: Hash = meta_key.try_into().map_err(|_| {
+                        StoreError::Other(
+                            "terminal Pool member has an invalid metadata hash key".into(),
+                        )
+                    })?;
+                    return Err(StoreError::Other(format!(
+                        "terminal Pool member blobs/metadata key sets differ: metadata {} has no blob row",
+                        to_hex(&hash)
+                    )));
+                }
+                (None, None) => break,
+            }
+        }
+        drop(blobs);
+        drop(metadata);
+        rtxn.commit().map_err(map_heed_error)?;
+
+        Ok(LmdbTerminalMemberKeysetAudit {
+            blob_entries,
+            metadata_entries,
+            sha256: digest.finalize().into(),
+        })
+    }
+
+    /// Prove that the final migration scan's selected key source is complete.
+    ///
+    /// A wholly legacy store with an empty metadata database is valid because
+    /// [`Self::scan_hashes_after`] selects `blobs`. Once metadata contains any
+    /// row, migration selects it for compact scans, so its sorted key set must
+    /// exactly equal `blobs`; otherwise legacy blob-only rows could be omitted.
+    /// Callers must keep every source writer fenced throughout this scan.
+    pub fn validate_terminal_migration_keyset(&self) -> Result<LmdbSourceKeysetAudit, StoreError> {
+        let rtxn = self.store.env.read_txn().map_err(map_heed_error)?;
+        let blob_entries = self.store.blobs.len(&rtxn).map_err(map_heed_error)?;
+        let metadata_entries = self.store.metadata.len(&rtxn).map_err(map_heed_error)?;
+        let legacy_blob_only = metadata_entries == 0;
+        let mut digest = Sha256::new();
+        digest.update(b"hashtree-lmdb-terminal-source-keyset/v1\0");
+        digest.update(blob_entries.to_be_bytes());
+        digest.update(metadata_entries.to_be_bytes());
+        digest.update([u8::from(legacy_blob_only)]);
+
+        if legacy_blob_only {
+            for item in self.store.blobs.iter(&rtxn).map_err(map_heed_error)? {
+                let (key, _) = item.map_err(map_heed_error)?;
+                let hash: Hash = key.try_into().map_err(|_| {
+                    StoreError::Other("terminal source has an invalid blob hash key".into())
+                })?;
+                digest.update(hash);
+            }
+        } else {
+            let mut blobs = self.store.blobs.iter(&rtxn).map_err(map_heed_error)?;
+            let mut metadata = self.store.metadata.iter(&rtxn).map_err(map_heed_error)?;
+            loop {
+                let blob = blobs.next().transpose().map_err(map_heed_error)?;
+                let meta = metadata.next().transpose().map_err(map_heed_error)?;
+                match (blob, meta) {
+                    (Some((blob_key, _)), Some((meta_key, _))) => {
+                        let blob_hash: Hash = blob_key.try_into().map_err(|_| {
+                            StoreError::Other("terminal source has an invalid blob hash key".into())
+                        })?;
+                        let meta_hash: Hash = meta_key.try_into().map_err(|_| {
+                            StoreError::Other(
+                                "terminal source has an invalid metadata hash key".into(),
+                            )
+                        })?;
+                        if blob_hash != meta_hash {
+                            let detail = if blob_hash < meta_hash {
+                                format!("blob {} has no metadata row", to_hex(&blob_hash))
+                            } else {
+                                format!("metadata {} has no blob row", to_hex(&meta_hash))
+                            };
+                            return Err(StoreError::Other(format!(
+                                "terminal source blobs/metadata key sets differ: {detail}"
+                            )));
+                        }
+                        digest.update(blob_hash);
+                    }
+                    (Some((blob_key, _)), None) => {
+                        let hash: Hash = blob_key.try_into().map_err(|_| {
+                            StoreError::Other("terminal source has an invalid blob hash key".into())
+                        })?;
+                        return Err(StoreError::Other(format!(
+                            "terminal source blobs/metadata key sets differ: blob {} has no metadata row",
+                            to_hex(&hash)
+                        )));
+                    }
+                    (None, Some((meta_key, _))) => {
+                        let hash: Hash = meta_key.try_into().map_err(|_| {
+                            StoreError::Other(
+                                "terminal source has an invalid metadata hash key".into(),
+                            )
+                        })?;
+                        return Err(StoreError::Other(format!(
+                            "terminal source blobs/metadata key sets differ: metadata {} has no blob row",
+                            to_hex(&hash)
+                        )));
+                    }
+                    (None, None) => break,
+                }
+            }
+        }
+        rtxn.commit().map_err(map_heed_error)?;
+
+        Ok(LmdbSourceKeysetAudit {
+            blob_entries,
+            metadata_entries,
+            legacy_blob_only,
+            sha256: digest.finalize().into(),
+        })
     }
 
     pub fn map_size_bytes(&self) -> usize {
@@ -584,7 +1263,7 @@ fn read_external_blob_files(
 
 fn read_external_blob_file(plan: &SourceBlobReadPlan) -> Result<Vec<u8>, StoreError> {
     let SourceBlobRead::ExternalBlob {
-        path,
+        file,
         expected_size,
     } = &plan.read
     else {
@@ -592,7 +1271,7 @@ fn read_external_blob_file(plan: &SourceBlobReadPlan) -> Result<Vec<u8>, StoreEr
             "pack range entered the external-file read lane".into(),
         ));
     };
-    let mut file = File::open(path)?;
+    let mut file = file.open()?;
     let file_size = file.metadata()?.len();
     if file_size != *expected_size {
         return Err(StoreError::Other(format!(
@@ -736,6 +1415,23 @@ impl LmdbBlobStore {
             env_flags_from_env(),
             |_| external_blobs.map(Into::into),
             false,
+            None,
+        )
+    }
+
+    pub(crate) fn with_exact_map_size_external_options_and_pinned_identity<P: AsRef<Path>>(
+        path: P,
+        map_size: usize,
+        external_blobs: Option<ExternalBlobOptions>,
+        identity: PinnedLmdbIdentity,
+    ) -> Result<Self, StoreError> {
+        Self::with_map_size_and_settings_mode(
+            path,
+            map_size,
+            env_flags_from_env(),
+            |_| external_blobs.map(Into::into),
+            false,
+            Some(identity),
         )
     }
 
@@ -749,7 +1445,7 @@ impl LmdbBlobStore {
         P: AsRef<Path>,
         F: FnOnce(&Path) -> Option<ExternalBlobConfig>,
     {
-        Self::with_map_size_and_settings_mode(path, map_size, flags, external_blobs, true)
+        Self::with_map_size_and_settings_mode(path, map_size, flags, external_blobs, true, None)
     }
 
     fn with_map_size_and_settings_mode<P, F>(
@@ -758,16 +1454,22 @@ impl LmdbBlobStore {
         flags: EnvFlags,
         external_blobs: F,
         add_reopen_headroom: bool,
+        pinned_identity: Option<PinnedLmdbIdentity>,
     ) -> Result<Self, StoreError>
     where
         P: AsRef<Path>,
         F: FnOnce(&Path) -> Option<ExternalBlobConfig>,
     {
         let path_ref = path.as_ref();
-        std::fs::create_dir_all(path_ref).map_err(StoreError::Io)?;
-        let existing_map_size = std::fs::metadata(path_ref.join("data.mdb"))
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+        if pinned_identity.is_none() {
+            std::fs::create_dir_all(path_ref).map_err(StoreError::Io)?;
+        }
+        let existing_map_size = match pinned_identity {
+            Some(identity) => pinned_lmdb_data_len(path_ref, identity)?,
+            None => std::fs::metadata(path_ref.join("data.mdb"))
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        };
         let existing_headroom = if existing_map_size == 0 || !add_reopen_headroom {
             0
         } else {
@@ -789,7 +1491,13 @@ impl LmdbBlobStore {
         unsafe {
             env_options.flags(flags);
         }
-        let env = unsafe { ManagedEnv::open(&env_options, path_ref).map_err(map_heed_error)? };
+        let env = unsafe {
+            match pinned_identity {
+                Some(identity) => ManagedEnv::open_pinned(&env_options, path_ref, identity),
+                None => ManagedEnv::open(&env_options, path_ref),
+            }
+            .map_err(map_heed_error)?
+        };
         let _ = env.clear_stale_readers();
         if env.info().map_size < map_size {
             unsafe { env.resize(map_size) }.map_err(map_heed_error)?;
@@ -816,6 +1524,9 @@ impl LmdbBlobStore {
         let totals = Self::load_or_rebuild_totals(&env, metadata, pins, stats)?;
         let next_order = Self::load_or_initialize_next_order(&env, stats, totals.count > 0)?;
 
+        let external_blobs = external_blobs(path_ref)
+            .map(ExternalBlobConfig::prepare_runtime)
+            .transpose()?;
         Ok(Self {
             env,
             blobs,
@@ -825,7 +1536,7 @@ impl LmdbBlobStore {
             stats,
             max_bytes: AtomicU64::new(0),
             next_order: AtomicU64::new(next_order),
-            external_blobs: external_blobs(path_ref),
+            external_blobs,
         })
     }
 
@@ -1497,7 +2208,14 @@ impl LmdbBlobStore {
             return Ok(None);
         };
 
-        self.decode_blob_value(hash, blob).map(Some)
+        let expected_size = self
+            .metadata
+            .get(&rtxn, hash)
+            .map_err(|e| StoreError::Other(e.to_string()))?
+            .map(Self::decode_blob_meta)
+            .transpose()?
+            .map(|meta| meta.size);
+        self.decode_blob_value(hash, blob, expected_size).map(Some)
     }
 
     pub fn get_range_sync(
@@ -1606,6 +2324,12 @@ impl LmdbBlobStore {
         chunk_bytes: usize,
         config: &ExternalBlobConfig,
     ) -> Result<bool, StoreError> {
+        if config.pinned_root.is_some() {
+            return Err(StoreError::Other(
+                "streaming member relocation is disabled while external paths are authority-pinned"
+                    .into(),
+            ));
+        }
         let path = Self::external_blob_path_for_config(config, hash);
         let parent = path
             .parent()
@@ -2340,6 +3064,7 @@ impl LmdbBlobStore {
             .join(pack_name)
     }
 
+    #[cfg(test)]
     fn external_pack_path(&self, pack_ref: &ExternalPackRef) -> Option<PathBuf> {
         self.external_blobs
             .as_ref()
@@ -2368,6 +3093,14 @@ impl LmdbBlobStore {
         data: &[u8],
         config: &ExternalBlobConfig,
     ) -> Result<(), StoreError> {
+        if let Some(root) = &config.pinned_root {
+            return root.write_blob(
+                &ExternalBlobConfig::relative_blob_path(hash),
+                data,
+                hash,
+                config.sync,
+            );
+        }
         let path = Self::external_blob_path_for_config(config, hash);
         if path.exists() {
             return Ok(());
@@ -2440,6 +3173,23 @@ impl LmdbBlobStore {
         }
 
         let pack_name = Self::external_pack_name(&entries[0].1);
+        if let Some(root) = &config.pinned_root {
+            let relative = ExternalBlobConfig::relative_pack_path(&pack_name);
+            return root.create_file(&relative, config.sync, |file| {
+                let mut markers = Vec::with_capacity(entries.len());
+                let mut offset = 0u64;
+                for (index, _, data) in entries {
+                    let len = data.len() as u64;
+                    file.write_all(data).map_err(StoreError::Io)?;
+                    markers.push((
+                        *index,
+                        Self::external_pack_blob_ref(&pack_name, offset, len)?,
+                    ));
+                    offset = offset.saturating_add(len);
+                }
+                Ok(markers)
+            });
+        }
         let path = Self::external_pack_path_for_config(config, &pack_name);
         let parent = path
             .parent()
@@ -2482,14 +3232,37 @@ impl LmdbBlobStore {
         Ok(markers)
     }
 
-    fn decode_blob_value(&self, hash: &Hash, value: &[u8]) -> Result<Vec<u8>, StoreError> {
+    fn decode_blob_value(
+        &self,
+        hash: &Hash,
+        value: &[u8],
+        expected_size: Option<u64>,
+    ) -> Result<Vec<u8>, StoreError> {
         if self.is_external_blob_ref(hash, value) {
-            let path = self.external_blob_path(hash).ok_or_else(|| {
+            let config = self.external_blobs.as_ref().ok_or_else(|| {
                 StoreError::Other(
                     "external LMDB blob marker found but external blobs are disabled".into(),
                 )
             })?;
-            return fs::read(path).map_err(StoreError::Io);
+            let mut file = config.open_relative(&ExternalBlobConfig::relative_blob_path(hash))?;
+            let expected_size = expected_size.ok_or_else(|| {
+                StoreError::Other("external LMDB blob is missing size metadata".into())
+            })?;
+            let capacity = usize::try_from(expected_size)
+                .map_err(|_| StoreError::Other("external LMDB blob size exceeds usize".into()))?;
+            let mut data = Vec::with_capacity(capacity.min(1024 * 1024));
+            Read::by_ref(&mut file)
+                .take(expected_size.saturating_add(1))
+                .read_to_end(&mut data)
+                .map_err(StoreError::Io)?;
+            if data.len() as u64 != expected_size
+                || file.metadata().map_err(StoreError::Io)?.len() != expected_size
+            {
+                return Err(StoreError::Other(
+                    "external LMDB blob length differs from committed metadata".into(),
+                ));
+            }
+            return Ok(data);
         }
         if let Some(pack_ref) = Self::decode_external_pack_ref(value)? {
             return self.read_external_pack_blob(&pack_ref);
@@ -2503,12 +3276,12 @@ impl LmdbBlobStore {
         start: u64,
         end_inclusive: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let path = self.external_blob_path(hash).ok_or_else(|| {
+        let config = self.external_blobs.as_ref().ok_or_else(|| {
             StoreError::Other(
                 "external LMDB blob marker found but external blobs are disabled".into(),
             )
         })?;
-        let mut file = File::open(path)?;
+        let mut file = config.open_relative(&ExternalBlobConfig::relative_blob_path(hash))?;
         let len = file.metadata()?.len();
         if len == 0 || start >= len || end_inclusive < start {
             return Ok(Some(Vec::new()));
@@ -2528,12 +3301,13 @@ impl LmdbBlobStore {
         let read_len = usize::try_from(pack_ref.len).map_err(|_| {
             StoreError::Other("external pack blob is too large to read".to_string())
         })?;
-        let path = self.external_pack_path(pack_ref).ok_or_else(|| {
+        let config = self.external_blobs.as_ref().ok_or_else(|| {
             StoreError::Other(
                 "external LMDB pack marker found but external blobs are disabled".into(),
             )
         })?;
-        let mut file = File::open(path)?;
+        let mut file =
+            config.open_relative(&ExternalBlobConfig::relative_pack_path(&pack_ref.name))?;
         file.seek(SeekFrom::Start(pack_ref.offset))?;
         let mut data = vec![0; read_len];
         file.read_exact(&mut data)?;
@@ -2555,12 +3329,13 @@ impl LmdbBlobStore {
         let read_len = usize::try_from(read_len).map_err(|_| {
             StoreError::Other("external pack blob range is too large to read".to_string())
         })?;
-        let path = self.external_pack_path(pack_ref).ok_or_else(|| {
+        let config = self.external_blobs.as_ref().ok_or_else(|| {
             StoreError::Other(
                 "external LMDB pack marker found but external blobs are disabled".into(),
             )
         })?;
-        let mut file = File::open(path)?;
+        let mut file =
+            config.open_relative(&ExternalBlobConfig::relative_pack_path(&pack_ref.name))?;
         file.seek(SeekFrom::Start(pack_ref.offset.saturating_add(start)))?;
         let mut data = vec![0; read_len];
         file.read_exact(&mut data)?;
@@ -2598,6 +3373,14 @@ impl LmdbBlobStore {
 
     fn remove_external_blob_file(&self, path: Option<PathBuf>) {
         if let Some(path) = path {
+            if let Some(config) = &self.external_blobs {
+                if let Some(root) = &config.pinned_root {
+                    if let Ok(relative) = path.strip_prefix(&config.base_path) {
+                        let _ = root.remove_file(relative, config.sync);
+                        return;
+                    }
+                }
+            }
             let _ = fs::remove_file(path);
         }
     }
@@ -2804,6 +3587,88 @@ mod tests {
     #[cfg(unix)]
     const TEST_MAX_READERS: u32 = 4;
 
+    #[cfg(target_os = "linux")]
+    fn generated_pinned_external_root(
+        path: &Path,
+    ) -> Result<(File, Arc<PinnedExternalRoot>), StoreError> {
+        std::fs::create_dir(path).map_err(StoreError::Io)?;
+        let retained = File::open(path).map_err(StoreError::Io)?;
+        let config = ExternalBlobConfig {
+            base_path: PathBuf::from(format!("/proc/self/fd/{}", retained.as_raw_fd())),
+            min_bytes: 1,
+            sync: true,
+            pack_target_bytes: None,
+            pinned_root: None,
+        }
+        .prepare_runtime()?;
+        Ok((
+            retained,
+            config
+                .pinned_root
+                .expect("Linux procfd external root is pinned"),
+        ))
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_external_publication_uses_retained_unnamed_file() -> Result<(), StoreError> {
+        let temp = TempDir::new().map_err(StoreError::Io)?;
+        let root_path = temp.path().join("external");
+        let (_retained, root) = generated_pinned_external_root(&root_path)?;
+        let data = b"generated pinned O_TMPFILE publication";
+        let hash = sha256(data);
+        let relative = Path::new("aa").join("bb").join("blob");
+
+        root.write_blob(&relative, data, &hash, true)?;
+        root.write_blob(&relative, data, &hash, true)?;
+
+        assert_eq!(
+            std::fs::read(root_path.join(&relative)).map_err(StoreError::Io)?,
+            data
+        );
+        assert!(
+            std::fs::read_dir(root_path.join("aa").join("bb"))
+                .map_err(StoreError::Io)?
+                .all(|entry| {
+                    !entry
+                        .expect("generated external directory entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with(".hashtree-external.tmp.")
+                }),
+            "pinned publication must never expose a mutable named temporary"
+        );
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn pinned_external_intermediate_symlink_cannot_touch_victim() -> Result<(), StoreError> {
+        let temp = TempDir::new().map_err(StoreError::Io)?;
+        let root_path = temp.path().join("external");
+        let victim = temp.path().join("victim");
+        std::fs::create_dir(&victim).map_err(StoreError::Io)?;
+        let (_retained, root) = generated_pinned_external_root(&root_path)?;
+        std::os::unix::fs::symlink(&victim, root_path.join("aa")).map_err(StoreError::Io)?;
+        let data = b"generated symlink rejection";
+        let hash = sha256(data);
+
+        let error = root
+            .write_blob(Path::new("aa/bb/blob"), data, &hash, true)
+            .expect_err("pinned external traversal followed an intermediate symlink");
+        assert!(
+            error.to_string().contains("Too many levels")
+                || error.to_string().contains("Not a directory"),
+            "unexpected pinned symlink error: {error}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&victim).map_err(StoreError::Io)?.count(),
+            0,
+            "failed pinned write touched the symlink victim"
+        );
+        Ok(())
+    }
+
     fn count_files_under(path: &std::path::Path) -> std::io::Result<usize> {
         if !path.exists() {
             return Ok(0);
@@ -2912,6 +3777,7 @@ mod tests {
                     min_bytes: 8,
                     sync: false,
                     pack_target_bytes: None,
+                    pinned_root: None,
                 })
             },
         )?;
@@ -2971,6 +3837,7 @@ mod tests {
                     min_bytes: 8,
                     sync: true,
                     pack_target_bytes: Some(1024 * 1024),
+                    pinned_root: None,
                 })
             },
         )?;
@@ -3149,6 +4016,52 @@ mod tests {
             assert_eq!(exists, *hash == h1 || *hash == h2);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_migration_keyset_rejects_mixed_legacy_and_metadata_rows() -> Result<(), StoreError>
+    {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("blobs");
+        let legacy_data = b"legacy blob without metadata";
+        let legacy_hash = sha256(legacy_data);
+        let new_data = b"new blob with metadata";
+        let new_hash = sha256(new_data);
+
+        let store = LmdbBlobStore::new(&path)?;
+        store.put_sync(legacy_hash, legacy_data)?;
+        let mut wtxn = store.env.write_txn().map_err(map_heed_error)?;
+        store
+            .metadata
+            .delete(&mut wtxn, &legacy_hash)
+            .map_err(map_heed_error)?;
+        wtxn.commit().map_err(map_heed_error)?;
+        store.force_sync()?;
+        drop(store);
+
+        let legacy_reader = LmdbBlobReader::open(&path, None)?;
+        let legacy_audit = legacy_reader.validate_terminal_migration_keyset()?;
+        assert_eq!(legacy_audit.blob_entries, 1);
+        assert_eq!(legacy_audit.metadata_entries, 0);
+        assert!(legacy_audit.legacy_blob_only);
+        drop(legacy_reader);
+
+        let store = LmdbBlobStore::new(&path)?;
+        store.put_sync(new_hash, new_data)?;
+        store.force_sync()?;
+        drop(store);
+
+        let mixed_reader = LmdbBlobReader::open(&path, None)?;
+        assert_eq!(
+            mixed_reader.scan_hashes_after(None, 8)?,
+            vec![new_hash],
+            "compact migration scan demonstrates why the terminal proof is required"
+        );
+        let error = mixed_reader
+            .validate_terminal_migration_keyset()
+            .expect_err("mixed legacy/metadata key sets must withhold completion");
+        assert!(error.to_string().contains("has no metadata row"));
         Ok(())
     }
 

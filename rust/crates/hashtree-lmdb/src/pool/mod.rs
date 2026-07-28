@@ -23,20 +23,24 @@ use self::gate::ConcurrencyGate;
 use self::member::{open_member_store, prepare_member_paths, validate_member_config};
 use self::model::{LocationRecord, MemberRecord, PoolManifest, MIN_MEMBER_MAP_SIZE_BYTES};
 pub use self::model::{
-    PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolMemberStatus,
-    PoolStoreConfig, PoolTemperatureConfig, PoolTemperatureReport,
+    PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberRuntimePaths, PoolMemberState,
+    PoolMemberStatus, PoolStalePending, PoolStalePendingCleanupReport, PoolStoreConfig,
+    PoolTemperatureConfig, PoolTemperatureReport,
 };
-use self::move_catalog::rebuild_move_cleanup_member_index_txn;
+use self::move_catalog::{
+    move_cleanup_state_key, move_state_key, rebuild_move_cleanup_member_index_txn,
+};
 pub use self::read_only::{ReadOnlyPoolCatalogAudit, ReadOnlyPoolStore};
 pub use self::reader::{
     PoolCatalogLocation, PoolManifestIdentity, PoolReadBatchItem, PoolStoreReader,
+    PoolTerminalAudit,
 };
 use self::temperature::TemperatureRuntime;
 use self::temperature_worker::TemperatureWorker;
-use crate::{managed_env::ManagedEnv, LmdbBlobStore};
+use crate::{managed_env::ManagedEnv, pinned_lmdb_data_len, LmdbBlobStore};
 use async_trait::async_trait;
 use hashtree_core::store::{slice_blob_range, PutManyReport, Store, StoreError, StoreStats};
-use hashtree_core::{sha256, types::Hash};
+use hashtree_core::{sha256, to_hex, types::Hash};
 use heed::types::{Bytes, Unit};
 use heed::{Database, EnvOpenOptions};
 use std::collections::{HashMap, HashSet};
@@ -52,6 +56,7 @@ const CATALOG_MAX_READERS: u32 = 1024;
 const MANIFEST_KEY: &[u8] = b"pool-manifest-v1";
 const MEMBER_MARKER_NAME: &str = ".hashtree-pool-member-v1";
 const EXTERNAL_MARKER_NAME: &str = ".hashtree-pool-external-v1";
+const MAX_STALE_PENDING_CLEANUP_ITEMS: usize = 4_096;
 
 #[derive(Default)]
 struct RuntimeMembers {
@@ -84,6 +89,8 @@ pub struct PoolStoreInner {
     temperature_owner: PoolMemberId,
     temperature_cycle: Mutex<()>,
     temperature_worker: TemperatureWorker,
+    member_runtime_paths: HashMap<PoolMemberId, PoolMemberRuntimePaths>,
+    expected_manifest_sha256: Option<Hash>,
 }
 
 impl Deref for PoolStore {
@@ -123,14 +130,114 @@ fn validate_new_member_paths(
     Ok(())
 }
 
+fn open_required_catalog_database<K: 'static, D: 'static>(
+    env: &ManagedEnv,
+    txn: &heed::RoTxn<'_>,
+    name: &str,
+) -> Result<Database<K, D>, StoreError> {
+    env.open_database(txn, Some(name))
+        .map_err(map_heed)?
+        .ok_or_else(|| StoreError::Other(format!("pool {name} database is missing")))
+}
+
+fn validate_controlled_manifest(
+    bytes: &[u8],
+    expected_sha256: Hash,
+    bindings: &HashMap<PoolMemberId, PoolMemberRuntimePaths>,
+) -> Result<PoolManifest, StoreError> {
+    let actual_sha256 = sha256(bytes);
+    if actual_sha256 != expected_sha256 {
+        return Err(StoreError::Other(format!(
+            "live pool manifest SHA-256 differs from controlled authority: expected {}, found {}",
+            to_hex(&expected_sha256),
+            to_hex(&actual_sha256)
+        )));
+    }
+    let manifest = decode_manifest(bytes)?;
+    validate_controlled_manifest_members(&manifest, bindings)?;
+    Ok(manifest)
+}
+
+fn validate_controlled_manifest_members(
+    manifest: &PoolManifest,
+    bindings: &HashMap<PoolMemberId, PoolMemberRuntimePaths>,
+) -> Result<(), StoreError> {
+    if bindings.len() != manifest.members.len() {
+        return Err(StoreError::Other(format!(
+            "pinned pool topology has {} members, live manifest has {}",
+            bindings.len(),
+            manifest.members.len()
+        )));
+    }
+    for member in &manifest.members {
+        let binding = bindings.get(&member.id).ok_or_else(|| {
+            StoreError::Other(format!(
+                "live pool member {} is absent from pinned topology",
+                member.id
+            ))
+        })?;
+        if binding.configured_path != member.config.path
+            || binding.configured_external_path != member.config.external_blob_dir
+        {
+            return Err(StoreError::Other(format!(
+                "live pool member {} paths differ from pinned topology",
+                member.id
+            )));
+        }
+        if !member.config.external_blob_sync {
+            return Err(StoreError::Other(format!(
+                "controlled migration requires external_blob_sync=true for pool member {}",
+                member.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 impl PoolStore {
     pub fn open<P: AsRef<Path>>(path: P, config: PoolStoreConfig) -> Result<Self, StoreError> {
         config.temperature.validate()?;
+        let mut member_runtime_paths = HashMap::new();
+        for binding in &config.member_runtime_paths {
+            if member_runtime_paths
+                .insert(binding.id, binding.clone())
+                .is_some()
+            {
+                return Err(StoreError::Other(format!(
+                    "duplicate runtime path binding for pool member {}",
+                    binding.id
+                )));
+            }
+            if binding.configured_external_path.is_some() != binding.runtime_external_path.is_some()
+            {
+                return Err(StoreError::Other(format!(
+                    "incomplete external runtime path binding for pool member {}",
+                    binding.id
+                )));
+            }
+        }
+        let controlled = !member_runtime_paths.is_empty()
+            || config.catalog_lmdb_identity.is_some()
+            || config.expected_manifest_sha256.is_some();
+        if controlled
+            && (member_runtime_paths.is_empty()
+                || config.catalog_lmdb_identity.is_none()
+                || config.expected_manifest_sha256.is_none())
+        {
+            return Err(StoreError::Other(
+                "controlled Pool open requires catalog identity, exact manifest SHA-256, and every member runtime binding".into(),
+            ));
+        }
         let path = path.as_ref();
-        fs::create_dir_all(path).map_err(StoreError::Io)?;
-        let existing_size = fs::metadata(path.join("data.mdb"))
-            .map(|metadata| metadata.len())
-            .unwrap_or(0);
+        if !controlled {
+            fs::create_dir_all(path).map_err(StoreError::Io)?;
+        }
+        let existing_size = match config.catalog_lmdb_identity {
+            Some(identity) => pinned_lmdb_data_len(path, identity)?,
+            None => fs::metadata(path.join("data.mdb"))
+                .map(|metadata| metadata.len())
+                .unwrap_or(0),
+        };
         let requested = config
             .catalog_map_size_bytes
             .max(existing_size.saturating_add(existing_size / 10))
@@ -146,42 +253,102 @@ impl PoolStore {
         unsafe {
             options.flags(super::env_flags_from_env());
         }
-        let env = unsafe { ManagedEnv::open(&options, path) }.map_err(|error| {
+        let env = unsafe {
+            match config.catalog_lmdb_identity {
+                Some(identity) => ManagedEnv::open_pinned(&options, path, identity),
+                None => ManagedEnv::open(&options, path),
+            }
+        }
+        .map_err(|error| {
             StoreError::Other(format!("open pool catalog {}: {error}", path.display()))
         })?;
         let _ = env.clear_stale_readers();
+        let (manifest_db, locations, by_member, pins, last_accessed, temperature_state) =
+            if controlled {
+                let rtxn = env.read_txn().map_err(map_heed)?;
+                let manifest_db: Database<Bytes, Bytes> =
+                    open_required_catalog_database(&env, &rtxn, "manifest")?;
+                let locations: Database<Bytes, Bytes> =
+                    open_required_catalog_database(&env, &rtxn, "locations")?;
+                let by_member: Database<Bytes, Unit> =
+                    open_required_catalog_database(&env, &rtxn, "by_member")?;
+                let pins: Database<Bytes, Bytes> =
+                    open_required_catalog_database(&env, &rtxn, "pins")?;
+                let last_accessed: Database<Bytes, Bytes> =
+                    open_required_catalog_database(&env, &rtxn, "last_accessed")?;
+                let temperature_state: Database<Bytes, Bytes> =
+                    open_required_catalog_database(&env, &rtxn, "temperature_state")?;
+                let manifest_bytes = manifest_db
+                    .get(&rtxn, MANIFEST_KEY)
+                    .map_err(map_heed)?
+                    .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
+                validate_controlled_manifest(
+                    manifest_bytes,
+                    config
+                        .expected_manifest_sha256
+                        .expect("controlled manifest identity checked above"),
+                    &member_runtime_paths,
+                )?;
+                rtxn.commit().map_err(map_heed)?;
+                (
+                    manifest_db,
+                    locations,
+                    by_member,
+                    pins,
+                    last_accessed,
+                    temperature_state,
+                )
+            } else {
+                let mut wtxn = env.write_txn().map_err(map_heed)?;
+                let manifest_db = env
+                    .create_database(&mut wtxn, Some("manifest"))
+                    .map_err(map_heed)?;
+                let locations = env
+                    .create_database(&mut wtxn, Some("locations"))
+                    .map_err(map_heed)?;
+                let by_member = env
+                    .create_database(&mut wtxn, Some("by_member"))
+                    .map_err(map_heed)?;
+                let pins = env
+                    .create_database(&mut wtxn, Some("pins"))
+                    .map_err(map_heed)?;
+                let last_accessed = env
+                    .create_database(&mut wtxn, Some("last_accessed"))
+                    .map_err(map_heed)?;
+                let temperature_state = env
+                    .create_database(&mut wtxn, Some("temperature_state"))
+                    .map_err(map_heed)?;
+                if manifest_db
+                    .get(&wtxn, MANIFEST_KEY)
+                    .map_err(map_heed)?
+                    .is_none()
+                {
+                    let bytes = encode_manifest(&PoolManifest::default())?;
+                    manifest_db
+                        .put(&mut wtxn, MANIFEST_KEY, bytes.as_slice())
+                        .map_err(map_heed)?;
+                }
+                wtxn.commit().map_err(map_heed)?;
+                (
+                    manifest_db,
+                    locations,
+                    by_member,
+                    pins,
+                    last_accessed,
+                    temperature_state,
+                )
+            };
         if env.info().map_size < map_size {
             unsafe { env.resize(map_size) }.map_err(map_heed)?;
         }
 
         let mut wtxn = env.write_txn().map_err(map_heed)?;
-        let manifest_db = env
-            .create_database(&mut wtxn, Some("manifest"))
-            .map_err(map_heed)?;
-        let locations = env
-            .create_database(&mut wtxn, Some("locations"))
-            .map_err(map_heed)?;
-        let by_member = env
-            .create_database(&mut wtxn, Some("by_member"))
-            .map_err(map_heed)?;
-        let pins = env
-            .create_database(&mut wtxn, Some("pins"))
-            .map_err(map_heed)?;
-        let last_accessed = env
-            .create_database(&mut wtxn, Some("last_accessed"))
-            .map_err(map_heed)?;
-        let temperature_state = env
-            .create_database(&mut wtxn, Some("temperature_state"))
-            .map_err(map_heed)?;
-        if manifest_db
-            .get(&wtxn, MANIFEST_KEY)
-            .map_err(map_heed)?
-            .is_none()
-        {
-            let bytes = encode_manifest(&PoolManifest::default())?;
-            manifest_db
-                .put(&mut wtxn, MANIFEST_KEY, bytes.as_slice())
-                .map_err(map_heed)?;
+        if let Some(expected) = config.expected_manifest_sha256 {
+            let manifest_bytes = manifest_db
+                .get(&wtxn, MANIFEST_KEY)
+                .map_err(map_heed)?
+                .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
+            validate_controlled_manifest(manifest_bytes, expected, &member_runtime_paths)?;
         }
         let cleanup_rebuild_started = Instant::now();
         let cleanup_rebuild_count =
@@ -215,6 +382,8 @@ impl PoolStore {
                 temperature_owner: PoolMemberId::new(),
                 temperature_cycle: Mutex::new(()),
                 temperature_worker: TemperatureWorker::default(),
+                member_runtime_paths,
+                expected_manifest_sha256: config.expected_manifest_sha256,
             }),
         };
         store.refresh_members()?;
@@ -262,6 +431,11 @@ impl PoolStore {
         config: PoolMemberConfig,
         only_if_empty: bool,
     ) -> Result<Option<PoolMemberId>, StoreError> {
+        if !self.member_runtime_paths.is_empty() {
+            return Err(StoreError::Other(
+                "cannot change pool membership while exact runtime paths are pinned".into(),
+            ));
+        }
         validate_member_config(&config)?;
         let wtxn = self.env.write_txn().map_err(map_heed)?;
         let manifest = self.manifest_from_txn(&wtxn)?;
@@ -273,7 +447,7 @@ impl PoolStore {
         validate_new_member_paths(&manifest, &config)?;
         let id = prepare_member_paths(&config, PoolMemberId::new())?;
         drop(wtxn);
-        let store = Arc::new(open_member_store(id, &config)?);
+        let store = Arc::new(open_member_store(id, &config, None)?);
 
         let mut wtxn = self.env.write_txn().map_err(map_heed)?;
         let mut manifest = self.manifest_from_txn(&wtxn)?;
@@ -861,6 +1035,234 @@ impl PoolStore {
         Ok(located.len())
     }
 
+    /// Clear one exact, bounded set of crash-abandoned `Pending` records.
+    ///
+    /// This is deliberately narrower than [`Self::delete_many_sync`]: every
+    /// live location must still equal the authorized `(hash, member, size)`,
+    /// no hash may be pinned or owned by a move, and no member may contain a
+    /// physical record for the hash. The catalog and all secondary indexes
+    /// change in one transaction and are force-synced before success.
+    ///
+    /// A caller must stop and fence **every** Pool writer before its strict
+    /// read-only audit and keep that fence through this call. This includes
+    /// clones and handles in this process: a writer can commit `Pending`, pause
+    /// before entering its member gate, and otherwise resume after cleanup.
+    /// Catalog and member LMDB environments do not provide one atomic
+    /// cross-environment transaction, so this method intentionally makes no
+    /// online-safety claim.
+    pub fn cleanup_stale_pending_exact_offline_sync(
+        &self,
+        expected: &[PoolStalePending],
+    ) -> Result<PoolStalePendingCleanupReport, StoreError> {
+        if expected.is_empty() || expected.len() > MAX_STALE_PENDING_CLEANUP_ITEMS {
+            return Err(StoreError::Other(format!(
+                "stale Pending cleanup requires 1..={MAX_STALE_PENDING_CLEANUP_ITEMS} exact records"
+            )));
+        }
+        if self.expected_manifest_sha256.is_none() || self.member_runtime_paths.is_empty() {
+            return Err(StoreError::Other(
+                "stale Pending cleanup requires a controlled Pool open".into(),
+            ));
+        }
+        if self.temperature_config.enabled {
+            return Err(StoreError::Other(
+                "stale Pending cleanup requires temperature tracking to be disabled".into(),
+            ));
+        }
+        if expected.windows(2).any(|pair| pair[0].hash >= pair[1].hash) {
+            return Err(StoreError::Other(
+                "stale Pending cleanup records must be strictly hash-sorted and unique".into(),
+            ));
+        }
+        let declared_bytes = expected.iter().try_fold(0u64, |total, item| {
+            total.checked_add(item.size).ok_or_else(|| {
+                StoreError::Other("stale Pending declared byte total overflow".into())
+            })
+        })?;
+
+        self.validate_controlled_authority_and_sync()?;
+
+        let mut member_ids = expected.iter().map(|item| item.member).collect::<Vec<_>>();
+        member_ids.sort_unstable();
+        member_ids.dedup();
+        let member_resources = member_ids
+            .iter()
+            .map(|member| {
+                Ok((
+                    *member,
+                    self.get_member(*member)?,
+                    self.member_gate(*member, true)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let _exclusive_permits = member_resources
+            .iter()
+            .map(|(_, _, gate)| gate.acquire_exclusive())
+            .collect::<Result<Vec<_>, StoreError>>()?;
+
+        let ensure_physically_absent = || -> Result<(), StoreError> {
+            for (member, store, _) in &member_resources {
+                let hashes = expected
+                    .iter()
+                    .filter(|item| item.member == *member)
+                    .map(|item| item.hash)
+                    .collect::<Vec<_>>();
+                let present = store.existing_hashes_in_sorted_candidates(&hashes)?;
+                if let Some(hash) = hashes
+                    .iter()
+                    .zip(present)
+                    .find_map(|(hash, present)| present.then_some(hash))
+                {
+                    return Err(StoreError::Other(format!(
+                        "stale Pending cleanup rejected physically present member record {} on {member}",
+                        to_hex(hash)
+                    )));
+                }
+            }
+            Ok(())
+        };
+        ensure_physically_absent()?;
+
+        let mut wtxn = self.env.write_txn().map_err(map_heed)?;
+        let mut exact_pending = 0usize;
+        let mut already_missing = 0usize;
+        for item in expected {
+            let current = self
+                .locations
+                .get(&wtxn, &item.hash)
+                .map_err(map_heed)?
+                .map(LocationRecord::decode)
+                .transpose()?;
+            let authorized = LocationRecord::Pending {
+                member: item.member,
+                size: item.size,
+            };
+            match current {
+                Some(current) if current == authorized => {
+                    exact_pending = exact_pending.saturating_add(1);
+                    if self
+                        .by_member
+                        .get(&wtxn, &member_hash_key(item.member, item.hash))
+                        .map_err(map_heed)?
+                        .is_none()
+                    {
+                        return Err(StoreError::Other(format!(
+                            "stale Pending cleanup found a missing member index for {}",
+                            to_hex(&item.hash)
+                        )));
+                    }
+                }
+                None => {
+                    already_missing = already_missing.saturating_add(1);
+                    if self
+                        .by_member
+                        .get(&wtxn, &member_hash_key(item.member, item.hash))
+                        .map_err(map_heed)?
+                        .is_some()
+                        || self
+                            .last_accessed
+                            .get(&wtxn, &item.hash)
+                            .map_err(map_heed)?
+                            .is_some()
+                    {
+                        return Err(StoreError::Other(format!(
+                            "already-cleared stale Pending record {} retains catalog indexes",
+                            to_hex(&item.hash)
+                        )));
+                    }
+                }
+                current => {
+                    return Err(StoreError::Other(format!(
+                        "stale Pending authority no longer matches {}: expected {authorized:?}, found {current:?}",
+                        to_hex(&item.hash)
+                    )));
+                }
+            }
+            let pin_count = self
+                .pins
+                .get(&wtxn, &item.hash)
+                .map_err(map_heed)?
+                .map(decode_pin_count)
+                .transpose()?
+                .unwrap_or(0);
+            if pin_count != 0 {
+                return Err(StoreError::Other(format!(
+                    "stale Pending cleanup rejected pinned hash {}",
+                    to_hex(&item.hash)
+                )));
+            }
+            if self
+                .temperature_state
+                .get(&wtxn, &move_state_key(item.hash))
+                .map_err(map_heed)?
+                .is_some()
+                || self
+                    .temperature_state
+                    .get(&wtxn, &move_cleanup_state_key(item.hash))
+                    .map_err(map_heed)?
+                    .is_some()
+            {
+                return Err(StoreError::Other(format!(
+                    "stale Pending cleanup rejected move-owned hash {}",
+                    to_hex(&item.hash)
+                )));
+            }
+        }
+        if exact_pending != 0 && already_missing != 0 {
+            return Err(StoreError::Other(
+                "stale Pending cleanup refuses a partially changed authority set".into(),
+            ));
+        }
+
+        // Repeat the cross-environment absence proof as late as possible. The
+        // operational writer fence remains mandatory for other Pool handles.
+        ensure_physically_absent()?;
+        if exact_pending != 0 {
+            for item in expected {
+                self.set_location_txn(&mut wtxn, item.hash, None)?;
+                self.pins.delete(&mut wtxn, &item.hash).map_err(map_heed)?;
+            }
+        }
+        wtxn.commit().map_err(map_heed)?;
+        self.validate_controlled_authority_and_sync()?;
+
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        for item in expected {
+            if self
+                .locations
+                .get(&rtxn, &item.hash)
+                .map_err(map_heed)?
+                .is_some()
+                || self
+                    .by_member
+                    .get(&rtxn, &member_hash_key(item.member, item.hash))
+                    .map_err(map_heed)?
+                    .is_some()
+                || self
+                    .pins
+                    .get(&rtxn, &item.hash)
+                    .map_err(map_heed)?
+                    .is_some()
+                || self
+                    .last_accessed
+                    .get(&rtxn, &item.hash)
+                    .map_err(map_heed)?
+                    .is_some()
+            {
+                return Err(StoreError::Other(format!(
+                    "stale Pending cleanup did not durably clear {}",
+                    to_hex(&item.hash)
+                )));
+            }
+        }
+        rtxn.commit().map_err(map_heed)?;
+        Ok(PoolStalePendingCleanupReport {
+            requested: expected.len(),
+            declared_bytes,
+            already_cleaned: exact_pending == 0,
+        })
+    }
+
     pub fn pin_sync(&self, hash: &Hash) -> Result<(), StoreError> {
         let mut wtxn = self.env.write_txn().map_err(map_heed)?;
         let previous = self
@@ -1095,8 +1497,45 @@ impl PoolStore {
         Ok(())
     }
 
+    /// Revalidate every controlled authority and force the catalog/member
+    /// commits durable before an external migration cursor may advance.
+    pub fn validate_controlled_authority_and_sync(&self) -> Result<(), StoreError> {
+        if self.expected_manifest_sha256.is_none() {
+            return Err(StoreError::Other(
+                "controlled authority validation requires an exact manifest SHA-256".into(),
+            ));
+        }
+        self.refresh_members()?;
+        self.env.force_sync().map_err(map_heed)?;
+        {
+            let runtime = self
+                .runtime
+                .read()
+                .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
+            if runtime.stores.len() != self.member_runtime_paths.len() {
+                return Err(StoreError::Other(
+                    "not every authority-pinned Pool member is open".into(),
+                ));
+            }
+            for store in runtime.stores.values() {
+                store.force_sync()?;
+            }
+        }
+        self.refresh_members()
+    }
+
     fn refresh_members(&self) -> Result<(), StoreError> {
-        let manifest = self.read_manifest()?;
+        let (manifest, manifest_sha256) = self.read_manifest_with_identity()?;
+        if let Some(expected) = self.expected_manifest_sha256 {
+            if manifest_sha256 != expected {
+                return Err(StoreError::Other(format!(
+                    "live pool manifest SHA-256 differs from controlled authority: expected {}, found {}",
+                    to_hex(&expected),
+                    to_hex(&manifest_sha256)
+                )));
+            }
+            validate_controlled_manifest_members(&manifest, &self.member_runtime_paths)?;
+        }
         let mut runtime = self
             .runtime
             .write()
@@ -1134,12 +1573,23 @@ impl PoolStore {
             if runtime.stores.contains_key(&member.id) {
                 continue;
             }
-            match open_member_store(member.id, &member.config) {
+            let config = self.runtime_member_config(member)?;
+            let pinned_identity = self
+                .member_runtime_paths
+                .get(&member.id)
+                .map(|binding| binding.lmdb_identity);
+            match open_member_store(member.id, &config, pinned_identity) {
                 Ok(store) => {
                     runtime.stores.insert(member.id, Arc::new(store));
                     runtime.errors.remove(&member.id);
                 }
                 Err(error) => {
+                    if self.expected_manifest_sha256.is_some() {
+                        return Err(StoreError::Other(format!(
+                            "controlled Pool member {} failed its exact open: {error}",
+                            member.id
+                        )));
+                    }
                     runtime.errors.insert(member.id, error.to_string());
                 }
             }
@@ -1151,6 +1601,30 @@ impl PoolStore {
             .map_err(|_| StoreError::Other("pool adaptive lock poisoned".into()))?
             .retain(&configured);
         Ok(())
+    }
+
+    fn runtime_member_config(&self, member: &MemberRecord) -> Result<PoolMemberConfig, StoreError> {
+        let Some(binding) = self.member_runtime_paths.get(&member.id) else {
+            if self.member_runtime_paths.is_empty() {
+                return Ok(member.config.clone());
+            }
+            return Err(StoreError::Other(format!(
+                "pool member {} has no pinned runtime path",
+                member.id
+            )));
+        };
+        if binding.configured_path != member.config.path
+            || binding.configured_external_path != member.config.external_blob_dir
+        {
+            return Err(StoreError::Other(format!(
+                "pool member {} paths differ from pinned runtime authority",
+                member.id
+            )));
+        }
+        let mut config = member.config.clone();
+        config.path = binding.runtime_path.clone();
+        config.external_blob_dir = binding.runtime_external_path.clone();
+        Ok(config)
     }
 
     fn get_member(&self, id: PoolMemberId) -> Result<Arc<LmdbBlobStore>, StoreError> {
@@ -1172,7 +1646,12 @@ impl PoolStore {
             .into_iter()
             .find(|member| member.id == id)
             .ok_or_else(|| StoreError::Other(format!("unknown pool member {id}")))?;
-        match open_member_store(id, &member.config) {
+        let config = self.runtime_member_config(&member)?;
+        let pinned_identity = self
+            .member_runtime_paths
+            .get(&id)
+            .map(|binding| binding.lmdb_identity);
+        match open_member_store(id, &config, pinned_identity) {
             Ok(store) => {
                 let store = Arc::new(store);
                 let mut runtime = self

@@ -7,7 +7,7 @@ lane="all"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/release-gate.sh [--fast] [--lane static|typescript|rust|rust-peripheral|fips]
+Usage: scripts/release-gate.sh [--fast] [--lane static|typescript|rust|rust-peripheral|fips|pool-migration-systemd]
 
 Runs the complete pre-publish gate by default. Independent static and
 TypeScript checks overlap the main Rust lane; dependency-heavy peripheral and
@@ -41,7 +41,7 @@ while (( $# > 0 )); do
 done
 
 case "$lane" in
-  all|static|typescript|rust|rust-peripheral|fips) ;;
+  all|static|typescript|rust|rust-peripheral|fips|pool-migration-systemd) ;;
   *)
     echo "Unknown release gate lane: $lane" >&2
     exit 1
@@ -91,7 +91,42 @@ run_static_gate() {
   bash "$repo_root/rust/tests/test_build_release_invocation.sh" || return $?
   bash "$repo_root/rust/tests/test_build_release_docker_invocation.sh" || return $?
   bash "$repo_root/rust/tests/test_release_webrtc_smoke.sh" || return $?
+  bash "$repo_root/packaging/systemd/tests/test_pool_migration_service.sh" || return $?
   node --test "$repo_root/rust/tests/test_build_windows_vm_artifacts.mjs" || return $?
+}
+
+run_pool_migration_systemd_gate() {
+  if [[ "$(uname -s)" != "Linux" ]]; then
+    echo "Pool migration systemd gate is Linux-only; skipped on $(uname -s)"
+    return
+  fi
+  [[ -d /run/systemd/system ]] || {
+    echo "Pool migration systemd gate requires a running system manager" >&2
+    return 1
+  }
+  command -v sudo >/dev/null || {
+    echo "Pool migration systemd gate requires passwordless sudo" >&2
+    return 1
+  }
+  (
+    cd "$repo_root/rust" || exit $?
+    cargo build --locked -p hashtree-cli --bin htree || exit $?
+    bash tests/test_unified_lmdb_link.sh || exit $?
+    cargo test --locked -p hashtree-lmdb \
+      c_open_rejects_data_and_lock_swapped_after_rust_precheck \
+      -- --test-threads=1 || exit $?
+    cargo test --locked -p hashtree-lmdb \
+      pinned_external_ \
+      -- --test-threads=1 || exit $?
+    cargo test --locked -p hashtree-lmdb \
+      exact_offline_stale_pending_cleanup_is_atomic_and_idempotent \
+      -- --test-threads=1 || exit $?
+    cargo test --locked -p hashtree-cli --bin htree \
+      cursor_parent_lease_serializes_independent_open_descriptions \
+      -- --test-threads=1 || exit $?
+    cargo test --locked -p hashtree-cli --test pool_migration \
+      -- --ignored --test-threads=1 || exit $?
+  )
 }
 
 run_typescript_gate() {
@@ -214,6 +249,7 @@ run_all_gates() {
     echo "Release gate lane failed (fips=$fips_status rust-peripheral=$peripheral_status)" >&2
     return 1
   fi
+  run_pool_migration_systemd_gate || return $?
 }
 
 case "$lane" in
@@ -223,6 +259,7 @@ case "$lane" in
   rust) run_rust_gate ;;
   rust-peripheral) run_rust_peripheral_gate ;;
   fips) run_fips_gate ;;
+  pool-migration-systemd) run_pool_migration_systemd_gate ;;
 esac
 
 echo "Hashtree ${mode} release gate (${lane}) passed"

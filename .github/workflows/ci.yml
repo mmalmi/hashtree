@@ -61,6 +61,40 @@ jobs:
       - name: Run static release gate
         run: bash scripts/release-gate.sh --lane static
 
+  pool-migration-systemd:
+    name: Pool Migration Systemd
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libdbus-1-dev \
+            libfuse3-dev \
+            pkg-config
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: ${{ runner.os }}-cargo-pool-migration-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-pool-migration-
+            ${{ runner.os }}-cargo-
+
+      - name: Run Pool migration systemd gate
+        run: bash scripts/release-gate.sh --lane pool-migration-systemd
+
   rust-tests:
     name: Rust Tests
     runs-on: ubuntu-latest

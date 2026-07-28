@@ -1,15 +1,20 @@
 use super::member::open_member_reader;
 use super::{
-    decode_manifest, map_heed, LocationRecord, PoolManifest, PoolMemberId, PoolStoreConfig,
-    MANIFEST_KEY,
+    decode_manifest, map_heed, validate_controlled_manifest, LocationRecord, PoolManifest,
+    PoolMemberId, PoolStoreConfig, MANIFEST_KEY,
 };
 use crate::{managed_env::ManagedEnv, LmdbBlobReader};
 use hashtree_core::store::StoreError;
 use hashtree_core::{sha256, types::Hash};
 use heed::types::Bytes;
 use heed::{Database, EnvFlags, EnvOpenOptions};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
+
+const TERMINAL_AUDIT_BATCH_ITEMS: usize = 4_096;
+const TERMINAL_AUDIT_BATCH_BYTES: u64 = 64 * 1024 * 1024;
 
 /// Strictly read-only view of a PoolStore for exhaustive validation.
 ///
@@ -20,7 +25,11 @@ use std::path::Path;
 /// any catalog or member bytes.
 pub struct PoolStoreReader {
     env: ManagedEnv,
+    manifest: Database<Bytes, Bytes>,
+    opened_manifest_bytes: Vec<u8>,
     locations: Database<Bytes, Bytes>,
+    by_member: Database<Bytes, heed::types::Unit>,
+    temperature_state: Database<Bytes, Bytes>,
     manifest_identity: PoolManifestIdentity,
     member_ids: Vec<PoolMemberId>,
     members: HashMap<PoolMemberId, LmdbBlobReader>,
@@ -34,6 +43,16 @@ pub struct PoolReadBatchItem {
     pub declared_size: Option<u64>,
     pub data: Option<Vec<u8>>,
     pub error: Option<String>,
+}
+
+/// Exhaustive terminal-state proof for a controlled Pool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolTerminalAudit {
+    pub stored_locations: u64,
+    pub stored_bytes: u64,
+    pub catalog_sha256: Hash,
+    pub payload_sha256: Hash,
+    pub manifest_sha256: Hash,
 }
 
 /// Exact, read-only Pool catalog state for one blob.
@@ -118,6 +137,29 @@ impl PoolStoreReader {
             ));
         }
 
+        let mut member_runtime_paths = config
+            .member_runtime_paths
+            .iter()
+            .map(|binding| (binding.id, binding.clone()))
+            .collect::<HashMap<_, _>>();
+        if member_runtime_paths.len() != config.member_runtime_paths.len() {
+            return Err(StoreError::Other(
+                "duplicate runtime path binding for controlled Pool reader".into(),
+            ));
+        }
+        let controlled = !member_runtime_paths.is_empty()
+            || config.catalog_lmdb_identity.is_some()
+            || config.expected_manifest_sha256.is_some();
+        if controlled
+            && (member_runtime_paths.is_empty()
+                || config.catalog_lmdb_identity.is_none()
+                || config.expected_manifest_sha256.is_none())
+        {
+            return Err(StoreError::Other(
+                "controlled Pool reader requires catalog identity, exact manifest SHA-256, and every member runtime binding".into(),
+            ));
+        }
+
         let mut options = EnvOpenOptions::new();
         options.max_dbs(super::CATALOG_DATABASES);
         unsafe {
@@ -125,7 +167,13 @@ impl PoolStoreReader {
                 super::super::env_flags_from_env() | EnvFlags::READ_ONLY | EnvFlags::NO_READ_AHEAD,
             );
         }
-        let env = unsafe { ManagedEnv::open(&options, path) }.map_err(map_heed)?;
+        let env = unsafe {
+            match config.catalog_lmdb_identity {
+                Some(identity) => ManagedEnv::open_pinned(&options, path, identity),
+                None => ManagedEnv::open(&options, path),
+            }
+        }
+        .map_err(map_heed)?;
         let rtxn = env.read_txn().map_err(map_heed)?;
         let manifest_db: Database<Bytes, Bytes> = env
             .open_database(&rtxn, Some("manifest"))
@@ -135,7 +183,25 @@ impl PoolStoreReader {
             .open_database(&rtxn, Some("locations"))
             .map_err(map_heed)?
             .ok_or_else(|| StoreError::Other("pool locations database is missing".into()))?;
+        let by_member = env
+            .open_database(&rtxn, Some("by_member"))
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("pool member index database is missing".into()))?;
+        let temperature_state = env
+            .open_database(&rtxn, Some("temperature_state"))
+            .map_err(map_heed)?
+            .ok_or_else(|| {
+                StoreError::Other("pool temperature state database is missing".into())
+            })?;
         let (manifest, manifest_sha256) = read_manifest(&manifest_db, &rtxn)?;
+        let opened_manifest_bytes = manifest_db
+            .get(&rtxn, MANIFEST_KEY)
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?
+            .to_vec();
+        if let Some(expected) = config.expected_manifest_sha256 {
+            validate_controlled_manifest(&opened_manifest_bytes, expected, &member_runtime_paths)?;
+        }
         rtxn.commit().map_err(map_heed)?;
 
         let mut member_ids = manifest
@@ -152,7 +218,22 @@ impl PoolStoreReader {
         let mut members = HashMap::with_capacity(manifest.members.len());
         let mut member_errors = HashMap::new();
         for member in manifest.members {
-            match open_member_reader(member.id, &member.config) {
+            let mut runtime_config = member.config.clone();
+            let pinned_identity = match member_runtime_paths.remove(&member.id) {
+                Some(binding) => {
+                    runtime_config.path = binding.runtime_path;
+                    runtime_config.external_blob_dir = binding.runtime_external_path;
+                    Some(binding.lmdb_identity)
+                }
+                None if controlled => {
+                    return Err(StoreError::Other(format!(
+                        "controlled Pool reader has no runtime binding for member {}",
+                        member.id
+                    )))
+                }
+                None => None,
+            };
+            match open_member_reader(member.id, &runtime_config, pinned_identity) {
                 Ok(reader) => {
                     members.insert(member.id, reader);
                 }
@@ -166,7 +247,11 @@ impl PoolStoreReader {
         }
         Ok(Self {
             env,
+            manifest: manifest_db,
+            opened_manifest_bytes,
             locations,
+            by_member,
+            temperature_state,
             manifest_identity,
             member_ids,
             members,
@@ -191,6 +276,217 @@ impl PoolStoreReader {
     /// Return the complete manifest identity captured by this reader.
     pub fn manifest_identity(&self) -> PoolManifestIdentity {
         self.manifest_identity.clone()
+    }
+
+    /// Exhaustively prove terminal catalog and physical member state.
+    ///
+    /// Every location must decode as `Stored`, reference a manifest member,
+    /// have its exact secondary index entry, and resolve to bytes of the
+    /// declared size and SHA-256. Each member's blob and metadata key sets must
+    /// be identical and exactly match catalog ownership, so missing metadata
+    /// and addressable member orphans are rejected even when counts coincide.
+    /// Callers must keep all target Pool writers fenced for the full scan.
+    pub fn validate_terminal_catalog_and_payloads(&self) -> Result<PoolTerminalAudit, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        let manifest = self
+            .manifest
+            .get(&rtxn, MANIFEST_KEY)
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
+        if manifest != self.opened_manifest_bytes {
+            return Err(StoreError::Other(format!(
+                "pool manifest changed after terminal reader open: expected {}, found {}",
+                hashtree_core::to_hex(&self.manifest_identity.sha256),
+                hashtree_core::to_hex(&sha256(manifest))
+            )));
+        }
+        decode_manifest(manifest)?;
+
+        let mut catalog_digest = Sha256::new();
+        catalog_digest.update(b"hashtree-pool-terminal-catalog/v1\0");
+        catalog_digest.update((manifest.len() as u64).to_be_bytes());
+        catalog_digest.update(manifest);
+        let mut payload_digest = Sha256::new();
+        payload_digest.update(b"hashtree-pool-terminal-payloads/v1\0");
+        let mut stored_locations = 0u64;
+        let mut stored_bytes = 0u64;
+        let mut member_counts = HashMap::<PoolMemberId, u64>::new();
+        let mut batch = Vec::<(Hash, PoolMemberId, u64)>::with_capacity(TERMINAL_AUDIT_BATCH_ITEMS);
+        let started = Instant::now();
+        let mut last_progress = started;
+
+        for item in self.locations.iter(&rtxn).map_err(map_heed)? {
+            let (hash, encoded) = item.map_err(map_heed)?;
+            let hash: Hash = hash
+                .try_into()
+                .map_err(|_| StoreError::Other("invalid pool catalog hash key".into()))?;
+            let location = LocationRecord::decode(encoded)?;
+            let (member, size) = match location {
+                LocationRecord::Stored { member, size } => (member, size),
+                LocationRecord::Pending { .. } => {
+                    return Err(StoreError::Other(format!(
+                        "terminal Pool audit rejected pending location {}",
+                        hashtree_core::to_hex(&hash)
+                    )))
+                }
+                LocationRecord::Moving { .. } => {
+                    return Err(StoreError::Other(format!(
+                        "terminal Pool audit rejected moving location {}",
+                        hashtree_core::to_hex(&hash)
+                    )))
+                }
+            };
+            if !self.members.contains_key(&member) {
+                return Err(self.member_unavailable_error(member));
+            }
+            if self
+                .by_member
+                .get(&rtxn, &super::member_hash_key(member, hash))
+                .map_err(map_heed)?
+                .is_none()
+            {
+                return Err(StoreError::Other(format!(
+                    "terminal Pool audit found no member index for {} on {member}",
+                    hashtree_core::to_hex(&hash)
+                )));
+            }
+            stored_locations = stored_locations
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Other("terminal Pool location count overflow".into()))?;
+            stored_bytes = stored_bytes.checked_add(size).ok_or_else(|| {
+                StoreError::Other("terminal Pool declared byte total overflow".into())
+            })?;
+            let member_count = member_counts.entry(member).or_default();
+            *member_count = member_count
+                .checked_add(1)
+                .ok_or_else(|| StoreError::Other("terminal Pool member count overflow".into()))?;
+            catalog_digest.update(hash);
+            catalog_digest.update((encoded.len() as u64).to_be_bytes());
+            catalog_digest.update(encoded);
+            batch.push((hash, member, size));
+            if batch.len() >= TERMINAL_AUDIT_BATCH_ITEMS {
+                self.validate_terminal_payload_batch(&batch, &mut payload_digest)?;
+                batch.clear();
+            }
+            if last_progress.elapsed() >= Duration::from_secs(10) {
+                eprintln!(
+                    "Pool terminal audit: verified {stored_locations} catalogued blobs / {stored_bytes} declared bytes in {} s",
+                    started.elapsed().as_secs()
+                );
+                last_progress = Instant::now();
+            }
+        }
+        if !batch.is_empty() {
+            self.validate_terminal_payload_batch(&batch, &mut payload_digest)?;
+        }
+
+        let indexed = self.by_member.len(&rtxn).map_err(map_heed)?;
+        if indexed != stored_locations {
+            return Err(StoreError::Other(format!(
+                "terminal Pool member index count {indexed} differs from stored location count {stored_locations}"
+            )));
+        }
+        catalog_digest.update(b"\0exact-by-member-index\0");
+        catalog_digest.update(indexed.to_be_bytes());
+        for (prefix, label) in [(b"m".as_slice(), "move"), (b"c".as_slice(), "move-cleanup")] {
+            if self
+                .temperature_state
+                .prefix_iter(&rtxn, prefix)
+                .map_err(map_heed)?
+                .next()
+                .transpose()
+                .map_err(map_heed)?
+                .is_some()
+            {
+                return Err(StoreError::Other(format!(
+                    "terminal Pool audit found active {label} ownership"
+                )));
+            }
+        }
+        catalog_digest.update(b"\0no-active-move-ownership\0");
+        rtxn.commit().map_err(map_heed)?;
+
+        for member in &self.member_ids {
+            let reader = self
+                .members
+                .get(member)
+                .ok_or_else(|| self.member_unavailable_error(*member))?;
+            let expected = member_counts.get(member).copied().unwrap_or(0);
+            let keyset = reader.validate_terminal_member_keyset()?;
+            if keyset.blob_entries != expected || keyset.metadata_entries != expected {
+                return Err(StoreError::Other(format!(
+                    "terminal Pool member {member} has {} blob and {} metadata records, expected exactly {expected} catalog locations",
+                    keyset.blob_entries, keyset.metadata_entries
+                )));
+            }
+            catalog_digest.update(member.as_bytes());
+            catalog_digest.update(expected.to_be_bytes());
+            catalog_digest.update(keyset.blob_entries.to_be_bytes());
+            catalog_digest.update(keyset.metadata_entries.to_be_bytes());
+            catalog_digest.update(keyset.sha256);
+        }
+
+        Ok(PoolTerminalAudit {
+            stored_locations,
+            stored_bytes,
+            catalog_sha256: catalog_digest.finalize().into(),
+            payload_sha256: payload_digest.finalize().into(),
+            manifest_sha256: self.manifest_identity.sha256,
+        })
+    }
+
+    fn validate_terminal_payload_batch(
+        &self,
+        batch: &[(Hash, PoolMemberId, u64)],
+        payload_digest: &mut Sha256,
+    ) -> Result<(), StoreError> {
+        let mut by_member = HashMap::<PoolMemberId, Vec<(Hash, u64)>>::new();
+        for (hash, member, size) in batch {
+            by_member.entry(*member).or_default().push((*hash, *size));
+        }
+        for (member, expected) in by_member {
+            let reader = self
+                .members
+                .get(&member)
+                .ok_or_else(|| self.member_unavailable_error(member))?;
+            let mut offset = 0usize;
+            while offset < expected.len() {
+                let hashes = expected[offset..]
+                    .iter()
+                    .map(|(hash, _)| *hash)
+                    .collect::<Vec<_>>();
+                let found = reader.read_hashes_bounded(&hashes, TERMINAL_AUDIT_BATCH_BYTES)?;
+                if found.is_empty() {
+                    return Err(StoreError::Other(format!(
+                        "terminal Pool member {member} omitted a requested payload"
+                    )));
+                }
+                for ((found_hash, data), (expected_hash, expected_size)) in
+                    found.iter().zip(&expected[offset..])
+                {
+                    if found_hash != expected_hash {
+                        return Err(StoreError::Other(format!(
+                            "terminal Pool member {member} returned payloads out of order"
+                        )));
+                    }
+                    if data.len() as u64 != *expected_size || sha256(data) != *expected_hash {
+                        return Err(StoreError::Other(format!(
+                            "terminal Pool member {member} returned corrupt or size-mismatched bytes for {}",
+                            hashtree_core::to_hex(expected_hash)
+                        )));
+                    }
+                }
+                offset = offset.checked_add(found.len()).ok_or_else(|| {
+                    StoreError::Other("terminal Pool batch offset overflow".into())
+                })?;
+            }
+        }
+        for (hash, member, size) in batch {
+            payload_digest.update(hash);
+            payload_digest.update(member.as_bytes());
+            payload_digest.update(size.to_be_bytes());
+        }
+        Ok(())
     }
 
     /// Mark which sorted candidate hashes physically exist on one exact Pool
@@ -557,6 +853,10 @@ mod tests {
         assert_eq!(batch[1].hash, moving_hash);
         assert_eq!(batch[1].data.as_deref(), Some(moving_data.as_slice()));
         assert!(batch[1].error.is_none());
+        let terminal_error = reader
+            .validate_terminal_catalog_and_payloads()
+            .expect_err("terminal audit must reject Pending and Moving");
+        assert!(terminal_error.to_string().contains("pending location"));
         drop(reader);
         let after = fs::read(&catalog_path).map_err(StoreError::Io)?;
         assert_eq!(after, before);
@@ -628,6 +928,100 @@ mod tests {
             reader.read_member_hashes_bounded_unverified(first, &[hash], data.len() as u64)?,
             vec![(hash, data.to_vec())]
         );
+        let audit = reader.validate_terminal_catalog_and_payloads()?;
+        assert_eq!(audit.stored_locations, 1);
+        assert_eq!(audit.stored_bytes, data.len() as u64);
+        assert_eq!(audit.manifest_sha256, reader.manifest_identity().sha256);
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_audit_rejects_missing_bodies_and_addressable_member_orphans(
+    ) -> Result<(), StoreError> {
+        let temp = tempfile::tempdir().map_err(StoreError::Io)?;
+        let catalog = temp.path().join("catalog");
+        let member_path = temp.path().join("member");
+        let mut config = PoolStoreConfig::default();
+        config.temperature.enabled = false;
+        let pool = PoolStore::open(&catalog, config.clone())?;
+        let member = pool.add_member(PoolMemberConfig::new(member_path, 16 * 1024 * 1024))?;
+        let stored_data = b"terminal audit catalogued body";
+        let stored_hash = sha256(stored_data);
+        pool.put_sync(stored_hash, stored_data)?;
+        pool.get_member(member)?.delete_sync(&stored_hash)?;
+        pool.force_sync()?;
+        drop(pool);
+
+        let reader = PoolStoreReader::open(&catalog, config.clone())?;
+        let missing = reader
+            .validate_terminal_catalog_and_payloads()
+            .expect_err("missing catalogued body must fail terminal audit");
+        assert!(
+            missing.to_string().contains("lost blob")
+                || missing.to_string().contains("omitted")
+                || missing.to_string().contains("missing")
+        );
+        drop(reader);
+
+        let pool = PoolStore::open(&catalog, config.clone())?;
+        pool.put_sync(stored_hash, stored_data)?;
+        let orphan_data = b"terminal audit addressable member orphan";
+        pool.get_member(member)?
+            .put_sync(sha256(orphan_data), orphan_data)?;
+        pool.force_sync()?;
+        drop(pool);
+
+        let reader = PoolStoreReader::open(&catalog, config)?;
+        let orphan = reader
+            .validate_terminal_catalog_and_payloads()
+            .expect_err("addressable member orphan must fail terminal audit");
+        assert!(orphan.to_string().contains("expected exactly"));
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_audit_rejects_equal_count_member_keyset_mismatch() -> Result<(), StoreError> {
+        let temp = tempfile::tempdir().map_err(StoreError::Io)?;
+        let catalog = temp.path().join("catalog");
+        let member_path = temp.path().join("member");
+        let mut config = PoolStoreConfig::default();
+        config.temperature.enabled = false;
+        let pool = PoolStore::open(&catalog, config.clone())?;
+        let member = pool.add_member(PoolMemberConfig::new(member_path, 16 * 1024 * 1024))?;
+        let first_data = b"terminal member keyset first body";
+        let second_data = b"terminal member keyset second body";
+        let first_hash = sha256(first_data);
+        let second_hash = sha256(second_data);
+        let metadata_orphan_hash = sha256(b"metadata-only replacement key");
+        pool.put_sync(first_hash, first_data)?;
+        pool.put_sync(second_hash, second_data)?;
+
+        let member_store = pool.get_member(member)?;
+        let mut wtxn = member_store.env.write_txn().map_err(map_heed)?;
+        let second_metadata = member_store
+            .metadata
+            .get(&wtxn, &second_hash)
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("test metadata row is missing".into()))?
+            .to_vec();
+        member_store
+            .metadata
+            .delete(&mut wtxn, &second_hash)
+            .map_err(map_heed)?;
+        member_store
+            .metadata
+            .put(&mut wtxn, &metadata_orphan_hash, &second_metadata)
+            .map_err(map_heed)?;
+        wtxn.commit().map_err(map_heed)?;
+        pool.force_sync()?;
+        drop(member_store);
+        drop(pool);
+
+        let reader = PoolStoreReader::open(&catalog, config)?;
+        let error = reader
+            .validate_terminal_catalog_and_payloads()
+            .expect_err("equal blob/metadata counts with different keys must fail terminal audit");
+        assert!(error.to_string().contains("blobs/metadata key sets differ"));
         Ok(())
     }
 

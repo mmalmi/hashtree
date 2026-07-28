@@ -35,6 +35,18 @@ WAIT_TIME=30
 
 FAILED_CRATES=()
 
+STAGE_0_SYS_CRATES=(
+    "hashtree-lmdb-master-sys"
+)
+
+STAGE_0_HEED_CRATES=(
+    "hashtree-heed"
+)
+
+STAGE_0_HEED_CONSUMERS=(
+    "hashtree-nostr-social-graph-heed"
+)
+
 STAGE_1_CRATES=(
     "hashtree-core"
     "hashtree-config"
@@ -83,6 +95,9 @@ STAGE_8_CRATES=(
 )
 
 ALL_CRATES=(
+    "${STAGE_0_SYS_CRATES[@]}"
+    "${STAGE_0_HEED_CRATES[@]}"
+    "${STAGE_0_HEED_CONSUMERS[@]}"
     "${STAGE_1_CRATES[@]}"
     "${STAGE_2_CRATES[@]}"
     "${STAGE_3_CRATES[@]}"
@@ -176,6 +191,9 @@ echo ""
 
 cd "$RUST_DIR"
 
+publish_stage "Stage 0a" "${STAGE_0_SYS_CRATES[@]}"
+publish_stage "Stage 0b" "${STAGE_0_HEED_CRATES[@]}"
+publish_stage "Stage 0c" "${STAGE_0_HEED_CONSUMERS[@]}"
 publish_stage "Stage 1" "${STAGE_1_CRATES[@]}"
 # hashtree-bep52 excluded - internal testing only
 

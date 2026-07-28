@@ -185,10 +185,17 @@ fn read_only_reader_adopts_existing_map_and_reads_inline_and_external_blobs() {
     let replay = migrate_lmdb_batch(&reader, &pool, None, 2).expect("replay migration batch");
     assert_eq!(replay.scanned, 2);
     assert_eq!(replay.already_present, 2);
-    assert_eq!(replay.verified, 0);
+    assert_eq!(
+        replay.verified, 2,
+        "replay must hash-verify source and compare committed target bytes"
+    );
     assert_eq!(replay.inserted, 0);
     assert_eq!(replay.write_batches, 0);
-    assert_eq!(replay.peak_buffered_bytes, 0);
+    assert_eq!(
+        replay.peak_buffered_bytes,
+        (inline_data().len() + external_data().len()) as u64,
+        "unbounded replay verifies both source payloads in one batch"
+    );
     let complete = migrate_lmdb_batch(&reader, &pool, first.last_hash, 1).expect("complete scan");
     assert!(complete.source_exhausted);
     assert_eq!(pool.stats().expect("pool stats").count, 2);

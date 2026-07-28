@@ -48,6 +48,9 @@ use super::nostr_index::{
     SocialGraphIndexOptions,
 };
 use super::peers::list_peers;
+#[cfg(test)]
+use super::pool_migration_launch::write_durable_pool_migration_cursor;
+use super::pool_migration_launch::{acknowledge_pool_migration_launch, PoolMigrationLaunchContext};
 use super::pwa::run_export;
 use super::release::publish_release_version;
 use super::resolve::{
@@ -303,6 +306,13 @@ pub(crate) fn should_spawn_background_update(cli: &Cli) -> bool {
                 command.as_ref(),
                 NostrIndexCommands::RepairBulkProjectionProfiles { .. }
             )
+    ) && !matches!(
+        &cli.command,
+        Commands::Storage {
+            command: StorageCommands::Pool {
+                command: PoolCommands::MigrateLmdb { .. },
+            },
+        }
     )
 }
 
@@ -1747,6 +1757,28 @@ pub(crate) async fn run() -> Result<()> {
             push_to_blossom(&data_dir, &cid, server, force, shallow).await?;
         }
         Commands::Storage { command } => {
+            // The migration launcher is an inert rendezvous until its
+            // invocation-bound request has been durably acknowledged. In
+            // particular, do not call Config::load here: it creates a default
+            // config file when one is absent. A controlled migration must
+            // therefore name its data directory explicitly and dispatch
+            // before any config read/create path.
+            let command = match command {
+                StorageCommands::Pool {
+                    command: command @ PoolCommands::MigrateLmdb { .. },
+                } => {
+                    let data_dir = cli.data_dir.clone().context(
+                        "controlled Pool migration requires an explicit --data-dir before storage pool migrate-lmdb",
+                    )?;
+                    if !data_dir.is_absolute() {
+                        bail!("controlled Pool migration --data-dir must be absolute");
+                    }
+                    run_pool_command(&data_dir, command)?;
+                    return Ok(());
+                }
+                command => command,
+            };
+
             // Load config
             let config = Config::load()?;
 
@@ -2150,7 +2182,8 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
     #[cfg(feature = "lmdb")]
     {
         use hashtree_lmdb::{
-            PoolMemberConfig, PoolMemberId, PoolStore, PoolStoreConfig, SHARED_BLOB_POOL_DIR_NAME,
+            PoolMemberConfig, PoolMemberId, PoolMemberRuntimePaths, PoolStore, PoolStoreConfig,
+            SHARED_BLOB_POOL_DIR_NAME,
         };
 
         let pool_path = data_dir.join(SHARED_BLOB_POOL_DIR_NAME);
@@ -2338,6 +2371,8 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 }
             }
             PoolCommands::MigrateLmdb {
+                launch_request,
+                launch_request_wait_seconds,
                 source,
                 source_external_dir,
                 state_file,
@@ -2350,6 +2385,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
             } => {
                 use hashtree_lmdb::{
                     migrate_lmdb_batch_with_max_buffer_bytes, ExternalBlobOptions, LmdbBlobReader,
+                    PoolStoreReader,
                 };
 
                 if batch_size == 0
@@ -2369,17 +2405,17 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 let source = resolve_path(source);
                 let state_file = resolve_path(state_file);
                 let source_external_dir = source_external_dir.map(resolve_path);
-                let mut cursor = if resume && state_file.exists() {
-                    let value = std::fs::read_to_string(&state_file)?;
-                    let value = value.trim();
-                    if value.is_empty() || value == "complete" {
-                        None
-                    } else {
-                        Some(from_hex(value).context("invalid migration cursor")?)
-                    }
-                } else {
-                    None
-                };
+                let launch = acknowledge_pool_migration_launch(PoolMigrationLaunchContext {
+                    launch_request: &launch_request,
+                    source: &source,
+                    source_external_dir: source_external_dir.as_deref(),
+                    pool: &pool_path,
+                    state_file: &state_file,
+                    resume,
+                    max_items,
+                    request_wait: Duration::from_secs(launch_request_wait_seconds),
+                })?;
+                let mut cursor = launch.cursor;
                 let mut verified = 0usize;
                 let mut scanned = 0usize;
                 let mut already_present = 0usize;
@@ -2391,22 +2427,40 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         break;
                     }
 
+                    launch.ensure_store_paths()?;
+                    launch.ensure_final_writer_fence()?;
                     let mut pool_config = PoolStoreConfig::default();
                     pool_config.temperature.enabled = false;
-                    let pool = PoolStore::open(&pool_path, pool_config)?;
-                    let external = source_external_dir
-                        .as_ref()
-                        .map(|path| ExternalBlobOptions {
-                            base_path: path.clone(),
-                            min_bytes: 1,
-                            sync: true,
-                            pack_target_bytes: None,
-                        });
-                    let reader = LmdbBlobReader::open_with_external_read_concurrency(
-                        &source,
-                        external,
-                        source_read_concurrency,
-                    )?;
+                    pool_config.catalog_lmdb_identity = Some(launch.pool_catalog_lmdb_identity());
+                    pool_config.expected_manifest_sha256 = Some(launch.pool_manifest_sha256());
+                    pool_config.member_runtime_paths = launch
+                        .pool_member_runtime_paths()
+                        .into_iter()
+                        .map(|paths| {
+                            Ok(PoolMemberRuntimePaths {
+                                id: paths.id.parse()?,
+                                configured_path: paths.configured_path,
+                                runtime_path: paths.runtime_path,
+                                configured_external_path: paths.configured_external_path,
+                                runtime_external_path: paths.runtime_external_path,
+                                lmdb_identity: paths.lmdb_identity,
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let pool = PoolStore::open(launch.pool(), pool_config.clone())?;
+                    let external = launch.source_external().map(|path| ExternalBlobOptions {
+                        base_path: path.to_path_buf(),
+                        min_bytes: 1,
+                        sync: true,
+                        pack_target_bytes: None,
+                    });
+                    let reader =
+                        LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+                            launch.source(),
+                            external,
+                            source_read_concurrency,
+                            launch.source_lmdb_identity(),
+                        )?;
                     let mut epoch_batches = 0usize;
 
                     loop {
@@ -2425,7 +2479,43 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                             max_buffer_bytes,
                         )?;
                         if batch.source_exhausted {
-                            write_pool_migration_cursor(&state_file, "complete")?;
+                            if !launch.final_stopped_full_pass {
+                                break 'mapping_epochs;
+                            }
+                            let source_audit = reader.validate_terminal_migration_keyset()?;
+                            pool.validate_controlled_authority_and_sync()?;
+                            drop(reader);
+                            drop(pool);
+                            launch.ensure_store_paths()?;
+                            launch.ensure_final_writer_fence()?;
+                            let terminal_reader =
+                                PoolStoreReader::open(launch.pool(), pool_config)?;
+                            let terminal_audit =
+                                terminal_reader.validate_terminal_catalog_and_payloads()?;
+                            if terminal_audit.manifest_sha256 != launch.pool_manifest_sha256() {
+                                bail!("terminal Pool audit manifest differs from launch authority");
+                            }
+                            drop(terminal_reader);
+                            launch.ensure_store_paths()?;
+                            launch.ensure_final_writer_fence()?;
+                            launch.write_terminal_audit_receipt(&source_audit, &terminal_audit)?;
+                            launch.ensure_store_paths()?;
+                            launch.ensure_final_writer_fence()?;
+                            launch.write_cursor("complete")?;
+                            println!(
+                                "Terminal source audit: {} blob keys / {} metadata keys (legacy blob-only: {}), keyset {}",
+                                source_audit.blob_entries,
+                                source_audit.metadata_entries,
+                                source_audit.legacy_blob_only,
+                                hashtree_core::to_hex(&source_audit.sha256),
+                            );
+                            println!(
+                                "Terminal Pool audit: stored {} blobs / {} bytes, catalog {}, payloads {}",
+                                terminal_audit.stored_locations,
+                                terminal_audit.stored_bytes,
+                                hashtree_core::to_hex(&terminal_audit.catalog_sha256),
+                                hashtree_core::to_hex(&terminal_audit.payload_sha256),
+                            );
                             completed = true;
                             break 'mapping_epochs;
                         }
@@ -2436,10 +2526,11 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         inserted_bytes = inserted_bytes.saturating_add(batch.inserted_bytes);
                         cursor = batch.last_hash;
                         let cursor_hash = cursor.expect("non-empty migration batch has a cursor");
-                        write_pool_migration_cursor(
-                            &state_file,
-                            &hashtree_core::to_hex(&cursor_hash),
-                        )?;
+                        pool.validate_controlled_authority_and_sync()?;
+                        launch.ensure_store_paths()?;
+                        if !launch.final_stopped_full_pass {
+                            launch.write_cursor(&hashtree_core::to_hex(&cursor_hash))?;
+                        }
                         println!(
                             "Migration batch: scanned {}, already present {}, verified {}, writes {}, peak buffered {} bytes, scan {} us, catalog probe {} us, source read {} us, source verify {} us, target write {} us",
                             batch.scanned,
@@ -2486,23 +2577,9 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
 }
 
 #[cfg(feature = "lmdb")]
+#[cfg(test)]
 pub(super) fn write_pool_migration_cursor(path: &Path, value: &str) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(parent)?;
-    let temporary = path.with_extension("tmp");
-    let mut file = std::fs::File::create(&temporary)?;
-    file.write_all(value.as_bytes())?;
-    file.write_all(b"\n")?;
-    file.sync_all()?;
-    std::fs::rename(temporary, path)?;
-    // Unix exposes directory handles through the portable File API, allowing
-    // the rename itself—not only the temporary file contents—to be durable.
-    #[cfg(unix)]
-    std::fs::File::open(parent)?.sync_all()?;
-    Ok(())
+    write_durable_pool_migration_cursor(path, value)
 }
 
 pub(crate) fn format_cid_for_display(cid: &Cid) -> String {

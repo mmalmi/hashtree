@@ -3,6 +3,13 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::thread;
 use tempfile::TempDir;
+#[cfg(target_os = "linux")]
+use {
+    heed::{PinnedLmdbFileIdentity, PinnedLmdbIdentity},
+    std::fs::File,
+    std::os::fd::AsRawFd,
+    std::os::unix::fs::MetadataExt,
+};
 
 const HELPER_MODE: &str = "HASHTREE_POOL_HELPER_MODE";
 const HELPER_CATALOG: &str = "HASHTREE_POOL_HELPER_CATALOG";
@@ -1085,6 +1092,131 @@ fn batch_delete_removes_member_blobs_and_catalog_locations() {
     assert!(member_store
         .exists(&retained)
         .expect("retained member lookup"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn exact_offline_stale_pending_cleanup_is_atomic_and_idempotent() {
+    fn lmdb_identity(path: &Path) -> PinnedLmdbIdentity {
+        let data = fs::metadata(path.join("data.mdb")).expect("data metadata");
+        let lock = fs::metadata(path.join("lock.mdb")).expect("lock metadata");
+        PinnedLmdbIdentity {
+            data: PinnedLmdbFileIdentity {
+                device: data.dev(),
+                inode: data.ino(),
+            },
+            lock: PinnedLmdbFileIdentity {
+                device: lock.dev(),
+                inode: lock.ino(),
+            },
+        }
+    }
+
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member_path = temp.path().join("member");
+    let mut ordinary_config = PoolStoreConfig::default();
+    ordinary_config.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, ordinary_config.clone()).expect("open Pool");
+    let member = pool
+        .add_member(PoolMemberConfig::new(member_path.clone(), 16 * 1024 * 1024))
+        .expect("add member");
+    let missing_hash = sha256(b"crash-abandoned Pending without member bytes");
+    let present_data = b"Pending whose member write actually committed";
+    let present_hash = sha256(present_data);
+    pool.get_member(member)
+        .expect("member")
+        .put_sync(present_hash, present_data)
+        .expect("write physically present Pending");
+    let mut wtxn = pool.env.write_txn().expect("catalog transaction");
+    for (hash, size) in [
+        (missing_hash, 91u64),
+        (present_hash, present_data.len() as u64),
+    ] {
+        pool.set_location_txn(
+            &mut wtxn,
+            hash,
+            Some(LocationRecord::Pending { member, size }),
+        )
+        .expect("write Pending record");
+    }
+    wtxn.commit().expect("commit Pending records");
+    pool.force_sync().expect("sync generated crash state");
+    drop(pool);
+
+    let reader = PoolStoreReader::open(&catalog, ordinary_config).expect("manifest reader");
+    let manifest_sha256 = reader.manifest_identity().sha256;
+    drop(reader);
+    let catalog_identity = lmdb_identity(&catalog);
+    let member_identity = lmdb_identity(&member_path);
+    let catalog_fd = File::open(&catalog).expect("pin catalog directory");
+    let member_fd = File::open(&member_path).expect("pin member directory");
+    let catalog_runtime = PathBuf::from(format!("/proc/self/fd/{}", catalog_fd.as_raw_fd()));
+    let member_runtime = PathBuf::from(format!("/proc/self/fd/{}", member_fd.as_raw_fd()));
+    let mut controlled_config = PoolStoreConfig::default();
+    controlled_config.temperature.enabled = false;
+    controlled_config.catalog_lmdb_identity = Some(catalog_identity);
+    controlled_config.expected_manifest_sha256 = Some(manifest_sha256);
+    controlled_config.member_runtime_paths = vec![PoolMemberRuntimePaths {
+        id: member,
+        configured_path: member_path,
+        runtime_path: member_runtime,
+        configured_external_path: None,
+        runtime_external_path: None,
+        lmdb_identity: member_identity,
+    }];
+    let controlled =
+        PoolStore::open(&catalog_runtime, controlled_config).expect("controlled Pool open");
+    let mut expected = vec![
+        PoolStalePending {
+            hash: missing_hash,
+            member,
+            size: 91,
+        },
+        PoolStalePending {
+            hash: present_hash,
+            member,
+            size: present_data.len() as u64,
+        },
+    ];
+    expected.sort_unstable_by_key(|item| item.hash);
+
+    let present_error = controlled
+        .cleanup_stale_pending_exact_offline_sync(&expected)
+        .expect_err("physically present Pending must block the whole cleanup");
+    assert!(present_error.to_string().contains("physically present"));
+    assert!(controlled
+        .read_location(&missing_hash)
+        .expect("missing location")
+        .is_some());
+
+    controlled
+        .get_member(member)
+        .expect("controlled member")
+        .delete_sync(&present_hash)
+        .expect("remove generated member bytes");
+    let report = controlled
+        .cleanup_stale_pending_exact_offline_sync(&expected)
+        .expect("exact offline cleanup");
+    assert_eq!(report.requested, 2);
+    assert_eq!(
+        report.declared_bytes,
+        91 + u64::try_from(present_data.len()).expect("size")
+    );
+    assert!(!report.already_cleaned);
+    assert!(controlled
+        .read_location(&missing_hash)
+        .expect("cleaned missing location")
+        .is_none());
+    assert!(controlled
+        .read_location(&present_hash)
+        .expect("cleaned present location")
+        .is_none());
+
+    let replay = controlled
+        .cleanup_stale_pending_exact_offline_sync(&expected)
+        .expect("idempotent exact replay");
+    assert!(replay.already_cleaned);
 }
 
 #[test]

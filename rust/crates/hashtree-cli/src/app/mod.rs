@@ -13,6 +13,7 @@ pub(crate) mod mount_target;
 pub(crate) mod mounts;
 pub(crate) mod nostr_index;
 pub(crate) mod peers;
+pub(crate) mod pool_migration_launch;
 pub(crate) mod pr;
 pub(crate) mod pwa;
 pub(crate) mod release;

@@ -62,9 +62,13 @@ fn args_to_strings(args: Vec<std::ffi::OsString>) -> Vec<String> {
 #[test]
 fn pool_migration_cursor_replacement_is_synced_and_atomic() {
     let temp = tempfile::tempdir().expect("tempdir");
-    let parent = temp.path().join("durable-state");
+    let root = temp.path().canonicalize().expect("canonical tempdir");
+    let parent = root.join("durable-state");
+    std::fs::create_dir(&parent).expect("create cursor parent");
     let cursor = parent.join("legacy.cursor");
-    let temporary = cursor.with_extension("tmp");
+    let victim = root.join("must-not-be-truncated");
+    std::fs::write(&victim, b"unchanged\n").expect("write symlink victim");
+    std::os::unix::fs::symlink(&victim, &cursor).expect("preplant cursor symlink");
     let first = "1111111111111111111111111111111111111111111111111111111111111111";
     let second = "2222222222222222222222222222222222222222222222222222222222222222";
 
@@ -73,20 +77,41 @@ fn pool_migration_cursor_replacement_is_synced_and_atomic() {
         std::fs::read_to_string(&cursor).expect("read first cursor"),
         format!("{first}\n")
     );
-    assert!(
-        !temporary.exists(),
-        "temporary cursor must not survive rename"
+    assert_eq!(
+        std::fs::read(&victim).expect("read symlink victim"),
+        b"unchanged\n",
+        "atomic cursor replacement must replace a symlink, never follow it"
     );
+    assert!(
+        std::fs::symlink_metadata(&cursor)
+            .expect("cursor metadata")
+            .file_type()
+            .is_file(),
+        "cursor replacement must leave a regular file"
+    );
+    assert_no_cursor_temporary(&parent);
 
     write_pool_migration_cursor(&cursor, second).expect("replace durable cursor");
     assert_eq!(
         std::fs::read_to_string(&cursor).expect("read replacement cursor"),
         format!("{second}\n")
     );
-    assert!(
-        !temporary.exists(),
-        "temporary cursor must not survive replacement"
-    );
+    assert_no_cursor_temporary(&parent);
+}
+
+#[cfg(all(feature = "lmdb", unix))]
+fn assert_no_cursor_temporary(parent: &std::path::Path) {
+    let names = std::fs::read_dir(parent)
+        .expect("read cursor parent")
+        .map(|entry| {
+            entry
+                .expect("cursor directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["legacy.cursor"]);
 }
 
 #[test]
@@ -621,6 +646,10 @@ fn test_storage_pool_add_and_migration_args() {
         "storage",
         "pool",
         "migrate-lmdb",
+        "--launch-request",
+        "/rollout/attempts-v3/nonce/launch-request.json",
+        "--launch-request-wait-seconds",
+        "30",
         "--source",
         "/old/blobs",
         "--state-file",
@@ -628,6 +657,10 @@ fn test_storage_pool_add_and_migration_args() {
         "--resume",
     ])
     .unwrap();
+    assert!(
+        !should_spawn_background_update(&cli),
+        "controlled Pool migration must not launch the generic background updater"
+    );
     let Commands::Storage {
         command: StorageCommands::Pool { command },
     } = cli.command
@@ -637,14 +670,74 @@ fn test_storage_pool_add_and_migration_args() {
     assert!(matches!(
         command,
         PoolCommands::MigrateLmdb {
+            launch_request,
+            launch_request_wait_seconds: 30,
             batch_size: 256,
             max_buffer_mib: 64,
             reopen_batches: 256,
             max_items: None,
             resume: true,
             ..
-        }
+        } if launch_request == std::path::Path::new(
+            "/rollout/attempts-v3/nonce/launch-request.json"
+        )
     ));
+
+    let missing_launch_request = Cli::try_parse_from([
+        "htree",
+        "storage",
+        "pool",
+        "migrate-lmdb",
+        "--source",
+        "/old/blobs",
+        "--launch-request-wait-seconds",
+        "30",
+        "--state-file",
+        "/state/legacy.cursor",
+        "--resume",
+    ]);
+    assert!(
+        missing_launch_request.is_err(),
+        "Pool migration must require a v3 launch request"
+    );
+
+    let missing_launch_wait = Cli::try_parse_from([
+        "htree",
+        "storage",
+        "pool",
+        "migrate-lmdb",
+        "--launch-request",
+        "/rollout/attempts-v3/nonce/launch-request.json",
+        "--source",
+        "/old/blobs",
+        "--state-file",
+        "/state/legacy.cursor",
+        "--resume",
+    ]);
+    assert!(
+        missing_launch_wait.is_err(),
+        "Pool migration must require a bounded v3 launch rendezvous"
+    );
+
+    let zero_launch_wait = Cli::try_parse_from([
+        "htree",
+        "storage",
+        "pool",
+        "migrate-lmdb",
+        "--launch-request",
+        "/rollout/attempts-v3/nonce/launch-request.json",
+        "--launch-request-wait-seconds",
+        "0",
+        "--source",
+        "/old/blobs",
+        "--state-file",
+        "/state/legacy.cursor",
+        "--resume",
+    ]);
+    assert!(
+        zero_launch_wait.is_err(),
+        "Pool migration must reject an unbounded zero-second rendezvous"
+    );
 }
 
 #[test]

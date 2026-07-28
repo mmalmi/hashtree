@@ -99,24 +99,11 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes(
     let catalog_probe_started = Instant::now();
     let committed = target.committed_hashes_in_sorted_candidates(&hashes)?;
     batch.catalog_probe_micros = elapsed_micros(catalog_probe_started.elapsed());
-    let missing = hashes
-        .iter()
-        .zip(committed)
-        .filter_map(|(hash, committed)| {
-            if committed {
-                batch.already_present = batch.already_present.saturating_add(1);
-                None
-            } else {
-                Some(*hash)
-            }
-        })
-        .collect::<Vec<_>>();
-
     let max_buffer_bytes = max_buffer_bytes as u64;
     let mut next = 0usize;
-    while next < missing.len() {
+    while next < hashes.len() {
         let source_read_started = Instant::now();
-        let items = source.read_hashes_bounded(&missing[next..], max_buffer_bytes)?;
+        let items = source.read_hashes_bounded(&hashes[next..], max_buffer_bytes)?;
         batch.source_read_micros = batch
             .source_read_micros
             .saturating_add(elapsed_micros(source_read_started.elapsed()));
@@ -140,15 +127,36 @@ pub fn migrate_lmdb_batch_with_max_buffer_bytes(
             .saturating_add(elapsed_micros(source_verify_started.elapsed()));
         batch.verified = batch.verified.saturating_add(items.len());
         batch.peak_buffered_bytes = batch.peak_buffered_bytes.max(buffered_bytes);
+        let item_count = items.len();
+        let mut writes = Vec::new();
+        for (offset, (hash, data)) in items.into_iter().enumerate() {
+            if committed[next + offset] {
+                let target_data = target.get_sync(&hash)?.ok_or_else(|| {
+                    StoreError::Other(format!(
+                        "target catalog claims committed blob {hash:?}, but its bytes are unavailable"
+                    ))
+                })?;
+                if target_data != data {
+                    return Err(StoreError::Other(format!(
+                        "target catalog claims committed blob {hash:?}, but its bytes differ from source"
+                    )));
+                }
+                batch.already_present = batch.already_present.saturating_add(1);
+            } else {
+                writes.push((hash, data));
+            }
+        }
         let target_write_started = Instant::now();
-        let report = target.put_many_report_sync(&items)?;
+        let report = target.put_many_report_sync(&writes)?;
         batch.target_write_micros = batch
             .target_write_micros
             .saturating_add(elapsed_micros(target_write_started.elapsed()));
         batch.inserted = batch.inserted.saturating_add(report.inserted);
         batch.inserted_bytes = batch.inserted_bytes.saturating_add(report.inserted_bytes);
-        batch.write_batches = batch.write_batches.saturating_add(1);
-        next = next.saturating_add(items.len());
+        if !writes.is_empty() {
+            batch.write_batches = batch.write_batches.saturating_add(1);
+        }
+        next = next.saturating_add(item_count);
     }
     Ok(batch)
 }

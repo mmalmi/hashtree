@@ -7,6 +7,15 @@ PUBLISH_SCRIPT="${RUST_DIR}/scripts/publish.sh"
 
 PLAN_OUTPUT="$("${PUBLISH_SCRIPT}" --plan)"
 
+grep -F 'hashtree-lmdb = { version = "=0.2.87", path = "crates/hashtree-lmdb" }' \
+    "${RUST_DIR}/Cargo.toml" >/dev/null
+grep -F 'version = "0.2.87"' \
+    "${RUST_DIR}/crates/hashtree-lmdb/Cargo.toml" >/dev/null
+grep -F 'version = "0.2.83"' \
+    "${RUST_DIR}/crates/git-remote-htree/Cargo.toml" >/dev/null
+grep -F 'git-remote-htree = { version = "=0.2.83", path = "../git-remote-htree" }' \
+    "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" >/dev/null
+
 fake_bin="$(mktemp -d "${TMPDIR:-/tmp}/hashtree-publish-test.XXXXXX")"
 trap 'rm -rf "${fake_bin}"' EXIT
 printf '%s\n' '#!/bin/sh' 'echo "crate version already exists" >&2' 'exit 1' \
@@ -29,6 +38,9 @@ fi
 printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-fuse' >/dev/null
 printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-collection' >/dev/null
 printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-cashu-cli' >/dev/null
+printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-lmdb-master-sys' >/dev/null
+printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-heed' >/dev/null
+printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-nostr-social-graph-heed' >/dev/null
 
 plan_line() {
     printf '%s\n' "$PLAN_OUTPUT" | nl -ba | awk -v crate="$1" '$2 == crate { print $1; exit }'
@@ -43,12 +55,30 @@ nostr_pubsub_line="$(plan_line hashtree-nostr-pubsub)"
 cli_line="$(plan_line hashtree-cli)"
 cashu_cli_line="$(plan_line hashtree-cashu-cli)"
 embedded_line="$(plan_line hashtree-embedded)"
+git_remote_line="$(plan_line git-remote-htree)"
+lmdb_sys_line="$(plan_line hashtree-lmdb-master-sys)"
+heed_line="$(plan_line hashtree-heed)"
+social_graph_heed_line="$(plan_line hashtree-nostr-social-graph-heed)"
+lmdb_line="$(plan_line hashtree-lmdb)"
 
 if [ -z "$fuse_line" ] || [ -z "$core_line" ] || [ -z "$collection_line" ] || \
     [ -z "$nostr_line" ] || [ -z "$transport_line" ] || \
     [ -z "$nostr_pubsub_line" ] || [ -z "$cli_line" ] || \
-    [ -z "$cashu_cli_line" ] || [ -z "$embedded_line" ]; then
+    [ -z "$cashu_cli_line" ] || [ -z "$embedded_line" ] || \
+    [ -z "$git_remote_line" ] || \
+    [ -z "$lmdb_sys_line" ] || [ -z "$heed_line" ] || \
+    [ -z "$social_graph_heed_line" ] || [ -z "$lmdb_line" ]; then
     echo "Failed to find a required crate in the publish plan" >&2
+    exit 1
+fi
+
+if [ "$lmdb_sys_line" -ge "$heed_line" ] || \
+    [ "$heed_line" -ge "$social_graph_heed_line" ] || \
+    [ "$heed_line" -ge "$lmdb_line" ] || \
+    [ "$lmdb_line" -ge "$git_remote_line" ] || \
+    [ "$git_remote_line" -ge "$cli_line" ] || \
+    [ "$social_graph_heed_line" -ge "$cli_line" ]; then
+    echo "registry release order must publish the unified hardened LMDB graph before consumers" >&2
     exit 1
 fi
 

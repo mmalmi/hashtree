@@ -9,8 +9,19 @@ use hashtree_core::types::Hash;
 
 impl PoolStore {
     pub(super) fn read_manifest(&self) -> Result<PoolManifest, StoreError> {
+        Ok(self.read_manifest_with_identity()?.0)
+    }
+
+    pub(super) fn read_manifest_with_identity(
+        &self,
+    ) -> Result<(PoolManifest, hashtree_core::types::Hash), StoreError> {
         let rtxn = self.env.read_txn().map_err(map_heed)?;
-        self.manifest_from_txn(&rtxn)
+        let bytes = self
+            .manifest_db
+            .get(&rtxn, MANIFEST_KEY)
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
+        Ok((decode_manifest(bytes)?, hashtree_core::sha256(bytes)))
     }
 
     pub(super) fn manifest_from_txn(
