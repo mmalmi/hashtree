@@ -89,6 +89,10 @@
   authority in the launch request. This preserves the exact host-namespace
   proof without requiring worker access to `/proc/1/ns/*`, which may be
   denied by production process-visibility policy.
+- The Pool migration controller now gives a freshly execed systemd worker a
+  bounded 250 ms window for `/proc/PID/cmdline` to stabilize after
+  `/proc/PID/exe` identifies the exact pinned binary. A permanently different
+  argv still fails closed before request publication.
 - Pool migration workers now prove their user namespace against the owner of
   the already-verified host PID namespace through `NS_GET_USERNS`. This keeps
   the initial-user-namespace gate fail-closed on hosts where an unprivileged

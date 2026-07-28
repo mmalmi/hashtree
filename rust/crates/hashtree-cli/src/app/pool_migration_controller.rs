@@ -4383,6 +4383,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         }
         let deadline = Instant::now() + maximum;
         let mut last_observed_executable = None;
+        let mut argv_mismatch_since = None;
+        let mut last_observed_argv = None;
         loop {
             let properties = query_systemd_properties(systemctl, unit)?;
             validate_loaded_unit_common(
@@ -4430,6 +4432,26 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                     }
                 };
                 if observed_executable.as_deref() == Some(binary) {
+                    let observed_argv = match read_process_argv(main_pid) {
+                        Ok(argv) => Some(argv),
+                        Err(error) if io_error_kind(&error) == Some(ErrorKind::NotFound) => None,
+                        Err(error) => {
+                            return Err(error)
+                                .context("read Pool migration argv during systemd exec")
+                        }
+                    };
+                    if observed_argv.as_deref() != Some(expected_argv) {
+                        last_observed_argv = observed_argv;
+                        let mismatch_since = argv_mismatch_since.get_or_insert_with(Instant::now);
+                        if mismatch_since.elapsed() >= Duration::from_millis(250) {
+                            bail!(
+                                "Pool migration /proc argv did not stabilize to the controller-generated argv; last argv was {:?}",
+                                last_observed_argv
+                            );
+                        }
+                        thread::sleep(Duration::from_millis(25));
+                        continue;
+                    }
                     let identity = validate_process_identity(
                         main_pid,
                         invocation_id,
@@ -4450,6 +4472,13 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 last_observed_executable = observed_executable;
             }
             if Instant::now() >= deadline {
+                if let Some(argv) = last_observed_argv {
+                    bail!(
+                        "timed out after {} ms waiting for Pool migration argv to stabilize; last argv was {:?}",
+                        maximum.as_millis(),
+                        argv
+                    );
+                }
                 if let Some(executable) = last_observed_executable {
                     bail!(
                         "timed out after {} ms waiting for Pool migration MainPID to exec {}; last executable was {}",
@@ -4496,15 +4525,7 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 executable.display()
             );
         }
-        let cmdline = std::fs::read(proc.join("cmdline"))
-            .context("read Pool migration /proc cmdline")?
-            .split(|byte| *byte == 0)
-            .filter(|argument| !argument.is_empty())
-            .map(|argument| {
-                String::from_utf8(argument.to_vec())
-                    .context("Pool migration /proc argv is not UTF-8")
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let cmdline = read_process_argv(pid)?;
         if cmdline != expected_argv {
             bail!("Pool migration /proc argv differs from the controller-generated argv");
         }
@@ -4540,6 +4561,18 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             uid,
             gid,
         })
+    }
+
+    fn read_process_argv(pid: u32) -> Result<Vec<String>> {
+        std::fs::read(format!("/proc/{pid}/cmdline"))
+            .context("read Pool migration /proc cmdline")?
+            .split(|byte| *byte == 0)
+            .filter(|argument| !argument.is_empty())
+            .map(|argument| {
+                String::from_utf8(argument.to_vec())
+                    .context("Pool migration /proc argv is not UTF-8")
+            })
+            .collect()
     }
 
     fn process_start_time(pid: u32) -> Result<u64> {
