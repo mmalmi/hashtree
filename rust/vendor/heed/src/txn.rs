@@ -71,6 +71,15 @@ impl<'e> RoTxn<'e> {
         self.env.env_mut_ptr()
     }
 
+    /// Return the LMDB transaction identifier for this read snapshot.
+    ///
+    /// Read-only transactions with the same identifier observe the same
+    /// coherent database snapshot. This is useful when independent cursors
+    /// must scan one snapshot concurrently.
+    pub fn id(&self) -> usize {
+        unsafe { ffi::mdb_txn_id(self.txn) }
+    }
+
     /// Commit a read transaction.
     ///
     /// Synchronizing some [`Env`] metadata with the global handle.

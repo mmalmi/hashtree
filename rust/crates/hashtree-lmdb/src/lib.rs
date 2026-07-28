@@ -4,6 +4,7 @@ mod configured;
 mod managed_env;
 mod migration;
 mod migration_audit;
+mod parallel_key_scan;
 mod pool;
 
 pub use configured::{
@@ -24,6 +25,7 @@ pub use migration::{
     PoolMigrationBatch, DEFAULT_POOL_MIGRATION_MAX_BUFFER_BYTES,
 };
 pub use migration_audit::{PoolMigrationAuditStore, PoolMigrationAuditSummary};
+pub use parallel_key_scan::{LmdbParallelRawKeyScanner, MAX_PARALLEL_RAW_KEY_SCAN_CONCURRENCY};
 pub use pool::{
     PoolCatalogLocation, PoolMaintenanceReport, PoolManifestIdentity, PoolMemberConfig,
     PoolMemberId, PoolMemberRuntimePaths, PoolMemberState, PoolMemberStatus, PoolPhysicalAudit,

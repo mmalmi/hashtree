@@ -1073,6 +1073,52 @@ impl<KC, DC, C> Database<KC, DC, C> {
         Ok(keys)
     }
 
+    /// Return a bounded page of copied raw keys in one lexicographic range
+    /// without requesting their values from LMDB.
+    ///
+    /// `end` is exclusive. The boolean is true when the cursor reached that
+    /// boundary (or database EOF), and false when another page remains in the
+    /// same range. The cursor inspects at most one key beyond `limit` to
+    /// distinguish those cases, still with a null LMDB data pointer.
+    pub fn raw_keys_in_range(
+        &self,
+        txn: &RoTxn,
+        start: Bound<&[u8]>,
+        end: Option<&[u8]>,
+        limit: usize,
+    ) -> Result<(Vec<Vec<u8>>, bool)> {
+        assert_eq_env_db_txn!(self, txn);
+        if limit == 0 {
+            return Ok((Vec::new(), false));
+        }
+
+        let mut cursor = RoCursor::new(txn, self.dbi)?;
+        let mut current = match start {
+            Bound::Unbounded => cursor.move_on_first_key()?,
+            Bound::Included(start) => {
+                cursor.move_on_key_greater_than_or_equal_to_without_data(start)?
+            }
+            Bound::Excluded(start) => {
+                match cursor.move_on_key_greater_than_or_equal_to_without_data(start)? {
+                    Some(key) if key == start => cursor.move_on_next_key()?,
+                    current => current,
+                }
+            }
+        };
+        let mut keys = Vec::with_capacity(limit);
+        while let Some(key) = current {
+            if end.is_some_and(|end| key >= end) {
+                return Ok((keys, true));
+            }
+            if keys.len() == limit {
+                return Ok((keys, false));
+            }
+            keys.push(key.to_vec());
+            current = cursor.move_on_next_key()?;
+        }
+        Ok((keys, true))
+    }
+
     /// Return whether an encoded key exists without requesting its value from
     /// LMDB.
     pub fn contains_raw_key_without_data(&self, txn: &RoTxn, key: &[u8]) -> Result<bool> {
@@ -2852,6 +2898,28 @@ mod tests {
         assert_eq!(
             db.raw_keys_from(&txn, Bound::Included(b"b".as_slice()), 1)?,
             [b"b".to_vec()]
+        );
+        assert_eq!(
+            db.raw_keys_in_range(
+                &txn,
+                Bound::Included(b"a".as_slice()),
+                Some(b"c".as_slice()),
+                1,
+            )?,
+            (vec![b"a".to_vec()], false),
+        );
+        assert_eq!(
+            db.raw_keys_in_range(
+                &txn,
+                Bound::Excluded(b"a".as_slice()),
+                Some(b"c".as_slice()),
+                8,
+            )?,
+            (vec![b"b".to_vec()], true),
+        );
+        assert_eq!(
+            db.raw_keys_in_range(&txn, Bound::Included(b"c".as_slice()), None, 8,)?,
+            (vec![b"c".to_vec()], true),
         );
         assert!(db.contains_raw_keys_in_bounded_range_without_data(
             &txn,

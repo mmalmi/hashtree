@@ -2665,6 +2665,8 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                             source_read_concurrency,
                             launch.source_lmdb_identity(),
                         )?;
+                    let mut source_key_scanner =
+                        reader.parallel_raw_key_scanner(cursor, source_read_concurrency)?;
                     let mut epoch_batches = 0usize;
 
                     loop {
@@ -2689,12 +2691,17 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                                     ))
                                 })
                         };
-                        let hashes = reader.scan_hashes_after(cursor, limit)?;
+                        let hashes = source_key_scanner.next_page(limit)?;
                         if hashes.is_empty() {
+                            drop(source_key_scanner);
                             launch.ensure_checkpoint_broker_alive()?;
                             launch.ensure_final_writer_masks()?;
-                            if let Some(missing) =
-                                online_audit.first_unreconciled_source_key(&reader, batch_size)?
+                            if let Some(missing) = online_audit
+                                .first_unreconciled_source_key_parallel(
+                                    &reader,
+                                    batch_size,
+                                    source_read_concurrency,
+                                )?
                             {
                                 launch.reset_online_cursor()?;
                                 cursor = None;
@@ -3072,13 +3079,19 @@ fn run_final_stopped_source_audit(
             bail!("source LMDB generation changed across mapping reopen");
         }
         generation = Some(opened_generation);
+        let mut source_key_scanner =
+            reader.parallel_raw_key_scanner(cursor, source_read_concurrency)?;
+        if source_key_scanner.snapshot_transaction_id() != opened_generation.last_txn_id as usize {
+            bail!("terminal source key workers opened a different LMDB generation");
+        }
         let mut epoch_batches = 0usize;
         loop {
             launch.ensure_final_writer_masks()?;
-            let hashes = reader.scan_hashes_after(cursor, batch_size)?;
+            let hashes = source_key_scanner.next_page(batch_size)?;
             launch.ensure_checkpoint_broker_alive()?;
             launch.ensure_final_writer_masks()?;
             if hashes.is_empty() {
+                drop(source_key_scanner);
                 launch.authorize_checkpoint("source-keyset-audit", cursor, None)?;
                 let (source_blob_entries, _) = reader.database_entry_counts()?;
                 if source_key_audit.blob_entries() != source_blob_entries {

@@ -347,14 +347,28 @@ impl PoolMigrationAuditStore {
         source: &crate::LmdbBlobReader,
         page_size: usize,
     ) -> Result<Option<Hash>, StoreError> {
+        self.first_unreconciled_source_key_parallel(source, page_size, 1)
+    }
+
+    /// Find the first source key not covered by this durable set using an
+    /// ordered, coherent-snapshot parallel raw-key scan.
+    ///
+    /// Only source keys are prefetched. LMDB values, metadata sizes, external
+    /// file lengths, and payload bodies are never requested.
+    pub fn first_unreconciled_source_key_parallel(
+        &self,
+        source: &crate::LmdbBlobReader,
+        page_size: usize,
+        concurrency: usize,
+    ) -> Result<Option<Hash>, StoreError> {
         if page_size == 0 {
             return Err(StoreError::Other(
                 "online migration audit coverage page size must be non-zero".into(),
             ));
         }
-        let mut cursor = None;
+        let mut scanner = source.parallel_raw_key_scanner(None, concurrency)?;
         loop {
-            let hashes = source.scan_hashes_after(cursor, page_size)?;
+            let hashes = scanner.next_page(page_size)?;
             if hashes.is_empty() {
                 return Ok(None);
             }
@@ -369,7 +383,6 @@ impl PoolMigrationAuditStore {
                     return Ok(Some(*hash));
                 }
             }
-            cursor = hashes.last().copied();
         }
     }
 
@@ -554,7 +567,7 @@ mod tests {
             .expect("record first source");
         assert_eq!(
             audit
-                .first_unreconciled_source_key(&reader, 1)
+                .first_unreconciled_source_key_parallel(&reader, 1, 4)
                 .expect("scan coverage"),
             Some(second)
         );
@@ -563,7 +576,7 @@ mod tests {
             .expect("record second source");
         assert_eq!(
             audit
-                .first_unreconciled_source_key(&reader, 1)
+                .first_unreconciled_source_key_parallel(&reader, 1, 4)
                 .expect("scan complete coverage"),
             None
         );

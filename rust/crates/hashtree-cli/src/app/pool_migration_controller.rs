@@ -2283,9 +2283,11 @@ mod linux {
 
         fn verify_online_source_coverage(&self, audit: &PoolMigrationAuditStore) -> Result<()> {
             let reader = self.open_online_source_audit_reader()?;
-            if let Some(hash) =
-                audit.first_unreconciled_source_key(&reader.reader, self.options.batch_size)?
-            {
+            if let Some(hash) = audit.first_unreconciled_source_key_parallel(
+                &reader.reader,
+                self.options.batch_size,
+                self.options.source_read_concurrency,
+            )? {
                 bail!(
                     "root source coverage found unreconciled key {}",
                     hashtree_core::to_hex(&hash)
@@ -5432,8 +5434,13 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         let mut hasher = Sha256::new();
         hasher.update(b"hashtree-pool-migration-source-content/v3\0");
         let mut keyset = hashtree_lmdb::LmdbSourceKeyAuditBuilder::new();
+        let mut source_key_scanner =
+            reader.parallel_raw_key_scanner(None, source_read_concurrency)?;
+        if source_key_scanner.snapshot_transaction_id() != generation.last_txn_id as usize {
+            bail!("root frozen-source key workers opened a different LMDB generation");
+        }
         loop {
-            let hashes = reader.scan_hashes_after(cursor, page_size)?;
+            let hashes = source_key_scanner.next_page(page_size)?;
             if hashes.is_empty() {
                 break;
             }
@@ -5477,6 +5484,7 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             }
             cursor = hashes.last().copied();
         }
+        drop(source_key_scanner);
         if let Some((hash, size)) = next_terminal {
             bail!(
                 "terminal source evidence has extra entry {} / {} bytes",
