@@ -421,6 +421,12 @@ mod linux {
         online_target_audit_certification: Option<FileAuthorityV3>,
     }
 
+    struct PinnedOnlineSourceAuditReader {
+        reader: hashtree_lmdb::LmdbBlobReader,
+        _source: PinnedDirectory,
+        _external: Option<PinnedDirectory>,
+    }
+
     struct PreparedMountTeardown {
         intent: MountTeardownIntentV3,
         intent_path: PathBuf,
@@ -2194,6 +2200,7 @@ mod linux {
             let mut offset = 0usize;
             while offset < hashes.len() {
                 let bodies = reader
+                    .reader
                     .read_hashes_bounded(&hashes[offset..], byte_limit)
                     .context("root-read online source audit bodies")?;
                 if bodies.is_empty() {
@@ -2216,7 +2223,7 @@ mod linux {
             Ok(())
         }
 
-        fn open_online_source_audit_reader(&self) -> Result<hashtree_lmdb::LmdbBlobReader> {
+        fn open_online_source_audit_reader(&self) -> Result<PinnedOnlineSourceAuditReader> {
             let source =
                 PinnedDirectory::open_exact(&self.options.source, "online audit source LMDB")?;
             source.require_authority_identity(
@@ -2265,15 +2272,17 @@ mod linux {
                 },
             )
             .context("root-open exact online source audit reader")?;
-            drop(external_source);
-            drop(source);
-            Ok(reader)
+            Ok(PinnedOnlineSourceAuditReader {
+                reader,
+                _source: source,
+                _external: external_source,
+            })
         }
 
         fn verify_online_source_coverage(&self, audit: &PoolMigrationAuditStore) -> Result<()> {
             let reader = self.open_online_source_audit_reader()?;
             if let Some((hash, size)) =
-                audit.first_unverified_source(&reader, self.options.batch_size)?
+                audit.first_unverified_source(&reader.reader, self.options.batch_size)?
             {
                 bail!(
                     "root source coverage found unverified entry {} / {} bytes",
