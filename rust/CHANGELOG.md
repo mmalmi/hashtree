@@ -84,6 +84,10 @@
 
 ### Fixed
 
+- Ordinary online Pool migration checkpoints no longer require the nonempty
+  runtime writer-mask set reserved for target-fenced and stopped-final passes.
+  The root broker still revalidates its controller, worker, and legacy-worker
+  activation fences before authorizing every online checkpoint.
 - Controlled Pool opens now accept a live manifest member path only when it is
   either byte-identical to, or resolves to the same canonical directory as,
   the pinned topology path. This preserves canonical topology authority while

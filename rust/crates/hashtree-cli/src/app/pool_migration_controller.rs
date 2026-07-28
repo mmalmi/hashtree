@@ -389,6 +389,13 @@ mod linux {
         controller_unit: &'a str,
     }
 
+    fn checkpoint_requires_runtime_writer_masks(
+        phase: PoolMigrationControllerPhase,
+        target_writers_fenced: bool,
+    ) -> bool {
+        phase.is_final_stopped() || target_writers_fenced
+    }
+
     #[derive(Clone, Default)]
     struct CheckpointProgress {
         online_evidence_published: bool,
@@ -1800,10 +1807,16 @@ mod linux {
         }
 
         fn query_batched_systemd_fence(&self) -> Result<HashMap<String, String>> {
-            validate_runtime_writer_mask_authorities(
-                &self.controller_state.stopped_writer_units,
-                &self.controller_state.writer_unit_masks,
-            )?;
+            let runtime_writer_masks_required = checkpoint_requires_runtime_writer_masks(
+                self.options.phase,
+                self.controller_state.target_writers_fenced,
+            );
+            if runtime_writer_masks_required {
+                validate_runtime_writer_mask_authorities(
+                    &self.controller_state.stopped_writer_units,
+                    &self.controller_state.writer_unit_masks,
+                )?;
+            }
             validate_legacy_worker_mask_authorities(
                 &self.controller_state.legacy_worker_template_mask,
                 &self.controller_state.legacy_worker_instance_masks,
@@ -1812,7 +1825,9 @@ mod linux {
                 self.options.controller_systemd_unit.clone(),
                 self.options.systemd_unit.clone(),
             ];
-            units.extend(self.controller_state.stopped_writer_units.iter().cloned());
+            if runtime_writer_masks_required {
+                units.extend(self.controller_state.stopped_writer_units.iter().cloned());
+            }
             // An uninstantiated `name@.service` is not a valid `systemctl
             // show` target. Its exact root-owned runtime symlink is validated
             // directly; concrete instance masks also bind systemd's view.
@@ -1850,16 +1865,18 @@ mod linux {
             {
                 bail!("Pool migration worker lost its exact root-controller BindsTo authority");
             }
-            for (unit, mask) in self
-                .controller_state
-                .stopped_writer_units
-                .iter()
-                .zip(&self.controller_state.writer_unit_masks)
-            {
-                let unit_properties = properties
-                    .remove(unit)
-                    .with_context(|| format!("batched checkpoint query omitted writer {unit}"))?;
-                validate_runtime_masked_writer_owned_properties(unit, mask, &unit_properties)?;
+            if runtime_writer_masks_required {
+                for (unit, mask) in self
+                    .controller_state
+                    .stopped_writer_units
+                    .iter()
+                    .zip(&self.controller_state.writer_unit_masks)
+                {
+                    let unit_properties = properties.remove(unit).with_context(|| {
+                        format!("batched checkpoint query omitted writer {unit}")
+                    })?;
+                    validate_runtime_masked_writer_owned_properties(unit, mask, &unit_properties)?;
+                }
             }
             for mask in &self.controller_state.legacy_worker_instance_masks {
                 let unit_properties = properties.remove(&mask.unit).with_context(|| {
@@ -1967,6 +1984,12 @@ mod linux {
                 &self.controller_state.legacy_worker_instance_masks,
             )
             .context("revalidate legacy migration-worker activation fence")?;
+            if !checkpoint_requires_runtime_writer_masks(
+                self.options.phase,
+                self.controller_state.target_writers_fenced,
+            ) {
+                return Ok(());
+            }
             validate_runtime_masked_writer_units_with_systemctl(
                 &self.systemctl.path,
                 &self.controller_state.stopped_writer_units,
@@ -6730,6 +6753,26 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn ordinary_online_checkpoint_does_not_require_final_writer_masks() {
+            assert!(!checkpoint_requires_runtime_writer_masks(
+                PoolMigrationControllerPhase::OnlineBounded,
+                false,
+            ));
+            assert!(checkpoint_requires_runtime_writer_masks(
+                PoolMigrationControllerPhase::OnlineBounded,
+                true,
+            ));
+            assert!(checkpoint_requires_runtime_writer_masks(
+                PoolMigrationControllerPhase::FinalStoppedSource,
+                false,
+            ));
+            assert!(checkpoint_requires_runtime_writer_masks(
+                PoolMigrationControllerPhase::FinalStoppedFull,
+                false,
+            ));
+        }
 
         #[test]
         fn running_controller_hash_rejects_same_path_swap_inode() {
