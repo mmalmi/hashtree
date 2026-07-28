@@ -55,6 +55,26 @@ pub struct PoolTerminalAudit {
     pub manifest_sha256: Hash,
 }
 
+/// Exact catalog-to-physical-member proof that does not reread blob payloads.
+///
+/// It rejects non-`Stored` catalog rows, missing or extra secondary-index
+/// entries, active moves, missing physical objects, declared/physical size
+/// mismatches, member orphans, and stale member indexes or counters. It must
+/// be bound to a separate completed content audit when used as a release gate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolPhysicalAudit {
+    pub stored_locations: u64,
+    pub stored_bytes: u64,
+    pub catalog_sha256: Hash,
+    pub physical_sha256: Hash,
+    pub manifest_sha256: Hash,
+}
+
+struct TerminalStateAudit {
+    physical: PoolPhysicalAudit,
+    payload_sha256: Option<Hash>,
+}
+
 /// Exact, read-only Pool catalog state for one blob.
 ///
 /// Release auditors must distinguish a terminal `Stored` location from
@@ -287,6 +307,30 @@ impl PoolStoreReader {
     /// and addressable member orphans are rejected even when counts coincide.
     /// Callers must keep all target Pool writers fenced for the full scan.
     pub fn validate_terminal_catalog_and_payloads(&self) -> Result<PoolTerminalAudit, StoreError> {
+        let audit = self.validate_terminal_state(true)?;
+        Ok(PoolTerminalAudit {
+            stored_locations: audit.physical.stored_locations,
+            stored_bytes: audit.physical.stored_bytes,
+            catalog_sha256: audit.physical.catalog_sha256,
+            payload_sha256: audit.payload_sha256.ok_or_else(|| {
+                StoreError::Other("terminal payload audit produced no payload digest".into())
+            })?,
+            manifest_sha256: audit.physical.manifest_sha256,
+        })
+    }
+
+    /// Exhaustively prove exact catalog/physical-member parity without
+    /// rereading multi-terabyte payload bodies.
+    pub fn validate_terminal_catalog_and_physical_state(
+        &self,
+    ) -> Result<PoolPhysicalAudit, StoreError> {
+        Ok(self.validate_terminal_state(false)?.physical)
+    }
+
+    fn validate_terminal_state(
+        &self,
+        verify_payloads: bool,
+    ) -> Result<TerminalStateAudit, StoreError> {
         let rtxn = self.env.read_txn().map_err(map_heed)?;
         let manifest = self
             .manifest
@@ -308,6 +352,15 @@ impl PoolStoreReader {
         catalog_digest.update(manifest);
         let mut payload_digest = Sha256::new();
         payload_digest.update(b"hashtree-pool-terminal-payloads/v1\0");
+        let mut expected_member_ownership = self
+            .member_ids
+            .iter()
+            .map(|member| {
+                let mut digest = Sha256::new();
+                digest.update(b"hashtree-pool-member-ownership/v1\0");
+                (*member, digest)
+            })
+            .collect::<HashMap<_, _>>();
         let mut stored_locations = 0u64;
         let mut stored_bytes = 0u64;
         let mut member_counts = HashMap::<PoolMemberId, u64>::new();
@@ -365,13 +418,22 @@ impl PoolStoreReader {
             *member_byte_total = member_byte_total.checked_add(size).ok_or_else(|| {
                 StoreError::Other("terminal Pool member byte total overflow".into())
             })?;
+            let ownership = expected_member_ownership.get_mut(&member).ok_or_else(|| {
+                StoreError::Other(format!(
+                    "terminal Pool catalog references unavailable member {member}"
+                ))
+            })?;
+            ownership.update(hash);
+            ownership.update(size.to_be_bytes());
             catalog_digest.update(hash);
             catalog_digest.update((encoded.len() as u64).to_be_bytes());
             catalog_digest.update(encoded);
-            batch.push((hash, member, size));
-            if batch.len() >= TERMINAL_AUDIT_BATCH_ITEMS {
-                self.validate_terminal_payload_batch(&batch, &mut payload_digest)?;
-                batch.clear();
+            if verify_payloads {
+                batch.push((hash, member, size));
+                if batch.len() >= TERMINAL_AUDIT_BATCH_ITEMS {
+                    self.validate_terminal_payload_batch(&batch, &mut payload_digest)?;
+                    batch.clear();
+                }
             }
             if last_progress.elapsed() >= Duration::from_secs(10) {
                 eprintln!(
@@ -381,7 +443,7 @@ impl PoolStoreReader {
                 last_progress = Instant::now();
             }
         }
-        if !batch.is_empty() {
+        if verify_payloads && !batch.is_empty() {
             self.validate_terminal_payload_batch(&batch, &mut payload_digest)?;
         }
 
@@ -411,6 +473,9 @@ impl PoolStoreReader {
         catalog_digest.update(b"\0no-active-move-ownership\0");
         rtxn.commit().map_err(map_heed)?;
 
+        let mut physical_digest = Sha256::new();
+        physical_digest.update(b"hashtree-pool-terminal-physical/v1\0");
+        physical_digest.update(self.manifest_identity.sha256);
         for member in &self.member_ids {
             let reader = self
                 .members
@@ -428,6 +493,15 @@ impl PoolStoreReader {
                     keyset.blob_entries, keyset.metadata_entries, keyset.total_bytes
                 )));
             }
+            let expected_ownership = expected_member_ownership
+                .remove(member)
+                .expect("every manifest member has an ownership digest")
+                .finalize();
+            if keyset.ownership_sha256.as_slice() != expected_ownership.as_slice() {
+                return Err(StoreError::Other(format!(
+                    "terminal Pool member {member} physical hash/size ownership differs from its exact catalog ownership"
+                )));
+            }
             catalog_digest.update(member.as_bytes());
             catalog_digest.update(expected.to_be_bytes());
             catalog_digest.update(expected_bytes.to_be_bytes());
@@ -437,14 +511,24 @@ impl PoolStoreReader {
             catalog_digest.update(keyset.pinned_count.to_be_bytes());
             catalog_digest.update(keyset.pinned_bytes.to_be_bytes());
             catalog_digest.update(keyset.sha256);
+            physical_digest.update(member.as_bytes());
+            physical_digest.update(keyset.ownership_sha256);
+            physical_digest.update(keyset.sha256);
         }
 
-        Ok(PoolTerminalAudit {
-            stored_locations,
-            stored_bytes,
-            catalog_sha256: catalog_digest.finalize().into(),
-            payload_sha256: payload_digest.finalize().into(),
-            manifest_sha256: self.manifest_identity.sha256,
+        let catalog_sha256 = catalog_digest.finalize().into();
+        physical_digest.update(catalog_sha256);
+        physical_digest.update(stored_locations.to_be_bytes());
+        physical_digest.update(stored_bytes.to_be_bytes());
+        Ok(TerminalStateAudit {
+            physical: PoolPhysicalAudit {
+                stored_locations,
+                stored_bytes,
+                catalog_sha256,
+                physical_sha256: physical_digest.finalize().into(),
+                manifest_sha256: self.manifest_identity.sha256,
+            },
+            payload_sha256: verify_payloads.then(|| payload_digest.finalize().into()),
         })
     }
 
@@ -945,6 +1029,49 @@ mod tests {
         assert_eq!(audit.stored_locations, 1);
         assert_eq!(audit.stored_bytes, data.len() as u64);
         assert_eq!(audit.manifest_sha256, reader.manifest_identity().sha256);
+        let physical = reader.validate_terminal_catalog_and_physical_state()?;
+        assert_eq!(physical.stored_locations, 1);
+        assert_eq!(physical.stored_bytes, data.len() as u64);
+        assert_eq!(physical.catalog_sha256, audit.catalog_sha256);
+        assert_eq!(physical.manifest_sha256, audit.manifest_sha256);
+        Ok(())
+    }
+
+    #[test]
+    fn physical_audit_rejects_equal_count_catalog_member_ownership_mismatch(
+    ) -> Result<(), StoreError> {
+        let temp = tempfile::tempdir().map_err(StoreError::Io)?;
+        let catalog = temp.path().join("catalog");
+        let member_path = temp.path().join("member");
+        let mut config = PoolStoreConfig::default();
+        config.temperature.enabled = false;
+        let pool = PoolStore::open(&catalog, config.clone())?;
+        let member = pool.add_member(PoolMemberConfig::new(member_path, 16 * 1024 * 1024))?;
+        let physical_body = b"physical ownership A";
+        let catalog_body = b"physical ownership B";
+        assert_eq!(physical_body.len(), catalog_body.len());
+        let physical_hash = sha256(physical_body);
+        let catalog_hash = sha256(catalog_body);
+        pool.put_sync(physical_hash, physical_body)?;
+        let mut wtxn = pool.env.write_txn().map_err(map_heed)?;
+        pool.set_location_txn(&mut wtxn, physical_hash, None)?;
+        pool.set_location_txn(
+            &mut wtxn,
+            catalog_hash,
+            Some(LocationRecord::Stored {
+                member,
+                size: catalog_body.len() as u64,
+            }),
+        )?;
+        wtxn.commit().map_err(map_heed)?;
+        pool.force_sync()?;
+        drop(pool);
+
+        let reader = PoolStoreReader::open(&catalog, config)?;
+        let error = reader
+            .validate_terminal_catalog_and_physical_state()
+            .expect_err("equal-count ownership mismatch must fail physical audit");
+        assert!(error.to_string().contains("physical hash/size ownership"));
         Ok(())
     }
 

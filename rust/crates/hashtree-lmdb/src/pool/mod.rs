@@ -36,8 +36,8 @@ pub use self::read_only::{
     ReadOnlyPoolStore,
 };
 pub use self::reader::{
-    PoolCatalogLocation, PoolManifestIdentity, PoolReadBatchItem, PoolStoreReader,
-    PoolTerminalAudit,
+    PoolCatalogLocation, PoolManifestIdentity, PoolPhysicalAudit, PoolReadBatchItem,
+    PoolStoreReader, PoolTerminalAudit,
 };
 use self::temperature::TemperatureRuntime;
 use self::temperature_worker::TemperatureWorker;
