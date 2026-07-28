@@ -295,6 +295,26 @@ impl SourceEvidenceManifestReaderV3 {
     }
 }
 
+/// Consume the exact `expected_hash` from sorted evidence while tolerating
+/// earlier evidence entries that are no longer present in a later frozen
+/// source. The caller retains `next` so repeated calls remain streaming.
+pub(super) fn consume_matching_source_evidence(
+    reader: &mut SourceEvidenceManifestReaderV3,
+    next: &mut Option<([u8; 32], u64)>,
+    expected_hash: [u8; 32],
+) -> Result<Option<u64>> {
+    while next.is_some_and(|(hash, _)| hash < expected_hash) {
+        *next = reader.next_entry()?;
+    }
+    match *next {
+        Some((hash, size)) if hash == expected_hash => {
+            *next = reader.next_entry()?;
+            Ok(Some(size))
+        }
+        _ => Ok(None),
+    }
+}
+
 pub(super) struct SourceEvidenceUnionReaderV3 {
     readers: Vec<SourceEvidenceManifestReaderV3>,
     current: Vec<Option<([u8; 32], u64)>>,
@@ -631,6 +651,64 @@ mod tests {
             SourceEvidenceManifestWriterV3::create(&canonical).expect("create evidence writer");
         writer.append(records).expect("append generated evidence");
         writer.finish().expect("publish generated evidence")
+    }
+
+    #[test]
+    fn stopped_source_matching_allows_stale_online_evidence_entries() {
+        let temp = TempDir::new().expect("temp dir");
+        let first = [1u8; 32];
+        let deleted_between = [2u8; 32];
+        let last = [3u8; 32];
+        let deleted_after = [4u8; 32];
+        let authority = publish(
+            &temp.path().join("online"),
+            &[
+                (first, 11),
+                (deleted_between, 22),
+                (last, 33),
+                (deleted_after, 44),
+            ],
+        );
+        let mut reader =
+            SourceEvidenceManifestReaderV3::open(&authority).expect("open online evidence");
+        let mut next = reader.next_entry().expect("read first online entry");
+
+        assert_eq!(
+            consume_matching_source_evidence(&mut reader, &mut next, first)
+                .expect("match first frozen key"),
+            Some(11)
+        );
+        assert_eq!(
+            consume_matching_source_evidence(&mut reader, &mut next, last)
+                .expect("skip deleted online key and match last frozen key"),
+            Some(33)
+        );
+        while next.is_some() {
+            next = reader.next_entry().expect("drain stale online tail");
+        }
+        assert_eq!(
+            reader
+                .validated_summary()
+                .expect("validate online evidence"),
+            SourceEvidenceSummaryV3 {
+                entries: 4,
+                bytes: 110,
+                content_sha256: {
+                    let mut hasher = Sha256::new();
+                    hasher.update(b"hashtree-pool-migration-source-content/v3\0");
+                    for (hash, size) in [
+                        (first, 11u64),
+                        (deleted_between, 22),
+                        (last, 33),
+                        (deleted_after, 44),
+                    ] {
+                        hasher.update(hash);
+                        hasher.update(size.to_be_bytes());
+                    }
+                    hasher.finalize().into()
+                },
+            }
+        );
     }
 
     #[cfg(feature = "lmdb")]

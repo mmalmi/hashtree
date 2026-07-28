@@ -82,9 +82,9 @@ mod linux {
         MAX_CHECKPOINT_BYTES,
     };
     use super::super::pool_migration_evidence::{
-        validate_source_evidence_metadata, validate_terminal_catalog_target_evidence,
-        SourceEvidenceManifestReaderV3, SourceEvidenceUnionReaderV3,
-        ONLINE_TARGET_EVIDENCE_FILE_NAME, SOURCE_EVIDENCE_FILE_NAME,
+        consume_matching_source_evidence, validate_source_evidence_metadata,
+        validate_terminal_catalog_target_evidence, SourceEvidenceManifestReaderV3,
+        SourceEvidenceUnionReaderV3, ONLINE_TARGET_EVIDENCE_FILE_NAME, SOURCE_EVIDENCE_FILE_NAME,
     };
     use super::super::pool_migration_launch::{
         validate_batched_runtime_masked_final_fence_with_systemctl,
@@ -5422,23 +5422,21 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             }
             keyset.append_sorted(&hashes)?;
             for hash in hashes.iter().copied() {
-                let size = match (next_terminal, next_online) {
-                    (Some((terminal_hash, terminal_size)), Some((online_hash, online_size)))
-                        if terminal_hash == hash
-                            && online_hash == hash
-                            && terminal_size == online_size =>
+                let online_size =
+                    consume_matching_source_evidence(&mut online_evidence, &mut next_online, hash)?;
+                let size = match (next_terminal, online_size) {
+                    (Some((terminal_hash, terminal_size)), Some(online_size))
+                        if terminal_hash == hash && terminal_size == online_size =>
                     {
                         next_terminal = terminal.next_entry()?;
-                        next_online = online_evidence.next_entry()?;
                         terminal_size
                     }
-                    (Some((terminal_hash, terminal_size)), Some((online_hash, online_size))) => {
+                    (Some((terminal_hash, terminal_size)), Some(online_size)) => {
                         bail!(
-                            "frozen source key {} differs from terminal evidence {} / {} bytes or online evidence {} / {} bytes",
+                            "frozen source key {} differs from terminal evidence {} / {} bytes or online evidence size {}",
                             hashtree_core::to_hex(&hash),
                             hashtree_core::to_hex(&terminal_hash),
                             terminal_size,
-                            hashtree_core::to_hex(&online_hash),
                             online_size
                         )
                     }
@@ -5469,12 +5467,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 size
             );
         }
-        if let Some((hash, size)) = next_online {
-            bail!(
-                "certified online source evidence has extra entry {} / {} bytes",
-                hashtree_core::to_hex(&hash),
-                size
-            );
+        while next_online.is_some() {
+            next_online = online_evidence.next_entry()?;
         }
         let (source_blob_entries, _) = reader.database_entry_counts()?;
         if keyset.blob_entries() != source_blob_entries {

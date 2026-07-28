@@ -56,7 +56,9 @@ use super::pool_migration_controller::{
 };
 #[cfg(feature = "lmdb")]
 use super::pool_migration_evidence::validate_terminal_catalog_target_evidence;
-use super::pool_migration_evidence::{SourceEvidenceManifestReaderV3, SourceEvidenceUnionReaderV3};
+use super::pool_migration_evidence::{
+    consume_matching_source_evidence, SourceEvidenceManifestReaderV3, SourceEvidenceUnionReaderV3,
+};
 #[cfg(test)]
 use super::pool_migration_launch::write_durable_pool_migration_cursor;
 use super::pool_migration_launch::{
@@ -3091,12 +3093,8 @@ fn run_final_stopped_source_audit(
                 if reader.environment_generation() != opened_generation {
                     bail!("source LMDB generation changed during terminal source audit");
                 }
-                if let Some((hash, size)) = next_online {
-                    bail!(
-                        "certified online evidence has extra source key {} / {} bytes",
-                        hashtree_core::to_hex(&hash),
-                        size
-                    );
+                while next_online.is_some() {
+                    next_online = online_evidence.next_entry()?;
                 }
                 let online_summary = online_evidence.validated_summary()?;
                 if online_summary.entries != online.source_verified_entries
@@ -3146,17 +3144,14 @@ fn run_final_stopped_source_audit(
             source_key_audit.append_sorted(&hashes)?;
             let mut entries = Vec::with_capacity(hashes.len());
             for hash in &hashes {
-                match next_online {
-                    Some((online_hash, online_size)) if online_hash == *hash => {
+                match consume_matching_source_evidence(
+                    &mut online_evidence,
+                    &mut next_online,
+                    *hash,
+                )? {
+                    Some(online_size) => {
                         entries.push((*hash, online_size));
-                        next_online = online_evidence.next_entry()?;
                     }
-                    Some((online_hash, online_size)) => bail!(
-                        "stopped source key {} differs from certified online key {} / {} bytes",
-                        hashtree_core::to_hex(hash),
-                        hashtree_core::to_hex(&online_hash),
-                        online_size,
-                    ),
                     None => bail!(
                         "stopped source key {} is absent from the certified online target audit; rerun online-bounded catch-up",
                         hashtree_core::to_hex(hash),

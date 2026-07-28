@@ -12,7 +12,9 @@
   the complete frozen source key sequence without rereading source sizes or
   storage locations. Raw-key cursors pass a null data pointer to LMDB so key
   evidence does not fault overflow-value pages, and metadata-only rows cannot
-  satisfy source membership.
+  satisfy source membership. Frozen-source replay tolerates stale online
+  evidence for keys deleted before the source fence while still requiring
+  every frozen raw key and its Pool-derived size exactly.
 - The daemon can temporarily serve exact-hash misses from one independently
   pinned, strict read-only PoolStore while keeping its main PoolStore as the
   sole write and enumeration authority. Startup requires an explicit mode,
