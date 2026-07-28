@@ -406,10 +406,11 @@ The supported full migration is three-stage:
    mappings after the bounded epoch, and then performs one exhaustive
    catalog-to-physical-member parity audit.
 
-Before either stage, remove only an exactly audited list of physically absent
-`Pending` records with `cleanup_stale_pending_exact_offline_sync`; generic
-`delete_many_sync` is not a safe substitute. Every source, target and legacy
-migration writer unit must remain stopped and runtime-masked for the complete
+Before either stopped-final stage, remove only an exactly audited list of
+physically absent `Pending` records with
+`cleanup_stale_pending_exact_offline_sync`; generic `delete_many_sync` is not
+a safe substitute. Every writer unit named by that phase, plus every legacy
+migration writer, must remain stopped and runtime-masked for the complete
 stage. Immutable readers may remain available only when the controller's
 handle census and mount policy explicitly permit them.
 

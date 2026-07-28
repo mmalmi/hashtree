@@ -352,8 +352,6 @@ mod linux {
         environment_bytes: Vec<u8>,
         expected_argv: Vec<String>,
         source_receipts: Vec<ValidatedSourceTerminalReceiptV3>,
-        online_target_audit:
-            Option<super::super::pool_migration_online_audit::ValidatedOnlineTargetAuditV3>,
         broker_pid: u32,
         broker_proc_start_time_ticks: u64,
     }
@@ -899,7 +897,6 @@ mod linux {
                 environment_bytes,
                 expected_argv,
                 source_receipts,
-                online_target_audit,
                 broker_pid,
                 broker_proc_start_time_ticks,
             }))
