@@ -75,6 +75,10 @@ pub(super) fn validate_checkpoint_operation(value: &str) -> Result<()> {
     if !matches!(
         value,
         "migration-batch"
+            | "online-audit-batch"
+            | "online-evidence-publication"
+            | "online-audit-publication"
+            | "online-readiness"
             | "source-keyset-audit"
             | "source-evidence-publication"
             | "source-evidence-consumed"

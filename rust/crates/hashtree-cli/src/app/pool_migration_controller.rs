@@ -80,6 +80,9 @@ mod linux {
         MigrationCheckpointRequestV3, CHECKPOINT_ACK_SCHEMA, CHECKPOINT_REQUEST_SCHEMA,
         MAX_CHECKPOINT_BYTES,
     };
+    use super::super::pool_migration_evidence::{
+        validate_source_evidence_metadata, SourceEvidenceManifestReaderV3,
+    };
     use super::super::pool_migration_launch::{
         validate_batched_runtime_masked_final_fence_with_systemctl,
         validate_legacy_worker_activation_fence_with_systemctl,
@@ -105,6 +108,13 @@ mod linux {
         record_full_mount_lifecycle_closed, record_source_mounts_created,
         record_source_mounts_retained, recover_rollout_mount_lifecycle_state,
         PreparedMountLifecycleV3,
+    };
+    use super::super::pool_migration_online_audit::{
+        compute_online_audit_binding, load_validated_online_target_audit, online_audit_path,
+        OnlineTargetAuditExpectationV3, PoolMigrationOnlineTargetAuditCertificationV3,
+        PoolMigrationOnlineTargetAuditReceiptV3, ONLINE_TARGET_AUDIT_CERTIFICATION_FILE_NAME,
+        ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA, ONLINE_TARGET_AUDIT_FILE_NAME,
+        ONLINE_TARGET_AUDIT_SCHEMA,
     };
     use super::super::pool_migration_pinned::PinnedDirectory;
     use super::super::pool_migration_receipt::{
@@ -342,6 +352,8 @@ mod linux {
         environment_bytes: Vec<u8>,
         expected_argv: Vec<String>,
         source_receipts: Vec<ValidatedSourceTerminalReceiptV3>,
+        online_target_audit:
+            Option<super::super::pool_migration_online_audit::ValidatedOnlineTargetAuditV3>,
         broker_pid: u32,
         broker_proc_start_time_ticks: u64,
     }
@@ -377,6 +389,9 @@ mod linux {
 
     #[derive(Clone, Default)]
     struct CheckpointProgress {
+        online_evidence_published: bool,
+        online_audit_published: bool,
+        online_ready: bool,
         source_keyset_audited: bool,
         source_evidence_published: bool,
         source_reconciliations: u64,
@@ -394,6 +409,7 @@ mod linux {
         mount_teardown_receipt: Option<FileAuthorityV3>,
         terminal_publication_receipt: Option<FileAuthorityV3>,
         source_terminal_certification: Option<FileAuthorityV3>,
+        online_target_audit_certification: Option<FileAuthorityV3>,
     }
 
     struct PreparedMountTeardown {
@@ -769,6 +785,38 @@ mod linux {
                     "source-terminal receipt CAS set differs from the exact controller-state receipt set"
                 );
             }
+            let online_target_audit = load_validated_online_target_audit(
+                &receipt_authorities,
+                &OnlineTargetAuditExpectationV3 {
+                    rollout_id: &options.rollout_id,
+                    source_path: &source,
+                    source_lmdb_identity: source_identity,
+                    source_external_path: options.source_external_dir.as_deref(),
+                    source_external_identity,
+                    pool_path: &pool,
+                    pool_lmdb_identity: pool_identity,
+                    pool_topology_sha256: &pool_topology_input.sha256,
+                    pool_manifest_sha256: &controller_state.pool_manifest_sha256,
+                    expected_service_gid: options.service_gid,
+                    validate_evidence_content: false,
+                },
+            )?;
+            match options.phase {
+                PoolMigrationControllerPhase::FinalStoppedSource
+                    if online_target_audit.is_none() =>
+                {
+                    bail!(
+                        "final-stopped-source requires one root-certified online target audit CAS"
+                    )
+                }
+                PoolMigrationControllerPhase::OnlineBounded
+                | PoolMigrationControllerPhase::FinalStoppedFull
+                    if online_target_audit.is_some() =>
+                {
+                    bail!("online target audit CAS is accepted only by final-stopped-source")
+                }
+                _ => {}
+            }
 
             validate_authority_isolation(
                 &rollout_dir,
@@ -851,6 +899,7 @@ mod linux {
                 environment_bytes,
                 expected_argv,
                 source_receipts,
+                online_target_audit,
                 broker_pid,
                 broker_proc_start_time_ticks,
             }))
@@ -1153,6 +1202,7 @@ mod linux {
                 &process,
                 &request,
                 &request_sha256,
+                &launch_ack_sha256,
                 mount_lifecycle,
                 mounted_lifecycle_authority.as_ref(),
             )?;
@@ -1178,6 +1228,7 @@ mod linux {
                     "mountTeardownReceipt": completion.mount_teardown_receipt,
                     "terminalPublicationReceipt": completion.terminal_publication_receipt,
                     "sourceTerminalCertification": completion.source_terminal_certification,
+                    "onlineTargetAuditCertification": completion.online_target_audit_certification,
                 }))
                 .context("serialize Pool migration controller result")?
             );
@@ -1206,6 +1257,7 @@ mod linux {
             process: &ProcessIdentity,
             request: &PoolMigrationLaunchRequestV3,
             launch_request_sha256: &str,
+            launch_ack_sha256: &str,
             mount_lifecycle: Option<&PreparedMountLifecycleV3>,
             mounted_lifecycle_authority: Option<&FileAuthorityV3>,
         ) -> Result<CheckpointBrokerCompletion> {
@@ -1420,10 +1472,35 @@ mod linux {
                             self.validate_terminal_worker_outputs(process, &progress, sequence)?;
                         if terminal_receipt_authority.as_ref()
                             != prepared_terminal_authority.as_ref()
+                            && self.options.phase.is_final_stopped()
                         {
                             bail!(
                                 "worker terminal receipt changed after root authorized terminal readiness"
                             );
+                        }
+                        if self.options.phase == PoolMigrationControllerPhase::OnlineBounded {
+                            let certification = terminal_receipt_authority
+                                .as_ref()
+                                .map(|authority| {
+                                    self.certify_online_target_audit(
+                                        process,
+                                        request,
+                                        launch_request_sha256,
+                                        launch_ack_sha256,
+                                        authority,
+                                    )
+                                })
+                                .transpose()?;
+                            return Ok(CheckpointBrokerCompletion {
+                                checkpoint_count: sequence,
+                                checkpoint_systemctl_subprocess_count: sequence,
+                                terminal_receipt_sha256: terminal_receipt_authority
+                                    .map(|authority| authority.sha256),
+                                mount_teardown_receipt: None,
+                                terminal_publication_receipt: None,
+                                source_terminal_certification: None,
+                                online_target_audit_certification: certification,
+                            });
                         }
                         let terminal_publication_intent = prepared_terminal_publication
                             .as_ref()
@@ -1499,6 +1576,7 @@ mod linux {
                                 .map(|completion| completion.receipt.clone()),
                             source_terminal_certification: terminal_publication
                                 .and_then(|completion| completion.source_certification),
+                            online_target_audit_certification: None,
                         });
                     }
                     "failed" => {
@@ -1776,7 +1854,21 @@ mod linux {
             checkpoint_count: u64,
         ) -> Result<Option<BoundedFileAuthorityV3>> {
             match self.options.phase {
-                PoolMigrationControllerPhase::OnlineBounded => Ok(None),
+                PoolMigrationControllerPhase::OnlineBounded => {
+                    if !progress.online_evidence_published
+                        && !progress.online_audit_published
+                        && !progress.online_ready
+                    {
+                        return Ok(None);
+                    }
+                    if !progress.online_evidence_published
+                        || !progress.online_audit_published
+                        || !progress.online_ready
+                    {
+                        bail!("online worker exited during its terminal audit checkpoint sequence");
+                    }
+                    self.capture_phase_terminal_authority(process).map(Some)
+                }
                 PoolMigrationControllerPhase::FinalStoppedSource => {
                     if checkpoint_count == 0
                         || !progress.source_keyset_audited
@@ -1824,10 +1916,132 @@ mod linux {
                     0o600,
                     "terminal Pool audit receipt",
                 ),
-                PoolMigrationControllerPhase::OnlineBounded => {
-                    bail!("online-bounded migration has no terminal worker receipt")
-                }
+                PoolMigrationControllerPhase::OnlineBounded => validate_worker_terminal_file(
+                    &self.attempt_dir.join(ONLINE_TARGET_AUDIT_FILE_NAME),
+                    process.uid,
+                    process.gid,
+                    0o640,
+                    "online target audit receipt",
+                ),
             }
+        }
+
+        fn certify_online_target_audit(
+            &self,
+            process: &ProcessIdentity,
+            request: &PoolMigrationLaunchRequestV3,
+            launch_request_sha256: &str,
+            launch_ack_sha256: &str,
+            authority: &BoundedFileAuthorityV3,
+        ) -> Result<FileAuthorityV3> {
+            let expected_path = self.attempt_dir.join(ONLINE_TARGET_AUDIT_FILE_NAME);
+            if authority.path != expected_path {
+                bail!("online target audit receipt has an unexpected attempt path");
+            }
+            let bytes = read_bounded_file_authority(authority, "online target audit receipt")?;
+            let receipt: PoolMigrationOnlineTargetAuditReceiptV3 =
+                serde_json::from_slice(&bytes)
+                    .context("parse online target audit receipt for root certification")?;
+            let terminal_cursor =
+                capture_cursor_authority(&self.options.state_file, self.options.phase)?;
+            let pool_manifest_sha256 =
+                hashtree_core::from_hex(&self.controller_state.pool_manifest_sha256)
+                    .context("decode online audit Pool manifest authority")?;
+            let audit_binding = compute_online_audit_binding(
+                &request.controller.rollout_id,
+                request.source.lmdb_identity,
+                request.source.external_identity,
+                request.pool.lmdb_identity,
+                &request.pool.topology.sha256,
+                pool_manifest_sha256,
+            )?;
+            if receipt.schema != ONLINE_TARGET_AUDIT_SCHEMA
+                || receipt.status != "verified"
+                || receipt.phase != "online-bounded"
+                || receipt.rollout_id != self.options.rollout_id
+                || receipt.boot_id != request.boot_id
+                || receipt.attempt_namespace != request.attempt_namespace
+                || receipt.attempt_namespace_identity != request.attempt_namespace_identity
+                || receipt.attempt_identity != request.attempt_identity
+                || receipt.attempt_nonce != self.nonce
+                || receipt.request_path != self.request_path
+                || receipt.request_sha256 != launch_request_sha256
+                || receipt.acknowledgement_path != self.ack_path
+                || receipt.acknowledgement_sha256 != launch_ack_sha256
+                || receipt.terminal_cursor != terminal_cursor
+                || receipt.worker_binary != request.binary
+                || receipt.worker_argv_sha256 != argv_sha256(&request.argv)
+                || receipt.systemd_unit != request.systemd_unit
+                || receipt.systemd_invocation_id != process.invocation_id
+                || receipt.systemd_fragment != request.systemd_fragment
+                || receipt.systemd_environment_file != request.systemd_environment_file
+                || receipt.main_pid != process.main_pid
+                || receipt.proc_start_time_ticks != process.start_time_ticks
+                || receipt.controller_state_sha256 != request.controller.state.sha256
+                || receipt.source_path != request.source.lmdb_path
+                || receipt.source_lmdb_identity != request.source.lmdb_identity
+                || receipt.source_external_path != request.source.external_path
+                || receipt.source_external_identity != request.source.external_identity
+                || receipt.source_baseline_sha256 != request.source.baseline.sha256
+                || receipt.pool_path != request.pool.path
+                || receipt.pool_lmdb_identity != request.pool.lmdb_identity
+                || receipt.pool_topology_sha256 != request.pool.topology.sha256
+                || receipt.pool_manifest_sha256 != self.controller_state.pool_manifest_sha256
+                || receipt.audit_store_path != online_audit_path(&request.cursor.path)?
+                || receipt.audit_binding_sha256 != hashtree_core::to_hex(&audit_binding)
+                || receipt.source_evidence.path
+                    != self.attempt_dir.join("source-hash-size.manifest")
+                || receipt.source_evidence.entries != receipt.verified_entries
+            {
+                bail!("online target audit receipt differs from the exact live launch authority");
+            }
+            validate_source_evidence_metadata(
+                &receipt.source_evidence,
+                Some(self.options.service_gid),
+                false,
+            )?;
+            let mut evidence = SourceEvidenceManifestReaderV3::open(&receipt.source_evidence)?;
+            while evidence.next_entry()?.is_some() {}
+            let summary = evidence.validated_summary()?;
+            if summary.entries != receipt.verified_entries
+                || summary.bytes != receipt.verified_bytes
+                || hashtree_core::to_hex(&summary.content_sha256) != receipt.content_sha256
+            {
+                bail!("online target audit evidence differs from its receipt");
+            }
+            let certification = PoolMigrationOnlineTargetAuditCertificationV3 {
+                schema: ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA.to_string(),
+                status: "certified".to_string(),
+                rollout_id: self.options.rollout_id.clone(),
+                controller_state_sha256: self.controller_state_input.sha256.clone(),
+                receipt: FileAuthorityV3 {
+                    path: authority.path.clone(),
+                    sha256: authority.sha256.clone(),
+                },
+                source_evidence: receipt.source_evidence,
+                certified_at_unix_seconds: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .context("system clock precedes Unix epoch")?
+                    .as_secs(),
+            };
+            let mut certification_bytes = serde_json::to_vec(&certification)
+                .context("serialize online target audit certification")?;
+            certification_bytes.push(b'\n');
+            let path = self
+                .attempt_dir
+                .join(ONLINE_TARGET_AUDIT_CERTIFICATION_FILE_NAME);
+            durable_create_atomic(
+                &path,
+                &certification_bytes,
+                0o440,
+                0,
+                self.options.service_gid,
+                &self.nonce,
+            )?;
+            Ok(FileAuthorityV3 {
+                path,
+                sha256: sha256_bytes(&certification_bytes),
+            })
         }
 
         fn prepare_completed_source_mount_teardown_intent(
@@ -3993,12 +4207,32 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         };
 
         match phase {
-            PoolMigrationControllerPhase::OnlineBounded => {
-                if checkpoint.operation != "migration-batch" {
-                    bail!("online migration requested a non-migration checkpoint operation");
+            PoolMigrationControllerPhase::OnlineBounded => match checkpoint.operation.as_str() {
+                "migration-batch" if !progress.online_evidence_published => {
+                    require_batch_range()?;
                 }
-                require_batch_range()?;
-            }
+                "online-audit-batch" if !progress.online_evidence_published => {
+                    require_batch_range()?;
+                }
+                "online-evidence-publication" if !progress.online_evidence_published => {
+                    require_no_range()?;
+                    progress.online_evidence_published = true;
+                }
+                "online-audit-publication"
+                    if progress.online_evidence_published && !progress.online_audit_published =>
+                {
+                    require_no_range()?;
+                    progress.online_audit_published = true;
+                }
+                "online-readiness" if progress.online_audit_published && !progress.online_ready => {
+                    require_no_range()?;
+                    progress.online_ready = true;
+                }
+                _ => bail!(
+                    "online checkpoint operation {} is out of order",
+                    checkpoint.operation
+                ),
+            },
             PoolMigrationControllerPhase::FinalStoppedSource => match checkpoint.operation.as_str()
             {
                 "source-keyset-audit" if !progress.source_keyset_audited => {
@@ -4095,10 +4329,10 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         )?;
         let value: Value =
             serde_json::from_slice(&bytes).with_context(|| format!("parse strict {label} JSON"))?;
-        let expected_schema = if label == "source-terminal receipt" {
-            "hashtree-pool-migration-source-terminal/v3"
-        } else {
-            "hashtree-pool-migration-terminal-audit/v3"
+        let expected_schema = match label {
+            "source-terminal receipt" => "hashtree-pool-migration-source-terminal/v3",
+            "online target audit receipt" => ONLINE_TARGET_AUDIT_SCHEMA,
+            _ => "hashtree-pool-migration-terminal-audit/v3",
         };
         if value.get("schema").and_then(Value::as_str) != Some(expected_schema)
             || value.get("status").and_then(Value::as_str) != Some("verified")
@@ -4153,7 +4387,7 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         target_stored_locations: u64,
         target_stored_bytes: u64,
         target_catalog_sha256: String,
-        target_payload_sha256: String,
+        target_physical_sha256: String,
         target_manifest_sha256: String,
     }
 
@@ -4255,6 +4489,25 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         let receipt: PoolMigrationSourceTerminalReceiptV3 =
             serde_json::from_slice(&bytes).context("parse recoverable source-terminal receipt")?;
         validate_source_terminal_receipt_shape(&receipt)?;
+        let expected_online_certification = parse_additional_cas(&options.additional_cas)?
+            .into_iter()
+            .filter(|(label, _)| label.starts_with("online-target-audit-"))
+            .map(|(_, path)| {
+                PinnedAuthorityFile::open_bytes(
+                    &path,
+                    "recoverable online target audit certification",
+                    MAX_ADDITIONAL_CAS_BYTES,
+                )
+                .map(|file| file.sha256)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if expected_online_certification.len() != 1
+            || receipt.online_target_audit_certification_sha256 != expected_online_certification[0]
+        {
+            bail!(
+                "recoverable source-terminal receipt does not bind the exact online target audit certification"
+            );
+        }
         if receipt.schema != SOURCE_TERMINAL_SCHEMA
             || receipt.status != "verified"
             || receipt.phase != "final-stopped-source"
@@ -4377,7 +4630,7 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 receipt.source_reconciliation_sha256.as_str(),
             ),
             ("target catalog", receipt.target_catalog_sha256.as_str()),
-            ("target payload", receipt.target_payload_sha256.as_str()),
+            ("target physical", receipt.target_physical_sha256.as_str()),
             ("target manifest", receipt.target_manifest_sha256.as_str()),
         ] {
             require_lower_hex(label, value, 64)?;
@@ -4388,7 +4641,7 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         if actual.stored_locations != receipt.target_stored_locations
             || actual.stored_bytes != receipt.target_stored_bytes
             || hashtree_core::to_hex(&actual.catalog_sha256) != receipt.target_catalog_sha256
-            || hashtree_core::to_hex(&actual.payload_sha256) != receipt.target_payload_sha256
+            || hashtree_core::to_hex(&actual.physical_sha256) != receipt.target_physical_sha256
             || hashtree_core::to_hex(&actual.manifest_sha256) != receipt.target_manifest_sha256
         {
             bail!("target Pool changed after its terminal audit and before cursor publication");
@@ -4401,7 +4654,7 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         pool_identity: LmdbIdentityV3,
         topology: &PoolTopologyV3,
         topology_sha256: &str,
-    ) -> Result<hashtree_lmdb::PoolTerminalAudit> {
+    ) -> Result<hashtree_lmdb::PoolPhysicalAudit> {
         require_lower_hex("recoverable Pool topology", topology_sha256, 64)?;
         let catalog =
             PinnedDirectory::open_exact(pool, "recoverable target Pool catalog directory")?;
@@ -4485,8 +4738,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         let reader = hashtree_lmdb::PoolStoreReader::open(catalog.runtime_path(), config)
             .context("open exact target Pool for terminal recovery audit")?;
         reader
-            .validate_terminal_catalog_and_payloads()
-            .context("replay exhaustive target Pool terminal audit during recovery")
+            .validate_terminal_catalog_and_physical_state()
+            .context("replay exact target Pool catalog/physical audit during recovery")
     }
 
     fn census_recovery_source_handles(

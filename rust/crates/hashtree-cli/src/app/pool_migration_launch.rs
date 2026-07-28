@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use hashtree_core::from_hex;
 use hashtree_lmdb::{
-    LmdbSourceKeysetAudit, PinnedLmdbFileIdentity, PinnedLmdbIdentity, PoolTerminalAudit,
+    LmdbSourceKeysetAudit, PinnedLmdbFileIdentity, PinnedLmdbIdentity, PoolMigrationAuditSummary,
+    PoolPhysicalAudit,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -26,6 +27,11 @@ use super::pool_migration_evidence::{
 use super::pool_migration_mount::{
     require_host_execution_namespace, validate_cached_source_read_only_mount_authorities,
     validate_source_read_only_mount_authority, SourceReadOnlyMountAuthorityV3,
+};
+use super::pool_migration_online_audit::{
+    compute_online_audit_binding, load_validated_online_target_audit, online_audit_path,
+    OnlineTargetAuditExpectationV3, PoolMigrationOnlineTargetAuditReceiptV3,
+    ValidatedOnlineTargetAuditV3, ONLINE_TARGET_AUDIT_FILE_NAME, ONLINE_TARGET_AUDIT_SCHEMA,
 };
 use super::pool_migration_pinned::{PinnedDirectory, PinnedRegularEntry};
 pub(super) use super::pool_migration_protocol::{
@@ -85,12 +91,9 @@ pub(super) fn validate_stopped_final_batch_size(
 
 pub(super) fn validate_pool_migration_release_phase(phase: &str) -> Result<()> {
     match phase {
-        "final-stopped-source" | "final-stopped-full" => Ok(()),
-        "online-bounded" => bail!(
-            "online-bounded Pool migration v3 is disabled until a rollout-bound exact target-state audit receipt is implemented"
-        ),
+        "online-bounded" | "final-stopped-source" | "final-stopped-full" => Ok(()),
         _ => bail!(
-            "unsupported Pool migration controller phase {phase}; expected final-stopped-source or final-stopped-full"
+            "unsupported Pool migration controller phase {phase}; expected online-bounded, final-stopped-source, or final-stopped-full"
         ),
     }
 }
@@ -185,7 +188,7 @@ struct PoolMigrationTerminalAuditReceiptV3<'a> {
     target_stored_locations: u64,
     target_stored_bytes: u64,
     target_catalog_sha256: String,
-    target_payload_sha256: String,
+    target_physical_sha256: String,
     target_manifest_sha256: String,
 }
 
@@ -204,6 +207,7 @@ struct ValidatedLaunch {
     main_pid: u32,
     proc_start_time_ticks: u64,
     controller_state: ControllerStateV3,
+    online_target_audit: Option<ValidatedOnlineTargetAuditV3>,
     paths: PinnedMigrationPaths,
 }
 
@@ -224,6 +228,7 @@ pub(super) struct AcknowledgedPoolMigrationLaunch {
     cursor_authority: Mutex<CursorAuthorityV3>,
     attempt: PinnedDirectory,
     pins: PinnedMigrationPaths,
+    online_target_audit: Option<ValidatedOnlineTargetAuditV3>,
 }
 
 struct CheckpointChainState {
@@ -273,6 +278,27 @@ impl AcknowledgedPoolMigrationLaunch {
 
     pub(super) fn pool_manifest_sha256(&self) -> [u8; 32] {
         self.pins.pool_manifest_sha256
+    }
+
+    pub(super) fn online_audit_path(&self) -> Result<PathBuf> {
+        if self.request.controller.phase != "online-bounded" {
+            bail!("online audit state exists only for online-bounded migration");
+        }
+        online_audit_path(&self.request.cursor.path)
+    }
+
+    pub(super) fn online_audit_binding(&self) -> Result<[u8; 32]> {
+        if self.request.controller.phase != "online-bounded" {
+            bail!("online audit binding exists only for online-bounded migration");
+        }
+        compute_online_audit_binding(
+            &self.request.controller.rollout_id,
+            self.request.source.lmdb_identity,
+            self.request.source.external_identity,
+            self.request.pool.lmdb_identity,
+            &self.request.pool.topology.sha256,
+            self.pins.pool_manifest_sha256,
+        )
     }
 
     pub(super) fn ensure_store_paths(&self) -> Result<()> {
@@ -593,6 +619,12 @@ impl AcknowledgedPoolMigrationLaunch {
         Ok(plans)
     }
 
+    pub(super) fn online_target_audit(&self) -> Result<&ValidatedOnlineTargetAuditV3> {
+        self.online_target_audit
+            .as_ref()
+            .context("launch has no validated online target audit")
+    }
+
     pub(super) fn write_cursor(&self, value: &str) -> Result<()> {
         if self.final_stopped_source_pass {
             self.pins.ensure_source_path_identities()?;
@@ -614,10 +646,31 @@ impl AcknowledgedPoolMigrationLaunch {
         )
     }
 
+    pub(super) fn reset_online_cursor(&self) -> Result<()> {
+        if self.request.controller.phase != "online-bounded" {
+            bail!("only online-bounded migration may reset a scan cursor");
+        }
+        self.pins.ensure_path_identities()?;
+        let mut authority = self
+            .cursor_authority
+            .lock()
+            .map_err(|_| anyhow::anyhow!("migration cursor authority lock poisoned"))?;
+        validate_cursor_checkpoint(&authority, &self.pins.cursor_parent, &self.pins.cursor_name)?;
+        if authority.exists {
+            self.pins
+                .cursor_parent
+                .durable_remove_regular(&self.pins.cursor_name, "Pool migration cursor")?;
+        }
+        authority.exists = false;
+        authority.value = None;
+        authority.sha256 = None;
+        validate_cursor_checkpoint(&authority, &self.pins.cursor_parent, &self.pins.cursor_name)
+    }
+
     pub(super) fn write_terminal_audit_receipt(
         &self,
         source: &PoolMigrationSourceUnionAuditV3,
-        target: &PoolTerminalAudit,
+        target: &PoolPhysicalAudit,
     ) -> Result<()> {
         if !self.final_stopped_full_pass {
             bail!("terminal Pool audit receipts are valid only for final-stopped-full");
@@ -636,7 +689,7 @@ impl AcknowledgedPoolMigrationLaunch {
             target_stored_locations: target.stored_locations,
             target_stored_bytes: target.stored_bytes,
             target_catalog_sha256: hashtree_core::to_hex(&target.catalog_sha256),
-            target_payload_sha256: hashtree_core::to_hex(&target.payload_sha256),
+            target_physical_sha256: hashtree_core::to_hex(&target.physical_sha256),
             target_manifest_sha256: hashtree_core::to_hex(&target.manifest_sha256),
         };
         let mut bytes =
@@ -646,6 +699,83 @@ impl AcknowledgedPoolMigrationLaunch {
             OsStr::new(TERMINAL_AUDIT_FILE_NAME),
             &bytes,
             "terminal Pool audit receipt",
+        )
+    }
+
+    pub(super) fn write_online_target_audit_receipt(
+        &self,
+        audit_store_path: PathBuf,
+        audit_binding: [u8; 32],
+        source_evidence: SourceEvidenceManifestAuthorityV3,
+        summary: &PoolMigrationAuditSummary,
+    ) -> Result<()> {
+        if self.request.controller.phase != "online-bounded" {
+            bail!("online target audit receipts are valid only for online-bounded");
+        }
+        if source_evidence.entries != summary.entries {
+            bail!("online target evidence count differs from its durable audit summary");
+        }
+        let terminal_cursor = self
+            .cursor_authority
+            .lock()
+            .map_err(|_| anyhow::anyhow!("migration cursor authority lock poisoned"))?
+            .clone();
+        let cursor_shape_valid = if terminal_cursor.exists {
+            terminal_cursor.value.is_some() && terminal_cursor.sha256.is_some()
+        } else {
+            terminal_cursor.value.is_none() && terminal_cursor.sha256.is_none()
+        };
+        if !cursor_shape_valid {
+            bail!("completed online target audit has an inconsistent terminal cursor");
+        }
+        let receipt = PoolMigrationOnlineTargetAuditReceiptV3 {
+            schema: ONLINE_TARGET_AUDIT_SCHEMA.to_string(),
+            status: "verified".to_string(),
+            phase: self.request.controller.phase.clone(),
+            rollout_id: self.request.controller.rollout_id.clone(),
+            boot_id: self.request.boot_id.clone(),
+            attempt_namespace: self.request.attempt_namespace.clone(),
+            attempt_namespace_identity: self.request.attempt_namespace_identity,
+            attempt_identity: self.request.attempt_identity,
+            attempt_nonce: self.request.nonce.clone(),
+            request_path: self.attempt.path.join(REQUEST_FILE_NAME),
+            request_sha256: self.request_sha256.clone(),
+            acknowledgement_path: self.attempt.path.join(ACK_FILE_NAME),
+            acknowledgement_sha256: self.acknowledgement_sha256.clone(),
+            terminal_cursor,
+            worker_binary: self.request.binary.clone(),
+            worker_argv_sha256: argv_sha256(&self.request.argv),
+            systemd_unit: self.request.systemd_unit.clone(),
+            systemd_invocation_id: self.request.systemd_invocation_id.clone(),
+            systemd_fragment: self.request.systemd_fragment.clone(),
+            systemd_environment_file: self.request.systemd_environment_file.clone(),
+            main_pid: self.request.main_pid,
+            proc_start_time_ticks: self.request.proc_start_time_ticks,
+            controller_state_sha256: self.controller_state_authority.sha256.clone(),
+            source_path: self.request.source.lmdb_path.clone(),
+            source_lmdb_identity: self.request.source.lmdb_identity,
+            source_external_path: self.request.source.external_path.clone(),
+            source_external_identity: self.request.source.external_identity,
+            source_baseline_sha256: self.request.source.baseline.sha256.clone(),
+            pool_path: self.request.pool.path.clone(),
+            pool_lmdb_identity: self.request.pool.lmdb_identity,
+            pool_topology_sha256: self.request.pool.topology.sha256.clone(),
+            pool_manifest_sha256: hex::encode(self.pins.pool_manifest_sha256),
+            audit_store_path,
+            audit_binding_sha256: hex::encode(audit_binding),
+            verified_entries: summary.entries,
+            verified_bytes: summary.bytes,
+            content_sha256: hashtree_core::to_hex(&summary.content_sha256),
+            source_evidence,
+        };
+        let mut bytes =
+            serde_json::to_vec(&receipt).context("serialize online target audit receipt")?;
+        bytes.push(b'\n');
+        self.attempt.create_durable_exclusive_with_mode(
+            OsStr::new(ONLINE_TARGET_AUDIT_FILE_NAME),
+            &bytes,
+            "online target audit receipt",
+            0o640,
         )
     }
 
@@ -724,6 +854,10 @@ impl AcknowledgedPoolMigrationLaunch {
             source_verified_entries: content.verified_entries,
             source_verified_bytes: content.verified_bytes,
             source_content_sha256: hashtree_core::to_hex(&content.sha256),
+            online_target_audit_certification_sha256: self
+                .online_target_audit()?
+                .certification_sha256
+                .clone(),
             source_evidence,
             source_generation,
             pool_path: self.request.pool.path.clone(),
@@ -753,8 +887,13 @@ impl AcknowledgedPoolMigrationLaunch {
     }
 
     pub(super) fn create_source_evidence_writer(&self) -> Result<SourceEvidenceManifestWriterV3> {
-        if self.request.controller.phase != "final-stopped-source" {
-            bail!("source evidence manifests are valid only for final-stopped-source");
+        if !matches!(
+            self.request.controller.phase.as_str(),
+            "online-bounded" | "final-stopped-source"
+        ) {
+            bail!(
+                "source evidence manifests are valid only for online-bounded or final-stopped-source"
+            );
         }
         self.attempt
             .ensure_path_identity("Pool migration attempt directory")?;
@@ -1522,6 +1661,14 @@ pub(super) fn acknowledge_pool_migration_launch(
         || first.main_pid != second.main_pid
         || first.proc_start_time_ticks != second.proc_start_time_ticks
         || first.controller_state != second.controller_state
+        || first
+            .online_target_audit
+            .as_ref()
+            .map(|audit| audit.certification_sha256.as_str())
+            != second
+                .online_target_audit
+                .as_ref()
+                .map(|audit| audit.certification_sha256.as_str())
         || !first.paths.same_objects(&second.paths)
     {
         bail!("Pool migration launch authority changed during validation");
@@ -1635,6 +1782,7 @@ pub(super) fn acknowledge_pool_migration_launch(
         cursor_authority: Mutex::new(request.cursor.clone()),
         attempt,
         pins: second.paths,
+        online_target_audit: second.online_target_audit,
     })
 }
 
@@ -2079,6 +2227,32 @@ fn validate_launch_authority(
         cursor_name,
     };
     let controller_state = validate_controller_state(request, &paths, &boot_id)?;
+    let online_target_audit = load_validated_online_target_audit(
+        &request.cas,
+        &OnlineTargetAuditExpectationV3 {
+            rollout_id: &request.controller.rollout_id,
+            source_path: &request.source.lmdb_path,
+            source_lmdb_identity: request.source.lmdb_identity,
+            source_external_path: request.source.external_path.as_deref(),
+            source_external_identity: request.source.external_identity,
+            pool_path: &request.pool.path,
+            pool_lmdb_identity: request.pool.lmdb_identity,
+            pool_topology_sha256: &request.pool.topology.sha256,
+            pool_manifest_sha256: &controller_state.pool_manifest_sha256,
+            expected_service_gid: service_gid()
+                .context("online target audit validation requires a service GID")?,
+            validate_evidence_content: false,
+        },
+    )?;
+    match request.controller.phase.as_str() {
+        "final-stopped-source" if online_target_audit.is_none() => {
+            bail!("final-stopped-source requires one root-certified online target audit CAS")
+        }
+        "online-bounded" | "final-stopped-full" if online_target_audit.is_some() => {
+            bail!("online target audit CAS is accepted only by final-stopped-source")
+        }
+        _ => {}
+    }
     let prior_receipts =
         load_request_source_terminal_receipts(request, &controller_state, &paths, false)?;
     paths.prior_sources = pin_prior_source_paths(&prior_receipts)?;
@@ -2110,6 +2284,7 @@ fn validate_launch_authority(
         main_pid,
         proc_start_time_ticks,
         controller_state,
+        online_target_audit,
         paths,
     })
 }
@@ -4327,19 +4502,15 @@ mod tests {
     }
 
     #[test]
-    fn release_phase_refuses_online_without_exact_target_audit_receipt() {
+    fn release_phase_accepts_online_exact_target_audit_path() {
+        validate_pool_migration_release_phase("online-bounded")
+            .expect("online bounded now publishes a root-certified target audit");
         validate_pool_migration_release_phase("final-stopped-source")
             .expect("source-final is a supported release phase");
         validate_pool_migration_release_phase("final-stopped-full")
             .expect("full-final is a supported release phase");
-        let error = validate_pool_migration_release_phase("online-bounded")
-            .expect_err("online bounded must remain fail-closed");
-        assert!(
-            error
-                .to_string()
-                .contains("exact target-state audit receipt"),
-            "unexpected online-bounded error: {error:#}"
-        );
+        validate_pool_migration_release_phase("not-a-phase")
+            .expect_err("unknown migration phase must fail closed");
     }
 
     #[test]

@@ -51,6 +51,7 @@ pub(super) struct LmdbGenerationV3 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct ExternalCorpusFingerprintV3 {
     pub(super) root: FileMutationSnapshotV3,
+    pub(super) complete_metadata_census: bool,
     pub(super) directory_entries: u64,
     pub(super) regular_file_entries: u64,
     pub(super) regular_file_bytes: u64,
@@ -110,6 +111,7 @@ pub(super) struct PoolMigrationSourceTerminalReceiptV3 {
     pub(super) source_verified_entries: u64,
     pub(super) source_verified_bytes: u64,
     pub(super) source_content_sha256: String,
+    pub(super) online_target_audit_certification_sha256: String,
     pub(super) source_evidence: SourceEvidenceManifestAuthorityV3,
     pub(super) source_generation: SourceGenerationFingerprintV3,
     pub(super) pool_path: PathBuf,
@@ -215,7 +217,11 @@ pub(super) fn validate_frozen_source_generation(
         source_external_runtime_path,
     ) {
         (Some(_), Some(identity), Some(expected), Some(runtime_path)) => {
-            let current = capture_external_corpus(runtime_path, identity, true)?;
+            let current = if expected.complete_metadata_census {
+                capture_external_corpus(runtime_path, identity, true)?
+            } else {
+                capture_external_boundary(runtime_path, identity, true)?
+            };
             if &current != expected {
                 bail!(
                     "frozen source external corpus fingerprint differs from its terminal receipt"
@@ -254,7 +260,7 @@ pub(super) fn capture_source_generation_fingerprint(
         "source LMDB lock.mdb",
     )?;
     let external = match (source_external_path, source_external_identity) {
-        (Some(path), Some(identity)) => Some(capture_external_corpus(path, identity, false)?),
+        (Some(path), Some(identity)) => Some(capture_external_boundary(path, identity, false)?),
         (None, None) => None,
         _ => bail!("source external path and identity must be present or absent together"),
     };
@@ -268,6 +274,33 @@ pub(super) fn capture_source_generation_fingerprint(
             last_txn_id: lmdb.last_txn_id,
         },
         external,
+    })
+}
+
+fn capture_external_boundary(
+    root: &Path,
+    expected_identity: FileIdentityV3,
+    allow_retained_procfd: bool,
+) -> Result<ExternalCorpusFingerprintV3> {
+    let root_snapshot = snapshot_path_impl(
+        root,
+        expected_identity,
+        ExpectedPathType::Directory,
+        "source external corpus root",
+        allow_retained_procfd,
+    )?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"hashtree-pool-migration-source-external-boundary/v3\0");
+    hasher.update(
+        serde_json::to_vec(&root_snapshot).context("serialize source external root boundary")?,
+    );
+    Ok(ExternalCorpusFingerprintV3 {
+        root: root_snapshot,
+        complete_metadata_census: false,
+        directory_entries: 0,
+        regular_file_entries: 0,
+        regular_file_bytes: 0,
+        metadata_sha256: hex::encode(hasher.finalize()),
     })
 }
 
@@ -309,6 +342,7 @@ fn capture_external_corpus(
     }
     Ok(ExternalCorpusFingerprintV3 {
         root: root_snapshot,
+        complete_metadata_census: true,
         directory_entries,
         regular_file_entries,
         regular_file_bytes,
@@ -695,6 +729,10 @@ fn validate_receipt_shape(receipt: &PoolMigrationSourceTerminalReceiptV3) -> Res
         &receipt.source_catalog_location_sha256,
     )?;
     validate_sha256("prior source content", &receipt.source_content_sha256)?;
+    validate_sha256(
+        "prior online target audit certification",
+        &receipt.online_target_audit_certification_sha256,
+    )?;
     validate_sha256(
         "prior source evidence manifest",
         &receipt.source_evidence.sha256,

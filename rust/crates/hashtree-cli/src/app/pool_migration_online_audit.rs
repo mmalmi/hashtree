@@ -1,0 +1,316 @@
+use anyhow::{bail, Context, Result};
+use hashtree_core::types::Hash;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+
+use super::pool_migration_evidence::{
+    validate_source_evidence_metadata, SourceEvidenceManifestAuthorityV3,
+    SourceEvidenceManifestReaderV3,
+};
+use super::pool_migration_protocol::{
+    CursorAuthorityV3, FileAuthorityV3, FileIdentityV3, LmdbIdentityV3, NamedFileAuthorityV3,
+};
+
+pub(super) const ONLINE_TARGET_AUDIT_SCHEMA: &str =
+    "hashtree-pool-migration-online-target-audit/v3";
+pub(super) const ONLINE_TARGET_AUDIT_FILE_NAME: &str = "online-target-audit.json";
+pub(super) const ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA: &str =
+    "hashtree-pool-migration-online-target-audit-certification/v3";
+pub(super) const ONLINE_TARGET_AUDIT_CERTIFICATION_FILE_NAME: &str =
+    "online-target-audit-certification.json";
+pub(super) const ONLINE_TARGET_AUDIT_CAS_LABEL_PREFIX: &str = "online-target-audit-";
+
+pub(super) fn online_audit_path(cursor_path: &Path) -> Result<PathBuf> {
+    let cursor_name = cursor_path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .context("online audit cursor name is not UTF-8")?;
+    Ok(cursor_path.with_file_name(format!("{cursor_name}.online-audit-v3")))
+}
+
+pub(super) fn compute_online_audit_binding(
+    rollout_id: &str,
+    source_lmdb_identity: LmdbIdentityV3,
+    source_external_identity: Option<FileIdentityV3>,
+    pool_lmdb_identity: LmdbIdentityV3,
+    pool_topology_sha256: &str,
+    pool_manifest_sha256: Hash,
+) -> Result<Hash> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"hashtree-pool-migration-online-audit-authority/v3\0");
+    hasher.update(rollout_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(
+        serde_json::to_vec(&source_lmdb_identity)
+            .context("serialize online audit source identity")?,
+    );
+    hasher.update(
+        serde_json::to_vec(&source_external_identity)
+            .context("serialize online audit source external identity")?,
+    );
+    hasher.update(
+        serde_json::to_vec(&pool_lmdb_identity).context("serialize online audit Pool identity")?,
+    );
+    hasher.update(pool_topology_sha256.as_bytes());
+    hasher.update(pool_manifest_sha256);
+    Ok(hasher.finalize().into())
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct PoolMigrationOnlineTargetAuditReceiptV3 {
+    pub(super) schema: String,
+    pub(super) status: String,
+    pub(super) phase: String,
+    pub(super) rollout_id: String,
+    pub(super) boot_id: String,
+    pub(super) attempt_namespace: PathBuf,
+    pub(super) attempt_namespace_identity: FileIdentityV3,
+    pub(super) attempt_identity: FileIdentityV3,
+    pub(super) attempt_nonce: String,
+    pub(super) request_path: PathBuf,
+    pub(super) request_sha256: String,
+    pub(super) acknowledgement_path: PathBuf,
+    pub(super) acknowledgement_sha256: String,
+    pub(super) terminal_cursor: CursorAuthorityV3,
+    pub(super) worker_binary: FileAuthorityV3,
+    pub(super) worker_argv_sha256: String,
+    pub(super) systemd_unit: String,
+    pub(super) systemd_invocation_id: String,
+    pub(super) systemd_fragment: FileAuthorityV3,
+    pub(super) systemd_environment_file: FileAuthorityV3,
+    pub(super) main_pid: u32,
+    pub(super) proc_start_time_ticks: u64,
+    pub(super) controller_state_sha256: String,
+    pub(super) source_path: PathBuf,
+    pub(super) source_lmdb_identity: LmdbIdentityV3,
+    pub(super) source_external_path: Option<PathBuf>,
+    pub(super) source_external_identity: Option<FileIdentityV3>,
+    pub(super) source_baseline_sha256: String,
+    pub(super) pool_path: PathBuf,
+    pub(super) pool_lmdb_identity: LmdbIdentityV3,
+    pub(super) pool_topology_sha256: String,
+    pub(super) pool_manifest_sha256: String,
+    pub(super) audit_store_path: PathBuf,
+    pub(super) audit_binding_sha256: String,
+    pub(super) verified_entries: u64,
+    pub(super) verified_bytes: u64,
+    pub(super) content_sha256: String,
+    pub(super) source_evidence: SourceEvidenceManifestAuthorityV3,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct PoolMigrationOnlineTargetAuditCertificationV3 {
+    pub(super) schema: String,
+    pub(super) status: String,
+    pub(super) rollout_id: String,
+    pub(super) controller_state_sha256: String,
+    pub(super) receipt: FileAuthorityV3,
+    pub(super) source_evidence: SourceEvidenceManifestAuthorityV3,
+    pub(super) certified_at_unix_seconds: u64,
+}
+
+pub(super) struct OnlineTargetAuditExpectationV3<'a> {
+    pub(super) rollout_id: &'a str,
+    pub(super) source_path: &'a Path,
+    pub(super) source_lmdb_identity: LmdbIdentityV3,
+    pub(super) source_external_path: Option<&'a Path>,
+    pub(super) source_external_identity: Option<FileIdentityV3>,
+    pub(super) pool_path: &'a Path,
+    pub(super) pool_lmdb_identity: LmdbIdentityV3,
+    pub(super) pool_topology_sha256: &'a str,
+    pub(super) pool_manifest_sha256: &'a str,
+    pub(super) expected_service_gid: u32,
+    pub(super) validate_evidence_content: bool,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ValidatedOnlineTargetAuditV3 {
+    pub(super) certification_sha256: String,
+    pub(super) receipt: PoolMigrationOnlineTargetAuditReceiptV3,
+}
+
+pub(super) fn load_validated_online_target_audit(
+    authorities: &[NamedFileAuthorityV3],
+    expected: &OnlineTargetAuditExpectationV3<'_>,
+) -> Result<Option<ValidatedOnlineTargetAuditV3>> {
+    let matching = authorities
+        .iter()
+        .filter(|authority| {
+            authority
+                .label
+                .starts_with(ONLINE_TARGET_AUDIT_CAS_LABEL_PREFIX)
+        })
+        .collect::<Vec<_>>();
+    if matching.len() > 1 {
+        bail!("exactly one online target audit certification may be supplied");
+    }
+    let Some(authority) = matching.first() else {
+        return Ok(None);
+    };
+    require_sha256("online target audit certification", &authority.sha256)?;
+    let certification_bytes = read_bounded_regular(
+        &authority.path,
+        1024 * 1024,
+        Some((0, expected.expected_service_gid, 0o440)),
+        "online target audit certification",
+    )?;
+    if sha256_bytes(&certification_bytes) != authority.sha256 {
+        bail!("online target audit certification differs from its CAS digest");
+    }
+    let certification: PoolMigrationOnlineTargetAuditCertificationV3 =
+        serde_json::from_slice(&certification_bytes)
+            .context("parse strict online target audit certification")?;
+    if certification.schema != ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA
+        || certification.status != "certified"
+        || certification.rollout_id != expected.rollout_id
+    {
+        bail!("online target audit certification has invalid release authority");
+    }
+    require_sha256(
+        "online target audit controller state",
+        &certification.controller_state_sha256,
+    )?;
+    require_sha256("online target audit receipt", &certification.receipt.sha256)?;
+    let receipt_bytes = read_bounded_regular(
+        &certification.receipt.path,
+        1024 * 1024,
+        Some((u32::MAX, expected.expected_service_gid, 0o640)),
+        "online target audit receipt",
+    )?;
+    if sha256_bytes(&receipt_bytes) != certification.receipt.sha256 {
+        bail!("online target audit receipt differs from its certification digest");
+    }
+    let receipt: PoolMigrationOnlineTargetAuditReceiptV3 =
+        serde_json::from_slice(&receipt_bytes)
+            .context("parse strict online target audit receipt")?;
+    if receipt.schema != ONLINE_TARGET_AUDIT_SCHEMA
+        || receipt.status != "verified"
+        || receipt.phase != "online-bounded"
+        || receipt.rollout_id != expected.rollout_id
+        || receipt.controller_state_sha256 != certification.controller_state_sha256
+    {
+        bail!("online target audit receipt has invalid release bindings");
+    }
+    if authority.label
+        != format!(
+            "{ONLINE_TARGET_AUDIT_CAS_LABEL_PREFIX}{}",
+            receipt.attempt_nonce
+        )
+    {
+        bail!("online target audit CAS label must end in the exact attempt nonce");
+    }
+    if receipt.source_path != expected.source_path
+        || receipt.source_lmdb_identity != expected.source_lmdb_identity
+        || receipt.source_external_path.as_deref() != expected.source_external_path
+        || receipt.source_external_identity != expected.source_external_identity
+        || receipt.pool_path != expected.pool_path
+        || receipt.pool_lmdb_identity != expected.pool_lmdb_identity
+        || receipt.pool_topology_sha256 != expected.pool_topology_sha256
+        || receipt.pool_manifest_sha256 != expected.pool_manifest_sha256
+    {
+        bail!("online target audit does not bind the exact source and Pool authority");
+    }
+    for (label, value) in [
+        ("request", receipt.request_sha256.as_str()),
+        ("acknowledgement", receipt.acknowledgement_sha256.as_str()),
+        ("worker binary", receipt.worker_binary.sha256.as_str()),
+        ("worker argv", receipt.worker_argv_sha256.as_str()),
+        ("systemd fragment", receipt.systemd_fragment.sha256.as_str()),
+        (
+            "systemd environment",
+            receipt.systemd_environment_file.sha256.as_str(),
+        ),
+        ("source baseline", receipt.source_baseline_sha256.as_str()),
+        ("Pool topology", receipt.pool_topology_sha256.as_str()),
+        ("Pool manifest", receipt.pool_manifest_sha256.as_str()),
+        ("audit binding", receipt.audit_binding_sha256.as_str()),
+        ("content", receipt.content_sha256.as_str()),
+    ] {
+        require_sha256(label, value)?;
+    }
+    let terminal_cursor_shape_valid = if receipt.terminal_cursor.exists {
+        receipt.terminal_cursor.value.is_some() && receipt.terminal_cursor.sha256.is_some()
+    } else {
+        receipt.terminal_cursor.value.is_none() && receipt.terminal_cursor.sha256.is_none()
+    };
+    if receipt.main_pid == 0
+        || receipt.proc_start_time_ticks == 0
+        || !terminal_cursor_shape_valid
+        || receipt.source_evidence != certification.source_evidence
+        || receipt.source_evidence.entries != receipt.verified_entries
+    {
+        bail!("online target audit receipt has an incomplete terminal authority");
+    }
+    validate_source_evidence_metadata(
+        &receipt.source_evidence,
+        Some(expected.expected_service_gid),
+        expected.validate_evidence_content,
+    )?;
+    if expected.validate_evidence_content {
+        let mut evidence = SourceEvidenceManifestReaderV3::open(&receipt.source_evidence)?;
+        while evidence.next_entry()?.is_some() {}
+        let summary = evidence.validated_summary()?;
+        if summary.entries != receipt.verified_entries
+            || summary.bytes != receipt.verified_bytes
+            || hashtree_core::to_hex(&summary.content_sha256) != receipt.content_sha256
+        {
+            bail!("online target audit evidence differs from its receipt summary");
+        }
+    }
+    Ok(Some(ValidatedOnlineTargetAuditV3 {
+        certification_sha256: authority.sha256.clone(),
+        receipt,
+    }))
+}
+
+fn read_bounded_regular(
+    path: &Path,
+    max_bytes: u64,
+    unix_authority: Option<(u32, u32, u32)>,
+    label: &str,
+) -> Result<Vec<u8>> {
+    let mut file = File::open(path).with_context(|| format!("open {label}"))?;
+    let metadata = file
+        .metadata()
+        .with_context(|| format!("inspect {label}"))?;
+    if !metadata.file_type().is_file() || metadata.len() > max_bytes {
+        bail!("{label} is not a bounded regular file");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let Some((uid, gid, mode)) = unix_authority {
+            if (uid != u32::MAX && metadata.uid() != uid)
+                || metadata.gid() != gid
+                || metadata.mode() & 0o7777 != mode
+                || metadata.nlink() != 1
+            {
+                bail!("{label} ownership/mode differs from its authority");
+            }
+        }
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.read_to_end(&mut bytes)
+        .with_context(|| format!("read {label}"))?;
+    Ok(bytes)
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn require_sha256(label: &str, value: &str) -> Result<()> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("{label} must be exactly 64 lowercase hexadecimal characters");
+    }
+    Ok(())
+}
