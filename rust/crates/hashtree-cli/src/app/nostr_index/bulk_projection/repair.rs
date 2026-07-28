@@ -25,10 +25,10 @@ use super::super::{
     StagedNostrCrawlState, STAGE_DIR, STAGE_STATE_FILE,
 };
 use super::audit::{
-    audit_exact_event_index_parity, audit_profile_indexes_at_roots,
-    load_pinned_profile_rank_decisions, recheck_trusted_profile_rank_decisions,
-    require_profile_rank_policy_binding, validate_exact_event_index_parity_evidence,
-    BulkProjectionExactIndexParityEvidence, BulkProjectionProfileAudit, ProfileDistanceProvenance,
+    audit_profile_indexes_at_roots, load_pinned_profile_rank_decisions,
+    recheck_trusted_profile_rank_decisions, require_profile_rank_policy_binding,
+    validate_exact_event_index_parity_evidence, BulkProjectionExactIndexParityEvidence,
+    BulkProjectionProfileAudit, ProfileDistanceProvenance,
 };
 use super::tranche::PROFILE_PUBLICATION_FENCE_BYTES;
 use super::{
@@ -36,7 +36,8 @@ use super::{
     BULK_PROJECTION_VERSION,
 };
 
-const EXACT_EVENT_AUDIT_PAGE_SIZE: usize = 4096;
+const EVENT_BLOB_REPAIR_RECEIPT_FORMAT: &str =
+    "nostr-index/bulk-projection-v2/event-blob-repair-v1/receipt";
 
 #[cfg(test)]
 type ProfileRepairBoundaryProbe = Arc<dyn Fn(&'static str) -> Result<()> + Send + Sync + 'static>;
@@ -95,6 +96,8 @@ pub(crate) struct BulkProfileRepairOptions {
     pub(crate) expected_stage_state_sha256: String,
     pub(crate) expected_policy_sha256: String,
     pub(crate) expected_spool_data_sha256: String,
+    pub(crate) event_blob_repair_receipt: PathBuf,
+    pub(crate) expected_event_blob_repair_receipt_sha256: String,
     pub(crate) profile_rank_decisions_file: PathBuf,
     pub(crate) expected_profile_rank_decisions_file_sha256: String,
     pub(crate) profile_rank_decisions_report: PathBuf,
@@ -123,6 +126,17 @@ pub(super) struct PoolCatalogPin {
     pub(super) stored_locations: u64,
     pub(super) sha256: String,
     pub(super) manifest_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct TrustedEventBlobRepairReceipt {
+    format: String,
+    intent_sha256: String,
+    recovered_records: u64,
+    missing_set_sha256: String,
+    completion_pool_catalog: PoolCatalogPin,
+    event_index_parity: BulkProjectionExactIndexParityEvidence,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -250,6 +264,60 @@ pub(super) fn canonical_json_bytes<T: Serialize>(value: &T, label: &str) -> Resu
     let mut bytes = serde_json::to_vec(value).with_context(|| format!("encode {label}"))?;
     bytes.push(b'\n');
     Ok(bytes)
+}
+
+fn load_trusted_event_blob_repair_receipt(
+    path: &Path,
+    expected_sha256: &str,
+) -> Result<TrustedEventBlobRepairReceipt> {
+    require_sha256("event-blob repair receipt SHA-256", expected_sha256)?;
+    if !path.is_absolute() {
+        anyhow::bail!("event-blob repair receipt path must be absolute");
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .with_context(|| format!("inspect event-blob repair receipt {}", path.display()))?;
+    if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
+        anyhow::bail!(
+            "event-blob repair receipt is not a direct regular file: {}",
+            path.display()
+        );
+    }
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("read event-blob repair receipt {}", path.display()))?;
+    if stage_bytes_sha256(&bytes) != expected_sha256 {
+        anyhow::bail!("event-blob repair receipt SHA-256 differs from the exact pin");
+    }
+    let receipt: TrustedEventBlobRepairReceipt =
+        serde_json::from_slice(&bytes).context("decode exact event-blob repair receipt")?;
+    if canonical_json_bytes(&receipt, "event-blob repair receipt")? != bytes {
+        anyhow::bail!("event-blob repair receipt is not canonical JSON");
+    }
+    if receipt.format != EVENT_BLOB_REPAIR_RECEIPT_FORMAT {
+        anyhow::bail!("event-blob repair receipt has the wrong format");
+    }
+    require_sha256("event-blob repair intent SHA-256", &receipt.intent_sha256)?;
+    require_sha256(
+        "event-blob repair missing-set SHA-256",
+        &receipt.missing_set_sha256,
+    )?;
+    validate_pool_catalog_pin(
+        "event-blob repair completion Pool snapshot",
+        &receipt.completion_pool_catalog,
+    )?;
+    Ok(receipt)
+}
+
+fn validate_trusted_event_blob_repair_evidence(
+    receipt: &TrustedEventBlobRepairReceipt,
+    built_roots: &BTreeMap<u8, String>,
+    btree_order: usize,
+) -> Result<()> {
+    validate_exact_event_index_parity_evidence(
+        &receipt.event_index_parity,
+        built_roots,
+        btree_order,
+    )
+    .context("validate exact event-root parity from the pinned event-blob repair receipt")
 }
 
 fn profile_repair_retention_roots(
@@ -762,6 +830,10 @@ where
             options.expected_spool_data_sha256.as_str(),
         ),
         (
+            "event-blob repair receipt SHA-256",
+            options.expected_event_blob_repair_receipt_sha256.as_str(),
+        ),
+        (
             "profile rank-decisions file SHA-256",
             options.expected_profile_rank_decisions_file_sha256.as_str(),
         ),
@@ -801,6 +873,10 @@ where
     }
     let required_profile_pubkeys =
         validate_required_pubkeys(options.required_profile_pubkeys.clone())?;
+    let trusted_event_repair = load_trusted_event_blob_repair_receipt(
+        &options.event_blob_repair_receipt,
+        &options.expected_event_blob_repair_receipt_sha256,
+    )?;
     hashtree_cli::socialgraph::bootstrap_profile_root_pair_transaction_lock(data_dir)
         .context("bootstrap legacy profile root-pair transaction lock")?;
     let (intent_path, receipt_path) = repair_paths(data_dir);
@@ -818,6 +894,16 @@ where
             &options,
             &required_profile_pubkeys,
         )?;
+        validate_trusted_event_blob_repair_evidence(
+            &trusted_event_repair,
+            &intent.built_roots,
+            intent.btree_order,
+        )?;
+        if intent.event_index_parity != trusted_event_repair.event_index_parity {
+            anyhow::bail!(
+                "completed profile repair event evidence differs from the pinned event-blob repair receipt"
+            );
+        }
         let installed_roots = pin_to_roots(&intent.new_roots)?;
         load_profile_repair_retention_lease(
             data_dir,
@@ -924,6 +1010,11 @@ where
             anyhow::bail!("event-index root {stable_id} is not canonical nhash text");
         }
     }
+    validate_trusted_event_blob_repair_evidence(
+        &trusted_event_repair,
+        &state.built_roots,
+        options.btree_order,
+    )?;
     let policy_sha256 = stage_bytes_sha256(
         &serde_json::to_vec(&state.policy).context("encode pinned crawl policy")?,
     );
@@ -991,18 +1082,20 @@ where
     )?;
     drop(publication_fence);
     let intent_was_existing = existing_intent.is_some();
+    if !intent_was_existing {
+        let event_completion_store = open_exact_durable_pool(data_dir)?;
+        let current_catalog = pin_committed_pool_catalog(&event_completion_store)?;
+        if current_catalog != trusted_event_repair.completion_pool_catalog {
+            anyhow::bail!(
+                "PoolStore catalog differs from the exact event-blob repair completion snapshot"
+            );
+        }
+        drop(event_completion_store);
+    }
     let (intent, prepared, verified_pool_catalog) = if let Some(intent) = existing_intent {
         let verification_store = open_exact_durable_pool(data_dir)?;
         let pool_catalog = pin_committed_pool_catalog(&verification_store)?;
-        let event_index_parity = audit_exact_event_index_parity(
-            &spool,
-            Arc::clone(&verification_store),
-            &state.built_roots,
-            options.btree_order,
-            EXACT_EVENT_AUDIT_PAGE_SIZE,
-        )
-        .await
-        .context("re-audit exact event-root parity from existing repair intent")?;
+        let event_index_parity = trusted_event_repair.event_index_parity.clone();
         validate_intent_authority(
             &intent,
             ProfileRepairAuthority {
@@ -1102,15 +1195,7 @@ where
         }
         let verification_store = open_exact_durable_pool(data_dir)?;
         let pool_catalog = pin_committed_pool_catalog(&verification_store)?;
-        let event_index_parity = audit_exact_event_index_parity(
-            &spool,
-            Arc::clone(&verification_store),
-            &state.built_roots,
-            options.btree_order,
-            EXACT_EVENT_AUDIT_PAGE_SIZE,
-        )
-        .await
-        .context("exhaustively audit all nine event roots against the retained spool")?;
+        let event_index_parity = trusted_event_repair.event_index_parity.clone();
         let (prepublish_audit, _) = audit_profile_indexes_at_roots(
             &spool,
             Arc::clone(&verification_store),
@@ -1754,6 +1839,43 @@ mod tests {
         let stage_state_sha256 = stage_bytes_sha256(&std::fs::read(&stage_state_path).unwrap());
         let policy_sha256 = stage_bytes_sha256(&serde_json::to_vec(&policy).unwrap());
         let spool_data_sha256 = hash_file(&spool_path.join("data.mdb")).unwrap();
+        let orphan_bytes = b"generated repair-vs-gc unleased orphan";
+        let orphan_hash = hashtree_core::sha256(orphan_bytes);
+        store.put_blob(orphan_bytes).unwrap();
+        store.force_sync().unwrap();
+        drop(event_store);
+        drop(graph);
+        drop(store);
+
+        let event_receipt_path = evidence_dir.join("event-repair-receipt.json");
+        let event_spool = BulkProjectionSpool::open_read_only(&spool_path).unwrap();
+        let event_pool = open_exact_durable_pool(&data_dir).unwrap();
+        let event_index_parity = super::super::audit::audit_exact_event_index_parity(
+            &event_spool,
+            Arc::clone(&event_pool),
+            &state.built_roots,
+            8,
+            64,
+        )
+        .await
+        .unwrap();
+        let event_receipt = TrustedEventBlobRepairReceipt {
+            format: EVENT_BLOB_REPAIR_RECEIPT_FORMAT.to_string(),
+            intent_sha256: "5".repeat(64),
+            recovered_records: 0,
+            missing_set_sha256: "6".repeat(64),
+            completion_pool_catalog: pin_committed_pool_catalog(&event_pool).unwrap(),
+            event_index_parity,
+        };
+        let event_receipt_bytes =
+            canonical_json_bytes(&event_receipt, "test event repair receipt").unwrap();
+        std::fs::write(&event_receipt_path, &event_receipt_bytes).unwrap();
+        let event_receipt_sha256 = stage_bytes_sha256(&event_receipt_bytes);
+        drop(event_pool);
+        let event_spool_closing = event_spool.env.clone().prepare_for_closing();
+        drop(event_spool);
+        event_spool_closing.wait();
+
         let receipt_path = evidence_dir.join("repair-receipt.json");
         let options = BulkProfileRepairOptions {
             staging_data_dir: staging_data_dir.clone(),
@@ -1761,6 +1883,8 @@ mod tests {
             expected_stage_state_sha256: stage_state_sha256,
             expected_policy_sha256: policy_sha256,
             expected_spool_data_sha256: spool_data_sha256,
+            event_blob_repair_receipt: event_receipt_path,
+            expected_event_blob_repair_receipt_sha256: event_receipt_sha256,
             profile_rank_decisions_file: rank.decisions_path,
             expected_profile_rank_decisions_file_sha256: rank.decisions_sha256,
             profile_rank_decisions_report: rank.report_path,
@@ -1776,9 +1900,6 @@ mod tests {
             btree_order: 8,
             out: Some(receipt_path.clone()),
         };
-        drop(event_store);
-        drop(graph);
-        drop(store);
         let writer_opens = Cell::new(0usize);
         let mut open_writer = || {
             writer_opens.set(writer_opens.get() + 1);
@@ -1831,6 +1952,22 @@ mod tests {
         assert!(
             !root_pair_lock_path.exists(),
             "generated legacy store must begin without the transaction lock"
+        );
+        let mut wrong_event_receipt_options = options.clone();
+        wrong_event_receipt_options.expected_event_blob_repair_receipt_sha256 = "7".repeat(64);
+        let error = repair_bulk_projection_profiles(
+            &data_dir,
+            wrong_event_receipt_options,
+            &mut open_writer,
+        )
+        .await
+        .expect_err("wrong event-repair receipt pin must fail before profile mutation");
+        assert!(error
+            .to_string()
+            .contains("event-blob repair receipt SHA-256 differs"));
+        assert!(
+            !root_pair_lock_path.exists(),
+            "wrong event receipt pin must fail before bootstrapping the transaction lock"
         );
         let mut invalid_output_options = options.clone();
         invalid_output_options.out = Some(PathBuf::from("relative-receipt.json"));
@@ -1889,10 +2026,7 @@ mod tests {
         };
         gc_pool.stop_temperature_worker().unwrap();
         drop(gc_local);
-        let orphan_bytes = b"generated repair-vs-gc unleased orphan";
-        let orphan_hash = hashtree_core::sha256(orphan_bytes);
-        gc_store.put_blob(orphan_bytes).unwrap();
-        gc_store.force_sync().unwrap();
+        assert!(gc_store.blob_exists(&orphan_hash).unwrap());
 
         let mut repair_child = GeneratedRepairChild::spawn(
             &child_context_path,

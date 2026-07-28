@@ -445,6 +445,10 @@ fn test_nostr_bulk_profile_repair_requires_all_authority_pins() {
         &"c".repeat(64),
         "--expected-spool-data-sha256",
         &"d".repeat(64),
+        "--event-blob-repair-receipt",
+        "/evidence/event-repair.json",
+        "--expected-event-blob-repair-receipt-sha256",
+        &"0".repeat(64),
         "--profile-rank-decisions-file",
         "/evidence/ranks.jsonl",
         "--expected-profile-rank-decisions-file-sha256",
@@ -479,6 +483,8 @@ fn test_nostr_bulk_profile_repair_requires_all_authority_pins() {
         "--expected-stage-state-sha256",
         "--expected-policy-sha256",
         "--expected-spool-data-sha256",
+        "--event-blob-repair-receipt",
+        "--expected-event-blob-repair-receipt-sha256",
         "--profile-rank-decisions-file",
         "--expected-profile-rank-decisions-file-sha256",
         "--profile-rank-decisions-report",
@@ -519,6 +525,8 @@ fn test_nostr_bulk_profile_repair_requires_all_authority_pins() {
         expected_stage_state_sha256,
         expected_policy_sha256,
         expected_spool_data_sha256,
+        event_blob_repair_receipt,
+        expected_event_blob_repair_receipt_sha256,
         profile_rank_decisions_file,
         expected_profile_rank_decisions_file_sha256,
         profile_rank_decisions_report,
@@ -539,6 +547,11 @@ fn test_nostr_bulk_profile_repair_requires_all_authority_pins() {
     assert_eq!(expected_stage_state_sha256, "b".repeat(64));
     assert_eq!(expected_policy_sha256, "c".repeat(64));
     assert_eq!(expected_spool_data_sha256, "d".repeat(64));
+    assert_eq!(
+        event_blob_repair_receipt,
+        PathBuf::from("/evidence/event-repair.json")
+    );
+    assert_eq!(expected_event_blob_repair_receipt_sha256, "0".repeat(64));
     assert_eq!(
         profile_rank_decisions_file,
         PathBuf::from("/evidence/ranks.jsonl")

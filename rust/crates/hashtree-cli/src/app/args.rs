@@ -1302,6 +1302,12 @@ pub(crate) enum NostrIndexCommands {
         /// Exact SHA-256 of bulk-projection-v2/spool/data.mdb
         #[arg(long = "expected-spool-data-sha256")]
         expected_spool_data_sha256: String,
+        /// Immutable receipt from the completed exact event-blob repair
+        #[arg(long = "event-blob-repair-receipt")]
+        event_blob_repair_receipt: PathBuf,
+        /// Exact SHA-256 of the event-blob repair receipt bytes
+        #[arg(long = "expected-event-blob-repair-receipt-sha256")]
+        expected_event_blob_repair_receipt_sha256: String,
         /// Canonical Iris Social profile rank-decisions JSONL
         #[arg(long = "profile-rank-decisions-file")]
         profile_rank_decisions_file: PathBuf,

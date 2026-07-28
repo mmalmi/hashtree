@@ -87,6 +87,13 @@
 - Single-blob uploads now always call the writable store's verified put path.
   A public fallback read can no longer make an upload return success without
   verifying or repairing the body in the destination Pool.
+- Bulk profile repair can now consume the exact canonical receipt from the
+  immediately preceding event-blob repair instead of repeating its
+  multi-hour nine-root parity scan. The command pins the receipt bytes,
+  validates its evidence against the retained roots and B-tree authority,
+  requires the fresh Pool catalog to equal the event-repair completion
+  snapshot before any profile mutation. Existing profile intents and receipts
+  remain byte-compatible and must carry the same parity evidence.
 - Optional Nostr event-blob reads now classify an absent linked chunk as a
   missing body, allowing exact spool-authoritative repair to restore partially
   missing large events while still rejecting corrupt bytes.

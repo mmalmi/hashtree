@@ -3569,6 +3569,8 @@ mod tests {
                         expected_stage_state_sha256: "b".repeat(64),
                         expected_policy_sha256: "c".repeat(64),
                         expected_spool_data_sha256: "d".repeat(64),
+                        event_blob_repair_receipt: base.join("event-repair-must-not-exist.json"),
+                        expected_event_blob_repair_receipt_sha256: "0".repeat(64),
                         profile_rank_decisions_file: base.join("ranks-must-not-exist.jsonl"),
                         expected_profile_rank_decisions_file_sha256: "e".repeat(64),
                         profile_rank_decisions_report: base.join("rank-report-must-not-exist.json"),
