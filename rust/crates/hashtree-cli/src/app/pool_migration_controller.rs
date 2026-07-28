@@ -678,12 +678,13 @@ mod linux {
             let pool_identity = lmdb_identity(&pool, "target Pool catalog")?;
             let target_data =
                 canonical_directory_path(&options.target_data_dir, "target Hashtree data")?;
-            let expected_pool = target_data.join(hashtree_lmdb::SHARED_BLOB_POOL_DIR_NAME);
+            let expected_pool_alias = target_data.join(hashtree_lmdb::SHARED_BLOB_POOL_DIR_NAME);
+            let expected_pool =
+                resolved_directory_path(&expected_pool_alias, "target Hashtree shared Pool")?;
             if pool != expected_pool {
                 bail!(
-                    "--pool must be exactly {}/{} for --target-data-dir",
-                    target_data.display(),
-                    hashtree_lmdb::SHARED_BLOB_POOL_DIR_NAME
+                    "--pool must resolve to the same directory as {} for --target-data-dir",
+                    expected_pool_alias.display(),
                 );
             }
 
@@ -3244,6 +3245,17 @@ mod linux {
             );
         }
         Ok(canonical)
+    }
+
+    fn resolved_directory_path(path: &Path, label: &str) -> Result<PathBuf> {
+        require_absolute(path, label)?;
+        let metadata = std::fs::metadata(path)
+            .with_context(|| format!("inspect {label} {}", path.display()))?;
+        if !metadata.is_dir() {
+            bail!("{label} {} does not resolve to a directory", path.display());
+        }
+        path.canonicalize()
+            .with_context(|| format!("canonicalize {label} {}", path.display()))
     }
 
     fn canonical_root_directory(path: &Path, label: &str) -> Result<PathBuf> {
