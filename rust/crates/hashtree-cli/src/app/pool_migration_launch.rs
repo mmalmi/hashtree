@@ -26,7 +26,7 @@ use super::pool_migration_evidence::{
     SourceEvidenceManifestAuthorityV3, SourceEvidenceManifestWriterV3, SourceEvidenceSummaryV3,
 };
 use super::pool_migration_mount::{
-    require_host_execution_namespace, validate_cached_source_read_only_mount_authorities,
+    require_attested_execution_namespace, validate_cached_source_read_only_mount_authorities,
     validate_source_read_only_mount_authority, SourceReadOnlyMountAuthorityV3,
 };
 use super::pool_migration_online_audit::{
@@ -1946,6 +1946,18 @@ fn validate_request_shape(
     require_lower_hex("launch nonce", &request.nonce, 64)?;
     validate_file_identity("v3 attempt namespace", request.attempt_namespace_identity)?;
     validate_file_identity("v3 attempt directory", request.attempt_identity)?;
+    validate_file_identity(
+        "root-attested user namespace",
+        request.execution_namespaces.user,
+    )?;
+    validate_file_identity(
+        "root-attested PID namespace",
+        request.execution_namespaces.pid,
+    )?;
+    validate_file_identity(
+        "root-attested mount namespace",
+        request.execution_namespaces.mount,
+    )?;
     require_boot_id("request boot ID", &request.boot_id)?;
     require_lower_hex(
         "request systemd invocation ID",
@@ -2122,7 +2134,7 @@ fn validate_launch_authority(
     if let Some(path) = context.source_external_dir {
         host_paths.push((path, "source external corpus"));
     }
-    require_host_execution_namespace(&host_paths)?;
+    require_attested_execution_namespace(request.execution_namespaces, &host_paths)?;
     validate_pool_migration_release_phase(&request.controller.phase)?;
 
     match request.controller.phase.as_str() {
@@ -2256,7 +2268,7 @@ fn validate_launch_authority(
             topology_paths.push((path, "target Pool member external corpus"));
         }
     }
-    require_host_execution_namespace(&topology_paths)?;
+    require_attested_execution_namespace(request.execution_namespaces, &topology_paths)?;
 
     let requested_source =
         canonical_directory_path(&request.source.lmdb_path, "requested source LMDB")?;

@@ -84,6 +84,11 @@
 
 ### Fixed
 
+- Unprivileged Pool migration workers now validate their user, PID, and mount
+  namespace identities against the root controller's immutable host-namespace
+  authority in the launch request. This preserves the exact host-namespace
+  proof without requiring worker access to `/proc/1/ns/*`, which may be
+  denied by production process-visibility policy.
 - Pool migration workers now prove their user namespace against the owner of
   the already-verified host PID namespace through `NS_GET_USERNS`. This keeps
   the initial-user-namespace gate fail-closed on hosts where an unprivileged

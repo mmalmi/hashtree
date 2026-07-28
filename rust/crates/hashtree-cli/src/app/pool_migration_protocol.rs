@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use super::pool_migration_checkpoint::CheckpointBrokerAuthorityV3;
-use super::pool_migration_mount::SourceReadOnlyMountAuthorityV3;
+use super::pool_migration_mount::{ExecutionNamespaceAuthorityV3, SourceReadOnlyMountAuthorityV3};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -13,6 +13,7 @@ pub(super) struct PoolMigrationLaunchRequestV3 {
     pub(super) attempt_identity: FileIdentityV3,
     pub(super) nonce: String,
     pub(super) boot_id: String,
+    pub(super) execution_namespaces: ExecutionNamespaceAuthorityV3,
     pub(super) systemd_invocation_id: String,
     pub(super) systemd_unit: String,
     pub(super) systemd_manager: String,

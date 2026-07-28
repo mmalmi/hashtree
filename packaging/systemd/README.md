@@ -71,6 +71,11 @@ network namespace. After `daemon-reload`, both loaded units must report
 environment file must be root-owned and not group/world writable. A daemon
 reload is mandatory after installing them. Every queried scalar or environment
 property must be present; omission is not treated as an empty or safe value.
+The root controller proves its exact host user, PID, and mount namespace
+identities against PID 1 and binds them into the immutable launch request. The
+unprivileged worker compares its own namespace identities to that authority;
+it does not require access to `/proc/1/ns/*`, which production process
+visibility policy may deny.
 systemd 255 suppresses empty `Exec*` arrays even when queried explicitly, so
 omitted forbidden hook arrays are accepted only after the launcher verifies the
 exact root-owned fragment, empty `DropInPaths`, and `NeedDaemonReload=no`; any

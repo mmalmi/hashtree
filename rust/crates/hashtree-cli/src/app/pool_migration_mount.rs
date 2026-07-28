@@ -19,12 +19,45 @@ use std::os::unix::fs::MetadataExt;
 #[cfg(target_os = "linux")]
 use std::os::unix::io::{AsRawFd, FromRawFd};
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ExecutionNamespaceAuthorityV3 {
+    pub(super) user: FileIdentityV3,
+    pub(super) pid: FileIdentityV3,
+    pub(super) mount: FileIdentityV3,
+}
+
 #[cfg(target_os = "linux")]
 pub(super) fn require_host_execution_namespace(paths: &[(&Path, &str)]) -> Result<()> {
+    host_execution_namespace_authority(paths).map(|_| ())
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn host_execution_namespace_authority(
+    paths: &[(&Path, &str)],
+) -> Result<ExecutionNamespaceAuthorityV3> {
     require_initial_user_namespace()?;
     require_initial_pid_namespace()?;
     require_host_mount_namespace()?;
     validate_host_systemd_runtime_identity()?;
+    for (path, label) in paths {
+        validate_local_host_filesystem(path, label)?;
+    }
+    current_execution_namespace_authority()
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn require_attested_execution_namespace(
+    authority: ExecutionNamespaceAuthorityV3,
+    paths: &[(&Path, &str)],
+) -> Result<()> {
+    require_initial_user_namespace()?;
+    let current = current_execution_namespace_authority()?;
+    if current != authority {
+        bail!(
+            "Pool migration worker execution namespaces differ from the root controller's host namespace authority"
+        );
+    }
     for (path, label) in paths {
         validate_local_host_filesystem(path, label)?;
     }
@@ -38,6 +71,21 @@ pub(super) fn require_host_mount_administrator() -> Result<()> {
 
 #[cfg(not(target_os = "linux"))]
 pub(super) fn require_host_execution_namespace(_paths: &[(&Path, &str)]) -> Result<()> {
+    bail!("host execution namespace authority is supported only on Linux")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn host_execution_namespace_authority(
+    _paths: &[(&Path, &str)],
+) -> Result<ExecutionNamespaceAuthorityV3> {
+    bail!("host execution namespace authority is supported only on Linux")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(super) fn require_attested_execution_namespace(
+    _authority: ExecutionNamespaceAuthorityV3,
+    _paths: &[(&Path, &str)],
+) -> Result<()> {
     bail!("host execution namespace authority is supported only on Linux")
 }
 
@@ -1064,6 +1112,15 @@ fn require_host_mount_namespace() -> Result<FileIdentityV3> {
         bail!("Pool migration controller/worker is not in the host mount namespace");
     }
     Ok(current)
+}
+
+#[cfg(target_os = "linux")]
+fn current_execution_namespace_authority() -> Result<ExecutionNamespaceAuthorityV3> {
+    Ok(ExecutionNamespaceAuthorityV3 {
+        user: namespace_identity(Path::new("/proc/self/ns/user"))?,
+        pid: namespace_identity(Path::new("/proc/self/ns/pid"))?,
+        mount: namespace_identity(Path::new("/proc/self/ns/mnt"))?,
+    })
 }
 
 #[cfg(target_os = "linux")]

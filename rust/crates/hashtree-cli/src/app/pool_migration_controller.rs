@@ -101,10 +101,11 @@ mod linux {
         POOL_TOPOLOGY_SCHEMA, REQUEST_FILE_NAME, REQUEST_SCHEMA,
     };
     use super::super::pool_migration_mount::{
-        ensure_source_read_only_mount_authority_from_plan, plan_source_read_only_mount_authority,
-        plan_source_read_only_mount_teardown, require_host_execution_namespace,
-        require_host_mount_administrator, teardown_one_source_read_only_mount,
-        validate_source_read_only_mount_authority, SourceReadOnlyMountAuthorityV3,
+        ensure_source_read_only_mount_authority_from_plan, host_execution_namespace_authority,
+        plan_source_read_only_mount_authority, plan_source_read_only_mount_teardown,
+        require_host_execution_namespace, require_host_mount_administrator,
+        teardown_one_source_read_only_mount, validate_source_read_only_mount_authority,
+        SourceReadOnlyMountAuthorityV3,
     };
     use super::super::pool_migration_mount_lifecycle::{
         create_full_mount_lifecycle, create_source_mount_lifecycle,
@@ -2829,6 +2830,7 @@ mod linux {
                 attempt_identity,
                 nonce: self.nonce.clone(),
                 boot_id: self.boot_id.clone(),
+                execution_namespaces: host_execution_namespace_authority(&[])?,
                 systemd_invocation_id: process.invocation_id.clone(),
                 systemd_unit: self.options.systemd_unit.clone(),
                 systemd_manager: "system".to_string(),
