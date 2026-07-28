@@ -1985,6 +1985,8 @@ mod linux {
                     &self.controller_state,
                     &self.pool_topology,
                     &self.source_receipts,
+                    self.options.source_external_dir.as_deref(),
+                    self.source_external_identity,
                     process.main_pid,
                     process.start_time_ticks,
                     deep_external_census,
@@ -1994,11 +1996,29 @@ mod linux {
                     &self.controller_state,
                     &self.pool_topology,
                     &self.source_receipts,
+                    self.options.source_external_dir.as_deref(),
+                    self.source_external_identity,
                     process.main_pid,
                     process.start_time_ticks,
                     deep_external_census,
                 )
                 .context("checkpoint source/target handle census"),
+                PoolMigrationControllerPhase::OnlineBounded
+                    if self.controller_state.target_writers_fenced
+                        && self.controller_state.source_writers_fenced =>
+                {
+                    census_store_process_handles(
+                        &self.controller_state,
+                        &self.pool_topology,
+                        &[],
+                        self.options.source_external_dir.as_deref(),
+                        self.source_external_identity,
+                        process.main_pid,
+                        process.start_time_ticks,
+                        deep_external_census,
+                    )
+                    .context("checkpoint source/target writer-handle census")
+                }
                 PoolMigrationControllerPhase::OnlineBounded
                     if self.controller_state.target_writers_fenced =>
                 {
@@ -2487,6 +2507,9 @@ mod linux {
             if !self.controller_state.target_writers_fenced {
                 bail!("online target audit certification requires the held target-writer fence");
             }
+            if !self.controller_state.source_writers_fenced {
+                bail!("online target audit certification requires the held source-writer fence");
+            }
             validate_runtime_masked_writer_units_with_systemctl(
                 &self.systemctl.path,
                 &self.controller_state.stopped_writer_units,
@@ -2495,6 +2518,13 @@ mod linux {
             .context("revalidate target writer-unit masks before online certification")?;
             census_recovery_target_handles(&self.controller_state, &self.pool_topology)
                 .context("revalidate target writer-handle census before online certification")?;
+            census_recovery_source_handles(
+                &self.controller_state,
+                &self.options.source,
+                self.options.source_external_dir.as_deref(),
+                self.source_external_identity,
+            )
+            .context("revalidate source writer-handle census before online certification")?;
             let (_, target_content) = audit_recoverable_target_pool(
                 &self.options.pool,
                 self.pool_identity,
@@ -2516,6 +2546,13 @@ mod linux {
             census_recovery_target_handles(&self.controller_state, &self.pool_topology).context(
                 "revalidate target writer-handle census after online certification replay",
             )?;
+            census_recovery_source_handles(
+                &self.controller_state,
+                &self.options.source,
+                self.options.source_external_dir.as_deref(),
+                self.source_external_identity,
+            )
+            .context("revalidate source writer-handle census after online certification replay")?;
             let certification = PoolMigrationOnlineTargetAuditCertificationV3 {
                 schema: ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA.to_string(),
                 status: "certified".to_string(),
@@ -5773,6 +5810,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         state: &ControllerStateV3,
         topology: &PoolTopologyV3,
         source_receipts: &[ValidatedSourceTerminalReceiptV3],
+        current_source_external_path: Option<&Path>,
+        current_source_external_identity: Option<FileIdentityV3>,
         waiting_worker_pid: u32,
         waiting_worker_start_time: u64,
         deep_external_census: bool,
@@ -5789,6 +5828,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             state,
             topology,
             source_receipts,
+            current_source_external_path,
+            current_source_external_identity,
             &live,
             deep_external_census,
         )?;
@@ -5801,6 +5842,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 state,
                 topology,
                 source_receipts,
+                current_source_external_path,
+                current_source_external_identity,
                 &live_after,
                 true,
             )?;
@@ -5812,6 +5855,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         state: &ControllerStateV3,
         topology: &PoolTopologyV3,
         source_receipts: &[ValidatedSourceTerminalReceiptV3],
+        current_source_external_path: Option<&Path>,
+        current_source_external_identity: Option<FileIdentityV3>,
         live: &HashMap<(u64, u64, u64), LiveProcessAuthority>,
         deep_external_census: bool,
     ) -> Result<()> {
@@ -5828,6 +5873,20 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 &format!("source LMDB {}", index + 1),
                 identity,
             )?;
+        }
+        match (
+            current_source_external_path,
+            current_source_external_identity,
+        ) {
+            (Some(path), Some(identity)) => validate_external_census_against_live(
+                live,
+                "current source external corpus",
+                path,
+                identity,
+                deep_external_census,
+            )?,
+            (None, None) => {}
+            _ => bail!("current source external census authority is incomplete"),
         }
         validate_lmdb_census_against_live(
             live,
@@ -5858,6 +5917,9 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             }
         }
         for source in source_receipts {
+            if source.receipt.source_lmdb_identity == state.source_lmdb_identity {
+                continue;
+            }
             match (
                 source.receipt.source_external_path.as_deref(),
                 source.receipt.source_external_identity,

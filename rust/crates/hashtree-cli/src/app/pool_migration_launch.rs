@@ -411,6 +411,10 @@ impl AcknowledgedPoolMigrationLaunch {
         self.target_writers_fenced
     }
 
+    pub(super) fn source_writers_fenced(&self) -> bool {
+        self.controller_state.source_writers_fenced
+    }
+
     pub(super) fn authorize_checkpoint(
         &self,
         operation: &str,

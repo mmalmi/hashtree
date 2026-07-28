@@ -2918,8 +2918,10 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         }
                     }
                 }
-                let completed =
-                    source_completed && target_completed && launch.target_writers_fenced();
+                let completed = source_completed
+                    && target_completed
+                    && launch.source_writers_fenced()
+                    && launch.target_writers_fenced();
                 if completed {
                     launch.authorize_checkpoint("online-evidence-publication", cursor, None)?;
                     let mut source_evidence = launch.create_source_evidence_writer()?;
@@ -2956,7 +2958,8 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                     launch.authorize_checkpoint("online-readiness", cursor, None)?;
                 }
                 println!(
-                    "Migration pass: scanned {scanned}, source audit reused {audit_reused}, target audit reused {target_audit_reused}, already present {already_present}, verified {verified}, inserted {inserted} blobs / {inserted_bytes} bytes, source covered: {source_completed}, target covered: {target_completed}, target fence held: {}, completed: {completed}",
+                    "Migration pass: scanned {scanned}, source audit reused {audit_reused}, target audit reused {target_audit_reused}, already present {already_present}, verified {verified}, inserted {inserted} blobs / {inserted_bytes} bytes, source covered: {source_completed}, target covered: {target_completed}, source fence held: {}, target fence held: {}, completed: {completed}",
+                    launch.source_writers_fenced(),
                     launch.target_writers_fenced(),
                 );
                 println!("Cursor: {}", state_file.display());
