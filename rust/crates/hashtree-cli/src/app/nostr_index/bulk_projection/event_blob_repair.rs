@@ -700,7 +700,10 @@ fn load_retention_lease(
     }
     for (stable_id, encoded) in built_roots {
         let label = format!("event-index-{stable_id}");
-        if lease.roots.get(&label) != Some(encoded) {
+        let canonical = parse_root_text(encoded)
+            .with_context(|| format!("parse retained event-index root {stable_id}"))?
+            .to_string();
+        if lease.roots.get(&label) != Some(&canonical) {
             anyhow::bail!(
                 "profile repair retention lease does not cover exact event root {stable_id}"
             );
@@ -1530,6 +1533,57 @@ pub(crate) async fn repair_bulk_projection_event_blobs(
         &receipt_bytes,
         "event-blob repair output",
     )
+}
+
+#[cfg(test)]
+mod retention_representation_tests {
+    use super::*;
+
+    fn write_retention_lease(data_dir: &Path, cid: &Cid) -> Vec<u8> {
+        let path = data_dir.join(PROFILE_REPAIR_RETENTION_LEASE_RELATIVE_PATH);
+        std::fs::create_dir_all(path.parent().expect("retention parent"))
+            .expect("create retention parent");
+        let lease = ProfileRepairRetentionLease {
+            format: hashtree_cli::storage::PROFILE_REPAIR_RETENTION_LEASE_FORMAT.to_string(),
+            authority_sha256: "11".repeat(32),
+            roots: BTreeMap::from([("event-index-0".to_string(), cid.to_string())]),
+        };
+        let lease_bytes = lease.canonical_bytes().expect("canonical lease");
+        std::fs::write(&path, &lease_bytes).expect("write retention lease");
+        lease_bytes
+    }
+
+    #[test]
+    fn retention_lease_accepts_the_same_event_root_in_nhash_state_encoding() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let cid = Cid::encrypted([0x2a; 32], [0x7b; 32]);
+        let lease_bytes = write_retention_lease(temp.path(), &cid);
+        let built_roots = BTreeMap::from([(0, cid_to_nhash(&cid).expect("encode state nhash"))]);
+        load_retention_lease(temp.path(), &stage_bytes_sha256(&lease_bytes), &built_roots)
+            .expect("equivalent CID encodings must identify the same retained event root");
+    }
+
+    #[test]
+    fn retention_lease_rejects_an_event_root_with_a_different_decryption_key() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let lease_cid = Cid::encrypted([0x2a; 32], [0x7b; 32]);
+        let state_cid = Cid::encrypted(lease_cid.hash, [0x8c; 32]);
+        let lease_bytes = write_retention_lease(temp.path(), &lease_cid);
+        let built_roots = BTreeMap::from([(
+            0,
+            cid_to_nhash(&state_cid).expect("encode different state nhash"),
+        )]);
+
+        let error =
+            load_retention_lease(temp.path(), &stage_bytes_sha256(&lease_bytes), &built_roots)
+                .expect_err("a different decrypt key must not satisfy exact root retention");
+        assert!(
+            error
+                .to_string()
+                .contains("does not cover exact event root 0"),
+            "unexpected error: {error:#}"
+        );
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
