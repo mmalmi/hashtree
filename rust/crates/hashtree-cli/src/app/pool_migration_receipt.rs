@@ -10,7 +10,8 @@ use std::path::{Path, PathBuf};
 use std::os::unix::fs::MetadataExt;
 
 use super::pool_migration_evidence::{
-    validate_source_evidence_metadata, SourceEvidenceManifestAuthorityV3, SOURCE_EVIDENCE_FILE_NAME,
+    validate_source_evidence_metadata, SourceEvidenceManifestAuthorityV3,
+    ONLINE_TARGET_EVIDENCE_FILE_NAME, SOURCE_EVIDENCE_FILE_NAME,
 };
 use super::pool_migration_launch::{
     CursorAuthorityV3, FileAuthorityV3, FileIdentityV3, LmdbIdentityV3, NamedFileAuthorityV3,
@@ -112,6 +113,10 @@ pub(super) struct PoolMigrationSourceTerminalReceiptV3 {
     pub(super) source_verified_bytes: u64,
     pub(super) source_content_sha256: String,
     pub(super) online_target_audit_certification_sha256: String,
+    pub(super) online_target_verified_entries: u64,
+    pub(super) online_target_verified_bytes: u64,
+    pub(super) online_target_content_sha256: String,
+    pub(super) online_target_evidence: SourceEvidenceManifestAuthorityV3,
     pub(super) source_evidence: SourceEvidenceManifestAuthorityV3,
     pub(super) source_generation: SourceGenerationFingerprintV3,
     pub(super) pool_path: PathBuf,
@@ -624,6 +629,11 @@ fn validate_prior_source_terminal_receipt(
         expected.expected_service_gid,
         expected.validate_physical_generation,
     )?;
+    validate_source_evidence_metadata(
+        &receipt.online_target_evidence,
+        expected.expected_service_gid,
+        expected.validate_physical_generation,
+    )?;
 
     if receipt.boot_id != expected.boot_id {
         bail!("prior source-terminal receipt belongs to a different boot");
@@ -734,6 +744,14 @@ fn validate_receipt_shape(receipt: &PoolMigrationSourceTerminalReceiptV3) -> Res
         &receipt.online_target_audit_certification_sha256,
     )?;
     validate_sha256(
+        "prior online target content",
+        &receipt.online_target_content_sha256,
+    )?;
+    validate_sha256(
+        "prior online target evidence manifest",
+        &receipt.online_target_evidence.sha256,
+    )?;
+    validate_sha256(
         "prior source evidence manifest",
         &receipt.source_evidence.sha256,
     )?;
@@ -750,6 +768,9 @@ fn validate_receipt_shape(receipt: &PoolMigrationSourceTerminalReceiptV3) -> Res
     }
     if receipt.source_evidence.entries != receipt.source_verified_entries {
         bail!("prior source evidence entry count differs from its source verification count");
+    }
+    if receipt.online_target_evidence.entries != receipt.online_target_verified_entries {
+        bail!("prior online target evidence entry count differs from its verification count");
     }
     if receipt.source_legacy_blob_only != (receipt.source_metadata_entries == 0)
         || receipt
@@ -799,6 +820,15 @@ fn validate_completed_attempt(
     }
     if receipt.source_evidence.path != attempt.join(SOURCE_EVIDENCE_FILE_NAME) {
         bail!("prior source-terminal receipt does not bind its exact source evidence path");
+    }
+    if receipt
+        .online_target_evidence
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        != Some(ONLINE_TARGET_EVIDENCE_FILE_NAME)
+    {
+        bail!("prior source-terminal receipt has an invalid online target evidence path");
     }
     require_lower_hex("prior attempt nonce", &receipt.attempt_nonce, 64)?;
     let namespace_metadata =

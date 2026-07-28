@@ -18,20 +18,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use super::pool_migration_checkpoint::{
     ack_file_name, boottime_millis, request_file_name, timeout_millis,
     validate_checkpoint_operation, validate_root_broker_process, validate_root_broker_service,
-    CheckpointBrokerAuthorityV3, MigrationCheckpointAckV3, MigrationCheckpointRequestV3,
-    CHECKPOINT_ACK_SCHEMA, CHECKPOINT_REQUEST_SCHEMA, MAX_CHECKPOINT_BYTES,
+    CheckpointBrokerAuthorityV3, MigrationCheckpointAckV3, MigrationCheckpointAuditEntryV3,
+    MigrationCheckpointRequestV3, CHECKPOINT_ACK_SCHEMA, CHECKPOINT_REQUEST_SCHEMA,
+    MAX_CHECKPOINT_BYTES,
 };
 use super::pool_migration_evidence::{
-    SourceEvidenceManifestAuthorityV3, SourceEvidenceManifestWriterV3,
+    SourceEvidenceManifestAuthorityV3, SourceEvidenceManifestWriterV3, SourceEvidenceSummaryV3,
 };
 use super::pool_migration_mount::{
     require_host_execution_namespace, validate_cached_source_read_only_mount_authorities,
     validate_source_read_only_mount_authority, SourceReadOnlyMountAuthorityV3,
 };
 use super::pool_migration_online_audit::{
-    compute_online_audit_binding, load_validated_online_target_audit, online_audit_path,
-    OnlineTargetAuditExpectationV3, PoolMigrationOnlineTargetAuditReceiptV3,
-    ValidatedOnlineTargetAuditV3, ONLINE_TARGET_AUDIT_FILE_NAME, ONLINE_TARGET_AUDIT_SCHEMA,
+    compute_online_audit_binding, compute_online_target_fence_binding,
+    load_validated_online_target_audit, online_audit_path, OnlineTargetAuditExpectationV3,
+    PoolMigrationOnlineTargetAuditReceiptV3, ValidatedOnlineTargetAuditV3,
+    ONLINE_TARGET_AUDIT_FILE_NAME, ONLINE_TARGET_AUDIT_SCHEMA,
 };
 use super::pool_migration_pinned::{PinnedDirectory, PinnedRegularEntry};
 pub(super) use super::pool_migration_protocol::{
@@ -185,6 +187,9 @@ struct PoolMigrationTerminalAuditReceiptV3<'a> {
     source_entries: u64,
     source_bytes: u64,
     source_reconciliation_sha256: String,
+    target_content_proof_entries: u64,
+    target_content_proof_bytes: u64,
+    target_content_proof_sha256: String,
     target_stored_locations: u64,
     target_stored_bytes: u64,
     target_catalog_sha256: String,
@@ -216,6 +221,7 @@ pub(super) struct AcknowledgedPoolMigrationLaunch {
     pub(super) final_stopped_pass: bool,
     pub(super) final_stopped_source_pass: bool,
     pub(super) final_stopped_full_pass: bool,
+    target_writers_fenced: bool,
     source: PathBuf,
     source_external: Option<PathBuf>,
     pool: PathBuf,
@@ -293,6 +299,8 @@ impl AcknowledgedPoolMigrationLaunch {
         }
         compute_online_audit_binding(
             &self.request.controller.rollout_id,
+            &self.request.binary.sha256,
+            &self.request.source.baseline.sha256,
             self.request.source.lmdb_identity,
             self.request.source.external_identity,
             self.request.pool.lmdb_identity,
@@ -329,7 +337,7 @@ impl AcknowledgedPoolMigrationLaunch {
     pub(super) fn ensure_final_writer_fence(&self) -> Result<()> {
         validate_file_authority(&self.controller_state_authority, "controller state")?;
         validate_controller_state_ownership(&self.controller_state_authority.path)?;
-        if !self.final_stopped_pass {
+        if !self.final_stopped_pass && !self.target_writers_fenced {
             return validate_legacy_worker_activation_fence(
                 &self.controller_state.legacy_worker_template_mask,
                 &self.controller_state.legacy_worker_instance_masks,
@@ -344,6 +352,9 @@ impl AcknowledgedPoolMigrationLaunch {
             &self.controller_state.legacy_worker_template_mask,
             &self.controller_state.legacy_worker_instance_masks,
         )?;
+        if !self.final_stopped_pass {
+            return Ok(());
+        }
         let mounts = self
             .request
             .source
@@ -369,13 +380,16 @@ impl AcknowledgedPoolMigrationLaunch {
             &self.controller_state.legacy_worker_template_mask,
             &self.controller_state.legacy_worker_instance_masks,
         )?;
-        if !self.final_stopped_pass {
+        if !self.final_stopped_pass && !self.target_writers_fenced {
             return Ok(());
         }
         validate_runtime_writer_mask_authorities(
             &self.controller_state.stopped_writer_units,
             &self.controller_state.writer_unit_masks,
         )?;
+        if !self.final_stopped_pass {
+            return Ok(());
+        }
         let current_mounts = self
             .request
             .source
@@ -393,11 +407,60 @@ impl AcknowledgedPoolMigrationLaunch {
         validate_cached_source_read_only_mount_authorities(&mounts)
     }
 
+    pub(super) fn target_writers_fenced(&self) -> bool {
+        self.target_writers_fenced
+    }
+
     pub(super) fn authorize_checkpoint(
         &self,
         operation: &str,
         cursor: Option<[u8; 32]>,
         range_limit: Option<usize>,
+    ) -> Result<()> {
+        self.authorize_checkpoint_with_audit(operation, cursor, range_limit, &[], None)
+    }
+
+    pub(super) fn authorize_online_source_audit_batch(
+        &self,
+        cursor: [u8; 32],
+        range_limit: usize,
+        entries: &[([u8; 32], u64)],
+    ) -> Result<()> {
+        self.authorize_checkpoint_with_audit(
+            "online-source-audit-batch",
+            Some(cursor),
+            Some(range_limit),
+            entries,
+            None,
+        )
+    }
+
+    pub(super) fn authorize_online_target_audit_batch(
+        &self,
+        cursor: [u8; 32],
+        range_limit: usize,
+        entries: &[([u8; 32], u64)],
+    ) -> Result<()> {
+        self.authorize_checkpoint_with_audit(
+            "online-target-audit-batch",
+            Some(cursor),
+            Some(range_limit),
+            entries,
+            Some(cursor),
+        )
+    }
+
+    pub(super) fn reset_online_target_audit_cursor(&self) -> Result<()> {
+        self.authorize_checkpoint_with_audit("online-target-audit-reset", None, None, &[], None)
+    }
+
+    fn authorize_checkpoint_with_audit(
+        &self,
+        operation: &str,
+        cursor: Option<[u8; 32]>,
+        range_limit: Option<usize>,
+        audit_entries: &[([u8; 32], u64)],
+        audit_target_cursor: Option<[u8; 32]>,
     ) -> Result<()> {
         validate_checkpoint_operation(operation)?;
         self.attempt
@@ -433,6 +496,13 @@ impl AcknowledgedPoolMigrationLaunch {
             .map(u64::try_from)
             .transpose()
             .context("checkpoint range limit exceeds u64")?;
+        let audit_entries = audit_entries
+            .iter()
+            .map(|(hash, size)| MigrationCheckpointAuditEntryV3 {
+                hash: hashtree_core::to_hex(hash),
+                size: *size,
+            })
+            .collect();
         let request = MigrationCheckpointRequestV3 {
             schema: CHECKPOINT_REQUEST_SCHEMA.to_string(),
             sequence,
@@ -440,6 +510,8 @@ impl AcknowledgedPoolMigrationLaunch {
             operation: operation.to_string(),
             cursor: cursor.clone(),
             range_limit,
+            audit_entries,
+            audit_target_cursor: audit_target_cursor.map(|hash| hashtree_core::to_hex(&hash)),
             worker_pid: self.request.main_pid,
             worker_proc_start_time_ticks: self.request.proc_start_time_ticks,
             broker_pid: self.request.checkpoint_broker.pid,
@@ -670,10 +742,16 @@ impl AcknowledgedPoolMigrationLaunch {
     pub(super) fn write_terminal_audit_receipt(
         &self,
         source: &PoolMigrationSourceUnionAuditV3,
+        target_content: &SourceEvidenceSummaryV3,
         target: &PoolPhysicalAudit,
     ) -> Result<()> {
         if !self.final_stopped_full_pass {
             bail!("terminal Pool audit receipts are valid only for final-stopped-full");
+        }
+        if target_content.entries != target.stored_locations
+            || target_content.bytes != target.stored_bytes
+        {
+            bail!("terminal target content proof differs from physical Pool summary");
         }
         self.attempt
             .ensure_path_identity("Pool migration attempt directory")?;
@@ -686,6 +764,9 @@ impl AcknowledgedPoolMigrationLaunch {
             source_entries: source.entries,
             source_bytes: source.bytes,
             source_reconciliation_sha256: hashtree_core::to_hex(&source.sha256),
+            target_content_proof_entries: target_content.entries,
+            target_content_proof_bytes: target_content.bytes,
+            target_content_proof_sha256: hashtree_core::to_hex(&target_content.content_sha256),
             target_stored_locations: target.stored_locations,
             target_stored_bytes: target.stored_bytes,
             target_catalog_sha256: hashtree_core::to_hex(&target.catalog_sha256),
@@ -707,13 +788,17 @@ impl AcknowledgedPoolMigrationLaunch {
         audit_store_path: PathBuf,
         audit_binding: [u8; 32],
         source_evidence: SourceEvidenceManifestAuthorityV3,
-        summary: &PoolMigrationAuditSummary,
+        source_summary: &PoolMigrationAuditSummary,
+        target_evidence: SourceEvidenceManifestAuthorityV3,
+        target_summary: &PoolMigrationAuditSummary,
     ) -> Result<()> {
         if self.request.controller.phase != "online-bounded" {
             bail!("online target audit receipts are valid only for online-bounded");
         }
-        if source_evidence.entries != summary.entries {
-            bail!("online target evidence count differs from its durable audit summary");
+        if source_evidence.entries != source_summary.entries
+            || target_evidence.entries != target_summary.entries
+        {
+            bail!("online evidence count differs from its durable audit summary");
         }
         let terminal_cursor = self
             .cursor_authority
@@ -728,6 +813,22 @@ impl AcknowledgedPoolMigrationLaunch {
         if !cursor_shape_valid {
             bail!("completed online target audit has an inconsistent terminal cursor");
         }
+        if !self.controller_state.target_writers_fenced
+            || !self.controller_state.fence_held_until_completion
+            || self
+                .controller_state
+                .target_writer_processes_with_open_handles
+                != 0
+        {
+            bail!("online target audit receipt requires the held target writer fence");
+        }
+        let target_fence_binding = compute_online_target_fence_binding(
+            &self.request.controller.rollout_id,
+            &self.controller_state.stopped_writer_units,
+            &self.controller_state.writer_unit_masks,
+            &self.controller_state.legacy_worker_template_mask,
+            &self.controller_state.legacy_worker_instance_masks,
+        )?;
         let receipt = PoolMigrationOnlineTargetAuditReceiptV3 {
             schema: ONLINE_TARGET_AUDIT_SCHEMA.to_string(),
             status: "verified".to_string(),
@@ -763,10 +864,22 @@ impl AcknowledgedPoolMigrationLaunch {
             pool_manifest_sha256: hex::encode(self.pins.pool_manifest_sha256),
             audit_store_path,
             audit_binding_sha256: hex::encode(audit_binding),
-            verified_entries: summary.entries,
-            verified_bytes: summary.bytes,
-            content_sha256: hashtree_core::to_hex(&summary.content_sha256),
+            source_verified_entries: source_summary.entries,
+            source_verified_bytes: source_summary.bytes,
+            source_content_sha256: hashtree_core::to_hex(&source_summary.content_sha256),
             source_evidence,
+            target_verified_entries: target_summary.entries,
+            target_verified_bytes: target_summary.bytes,
+            target_content_sha256: hashtree_core::to_hex(&target_summary.content_sha256),
+            target_evidence,
+            target_fence_binding_sha256: hashtree_core::to_hex(&target_fence_binding),
+            target_writer_units: self.controller_state.stopped_writer_units.clone(),
+            target_writer_unit_masks: self.controller_state.writer_unit_masks.clone(),
+            legacy_worker_template_mask: self.controller_state.legacy_worker_template_mask.clone(),
+            legacy_worker_instance_masks: self
+                .controller_state
+                .legacy_worker_instance_masks
+                .clone(),
         };
         let mut bytes =
             serde_json::to_vec(&receipt).context("serialize online target audit receipt")?;
@@ -808,6 +921,7 @@ impl AcknowledgedPoolMigrationLaunch {
             value: Some("source-complete".to_string()),
             sha256: Some(sha256_bytes(terminal_cursor_bytes)),
         };
+        let online_target = self.online_target_audit()?;
         let receipt = PoolMigrationSourceTerminalReceiptV3 {
             schema: SOURCE_TERMINAL_SCHEMA.to_string(),
             status: "verified".to_string(),
@@ -854,10 +968,11 @@ impl AcknowledgedPoolMigrationLaunch {
             source_verified_entries: content.verified_entries,
             source_verified_bytes: content.verified_bytes,
             source_content_sha256: hashtree_core::to_hex(&content.sha256),
-            online_target_audit_certification_sha256: self
-                .online_target_audit()?
-                .certification_sha256
-                .clone(),
+            online_target_audit_certification_sha256: online_target.certification_sha256.clone(),
+            online_target_verified_entries: online_target.receipt.target_verified_entries,
+            online_target_verified_bytes: online_target.receipt.target_verified_bytes,
+            online_target_content_sha256: online_target.receipt.target_content_sha256.clone(),
+            online_target_evidence: online_target.receipt.target_evidence.clone(),
             source_evidence,
             source_generation,
             pool_path: self.request.pool.path.clone(),
@@ -898,6 +1013,17 @@ impl AcknowledgedPoolMigrationLaunch {
         self.attempt
             .ensure_path_identity("Pool migration attempt directory")?;
         SourceEvidenceManifestWriterV3::create(&self.attempt.path)
+    }
+
+    pub(super) fn create_online_target_evidence_writer(
+        &self,
+    ) -> Result<SourceEvidenceManifestWriterV3> {
+        if self.request.controller.phase != "online-bounded" {
+            bail!("online target evidence manifests are valid only for online-bounded");
+        }
+        self.attempt
+            .ensure_path_identity("Pool migration attempt directory")?;
+        SourceEvidenceManifestWriterV3::create_online_target(&self.attempt.path)
     }
 }
 
@@ -1767,6 +1893,7 @@ pub(super) fn acknowledge_pool_migration_launch(
         ),
         final_stopped_source_pass: request.controller.phase == "final-stopped-source",
         final_stopped_full_pass: request.controller.phase == "final-stopped-full",
+        target_writers_fenced: second.controller_state.target_writers_fenced,
         source,
         source_external,
         pool,
@@ -2231,6 +2358,8 @@ fn validate_launch_authority(
         &request.cas,
         &OnlineTargetAuditExpectationV3 {
             rollout_id: &request.controller.rollout_id,
+            worker_binary_sha256: &request.binary.sha256,
+            source_baseline_sha256: &request.source.baseline.sha256,
             source_path: &request.source.lmdb_path,
             source_lmdb_identity: request.source.lmdb_identity,
             source_external_path: request.source.external_path.as_deref(),
@@ -2239,6 +2368,10 @@ fn validate_launch_authority(
             pool_lmdb_identity: request.pool.lmdb_identity,
             pool_topology_sha256: &request.pool.topology.sha256,
             pool_manifest_sha256: &controller_state.pool_manifest_sha256,
+            target_writer_units: &controller_state.stopped_writer_units,
+            target_writer_unit_masks: &controller_state.writer_unit_masks,
+            legacy_worker_template_mask: &controller_state.legacy_worker_template_mask,
+            legacy_worker_instance_masks: &controller_state.legacy_worker_instance_masks,
             expected_service_gid: service_gid()
                 .context("online target audit validation requires a service GID")?,
             validate_evidence_content: false,
@@ -2365,25 +2498,43 @@ fn validate_controller_state(
         request.controller.phase.as_str(),
         "final-stopped-source" | "final-stopped-full"
     );
+    let online_target_fenced =
+        request.controller.phase == "online-bounded" && !state.stopped_writer_units.is_empty();
     if final_stopped
         && (!state.source_writers_fenced
+            || !state.target_writers_fenced
             || !state.fence_held_until_completion
             || state.source_writer_processes_with_open_handles != 0
+            || state.target_writer_processes_with_open_handles != 0
             || state.stopped_writer_units.is_empty()
             || state.writer_unit_masks.is_empty())
     {
         bail!(
-            "stopped final controller state must attest its source writer fence held through completion, zero source writers holding store handles, and the exact stopped systemd writer units"
+            "stopped final controller state must attest source and target writer fences held through completion, zero source and target writers holding store handles, and the exact stopped systemd writer units"
         );
     }
-    if request.controller.phase == "final-stopped-full"
-        && (!state.target_writers_fenced || state.target_writer_processes_with_open_handles != 0)
+    if online_target_fenced
+        && (!state.target_writers_fenced
+            || !state.fence_held_until_completion
+            || state.target_writer_processes_with_open_handles != 0
+            || (state.source_writers_fenced
+                && state.source_writer_processes_with_open_handles != 0)
+            || state.writer_unit_masks.is_empty())
     {
         bail!(
-            "final-stopped-full controller state must additionally attest the target writer fence and zero target writers holding store handles"
+            "target-fenced online-bounded state must attest its held target fence, zero target writer handles, and exact writer masks"
         );
     }
-    if final_stopped {
+    if request.controller.phase == "online-bounded"
+        && !online_target_fenced
+        && (state.source_writers_fenced
+            || state.target_writers_fenced
+            || state.fence_held_until_completion
+            || !state.writer_unit_masks.is_empty())
+    {
+        bail!("ordinary online-bounded state must not claim writer fences or masks");
+    }
+    if final_stopped || online_target_fenced {
         validate_runtime_masked_writer_units(
             &state.stopped_writer_units,
             &state.writer_unit_masks,

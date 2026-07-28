@@ -8,10 +8,11 @@ use std::path::{Path, PathBuf};
 
 use super::pool_migration_evidence::{
     validate_source_evidence_metadata, SourceEvidenceManifestAuthorityV3,
-    SourceEvidenceManifestReaderV3,
+    SourceEvidenceManifestReaderV3, ONLINE_TARGET_EVIDENCE_FILE_NAME, SOURCE_EVIDENCE_FILE_NAME,
 };
 use super::pool_migration_protocol::{
     CursorAuthorityV3, FileAuthorityV3, FileIdentityV3, LmdbIdentityV3, NamedFileAuthorityV3,
+    WriterUnitMaskV3,
 };
 
 pub(super) const ONLINE_TARGET_AUDIT_SCHEMA: &str =
@@ -33,6 +34,8 @@ pub(super) fn online_audit_path(cursor_path: &Path) -> Result<PathBuf> {
 
 pub(super) fn compute_online_audit_binding(
     rollout_id: &str,
+    worker_binary_sha256: &str,
+    source_baseline_sha256: &str,
     source_lmdb_identity: LmdbIdentityV3,
     source_external_identity: Option<FileIdentityV3>,
     pool_lmdb_identity: LmdbIdentityV3,
@@ -42,6 +45,10 @@ pub(super) fn compute_online_audit_binding(
     let mut hasher = Sha256::new();
     hasher.update(b"hashtree-pool-migration-online-audit-authority/v3\0");
     hasher.update(rollout_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(worker_binary_sha256.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source_baseline_sha256.as_bytes());
     hasher.update(b"\0");
     hasher.update(
         serde_json::to_vec(&source_lmdb_identity)
@@ -56,6 +63,29 @@ pub(super) fn compute_online_audit_binding(
     );
     hasher.update(pool_topology_sha256.as_bytes());
     hasher.update(pool_manifest_sha256);
+    Ok(hasher.finalize().into())
+}
+
+pub(super) fn compute_online_target_fence_binding(
+    rollout_id: &str,
+    writer_units: &[String],
+    writer_unit_masks: &[WriterUnitMaskV3],
+    legacy_worker_template_mask: &WriterUnitMaskV3,
+    legacy_worker_instance_masks: &[WriterUnitMaskV3],
+) -> Result<Hash> {
+    let mut hasher = Sha256::new();
+    hasher.update(b"hashtree-pool-migration-online-target-fence/v3\0");
+    hasher.update(rollout_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(
+        serde_json::to_vec(&(
+            writer_units,
+            writer_unit_masks,
+            legacy_worker_template_mask,
+            legacy_worker_instance_masks,
+        ))
+        .context("serialize online target fence authority")?,
+    );
     Ok(hasher.finalize().into())
 }
 
@@ -96,10 +126,19 @@ pub(super) struct PoolMigrationOnlineTargetAuditReceiptV3 {
     pub(super) pool_manifest_sha256: String,
     pub(super) audit_store_path: PathBuf,
     pub(super) audit_binding_sha256: String,
-    pub(super) verified_entries: u64,
-    pub(super) verified_bytes: u64,
-    pub(super) content_sha256: String,
+    pub(super) source_verified_entries: u64,
+    pub(super) source_verified_bytes: u64,
+    pub(super) source_content_sha256: String,
     pub(super) source_evidence: SourceEvidenceManifestAuthorityV3,
+    pub(super) target_verified_entries: u64,
+    pub(super) target_verified_bytes: u64,
+    pub(super) target_content_sha256: String,
+    pub(super) target_evidence: SourceEvidenceManifestAuthorityV3,
+    pub(super) target_fence_binding_sha256: String,
+    pub(super) target_writer_units: Vec<String>,
+    pub(super) target_writer_unit_masks: Vec<WriterUnitMaskV3>,
+    pub(super) legacy_worker_template_mask: WriterUnitMaskV3,
+    pub(super) legacy_worker_instance_masks: Vec<WriterUnitMaskV3>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -111,11 +150,14 @@ pub(super) struct PoolMigrationOnlineTargetAuditCertificationV3 {
     pub(super) controller_state_sha256: String,
     pub(super) receipt: FileAuthorityV3,
     pub(super) source_evidence: SourceEvidenceManifestAuthorityV3,
+    pub(super) target_evidence: SourceEvidenceManifestAuthorityV3,
     pub(super) certified_at_unix_seconds: u64,
 }
 
 pub(super) struct OnlineTargetAuditExpectationV3<'a> {
     pub(super) rollout_id: &'a str,
+    pub(super) worker_binary_sha256: &'a str,
+    pub(super) source_baseline_sha256: &'a str,
     pub(super) source_path: &'a Path,
     pub(super) source_lmdb_identity: LmdbIdentityV3,
     pub(super) source_external_path: Option<&'a Path>,
@@ -124,6 +166,10 @@ pub(super) struct OnlineTargetAuditExpectationV3<'a> {
     pub(super) pool_lmdb_identity: LmdbIdentityV3,
     pub(super) pool_topology_sha256: &'a str,
     pub(super) pool_manifest_sha256: &'a str,
+    pub(super) target_writer_units: &'a [String],
+    pub(super) target_writer_unit_masks: &'a [WriterUnitMaskV3],
+    pub(super) legacy_worker_template_mask: &'a WriterUnitMaskV3,
+    pub(super) legacy_worker_instance_masks: &'a [WriterUnitMaskV3],
     pub(super) expected_service_gid: u32,
     pub(super) validate_evidence_content: bool,
 }
@@ -205,6 +251,8 @@ pub(super) fn load_validated_online_target_audit(
         bail!("online target audit CAS label must end in the exact attempt nonce");
     }
     if receipt.source_path != expected.source_path
+        || receipt.worker_binary.sha256 != expected.worker_binary_sha256
+        || receipt.source_baseline_sha256 != expected.source_baseline_sha256
         || receipt.source_lmdb_identity != expected.source_lmdb_identity
         || receipt.source_external_path.as_deref() != expected.source_external_path
         || receipt.source_external_identity != expected.source_external_identity
@@ -212,6 +260,10 @@ pub(super) fn load_validated_online_target_audit(
         || receipt.pool_lmdb_identity != expected.pool_lmdb_identity
         || receipt.pool_topology_sha256 != expected.pool_topology_sha256
         || receipt.pool_manifest_sha256 != expected.pool_manifest_sha256
+        || receipt.target_writer_units != expected.target_writer_units
+        || receipt.target_writer_unit_masks != expected.target_writer_unit_masks
+        || receipt.legacy_worker_template_mask != *expected.legacy_worker_template_mask
+        || receipt.legacy_worker_instance_masks != expected.legacy_worker_instance_masks
     {
         bail!("online target audit does not bind the exact source and Pool authority");
     }
@@ -229,7 +281,12 @@ pub(super) fn load_validated_online_target_audit(
         ("Pool topology", receipt.pool_topology_sha256.as_str()),
         ("Pool manifest", receipt.pool_manifest_sha256.as_str()),
         ("audit binding", receipt.audit_binding_sha256.as_str()),
-        ("content", receipt.content_sha256.as_str()),
+        ("source content", receipt.source_content_sha256.as_str()),
+        ("target content", receipt.target_content_sha256.as_str()),
+        (
+            "target fence binding",
+            receipt.target_fence_binding_sha256.as_str(),
+        ),
     ] {
         require_sha256(label, value)?;
     }
@@ -242,24 +299,64 @@ pub(super) fn load_validated_online_target_audit(
         || receipt.proc_start_time_ticks == 0
         || !terminal_cursor_shape_valid
         || receipt.source_evidence != certification.source_evidence
-        || receipt.source_evidence.entries != receipt.verified_entries
+        || receipt.target_evidence != certification.target_evidence
+        || receipt.source_evidence.entries != receipt.source_verified_entries
+        || receipt.target_evidence.entries != receipt.target_verified_entries
+        || receipt.source_evidence.path
+            != receipt
+                .request_path
+                .parent()
+                .context("online target audit request path has no attempt directory")?
+                .join(SOURCE_EVIDENCE_FILE_NAME)
+        || receipt.target_evidence.path
+            != receipt
+                .request_path
+                .parent()
+                .context("online target audit request path has no attempt directory")?
+                .join(ONLINE_TARGET_EVIDENCE_FILE_NAME)
     {
         bail!("online target audit receipt has an incomplete terminal authority");
+    }
+    let target_fence_binding = compute_online_target_fence_binding(
+        expected.rollout_id,
+        expected.target_writer_units,
+        expected.target_writer_unit_masks,
+        expected.legacy_worker_template_mask,
+        expected.legacy_worker_instance_masks,
+    )?;
+    if receipt.target_fence_binding_sha256 != hashtree_core::to_hex(&target_fence_binding) {
+        bail!("online target audit receipt has an invalid target fence binding");
     }
     validate_source_evidence_metadata(
         &receipt.source_evidence,
         Some(expected.expected_service_gid),
         expected.validate_evidence_content,
     )?;
+    validate_source_evidence_metadata(
+        &receipt.target_evidence,
+        Some(expected.expected_service_gid),
+        expected.validate_evidence_content,
+    )?;
     if expected.validate_evidence_content {
-        let mut evidence = SourceEvidenceManifestReaderV3::open(&receipt.source_evidence)?;
-        while evidence.next_entry()?.is_some() {}
-        let summary = evidence.validated_summary()?;
-        if summary.entries != receipt.verified_entries
-            || summary.bytes != receipt.verified_bytes
-            || hashtree_core::to_hex(&summary.content_sha256) != receipt.content_sha256
+        let mut source_evidence = SourceEvidenceManifestReaderV3::open(&receipt.source_evidence)?;
+        while source_evidence.next_entry()?.is_some() {}
+        let source_summary = source_evidence.validated_summary()?;
+        if source_summary.entries != receipt.source_verified_entries
+            || source_summary.bytes != receipt.source_verified_bytes
+            || hashtree_core::to_hex(&source_summary.content_sha256)
+                != receipt.source_content_sha256
         {
-            bail!("online target audit evidence differs from its receipt summary");
+            bail!("online source evidence differs from its receipt summary");
+        }
+        let mut target_evidence = SourceEvidenceManifestReaderV3::open(&receipt.target_evidence)?;
+        while target_evidence.next_entry()?.is_some() {}
+        let target_summary = target_evidence.validated_summary()?;
+        if target_summary.entries != receipt.target_verified_entries
+            || target_summary.bytes != receipt.target_verified_bytes
+            || hashtree_core::to_hex(&target_summary.content_sha256)
+                != receipt.target_content_sha256
+        {
+            bail!("online target evidence differs from its receipt summary");
         }
     }
     Ok(Some(ValidatedOnlineTargetAuditV3 {

@@ -15,6 +15,7 @@ use super::pool_migration_launch::FileIdentityV3;
 use super::pool_migration_pinned::{PinnedDirectory, PinnedStagedFile};
 
 pub(super) const SOURCE_EVIDENCE_FILE_NAME: &str = "source-hash-size.manifest";
+pub(super) const ONLINE_TARGET_EVIDENCE_FILE_NAME: &str = "online-target-hash-size.manifest";
 const SOURCE_EVIDENCE_MAGIC: &[u8] = b"HTREE-SOURCE-HASH-SIZE-V3\n";
 const SOURCE_EVIDENCE_RECORD_BYTES: u64 = 40;
 
@@ -43,9 +44,17 @@ pub(super) struct SourceEvidenceUnionEntryV3 {
     pub(super) body_source: usize,
 }
 
+#[cfg(feature = "lmdb")]
+#[derive(Debug)]
+pub(super) struct TargetEvidenceReplayV3 {
+    pub(super) catalog: SourceEvidenceSummaryV3,
+    pub(super) evidence: Vec<SourceEvidenceSummaryV3>,
+}
+
 pub(super) struct SourceEvidenceManifestWriterV3 {
     staged: PinnedStagedFile,
     final_path: PathBuf,
+    final_name: &'static str,
     parent_identity: FileIdentityV3,
     hasher: Sha256,
     entries: u64,
@@ -54,13 +63,18 @@ pub(super) struct SourceEvidenceManifestWriterV3 {
 
 impl SourceEvidenceManifestWriterV3 {
     pub(super) fn create(attempt_path: &Path) -> Result<Self> {
+        Self::create_named(attempt_path, SOURCE_EVIDENCE_FILE_NAME)
+    }
+
+    pub(super) fn create_online_target(attempt_path: &Path) -> Result<Self> {
+        Self::create_named(attempt_path, ONLINE_TARGET_EVIDENCE_FILE_NAME)
+    }
+
+    fn create_named(attempt_path: &Path, final_name: &'static str) -> Result<Self> {
         let attempt =
             PinnedDirectory::open_exact(attempt_path, "source evidence attempt directory")?;
-        let final_path = attempt.path.join(SOURCE_EVIDENCE_FILE_NAME);
-        if attempt.entry_exists(
-            OsStr::new(SOURCE_EVIDENCE_FILE_NAME),
-            "source evidence manifest",
-        )? {
+        let final_path = attempt.path.join(final_name);
+        if attempt.entry_exists(OsStr::new(final_name), "source evidence manifest")? {
             bail!(
                 "source evidence manifest already exists at {}",
                 final_path.display()
@@ -68,7 +82,7 @@ impl SourceEvidenceManifestWriterV3 {
         }
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let staging_name = OsString::from(format!(
-            ".source-hash-size.{}.{}.tmp",
+            ".{final_name}.{}.{}.tmp",
             std::process::id(),
             SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
@@ -84,6 +98,7 @@ impl SourceEvidenceManifestWriterV3 {
         Ok(Self {
             staged,
             final_path,
+            final_name,
             parent_identity,
             hasher,
             entries: 0,
@@ -142,10 +157,8 @@ impl SourceEvidenceManifestWriterV3 {
             bail!("source evidence staging file has an invalid length");
         }
         let identity = self.staged.identity();
-        self.staged.publish_noreplace(
-            OsStr::new(SOURCE_EVIDENCE_FILE_NAME),
-            "source evidence manifest",
-        )?;
+        self.staged
+            .publish_noreplace(OsStr::new(self.final_name), "source evidence manifest")?;
         let after = self
             .staged
             .file
@@ -272,7 +285,7 @@ impl SourceEvidenceManifestReaderV3 {
             bail!("source evidence manifest count/SHA-256 differs from receipt authority");
         }
         let current = self.parent.open_regular_authority(
-            OsStr::new(SOURCE_EVIDENCE_FILE_NAME),
+            evidence_leaf(&self.authority)?,
             self.authority.identity,
             "source evidence manifest",
         )?;
@@ -389,6 +402,79 @@ impl SourceEvidenceUnionReaderV3 {
     }
 }
 
+/// Prove that every terminal Pool catalog row belongs to the union of
+/// independently certified target-body evidence. Evidence may be a superset:
+/// online tranches can have proved rows that a later controlled operation no
+/// longer retains, but no final catalog row may lack an exact hash/size proof.
+#[cfg(feature = "lmdb")]
+pub(super) fn validate_terminal_catalog_target_evidence(
+    pool: &hashtree_lmdb::PoolStoreReader,
+    authorities: &[SourceEvidenceManifestAuthorityV3],
+    page_size: usize,
+    mut after_page: impl FnMut() -> Result<()>,
+) -> Result<TargetEvidenceReplayV3> {
+    if page_size == 0 {
+        bail!("terminal target evidence replay page size must be non-zero");
+    }
+    let mut evidence = SourceEvidenceUnionReaderV3::open(authorities)?;
+    let mut next_evidence = evidence.next_entry()?;
+    let mut cursor = None;
+    let mut entries = 0u64;
+    let mut bytes = 0u64;
+    let mut hasher = Sha256::new();
+    hasher.update(b"hashtree-pool-migration-target-content-proof/v3\0");
+    loop {
+        let page = pool.scan_terminal_catalog_entries_after(cursor, page_size)?;
+        if page.is_empty() {
+            break;
+        }
+        for (hash, size) in &page {
+            while next_evidence.is_some_and(|entry| entry.hash < *hash) {
+                next_evidence = evidence.next_entry()?;
+            }
+            match next_evidence {
+                Some(entry) if entry.hash == *hash && entry.size == *size => {
+                    next_evidence = evidence.next_entry()?;
+                }
+                Some(entry) if entry.hash == *hash => {
+                    bail!(
+                        "terminal Pool size {} for {} differs from certified target evidence size {}",
+                        size,
+                        hashtree_core::to_hex(hash),
+                        entry.size
+                    )
+                }
+                _ => bail!(
+                    "terminal Pool entry {} / {} bytes is absent from certified target evidence",
+                    hashtree_core::to_hex(hash),
+                    size
+                ),
+            }
+            hasher.update(hash);
+            hasher.update(size.to_be_bytes());
+            entries = entries
+                .checked_add(1)
+                .context("terminal target content-proof entry count overflow")?;
+            bytes = bytes
+                .checked_add(*size)
+                .context("terminal target content-proof byte count overflow")?;
+        }
+        cursor = page.last().map(|(hash, _)| *hash);
+        after_page()?;
+    }
+    while next_evidence.is_some() {
+        next_evidence = evidence.next_entry()?;
+    }
+    Ok(TargetEvidenceReplayV3 {
+        catalog: SourceEvidenceSummaryV3 {
+            entries,
+            bytes,
+            content_sha256: hasher.finalize().into(),
+        },
+        evidence: evidence.validated_source_summaries()?,
+    })
+}
+
 pub(super) fn validate_source_evidence_metadata(
     authority: &SourceEvidenceManifestAuthorityV3,
     expected_service_gid: Option<u32>,
@@ -408,10 +494,7 @@ fn open_source_evidence(
     authority: &SourceEvidenceManifestAuthorityV3,
     expected_service_gid: Option<u32>,
 ) -> Result<(PinnedDirectory, File)> {
-    if authority.path.file_name().and_then(|name| name.to_str()) != Some(SOURCE_EVIDENCE_FILE_NAME)
-    {
-        bail!("source evidence authority has an unexpected leaf name");
-    }
+    let leaf = evidence_leaf(authority)?;
     let parent_path = authority
         .path
         .parent()
@@ -421,13 +504,23 @@ fn open_source_evidence(
         authority.parent_identity,
         "source evidence parent authority",
     )?;
-    let file = parent.open_regular_authority(
-        OsStr::new(SOURCE_EVIDENCE_FILE_NAME),
-        authority.identity,
-        "source evidence manifest",
-    )?;
+    let file =
+        parent.open_regular_authority(leaf, authority.identity, "source evidence manifest")?;
     validate_open_source_evidence_metadata(&file, authority, expected_service_gid)?;
     Ok((parent, file))
+}
+
+fn evidence_leaf(authority: &SourceEvidenceManifestAuthorityV3) -> Result<&OsStr> {
+    let leaf = authority
+        .path
+        .file_name()
+        .context("source evidence authority has no leaf name")?;
+    if leaf != OsStr::new(SOURCE_EVIDENCE_FILE_NAME)
+        && leaf != OsStr::new(ONLINE_TARGET_EVIDENCE_FILE_NAME)
+    {
+        bail!("source evidence authority has an unexpected leaf name");
+    }
+    Ok(leaf)
 }
 
 fn validate_open_source_evidence_metadata(
@@ -540,6 +633,21 @@ mod tests {
         writer.finish().expect("publish generated evidence")
     }
 
+    #[cfg(feature = "lmdb")]
+    fn publish_target(
+        directory: &Path,
+        records: &[([u8; 32], u64)],
+    ) -> SourceEvidenceManifestAuthorityV3 {
+        std::fs::create_dir(directory).expect("create target evidence directory");
+        let canonical = directory
+            .canonicalize()
+            .expect("canonicalize target evidence directory");
+        let mut writer = SourceEvidenceManifestWriterV3::create_online_target(&canonical)
+            .expect("create target evidence writer");
+        writer.append(records).expect("append target evidence");
+        writer.finish().expect("publish target evidence")
+    }
+
     #[test]
     fn k_way_union_deduplicates_equal_hash_sizes() {
         let temp = TempDir::new().expect("temp dir");
@@ -583,6 +691,63 @@ mod tests {
         let mut union = SourceEvidenceUnionReaderV3::open(&[first, second])
             .expect("open generated evidence union");
         assert!(union.next_entry().is_err());
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn terminal_catalog_replay_requires_real_pool_rows_in_certified_target_evidence() {
+        use hashtree_lmdb::{PoolMemberConfig, PoolStore, PoolStoreConfig, PoolStoreReader};
+
+        let temp = TempDir::new().expect("temp dir");
+        let catalog = temp.path().join("catalog");
+        let pool =
+            PoolStore::open(&catalog, PoolStoreConfig::default()).expect("create real target Pool");
+        pool.add_member(PoolMemberConfig::new(
+            temp.path().join("member"),
+            1024 * 1024,
+        ))
+        .expect("add real target member");
+        let first_body = b"terminal target evidence body one";
+        let second_body = b"terminal target evidence body two";
+        let first = hashtree_core::sha256(first_body);
+        let second = hashtree_core::sha256(second_body);
+        pool.put_sync(first, first_body)
+            .expect("write first target body");
+        pool.put_sync(second, second_body)
+            .expect("write second target body");
+        pool.force_sync().expect("sync real target Pool");
+        drop(pool);
+
+        let mut records = vec![
+            (first, first_body.len() as u64),
+            (second, second_body.len() as u64),
+        ];
+        records.sort_unstable_by_key(|(hash, _)| *hash);
+        let complete = publish_target(&temp.path().join("complete"), &records);
+        let mut reader_config = PoolStoreConfig::default();
+        reader_config.temperature.enabled = false;
+        let reader =
+            PoolStoreReader::open(&catalog, reader_config).expect("open real terminal Pool");
+        let mut pages = 0usize;
+        let replay = validate_terminal_catalog_target_evidence(&reader, &[complete], 1, || {
+            pages += 1;
+            Ok(())
+        })
+        .expect("replay complete target proof");
+        assert_eq!(replay.catalog.entries, 2);
+        assert_eq!(
+            replay.catalog.bytes,
+            first_body.len() as u64 + second_body.len() as u64
+        );
+        assert_eq!(pages, 2);
+
+        let incomplete = publish_target(&temp.path().join("incomplete"), &records[..1]);
+        assert!(
+            validate_terminal_catalog_target_evidence(&reader, &[incomplete], 1, || Ok(()))
+                .expect_err("missing real target proof must fail")
+                .to_string()
+                .contains("absent from certified target evidence")
+        );
     }
 
     #[test]

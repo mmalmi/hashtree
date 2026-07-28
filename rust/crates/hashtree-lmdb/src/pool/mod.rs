@@ -996,6 +996,56 @@ impl PoolStore {
             .collect()
     }
 
+    /// Scan one bounded raw catalog page in hash order.
+    ///
+    /// Online migration content audits use the raw catalog key as their
+    /// resumable cursor. Pending and moving rows are returned explicitly:
+    /// they are not terminal content authorities, but their keys must still
+    /// advance the scan so a page containing only transient rows makes
+    /// progress.
+    pub fn scan_catalog_locations_after(
+        &self,
+        after: Option<Hash>,
+        limit: usize,
+    ) -> Result<Vec<(Hash, PoolCatalogLocation)>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        let mut entries = Vec::with_capacity(limit);
+        let decode =
+            |hash: &[u8], encoded: &[u8]| -> Result<(Hash, PoolCatalogLocation), StoreError> {
+                let hash: Hash = hash
+                    .try_into()
+                    .map_err(|_| StoreError::Other("invalid pool catalog hash length".into()))?;
+                let record = LocationRecord::decode(encoded)?;
+                Ok((hash, PoolCatalogLocation::from_record(Some(record))))
+            };
+        match after {
+            Some(after) => {
+                use std::ops::Bound;
+                let range = (Bound::Excluded(after.as_slice()), Bound::<&[u8]>::Unbounded);
+                for item in self.locations.range(&rtxn, &range).map_err(map_heed)? {
+                    let (hash, encoded) = item.map_err(map_heed)?;
+                    entries.push(decode(hash, encoded)?);
+                    if entries.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            None => {
+                for item in self.locations.iter(&rtxn).map_err(map_heed)? {
+                    let (hash, encoded) = item.map_err(map_heed)?;
+                    entries.push(decode(hash, encoded)?);
+                    if entries.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(entries)
+    }
+
     /// Largest map size among members that are available in this process.
     ///
     /// The pool catalog is a separate LMDB environment and is intentionally

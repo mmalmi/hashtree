@@ -327,6 +327,67 @@ impl PoolStoreReader {
         Ok(self.validate_terminal_state(false)?.physical)
     }
 
+    /// Scan one bounded terminal catalog page without reading payload bytes.
+    ///
+    /// Every row must already be `Stored`; callers can merge the returned
+    /// hash/size stream with an independently certified content-evidence
+    /// stream while target writers remain fenced.
+    pub fn scan_terminal_catalog_entries_after(
+        &self,
+        after: Option<Hash>,
+        limit: usize,
+    ) -> Result<Vec<(Hash, u64)>, StoreError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        let mut entries = Vec::with_capacity(limit);
+        let decode = |key: &[u8], encoded: &[u8]| -> Result<(Hash, u64), StoreError> {
+            let hash: Hash = key
+                .try_into()
+                .map_err(|_| StoreError::Other("invalid pool catalog hash key".into()))?;
+            let size = match LocationRecord::decode(encoded)? {
+                LocationRecord::Stored { size, .. } => size,
+                LocationRecord::Pending { .. } => {
+                    return Err(StoreError::Other(format!(
+                        "terminal Pool content proof rejected pending location {}",
+                        hashtree_core::to_hex(&hash)
+                    )))
+                }
+                LocationRecord::Moving { .. } => {
+                    return Err(StoreError::Other(format!(
+                        "terminal Pool content proof rejected moving location {}",
+                        hashtree_core::to_hex(&hash)
+                    )))
+                }
+            };
+            Ok((hash, size))
+        };
+        match after {
+            Some(after) => {
+                use std::ops::Bound;
+                let range = (Bound::Excluded(after.as_slice()), Bound::<&[u8]>::Unbounded);
+                for item in self.locations.range(&rtxn, &range).map_err(map_heed)? {
+                    let (key, encoded) = item.map_err(map_heed)?;
+                    entries.push(decode(key, encoded)?);
+                    if entries.len() >= limit {
+                        break;
+                    }
+                }
+            }
+            None => {
+                for item in self.locations.iter(&rtxn).map_err(map_heed)? {
+                    let (key, encoded) = item.map_err(map_heed)?;
+                    entries.push(decode(key, encoded)?);
+                    if entries.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(entries)
+    }
+
     fn validate_terminal_state(
         &self,
         verify_payloads: bool,
