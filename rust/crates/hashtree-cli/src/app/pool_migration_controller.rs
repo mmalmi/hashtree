@@ -6847,8 +6847,9 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             let (_temp, root, identity) = generated_external_root();
             let pin = PinnedDirectory::open_exact(&root, "generated recovery self-pin")
                 .expect("pin root");
-            let live_with_pin =
-                capture_live_process_authorities(None).expect("capture controller self-pin");
+            let mut live_with_pin = HashMap::new();
+            collect_process_fd_authorities(std::process::id(), &mut live_with_pin)
+                .expect("capture controller self-pin");
             validate_external_census_against_live(
                 &live_with_pin,
                 "generated recovery self-pin corpus",
@@ -6859,8 +6860,9 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             .expect_err("controller-retained recovery pin must appear in its own census");
 
             drop(pin);
-            let live_after_drop =
-                capture_live_process_authorities(None).expect("recapture after dropping self-pin");
+            let mut live_after_drop = HashMap::new();
+            collect_process_fd_authorities(std::process::id(), &mut live_after_drop)
+                .expect("recapture after dropping self-pin");
             validate_external_census_against_live(
                 &live_after_drop,
                 "generated recovery self-pin corpus",
