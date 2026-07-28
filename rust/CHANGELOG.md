@@ -4,6 +4,12 @@
 
 ### Added
 
+- The daemon can temporarily serve exact-hash misses from one independently
+  pinned, strict read-only PoolStore while keeping its main PoolStore as the
+  sole write and enumeration authority. Startup requires an explicit mode,
+  canonical source path, and exact manifest digest; malformed or stale pin
+  bundles fail closed. Each returned body is still verified against its
+  requested SHA-256 and catalog size.
 - `storage pool migrate-lmdb` now requires an invocation-bound v3 controller
   request. Before opening either the source LMDB or target PoolStore, it
   disables background updates, durably consumes a root-controlled
@@ -78,6 +84,9 @@
 
 ### Fixed
 
+- Single-blob uploads now always call the writable store's verified put path.
+  A public fallback read can no longer make an upload return success without
+  verifying or repairing the body in the destination Pool.
 - Optional Nostr event-blob reads now classify an absent linked chunk as a
   missing body, allowing exact spool-authoritative repair to restore partially
   missing large events while still rejecting corrupt bytes.

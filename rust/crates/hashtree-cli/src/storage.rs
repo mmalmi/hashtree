@@ -11,7 +11,7 @@ use hashtree_fs::FsBlobStore;
 use hashtree_lmdb::{
     open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, pool_audit_read_only_enabled,
     ConfiguredLmdbBlobStore, ExternalBlobOptions, LmdbBlobReader, LmdbBlobStore, PoolStore,
-    ReadOnlyPoolStore, POOL_AUDIT_READ_ONLY_ERROR,
+    ReadOnlyPoolStore, POOL_AUDIT_READ_ONLY_ERROR, SHARED_BLOB_POOL_DIR_NAME,
 };
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
@@ -81,6 +81,14 @@ const LMDB_HOT_BLOB_LEGACY_DIR_ENV: &str = "HTREE_LMDB_HOT_BLOB_LEGACY_DIR";
 const LMDB_HOT_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_HOT_EXTERNAL_BLOB_DIR";
 #[cfg(feature = "lmdb")]
 const LMDB_LEGACY_EXTERNAL_BLOB_DIR_ENV: &str = "HTREE_LMDB_LEGACY_EXTERNAL_BLOB_DIR";
+#[cfg(feature = "lmdb")]
+const POOL_READ_FALLBACK_MODE_ENV: &str = "HTREE_POOL_READ_FALLBACK_MODE";
+#[cfg(feature = "lmdb")]
+const POOL_READ_FALLBACK_PATH_ENV: &str = "HTREE_POOL_READ_FALLBACK_PATH";
+#[cfg(feature = "lmdb")]
+const POOL_READ_FALLBACK_MANIFEST_SHA256_ENV: &str = "HTREE_POOL_READ_FALLBACK_MANIFEST_SHA256";
+#[cfg(feature = "lmdb")]
+const POOL_READ_FALLBACK_MODE_V1: &str = "read-only-exact-hash-v1";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
 const LMDB_NO_SYNC_ENV: &str = "HTREE_LMDB_NO_SYNC";
 const LMDB_NO_META_SYNC_ENV: &str = "HTREE_LMDB_NO_META_SYNC";
@@ -223,6 +231,24 @@ pub enum LocalStore {
     ReadOnlyPool(Box<ReadOnlyPoolStoreWithFallbacks>),
 }
 
+/// Public status for one temporary read-only Pool fallback.
+///
+/// The fallback is never enumerable or writable. Every body read is still
+/// verified by [`ReadOnlyPoolStore`] against its requested SHA-256 and catalog
+/// size. The filesystem path is intentionally kept out of public status.
+#[cfg(feature = "lmdb")]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PoolReadFallbackStatus {
+    pub enabled: bool,
+    pub manifest_sha256: String,
+}
+
+#[cfg(feature = "lmdb")]
+struct PoolReadFallback {
+    store: ReadOnlyPoolStore,
+    status: PoolReadFallbackStatus,
+}
+
 /// A PoolStore with temporary exact-hash lookup fallbacks used during an
 /// online migration from the former hot and legacy LMDB tiers.
 ///
@@ -234,6 +260,7 @@ pub enum LocalStore {
 pub struct PoolStoreWithFallbacks {
     primary: PoolStore,
     fallbacks: Vec<LmdbBlobReader>,
+    pool_read_fallback: Option<PoolReadFallback>,
 }
 
 #[cfg(feature = "lmdb")]
@@ -248,7 +275,16 @@ impl std::ops::Deref for PoolStoreWithFallbacks {
 #[cfg(feature = "lmdb")]
 impl PoolStoreWithFallbacks {
     fn new(primary: PoolStore, fallbacks: Vec<LmdbBlobReader>) -> Self {
-        Self { primary, fallbacks }
+        Self {
+            primary,
+            fallbacks,
+            pool_read_fallback: None,
+        }
+    }
+
+    fn with_pool_read_fallback(mut self, fallback: Option<PoolReadFallback>) -> Self {
+        self.pool_read_fallback = fallback;
+        self
     }
 
     fn during_migration(primary: PoolStore, fallbacks: Vec<LmdbBlobReader>) -> Self {
@@ -290,6 +326,14 @@ impl PoolStoreWithFallbacks {
                 Err(_) => {}
             }
         }
+        if let Some(fallback) = &self.pool_read_fallback {
+            match fallback.store.get_sync(hash) {
+                Ok(Some(data)) => return Ok(Some(data)),
+                Ok(None) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
         match first_error {
             Some(error) => Err(error),
             None => Ok(None),
@@ -325,6 +369,14 @@ impl PoolStoreWithFallbacks {
                 Err(_) => {}
             }
         }
+        if let Some(fallback) = &self.pool_read_fallback {
+            match fallback.store.blob_size_sync(hash) {
+                Ok(Some(size)) => return Ok(Some(size)),
+                Ok(None) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
         match first_error {
             Some(error) => Err(error),
             None => Ok(None),
@@ -336,14 +388,14 @@ impl PoolStoreWithFallbacks {
     }
 
     fn delete_sync(&self, hash: &Hash) -> Result<bool, StoreError> {
-        if !self.fallbacks.is_empty() {
+        if !self.fallbacks.is_empty() || self.pool_read_fallback.is_some() {
             return Err(StoreError::Other(POOL_MIGRATION_DELETE_DISABLED.into()));
         }
         self.primary.delete_sync(hash)
     }
 
     fn delete_many_sync(&self, hashes: &[Hash]) -> Result<usize, StoreError> {
-        if !self.fallbacks.is_empty() {
+        if !self.fallbacks.is_empty() || self.pool_read_fallback.is_some() {
             return Err(StoreError::Other(POOL_MIGRATION_DELETE_DISABLED.into()));
         }
         self.primary.delete_many_sync(hashes)
@@ -358,7 +410,13 @@ impl PoolStoreWithFallbacks {
     }
 
     fn full_deletes_blocked(&self) -> bool {
-        !self.fallbacks.is_empty()
+        !self.fallbacks.is_empty() || self.pool_read_fallback.is_some()
+    }
+
+    fn pool_read_fallback_status(&self) -> Option<PoolReadFallbackStatus> {
+        self.pool_read_fallback
+            .as_ref()
+            .map(|fallback| fallback.status.clone())
     }
 }
 
@@ -371,12 +429,22 @@ impl PoolStoreWithFallbacks {
 pub struct ReadOnlyPoolStoreWithFallbacks {
     primary: ReadOnlyPoolStore,
     fallbacks: Vec<LmdbBlobReader>,
+    pool_read_fallback: Option<PoolReadFallback>,
 }
 
 #[cfg(feature = "lmdb")]
 impl ReadOnlyPoolStoreWithFallbacks {
     fn new(primary: ReadOnlyPoolStore, fallbacks: Vec<LmdbBlobReader>) -> Self {
-        Self { primary, fallbacks }
+        Self {
+            primary,
+            fallbacks,
+            pool_read_fallback: None,
+        }
+    }
+
+    fn with_pool_read_fallback(mut self, fallback: Option<PoolReadFallback>) -> Self {
+        self.pool_read_fallback = fallback;
+        self
     }
 
     fn get_sync(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
@@ -396,6 +464,14 @@ impl ReadOnlyPoolStoreWithFallbacks {
                     )));
                 }
                 Ok(Some(_)) | Ok(None) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        if let Some(fallback) = &self.pool_read_fallback {
+            match fallback.store.get_sync(hash) {
+                Ok(Some(data)) => return Ok(Some(data)),
+                Ok(None) => {}
                 Err(error) if first_error.is_none() => first_error = Some(error),
                 Err(_) => {}
             }
@@ -432,6 +508,14 @@ impl ReadOnlyPoolStoreWithFallbacks {
                 Err(_) => {}
             }
         }
+        if let Some(fallback) = &self.pool_read_fallback {
+            match fallback.store.blob_size_sync(hash) {
+                Ok(Some(size)) => return Ok(Some(size)),
+                Ok(None) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
         match first_error {
             Some(error) => Err(error),
             None => Ok(None),
@@ -440,6 +524,12 @@ impl ReadOnlyPoolStoreWithFallbacks {
 
     fn exists(&self, hash: &Hash) -> Result<bool, StoreError> {
         self.get_sync(hash).map(|data| data.is_some())
+    }
+
+    fn pool_read_fallback_status(&self) -> Option<PoolReadFallbackStatus> {
+        self.pool_read_fallback
+            .as_ref()
+            .map(|fallback| fallback.status.clone())
     }
 }
 
@@ -557,6 +647,148 @@ fn paths_refer_to_same_location(left: &Path, right: &Path) -> bool {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
+}
+
+#[cfg(feature = "lmdb")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PoolReadFallbackConfig {
+    path: PathBuf,
+    manifest_sha256: String,
+}
+
+#[cfg(feature = "lmdb")]
+fn require_lower_sha256(value: &str, label: &str) -> Result<(), StoreError> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(StoreError::Other(format!(
+            "{label} must be 64 lowercase hexadecimal characters"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(feature = "lmdb")]
+fn direct_canonical_directory(path: &Path, label: &str) -> Result<PathBuf, StoreError> {
+    if !path.is_absolute() {
+        return Err(StoreError::Other(format!(
+            "{label} must be absolute: {}",
+            path.display()
+        )));
+    }
+    let metadata = std::fs::symlink_metadata(path).map_err(StoreError::Io)?;
+    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
+        return Err(StoreError::Other(format!(
+            "{label} must be a direct directory: {}",
+            path.display()
+        )));
+    }
+    let canonical = std::fs::canonicalize(path).map_err(StoreError::Io)?;
+    if canonical != path {
+        return Err(StoreError::Other(format!(
+            "{label} must be its exact canonical path: got {}, canonical {}",
+            path.display(),
+            canonical.display()
+        )));
+    }
+    let data_path = path.join("data.mdb");
+    let data_metadata = std::fs::symlink_metadata(&data_path).map_err(StoreError::Io)?;
+    if data_metadata.file_type().is_symlink() || !data_metadata.file_type().is_file() {
+        return Err(StoreError::Other(format!(
+            "{label} data.mdb must be a direct regular file: {}",
+            data_path.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+#[cfg(feature = "lmdb")]
+fn pool_read_fallback_config_from_values(
+    mode: Option<String>,
+    path: Option<String>,
+    manifest_sha256: Option<String>,
+) -> Result<Option<PoolReadFallbackConfig>, StoreError> {
+    let supplied = [mode.is_some(), path.is_some(), manifest_sha256.is_some()];
+    if supplied.iter().all(|supplied| !supplied) {
+        return Ok(None);
+    }
+    if !supplied.iter().all(|supplied| *supplied) {
+        return Err(StoreError::Other(format!(
+            "temporary Pool read fallback is fail-closed: set all of {POOL_READ_FALLBACK_MODE_ENV}, {POOL_READ_FALLBACK_PATH_ENV}, and {POOL_READ_FALLBACK_MANIFEST_SHA256_ENV}, or none"
+        )));
+    }
+    let mode = mode.expect("all fallback values checked");
+    if mode != POOL_READ_FALLBACK_MODE_V1 {
+        return Err(StoreError::Other(format!(
+            "{POOL_READ_FALLBACK_MODE_ENV} must be exactly {POOL_READ_FALLBACK_MODE_V1:?}"
+        )));
+    }
+    let path = path.expect("all fallback values checked");
+    if path.trim() != path || path.is_empty() {
+        return Err(StoreError::Other(format!(
+            "{POOL_READ_FALLBACK_PATH_ENV} must be a nonempty exact path without surrounding whitespace"
+        )));
+    }
+    let manifest_sha256 = manifest_sha256.expect("all fallback values checked");
+    require_lower_sha256(&manifest_sha256, POOL_READ_FALLBACK_MANIFEST_SHA256_ENV)?;
+    Ok(Some(PoolReadFallbackConfig {
+        path: PathBuf::from(path),
+        manifest_sha256,
+    }))
+}
+
+#[cfg(feature = "lmdb")]
+fn configured_pool_read_fallback() -> Result<Option<PoolReadFallbackConfig>, StoreError> {
+    let read = |name: &str| -> Result<Option<String>, StoreError> {
+        match std::env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                Err(StoreError::Other(format!("{name} is not valid Unicode")))
+            }
+        }
+    };
+    pool_read_fallback_config_from_values(
+        read(POOL_READ_FALLBACK_MODE_ENV)?,
+        read(POOL_READ_FALLBACK_PATH_ENV)?,
+        read(POOL_READ_FALLBACK_MANIFEST_SHA256_ENV)?,
+    )
+}
+
+#[cfg(feature = "lmdb")]
+fn open_pinned_pool_read_fallback(
+    config: PoolReadFallbackConfig,
+    primary_pool_path: &Path,
+) -> Result<PoolReadFallback, StoreError> {
+    let canonical = direct_canonical_directory(&config.path, "Pool read fallback")?;
+    if paths_refer_to_same_location(&canonical, primary_pool_path) {
+        return Err(StoreError::Other(
+            "Pool read fallback must not resolve to the writable primary Pool".into(),
+        ));
+    }
+    let store = ReadOnlyPoolStore::open(&canonical)?;
+    store.require_durable_external_blob_writes()?;
+    let manifest_sha256 = to_hex(&store.manifest_snapshot()?.sha256);
+    if manifest_sha256 != config.manifest_sha256 {
+        return Err(StoreError::Other(format!(
+            "Pool read fallback manifest does not match its startup pin: expected {}, found {}",
+            config.manifest_sha256, manifest_sha256,
+        )));
+    }
+    tracing::warn!(
+        path = %canonical.display(),
+        manifest_sha256 = %manifest_sha256,
+        "Enabled temporary exact-hash read-only Pool fallback; writes remain on the primary Pool"
+    );
+    Ok(PoolReadFallback {
+        store,
+        status: PoolReadFallbackStatus {
+            enabled: true,
+            manifest_sha256,
+        },
+    })
 }
 
 #[cfg(feature = "lmdb")]
@@ -915,6 +1147,15 @@ impl LocalStore {
         }
     }
 
+    #[cfg(feature = "lmdb")]
+    pub fn pool_read_fallback_status(&self) -> Option<PoolReadFallbackStatus> {
+        match self {
+            LocalStore::Pool(store) => store.pool_read_fallback_status(),
+            LocalStore::ReadOnlyPool(store) => store.pool_read_fallback_status(),
+            LocalStore::Fs(_) | LocalStore::Lmdb(_) => None,
+        }
+    }
+
     /// Mark which sorted hashes already exist in local storage.
     pub fn existing_hashes_in_sorted_candidates(
         &self,
@@ -1212,24 +1453,47 @@ fn open_local_blob_store_with_options<P: AsRef<Path>>(
     #[cfg(feature = "lmdb")]
     if *backend == StorageBackend::Lmdb {
         let data_dir = data_dir.as_ref();
+        let pool_read_fallback_config = configured_pool_read_fallback()?;
         return open_shared_lmdb_blob_store(data_dir, max_size_bytes).and_then(|store| {
+            let primary_pool_path = data_dir.join(SHARED_BLOB_POOL_DIR_NAME);
             let local = match store {
-                ConfiguredLmdbBlobStore::Single(store) => LocalStore::Lmdb(store),
+                ConfiguredLmdbBlobStore::Single(store) => {
+                    if pool_read_fallback_config.is_some() {
+                        return Err(StoreError::Other(
+                            "Pool read fallback requires a writable PoolStore primary".into(),
+                        ));
+                    }
+                    LocalStore::Lmdb(store)
+                }
                 ConfiguredLmdbBlobStore::Pool(store) => {
                     let fallbacks = open_pool_fallbacks(data_dir)?;
-                    LocalStore::Pool(Box::new(PoolStoreWithFallbacks::during_migration(
-                        *store, fallbacks,
-                    )))
+                    let pool_read_fallback = pool_read_fallback_config
+                        .clone()
+                        .map(|config| {
+                            open_pinned_pool_read_fallback(config, &primary_pool_path)
+                        })
+                        .transpose()?;
+                    LocalStore::Pool(Box::new(
+                        PoolStoreWithFallbacks::during_migration(*store, fallbacks)
+                            .with_pool_read_fallback(pool_read_fallback),
+                    ))
                 }
                 ConfiguredLmdbBlobStore::ReadOnlyPool(store) => {
                     let fallbacks = open_pool_fallbacks(data_dir)?;
+                    let pool_read_fallback = pool_read_fallback_config
+                        .clone()
+                        .map(|config| {
+                            open_pinned_pool_read_fallback(config, &primary_pool_path)
+                        })
+                        .transpose()?;
                     tracing::warn!(
                         env = hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV,
                         "Pool audit-serving read-only mode enabled; all local mutations are rejected"
                     );
-                    LocalStore::ReadOnlyPool(Box::new(ReadOnlyPoolStoreWithFallbacks::new(
-                        *store, fallbacks,
-                    )))
+                    LocalStore::ReadOnlyPool(Box::new(
+                        ReadOnlyPoolStoreWithFallbacks::new(*store, fallbacks)
+                            .with_pool_read_fallback(pool_read_fallback),
+                    ))
                 }
             };
             Ok(Arc::new(local))
@@ -1658,6 +1922,11 @@ impl StorageRouter {
 
     pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
         self.local.blob_size_sync(hash)
+    }
+
+    #[cfg(feature = "lmdb")]
+    pub fn pool_read_fallback_status(&self) -> Option<PoolReadFallbackStatus> {
+        self.local.pool_read_fallback_status()
     }
 
     pub fn touch_accessed_sync(&self, hash: &Hash, now: u64) -> Result<bool, StoreError> {
@@ -2678,6 +2947,11 @@ impl HashtreeStore {
         self.router
             .exists(hash)
             .map_err(|e| anyhow::anyhow!("Failed to check blob: {}", e))
+    }
+
+    #[cfg(feature = "lmdb")]
+    pub fn pool_read_fallback_status(&self) -> Option<PoolReadFallbackStatus> {
+        self.router.pool_read_fallback_status()
     }
 
     // === Blossom ownership tracking ===
@@ -3768,6 +4042,90 @@ mod tests {
         assert_eq!(legacy_after.len(), legacy_before.len());
         assert_eq!(legacy_after.modified()?, legacy_before.modified()?);
         Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn pinned_pool_read_fallback_serves_reads_but_primary_proof_stays_empty() -> Result<()> {
+        let temp = TempDir::new()?;
+        let member_map_size = 64 * 1024 * 1024;
+
+        let primary_path = temp.path().join("primary-pool");
+        let primary = PoolStore::open(&primary_path, PoolStoreConfig::default())?;
+        primary.add_member(
+            PoolMemberConfig::new(temp.path().join("primary-member"), member_map_size)
+                .with_map_size_bytes(member_map_size),
+        )?;
+
+        let source_path = temp.path().join("source-pool");
+        let source = PoolStore::open(&source_path, PoolStoreConfig::default())?;
+        source.add_member(
+            PoolMemberConfig::new(temp.path().join("source-member"), member_map_size)
+                .with_map_size_bytes(member_map_size),
+        )?;
+        let source_data = b"temporary read-only Pool fallback bytes".to_vec();
+        let source_hash = sha256(&source_data);
+        source.put_sync(source_hash, &source_data)?;
+        source.force_sync()?;
+        drop(source);
+
+        let canonical_source = std::fs::canonicalize(&source_path)?;
+        let source_reader = ReadOnlyPoolStore::open(&canonical_source)?;
+        let manifest_sha256 = to_hex(&source_reader.manifest_snapshot()?.sha256);
+        drop(source_reader);
+        let fallback = open_pinned_pool_read_fallback(
+            PoolReadFallbackConfig {
+                path: canonical_source.clone(),
+                manifest_sha256: manifest_sha256.clone(),
+            },
+            &primary_path,
+        )?;
+        let store = PoolStoreWithFallbacks::new(primary.clone(), Vec::new())
+            .with_pool_read_fallback(Some(fallback));
+
+        assert_eq!(store.get_sync(&source_hash)?, Some(source_data.clone()));
+        assert_eq!(
+            store.blob_size_sync(&source_hash)?,
+            Some(source_data.len() as u64)
+        );
+        assert!(!primary.blob_size_sync(&source_hash)?.is_some());
+        assert_eq!(
+            store.existing_hashes_in_sorted_candidates(&[source_hash])?,
+            vec![false],
+            "upload planning must remain scoped to the writable primary Pool"
+        );
+        assert!(store.full_deletes_blocked());
+        assert!(store.delete_sync(&source_hash).is_err());
+
+        assert!(store.put_sync(source_hash, &source_data)?);
+        assert_eq!(
+            primary.blob_size_sync(&source_hash)?,
+            Some(source_data.len() as u64)
+        );
+        assert_eq!(
+            store.pool_read_fallback_status(),
+            Some(PoolReadFallbackStatus {
+                enabled: true,
+                manifest_sha256,
+            })
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn pool_read_fallback_configuration_is_all_or_nothing() {
+        let error = pool_read_fallback_config_from_values(
+            Some(POOL_READ_FALLBACK_MODE_V1.to_string()),
+            Some("/absolute/source".to_string()),
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("fail-closed"));
+
+        assert!(pool_read_fallback_config_from_values(None, None, None)
+            .unwrap()
+            .is_none());
     }
 
     #[cfg(feature = "lmdb")]

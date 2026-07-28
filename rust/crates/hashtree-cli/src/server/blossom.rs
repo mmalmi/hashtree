@@ -1666,45 +1666,6 @@ async fn acquire_optimistic_upload_queue(
     }
 }
 
-async fn uploaded_blob_already_exists(
-    state: &AppState,
-    sha256_hash: [u8; 32],
-    sha256_hex: &str,
-) -> Result<bool, String> {
-    if let Some(Some(_)) = state.blob_cache.get_size(sha256_hex) {
-        return Ok(true);
-    }
-
-    let store = state.store.clone();
-    let result = run_blob_metadata_read(move || {
-        store
-            .blob_size(&sha256_hash)
-            .map_err(|error| error.to_string())
-    })
-    .await;
-    match result {
-        Ok(Ok(size)) => {
-            state.blob_cache.put_size(sha256_hex.to_string(), size);
-            Ok(size.is_some())
-        }
-        Ok(Err(error)) => Err(error),
-        Err(error) if error.is_busy() => Err(BLOB_READ_BUSY.to_string()),
-        Err(error) if error.is_timeout() => Err("blob existence check timed out".to_string()),
-        Err(error) => Err(format!("blob existence task failed: {}", error)),
-    }
-}
-
-async fn set_existing_blob_owner_without_body_write(
-    state: AppState,
-    sha256_hash: [u8; 32],
-    pubkey: [u8; 32],
-) -> anyhow::Result<()> {
-    run_blob_write(move || state.store.set_blob_owner(&sha256_hash, &pubkey))
-        .await
-        .map_err(|error| anyhow::anyhow!("blob owner task failed: {}", error))??;
-    Ok(())
-}
-
 /// PUT /upload - Upload a new blob (BUD-02)
 pub async fn upload_blob(
     State(state): State<AppState>,
@@ -1889,37 +1850,6 @@ pub async fn upload_blob(
         );
     }
 
-    match uploaded_blob_already_exists(&state, sha256_hash, &sha256_hex).await {
-        Ok(true) => {
-            if is_allowed_author {
-                if let Err(error) = set_existing_blob_owner_without_body_write(
-                    state.clone(),
-                    sha256_hash,
-                    pubkey_bytes,
-                )
-                .await
-                {
-                    return Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                        .header("X-Reason", "Storage error")
-                        .header(header::CONTENT_TYPE, "application/json")
-                        .body(Body::from(format!(r#"{{"error":"{}"}}"#, error)))
-                        .unwrap();
-                }
-            }
-            return upload_descriptor_response(StatusCode::OK, &descriptor);
-        }
-        Ok(false) => {}
-        Err(error) => {
-            tracing::debug!(
-                "Could not preflight Blossom upload {} before synchronous storage: {}",
-                sha256_hex,
-                error
-            );
-        }
-    }
-
     let store_result = store_blossom_blob_without_blocking_runtime(
         &state,
         body.clone(),
@@ -1944,7 +1874,14 @@ pub async fn upload_blob(
                     );
                 }
             }
-            upload_descriptor_response(StatusCode::CREATED, &descriptor)
+            upload_descriptor_response(
+                if inserted {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                },
+                &descriptor,
+            )
         }
         Err(error) => blob_write_error_response(error),
     }

@@ -164,6 +164,14 @@ pub(super) async fn daemon_status(
             "total": status_counts_json(http_status.lifetime),
         }
     });
+    #[cfg(feature = "lmdb")]
+    let storage = json!({
+        "pool_read_fallback": state.store.pool_read_fallback_status(),
+    });
+    #[cfg(not(feature = "lmdb"))]
+    let storage = json!({
+        "pool_read_fallback": Value::Null,
+    });
 
     Json(json!({
         "status": "running",
@@ -182,6 +190,7 @@ pub(super) async fn daemon_status(
         "relay": relay,
         "upstream": upstream,
         "queues": queues,
+        "storage": storage,
         "http": http,
     }))
     .into_response()
