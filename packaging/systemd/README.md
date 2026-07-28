@@ -384,28 +384,30 @@ The supported full migration is four-stage:
    Keep restarting fresh controller attempts with the exact same installed
    worker binary, source baseline, rollout, source, Pool, and cursor
    authorities until both scans report covered.
-2. Install the exact complete runtime masks for every target writer, stop
-   those writers, prove no other process retains a target LMDB or external
-   member handle, and run a final `online-bounded` tranche with
-   `targetWritersFenced=true` and `fenceHeldUntilCompletion=true`. The first
+2. Start the stopped boundary by installing the exact complete runtime mask
+   set for every target writer and every source writer needed by the following
+   phase. Stop them all, attest both writer fences, prove no other process
+   retains a source, target LMDB, or external-corpus/member handle, and run a
+   final `online-bounded` tranche with `targetWritersFenced=true`,
+   `sourceWritersFenced=true`, and `fenceHeldUntilCompletion=true`. The first
    transition to this exact target-fence authority resets the target catalog
    cursor but retains the root-verified hash/size body proofs. The worker
    revisits every final catalog row under the held fence, fails on
    `Pending`/`Moving`/`Missing`, and reads only a body whose exact proof is
    absent. Completion publishes separate immutable sorted source and target
    evidence, `online-target-audit.json`, and the root-owned
-   `online-target-audit-certification.json`. Keep the target masks and fence
-   continuously held after this point.
+   `online-target-audit-certification.json`. Keep every mask and both fences
+   continuously held after this point; never return this audit ledger to an
+   unfenced online tranche.
 3. Pass that exact certification as
    `--cas online-target-audit-NONCE=/absolute/attempt/online-target-audit-certification.json`,
-   add an exact runtime mask for every writer that can open the source, prove
-   no process retains source LMDB or external-corpus handles, and run
-   `final-stopped-source` while retaining every target mask and unit identity
-   from stage 2. The source LMDB `blobs` database is the raw key authority:
+   retain the exact same stopped-writer units and mask authorities, re-prove
+   zero source and target handles, and run `final-stopped-source`. The source
+   LMDB `blobs` database is the raw key authority:
    legacy blob-only and partially populated metadata stores are accepted,
    while metadata-only rows are rejected. The worker scans the fresh stopped
-   hash/size boundary against the certified online evidence, reading zero
-   payload bodies, and publishes exact current-source evidence plus
+   hash/size boundary against the certified online evidence. It reads zero payload bodies
+   and publishes exact current-source evidence plus
    `source-terminal.json`. A new or size-changed source row fails closed with
    an instruction to recover the stopped attempt and rerun online catch-up.
 4. Keep all source and target fences and mounts intact and run
