@@ -18,6 +18,8 @@ grep -Fx 'Restart=no' "$CONTROLLER_UNIT" >/dev/null
 grep -Fx 'TimeoutStartSec=infinity' "$CONTROLLER_UNIT" >/dev/null
 grep -Fx 'KillMode=control-group' "$CONTROLLER_UNIT" >/dev/null
 grep -Fx 'PrivateNetwork=true' "$CONTROLLER_UNIT" >/dev/null
+grep -Fx 'PrivateMounts=false' "$CONTROLLER_UNIT" >/dev/null
+test "$(grep -c '^PrivateMounts=' "$CONTROLLER_UNIT")" -eq 1
 grep -Fx 'UnsetEnvironment=LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH HTREE_LMDB_NO_SYNC HTREE_LMDB_NO_META_SYNC' "$CONTROLLER_UNIT" >/dev/null
 grep -Fx 'Type=oneshot' "$UNIT" >/dev/null
 grep -Fx 'User=hashtree' "$UNIT" >/dev/null
@@ -38,6 +40,8 @@ grep -Fx 'Restart=no' "$UNIT" >/dev/null
 grep -Fx 'TimeoutStartSec=infinity' "$UNIT" >/dev/null
 grep -Fx 'IOSchedulingClass=idle' "$UNIT" >/dev/null
 grep -Fx 'PrivateNetwork=true' "$UNIT" >/dev/null
+grep -Fx 'PrivateMounts=false' "$UNIT" >/dev/null
+test "$(grep -c '^PrivateMounts=' "$UNIT")" -eq 1
 grep -Fx 'UnsetEnvironment=LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH HTREE_LMDB_NO_SYNC HTREE_LMDB_NO_META_SYNC' "$UNIT" >/dev/null
 if grep -Eq '^Exec(Condition|StartPre|StartPost|Reload|Stop|StopPost)=' "$UNIT"; then
   echo "migration template must not add unacknowledged auxiliary processes" >&2
@@ -82,6 +86,7 @@ grep -F 'delete an attempt, request, acknowledgement' "$README" >/dev/null
 grep -F 'checkpointSystemctlSubprocesses == authorizedCheckpoints' "$README" >/dev/null
 grep -F 'p99 request-to-authorization latency at most 100 ms' "$README" >/dev/null
 grep -F 'Do not use a generated fixture for this gate.' "$README" >/dev/null
+grep -F '`PrivateMounts=false` is mandatory on both migration units' "$README" >/dev/null
 grep -F 'Current systemd rejects an uninstantiated template as a `systemctl show`' "$README" >/dev/null
 if grep -F 'Id=hashtree-pool-migrate@.service' "$README" >/dev/null; then
   echo "runbook must not require systemctl show for an uninstantiated template" >&2

@@ -62,14 +62,19 @@ The loaded worker unit must have no drop-ins, conditions, start/stop helpers,
 reload helpers, restart, or control process. It must retain `Type=oneshot`,
 `Restart=no`, `TimeoutStartSec=infinity`, `PrivateNetwork=true`,
 `NoNewPrivileges=true`, the loader-variable `UnsetEnvironment` list, and one
-direct `ExecStart`. The binary, fragment, and environment file must be
-root-owned and not group/world writable. A daemon reload is mandatory after
-installing them. Every queried scalar or environment property must be present;
-omission is not treated as an empty or safe value. systemd 255 suppresses
-empty `Exec*` arrays even when queried explicitly, so omitted forbidden hook
-arrays are accepted only after the launcher verifies the exact root-owned
-fragment, empty `DropInPaths`, and `NeedDaemonReload=no`; any emitted nonempty
-hook is rejected.
+direct `ExecStart`. `PrivateMounts=false` is mandatory on both migration units:
+systemd 259 otherwise derives a private mount namespace from
+`PrivateNetwork=true`, but the migration authority requires the controller and
+worker to share PID 1's host mount namespace. This does not weaken the private
+network namespace. After `daemon-reload`, both loaded units must report
+`PrivateNetwork=yes` and `PrivateMounts=no`. The binary, fragment, and
+environment file must be root-owned and not group/world writable. A daemon
+reload is mandatory after installing them. Every queried scalar or environment
+property must be present; omission is not treated as an empty or safe value.
+systemd 255 suppresses empty `Exec*` arrays even when queried explicitly, so
+omitted forbidden hook arrays are accepted only after the launcher verifies the
+exact root-owned fragment, empty `DropInPaths`, and `NeedDaemonReload=no`; any
+emitted nonempty hook is rejected.
 
 ### Strict environment file
 
