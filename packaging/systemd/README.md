@@ -457,9 +457,11 @@ Read-only source/keyset, already-proved online pages, and full-union page scans
 do not create root checkpoints and do not invoke `systemctl`. A checkpoint
 exists only for a bounded target mutation, a newly durable online audit page,
 or a terminal publication boundary. Each checkpoint uses exactly one batched
-`systemctl show` for the controller, worker, complete writer set, legacy
-template, and legacy instances; worker-side liveness and idle controller
-polling use pinned files plus `/proc`, without subprocesses.
+`systemctl show` for the controller, worker, complete writer set, and concrete
+legacy instances; worker-side liveness and idle controller polling use pinned
+files plus `/proc`, without subprocesses. The bare legacy template is an
+uninstantiated systemd unit and is therefore bound by its exact root-owned
+`/run/systemd/system` mask symlink, not queried with `systemctl show`.
 Each pre/post page fence validates the deduplicated current/prior source mount
 set against one `/proc/self/mountinfo` snapshot; receipt files are not opened
 on that path. Mapping-epoch and pre/post terminal-audit writer/legacy fence
@@ -479,11 +481,14 @@ acknowledgement boottime fields plus controller/worker wall time, and require:
 - measured end-to-end time, projected from the real Stored/write ratio and
   corpus size, fits the approved downtime window with at least 25% reserve.
 
-Also verify on that installed systemd version that the single batched
-`systemctl show` returns an exact `Id=hashtree-pool-migrate@.service` block
-with `LoadState=masked` and `UnitFileState=masked-runtime` for the bare legacy
-template. A failed template query or any subprocess/latency mismatch blocks
-the rollout.
+Also verify on that installed systemd version that the bare
+`hashtree-pool-migrate@.service` template is an exact root-owned, single-link
+`/run/systemd/system/hashtree-pool-migrate@.service -> /dev/null` authority.
+Current systemd rejects an uninstantiated template as a `systemctl show`
+target. Every concrete legacy instance mask must still appear as
+`LoadState=masked`, `UnitFileState=masked-runtime`, inactive/dead,
+process-free, job-free, and daemon-reloaded. Any subprocess/latency mismatch
+blocks the rollout.
 
 For each stage, install fresh root-owned controller and worker environment
 files using the same instance name, then start only the controller:

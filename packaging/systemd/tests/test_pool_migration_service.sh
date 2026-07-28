@@ -82,7 +82,11 @@ grep -F 'delete an attempt, request, acknowledgement' "$README" >/dev/null
 grep -F 'checkpointSystemctlSubprocesses == authorizedCheckpoints' "$README" >/dev/null
 grep -F 'p99 request-to-authorization latency at most 100 ms' "$README" >/dev/null
 grep -F 'Do not use a generated fixture for this gate.' "$README" >/dev/null
-grep -F 'Id=hashtree-pool-migrate@.service' "$README" >/dev/null
+grep -F 'Current systemd rejects an uninstantiated template as a `systemctl show`' "$README" >/dev/null
+if grep -F 'Id=hashtree-pool-migrate@.service' "$README" >/dev/null; then
+  echo "runbook must not require systemctl show for an uninstantiated template" >&2
+  exit 1
+fi
 SOURCE_ROOT="$(cd "${SYSTEMD_DIR}/../.." && pwd)"
 grep -F '"checkpointSystemctlSubprocesses"' \
   "${SOURCE_ROOT}/rust/crates/hashtree-cli/src/app/pool_migration_controller.rs" >/dev/null
