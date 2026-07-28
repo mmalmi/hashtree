@@ -1182,6 +1182,17 @@ impl LmdbBlobReader {
             .existing_blob_keys_in_sorted_candidates(sorted_hashes)
     }
 
+    /// Prove exact raw `blobs` keys with one bounded forward cursor scan.
+    pub fn blob_keys_match_bounded_raw_range(
+        &self,
+        sorted_hashes: &[Hash],
+        inclusive_end: Hash,
+        max_scanned_keys: usize,
+    ) -> Result<bool, StoreError> {
+        self.store
+            .blob_keys_match_bounded_raw_range(sorted_hashes, inclusive_end, max_scanned_keys)
+    }
+
     /// Read the aggregate counters without opening the environment writable.
     pub fn stats(&self) -> Result<LmdbStats, StoreError> {
         self.store.stats()
@@ -2232,6 +2243,53 @@ impl LmdbBlobStore {
             .collect::<Vec<_>>();
         self.blobs
             .contains_raw_keys_without_data(&rtxn, &keys)
+            .map_err(map_heed_error)
+    }
+
+    /// Prove exact raw `blobs` keys using one bounded, forward-only cursor.
+    ///
+    /// Keys already covered by an earlier audit may appear between candidates.
+    /// The scan must still reach `inclusive_end` within `max_scanned_keys`
+    /// distinct raw keys. LMDB values are never requested.
+    pub fn blob_keys_match_bounded_raw_range(
+        &self,
+        sorted_hashes: &[Hash],
+        inclusive_end: Hash,
+        max_scanned_keys: usize,
+    ) -> Result<bool, StoreError> {
+        if sorted_hashes.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(StoreError::Other(
+                "bounded raw blob key candidates must be unique and strictly sorted".into(),
+            ));
+        }
+        let Some(last) = sorted_hashes.last() else {
+            return Err(StoreError::Other(
+                "bounded raw blob key proof requires at least one candidate".into(),
+            ));
+        };
+        if max_scanned_keys == 0 || sorted_hashes.len() > max_scanned_keys {
+            return Err(StoreError::Other(
+                "bounded raw blob key proof has an invalid scan limit".into(),
+            ));
+        }
+        if *last > inclusive_end {
+            return Err(StoreError::Other(
+                "bounded raw blob key candidate exceeds the terminal cursor".into(),
+            ));
+        }
+
+        let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+        let keys = sorted_hashes
+            .iter()
+            .map(|hash| hash.as_slice())
+            .collect::<Vec<_>>();
+        self.blobs
+            .contains_raw_keys_in_bounded_range_without_data(
+                &rtxn,
+                &keys,
+                inclusive_end.as_slice(),
+                max_scanned_keys,
+            )
             .map_err(map_heed_error)
     }
 
@@ -4575,6 +4633,11 @@ mod tests {
             store.existing_blob_keys_in_sorted_candidates(&[hashes[0], hashes[2]])?,
             vec![true, true],
             "already-covered raw keys may occur between new audit candidates"
+        );
+        assert!(store.blob_keys_match_bounded_raw_range(&[hashes[0], hashes[2]], hashes[2], 3,)?);
+        assert!(
+            !store.blob_keys_match_bounded_raw_range(&[hashes[0], hashes[2]], hashes[2], 2,)?,
+            "the proof must not scan beyond the checkpoint key count"
         );
         let error = store
             .existing_blob_keys_in_sorted_candidates(&[hashes[0], hashes[0]])

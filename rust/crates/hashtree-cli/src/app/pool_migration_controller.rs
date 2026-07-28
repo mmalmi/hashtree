@@ -2170,7 +2170,20 @@ mod linux {
                 })
                 .collect::<Result<Vec<_>>>()?;
             if checkpoint.operation == "online-source-audit-batch" {
-                self.verify_online_source_reconciliation_entries(&entries)?;
+                let cursor: [u8; 32] = hashtree_core::from_hex(
+                    checkpoint
+                        .cursor
+                        .as_deref()
+                        .context("online source audit checkpoint has no cursor")?,
+                )
+                .context("decode online source audit cursor")?;
+                let range_limit = usize::try_from(
+                    checkpoint
+                        .range_limit
+                        .context("online source audit checkpoint has no range limit")?,
+                )
+                .context("online source audit range limit exceeds usize")?;
+                self.verify_online_source_reconciliation_entries(&entries, cursor, range_limit)?;
                 self.verify_online_target_entries(&entries, None)?;
                 audit.record_reconciled_source(&entries)?;
             } else {
@@ -2189,6 +2202,8 @@ mod linux {
         fn verify_online_source_reconciliation_entries(
             &self,
             entries: &[([u8; 32], u64)],
+            cursor: [u8; 32],
+            range_limit: usize,
         ) -> Result<()> {
             if entries.is_empty() {
                 bail!("root source reconciliation requires a nonempty exact entry set");
@@ -2200,10 +2215,12 @@ mod linux {
             }
             let present = reader
                 .reader
-                .existing_blob_keys_in_sorted_candidates(&expected)
-                .context("root-check online source reconciliation keys")?;
-            if present.len() != expected.len() || present.iter().any(|exists| !exists) {
-                bail!("root source reconciliation contains a key absent from raw source blobs");
+                .blob_keys_match_bounded_raw_range(&expected, cursor, range_limit)
+                .context("root-check bounded online source reconciliation range")?;
+            if !present {
+                bail!(
+                    "root source reconciliation keys/cursor are absent from the bounded raw source range"
+                );
             }
             Ok(())
         }

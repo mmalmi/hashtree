@@ -1090,6 +1090,54 @@ impl<KC, DC, C> Database<KC, DC, C> {
             .collect()
     }
 
+    /// Prove sorted raw keys within one bounded forward range scan without
+    /// requesting any values from LMDB.
+    ///
+    /// The cursor starts at the first candidate with `MDB_SET_RANGE`, advances
+    /// with `MDB_NEXT_NODUP`, and stops at `inclusive_end` or after
+    /// `max_scanned_keys` distinct database keys. Database keys between
+    /// candidates are allowed. Callers are responsible for requiring unique,
+    /// strictly sorted candidates no greater than `inclusive_end`.
+    pub fn contains_raw_keys_in_bounded_range_without_data(
+        &self,
+        txn: &RoTxn,
+        sorted_keys: &[&[u8]],
+        inclusive_end: &[u8],
+        max_scanned_keys: usize,
+    ) -> Result<bool> {
+        assert_eq_env_db_txn!(self, txn);
+        let Some(first) = sorted_keys.first() else {
+            return Ok(false);
+        };
+        if max_scanned_keys == 0 || sorted_keys.len() > max_scanned_keys {
+            return Ok(false);
+        }
+
+        let mut cursor = RoCursor::new(txn, self.dbi)?;
+        let mut current = cursor.move_on_key_greater_than_or_equal_to_without_data(first)?;
+        let mut candidate_index = 0usize;
+        for _ in 0..max_scanned_keys {
+            let Some(key) = current else {
+                return Ok(false);
+            };
+            if key > inclusive_end {
+                return Ok(false);
+            }
+            if let Some(candidate) = sorted_keys.get(candidate_index) {
+                match key.cmp(candidate) {
+                    std::cmp::Ordering::Less => {}
+                    std::cmp::Ordering::Equal => candidate_index += 1,
+                    std::cmp::Ordering::Greater => return Ok(false),
+                }
+            }
+            if key == inclusive_end {
+                return Ok(candidate_index == sorted_keys.len());
+            }
+            current = cursor.move_on_next_key()?;
+        }
+        Ok(false)
+    }
+
     /// Return a mutable lexicographically ordered iterator of all key-value pairs in this database.
     ///
     /// ```
@@ -2804,6 +2852,39 @@ mod tests {
         assert_eq!(
             db.raw_keys_from(&txn, Bound::Included(b"b".as_slice()), 1)?,
             [b"b".to_vec()]
+        );
+        assert!(db.contains_raw_keys_in_bounded_range_without_data(
+            &txn,
+            &[b"a".as_slice(), b"c".as_slice()],
+            b"c",
+            3,
+        )?);
+        assert!(
+            !db.contains_raw_keys_in_bounded_range_without_data(
+                &txn,
+                &[b"a".as_slice(), b"c".as_slice()],
+                b"c",
+                2,
+            )?,
+            "the forward proof must stop at its distinct-key bound"
+        );
+        assert!(
+            !db.contains_raw_keys_in_bounded_range_without_data(
+                &txn,
+                &[b"a".as_slice(), b"bb".as_slice()],
+                b"c",
+                3,
+            )?,
+            "a missing candidate must fail even when later keys exist"
+        );
+        assert!(
+            !db.contains_raw_keys_in_bounded_range_without_data(
+                &txn,
+                &[b"a".as_slice(), b"c".as_slice()],
+                b"d",
+                4,
+            )?,
+            "an absent terminal cursor must fail closed"
         );
         Ok(())
     }
