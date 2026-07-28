@@ -740,6 +740,7 @@ impl LmdbBlobReader {
             external_blobs,
             external_read_concurrency,
             None,
+            false,
         )
     }
 
@@ -757,6 +758,27 @@ impl LmdbBlobReader {
             external_blobs,
             external_read_concurrency,
             Some(identity),
+            false,
+        )
+    }
+
+    /// Open a pinned migration source for an exhaustive, key-ordered scan.
+    ///
+    /// Unlike the ordinary sparse reader, this leaves kernel read-ahead
+    /// enabled. Large inline LMDB values otherwise degrade into one blocking
+    /// major page fault per page during a complete migration or audit.
+    pub fn open_sequential_with_external_read_concurrency_and_pinned_identity<P: AsRef<Path>>(
+        path: P,
+        external_blobs: Option<ExternalBlobOptions>,
+        external_read_concurrency: usize,
+        identity: PinnedLmdbIdentity,
+    ) -> Result<Self, StoreError> {
+        Self::open_with_external_read_concurrency_inner(
+            path.as_ref(),
+            external_blobs,
+            external_read_concurrency,
+            Some(identity),
+            true,
         )
     }
 
@@ -765,6 +787,7 @@ impl LmdbBlobReader {
         external_blobs: Option<ExternalBlobOptions>,
         external_read_concurrency: usize,
         pinned_identity: Option<PinnedLmdbIdentity>,
+        sequential_scan: bool,
     ) -> Result<Self, StoreError> {
         if external_read_concurrency == 0 {
             return Err(StoreError::Other(
@@ -775,12 +798,17 @@ impl LmdbBlobReader {
         options
             .max_dbs(DATABASE_COUNT)
             .max_readers(DEFAULT_MAX_READERS);
+        let mut flags = env_flags_from_env() | EnvFlags::READ_ONLY;
+        if sequential_scan {
+            flags.remove(EnvFlags::NO_READ_AHEAD);
+        } else {
+            // Ordinary verification performs sparse hash lookups across a
+            // potentially very large source. Disable kernel read-ahead so
+            // unrelated LMDB pages do not inflate reclaimable file cache.
+            flags |= EnvFlags::NO_READ_AHEAD;
+        }
         unsafe {
-            // Migration and verification perform sparse hash lookups across a
-            // potentially very large source. Disable kernel read-ahead for
-            // this dedicated reader so unrelated LMDB pages do not inflate
-            // the process cgroup's reclaimable file cache.
-            options.flags(env_flags_from_env() | EnvFlags::READ_ONLY | EnvFlags::NO_READ_AHEAD);
+            options.flags(flags);
         }
         let env = unsafe {
             match pinned_identity {
@@ -4038,6 +4066,44 @@ mod tests {
         assert!(flags.contains(EnvFlags::NO_READ_AHEAD));
         assert!(flags.contains(EnvFlags::NO_SYNC));
         assert!(flags.contains(EnvFlags::NO_META_SYNC));
+    }
+
+    #[test]
+    fn sequential_migration_reader_enables_kernel_read_ahead() -> Result<(), StoreError> {
+        let temp = TempDir::new().map_err(StoreError::Io)?;
+        let sparse_path = temp.path().join("sparse");
+        let sequential_path = temp.path().join("sequential");
+        drop(LmdbBlobStore::new(&sparse_path)?);
+        drop(LmdbBlobStore::new(&sequential_path)?);
+
+        let sparse = LmdbBlobReader::open(&sparse_path, None)?;
+        let sparse_flags = sparse
+            .store
+            .env
+            .flags()
+            .map_err(map_heed_error)?
+            .ok_or_else(|| {
+                StoreError::Other("sparse reader has no LMDB environment flags".into())
+            })?;
+        assert!(sparse_flags.contains(EnvFlags::NO_READ_AHEAD));
+
+        let sequential = LmdbBlobReader::open_with_external_read_concurrency_inner(
+            &sequential_path,
+            None,
+            1,
+            None,
+            true,
+        )?;
+        let sequential_flags = sequential
+            .store
+            .env
+            .flags()
+            .map_err(map_heed_error)?
+            .ok_or_else(|| {
+                StoreError::Other("sequential reader has no LMDB environment flags".into())
+            })?;
+        assert!(!sequential_flags.contains(EnvFlags::NO_READ_AHEAD));
+        Ok(())
     }
 
     #[tokio::test]

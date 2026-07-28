@@ -84,6 +84,9 @@
 
 ### Fixed
 
+- Exhaustive pinned LMDB migration scans can now opt into kernel read-ahead
+  while ordinary sparse readers retain `MDB_NORDAHEAD`, avoiding one blocking
+  major page fault per inline value page during multi-terabyte ordered audits.
 - Root-brokered online source audits now open their exact source LMDB and
   external corpus through retained directory descriptors before validating a
   checkpoint page, keeping both directory pins alive for the reader's complete
