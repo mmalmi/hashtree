@@ -162,6 +162,22 @@ fn validate_controlled_manifest(
     Ok(manifest)
 }
 
+fn configured_paths_match(pinned: &Path, live: &Path) -> bool {
+    pinned == live
+        || fs::canonicalize(pinned)
+            .ok()
+            .zip(fs::canonicalize(live).ok())
+            .is_some_and(|(pinned, live)| pinned == live)
+}
+
+fn configured_optional_paths_match(pinned: Option<&Path>, live: Option<&Path>) -> bool {
+    match (pinned, live) {
+        (Some(pinned), Some(live)) => configured_paths_match(pinned, live),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 fn validate_controlled_manifest_members(
     manifest: &PoolManifest,
     bindings: &HashMap<PoolMemberId, PoolMemberRuntimePaths>,
@@ -180,8 +196,11 @@ fn validate_controlled_manifest_members(
                 member.id
             ))
         })?;
-        if binding.configured_path != member.config.path
-            || binding.configured_external_path != member.config.external_blob_dir
+        if !configured_paths_match(&binding.configured_path, &member.config.path)
+            || !configured_optional_paths_match(
+                binding.configured_external_path.as_deref(),
+                member.config.external_blob_dir.as_deref(),
+            )
         {
             return Err(StoreError::Other(format!(
                 "live pool member {} paths differ from pinned topology",
@@ -1745,8 +1764,11 @@ impl PoolStore {
                 member.id
             )));
         };
-        if binding.configured_path != member.config.path
-            || binding.configured_external_path != member.config.external_blob_dir
+        if !configured_paths_match(&binding.configured_path, &member.config.path)
+            || !configured_optional_paths_match(
+                binding.configured_external_path.as_deref(),
+                member.config.external_blob_dir.as_deref(),
+            )
         {
             return Err(StoreError::Other(format!(
                 "pool member {} paths differ from pinned runtime authority",

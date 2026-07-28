@@ -84,6 +84,11 @@
 
 ### Fixed
 
+- Controlled Pool opens now accept a live manifest member path only when it is
+  either byte-identical to, or resolves to the same canonical directory as,
+  the pinned topology path. This preserves canonical topology authority while
+  allowing an existing manifest's stable symlink alias to use its fd-pinned
+  runtime member.
 - Unprivileged Pool migration workers now validate their user, PID, and mount
   namespace identities against the root controller's immutable host-namespace
   authority in the launch request. This preserves the exact host-namespace
