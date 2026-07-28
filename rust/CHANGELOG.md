@@ -84,6 +84,13 @@
 
 ### Fixed
 
+- Online Pool migration now records source-to-target hash/size reconciliation
+  separately from target-body proof. Exact-size `Stored` entries skip source
+  and target payload rereads, while Missing/Pending entries still read,
+  hash-check, and write source bodies. A v4 audit binding and explicit
+  evidence kinds prevent older body-proof ledgers from being reused; the
+  independent root target audit remains responsible for batched SHA-256 body
+  verification before any terminal receipt.
 - Exhaustive pinned LMDB migration scans can now opt into kernel read-ahead
   while ordinary sparse readers retain `MDB_NORDAHEAD`, avoiding one blocking
   major page fault per inline value page during multi-terabyte ordered audits.

@@ -504,7 +504,13 @@ fn open_controlled_members(
         let mut runtime_config = member.config.clone();
         runtime_config.path = binding.runtime_path;
         runtime_config.external_blob_dir = binding.runtime_external_path;
-        let reader = open_member_reader(member.id, &runtime_config, Some(binding.lmdb_identity))?;
+        let reader = open_member_reader(
+            member.id,
+            &runtime_config,
+            Some(binding.lmdb_identity),
+            false,
+            1,
+        )?;
         if stores.insert(member.id, Arc::new(reader)).is_some() {
             return Err(StoreError::Other(format!(
                 "pool manifest repeats member {}",

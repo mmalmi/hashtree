@@ -132,16 +132,39 @@ pub(super) fn open_member_reader(
     id: PoolMemberId,
     config: &PoolMemberConfig,
     pinned_identity: Option<PinnedLmdbIdentity>,
+    sequential_scan: bool,
+    read_concurrency: usize,
 ) -> Result<LmdbBlobReader, StoreError> {
+    if read_concurrency == 0 || read_concurrency > config.max_read_concurrency as usize {
+        return Err(StoreError::Other(format!(
+            "pool member {id} read concurrency {read_concurrency} is outside its configured 1..={} limit",
+            config.max_read_concurrency
+        )));
+    }
     let external = member_external_blob_options(id, config)?;
-    let opened = match pinned_identity {
-        Some(identity) => LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+    let opened = match (pinned_identity, sequential_scan) {
+        (Some(identity), true) => {
+            LmdbBlobReader::open_sequential_with_external_read_concurrency_and_pinned_identity(
+                &config.path,
+                external,
+                read_concurrency,
+                identity,
+            )
+        }
+        (Some(identity), false) => {
+            LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+                &config.path,
+                external,
+                read_concurrency,
+                identity,
+            )
+        }
+        (None, true) => LmdbBlobReader::open_sequential_with_external_read_concurrency(
             &config.path,
             external,
-            1,
-            identity,
+            read_concurrency,
         ),
-        None => LmdbBlobReader::open(&config.path, external),
+        (None, false) => LmdbBlobReader::open(&config.path, external),
     };
     opened.map_err(|error| {
         StoreError::Other(format!(

@@ -744,6 +744,22 @@ impl LmdbBlobReader {
         )
     }
 
+    /// Open an unpinned source for an exhaustive, key-ordered scan with
+    /// kernel read-ahead enabled.
+    pub fn open_sequential_with_external_read_concurrency<P: AsRef<Path>>(
+        path: P,
+        external_blobs: Option<ExternalBlobOptions>,
+        external_read_concurrency: usize,
+    ) -> Result<Self, StoreError> {
+        Self::open_with_external_read_concurrency_inner(
+            path.as_ref(),
+            external_blobs,
+            external_read_concurrency,
+            None,
+            true,
+        )
+    }
+
     /// Open a migration source through a retained directory descriptor and
     /// require the actual LMDB data/lock descriptors to match identities
     /// captured before the launch acknowledgement.

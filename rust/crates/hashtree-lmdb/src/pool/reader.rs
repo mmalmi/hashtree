@@ -130,7 +130,27 @@ impl PoolCatalogLocation {
 
 impl PoolStoreReader {
     pub fn open<P: AsRef<Path>>(path: P, config: PoolStoreConfig) -> Result<Self, StoreError> {
-        Self::open_inner(path.as_ref(), config, false)
+        Self::open_inner(path.as_ref(), config, false, false, 1)
+    }
+
+    /// Open a strict reader for an exhaustive, key-ordered catalog and
+    /// payload audit with kernel read-ahead enabled on the catalog and every
+    /// member LMDB.
+    pub fn open_sequential<P: AsRef<Path>>(
+        path: P,
+        config: PoolStoreConfig,
+    ) -> Result<Self, StoreError> {
+        Self::open_inner(path.as_ref(), config, false, true, 1)
+    }
+
+    /// Open an exhaustive reader with bounded parallel reads for distinct
+    /// loose external member files.
+    pub fn open_sequential_with_read_concurrency<P: AsRef<Path>>(
+        path: P,
+        config: PoolStoreConfig,
+        read_concurrency: usize,
+    ) -> Result<Self, StoreError> {
+        Self::open_inner(path.as_ref(), config, false, true, read_concurrency)
     }
 
     /// Open a strict read-only validator while retaining unavailable manifest
@@ -143,14 +163,21 @@ impl PoolStoreReader {
         path: P,
         config: PoolStoreConfig,
     ) -> Result<Self, StoreError> {
-        Self::open_inner(path.as_ref(), config, true)
+        Self::open_inner(path.as_ref(), config, true, false, 1)
     }
 
     fn open_inner(
         path: &Path,
         config: PoolStoreConfig,
         retain_unavailable_members: bool,
+        sequential_scan: bool,
+        read_concurrency: usize,
     ) -> Result<Self, StoreError> {
+        if read_concurrency == 0 {
+            return Err(StoreError::Other(
+                "read-only Pool member read concurrency must be non-zero".into(),
+            ));
+        }
         if config.temperature.enabled {
             return Err(StoreError::Other(
                 "read-only Pool validation requires temperature tracking to be disabled".into(),
@@ -182,10 +209,14 @@ impl PoolStoreReader {
 
         let mut options = EnvOpenOptions::new();
         options.max_dbs(super::CATALOG_DATABASES);
+        let mut flags = super::super::env_flags_from_env() | EnvFlags::READ_ONLY;
+        if sequential_scan {
+            flags.remove(EnvFlags::NO_READ_AHEAD);
+        } else {
+            flags |= EnvFlags::NO_READ_AHEAD;
+        }
         unsafe {
-            options.flags(
-                super::super::env_flags_from_env() | EnvFlags::READ_ONLY | EnvFlags::NO_READ_AHEAD,
-            );
+            options.flags(flags);
         }
         let env = unsafe {
             match config.catalog_lmdb_identity {
@@ -253,7 +284,13 @@ impl PoolStoreReader {
                 }
                 None => None,
             };
-            match open_member_reader(member.id, &runtime_config, pinned_identity) {
+            match open_member_reader(
+                member.id,
+                &runtime_config,
+                pinned_identity,
+                sequential_scan,
+                read_concurrency,
+            ) {
                 Ok(reader) => {
                     members.insert(member.id, reader);
                 }
@@ -929,6 +966,74 @@ mod tests {
     use super::*;
     use crate::{PoolMemberConfig, PoolStore};
     use std::fs;
+
+    #[test]
+    fn sequential_reader_enables_pool_read_ahead_and_bounded_member_reads() -> Result<(), StoreError>
+    {
+        let temp = tempfile::tempdir().map_err(StoreError::Io)?;
+        let catalog = temp.path().join("catalog");
+        let member_path = temp.path().join("member");
+        let mut config = PoolStoreConfig::default();
+        config.temperature.enabled = false;
+        let pool = PoolStore::open(&catalog, config.clone())?;
+        let member = pool.add_member(PoolMemberConfig::new(member_path, 1024 * 1024))?;
+        drop(pool);
+
+        let sparse = PoolStoreReader::open(&catalog, config.clone())?;
+        let sparse_catalog_flags = sparse
+            .env
+            .flags()
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("sparse Pool catalog has no flags".into()))?;
+        assert!(sparse_catalog_flags.contains(EnvFlags::NO_READ_AHEAD));
+        let sparse_member_flags = sparse
+            .members
+            .get(&member)
+            .expect("manifest member is open")
+            .store
+            .env
+            .flags()
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("sparse Pool member has no flags".into()))?;
+        assert!(sparse_member_flags.contains(EnvFlags::NO_READ_AHEAD));
+        drop(sparse);
+
+        let sequential =
+            PoolStoreReader::open_sequential_with_read_concurrency(&catalog, config.clone(), 16)?;
+        let sequential_catalog_flags = sequential
+            .env
+            .flags()
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("sequential Pool catalog has no flags".into()))?;
+        assert!(!sequential_catalog_flags.contains(EnvFlags::NO_READ_AHEAD));
+        let sequential_member = sequential
+            .members
+            .get(&member)
+            .expect("manifest member is open");
+        let sequential_member_flags = sequential_member
+            .store
+            .env
+            .flags()
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("sequential Pool member has no flags".into()))?;
+        assert!(!sequential_member_flags.contains(EnvFlags::NO_READ_AHEAD));
+        assert_eq!(sequential_member.external_read_concurrency, 16);
+        drop(sequential);
+
+        let error =
+            match PoolStoreReader::open_sequential_with_read_concurrency(&catalog, config, 65) {
+                Ok(_) => {
+                    return Err(StoreError::Other(
+                        "reader accepted concurrency above the member limit".into(),
+                    ))
+                }
+                Err(error) => error,
+            };
+        assert!(error
+            .to_string()
+            .contains("outside its configured 1..=64 limit"));
+        Ok(())
+    }
 
     #[test]
     fn reader_preserves_pending_and_moving_catalog_bytes() -> Result<(), StoreError> {

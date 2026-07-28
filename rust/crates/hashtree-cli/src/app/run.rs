@@ -2656,8 +2656,8 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         sync: true,
                         pack_target_bytes: None,
                     });
-                    let reader =
-                        LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+                    let reader = LmdbBlobReader::
+                        open_sequential_with_external_read_concurrency_and_pinned_identity(
                             launch.source(),
                             external,
                             source_read_concurrency,
@@ -3051,12 +3051,13 @@ fn run_final_stopped_source_audit(
             sync: true,
             pack_target_bytes: None,
         });
-        let reader = LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
-            launch.source(),
-            external,
-            source_read_concurrency,
-            launch.source_lmdb_identity(),
-        )?;
+        let reader =
+            LmdbBlobReader::open_sequential_with_external_read_concurrency_and_pinned_identity(
+                launch.source(),
+                external,
+                source_read_concurrency,
+                launch.source_lmdb_identity(),
+            )?;
         let opened_generation = reader.environment_generation();
         if generation.is_some_and(|expected| expected != opened_generation) {
             bail!("source LMDB generation changed across mapping reopen");
@@ -3386,7 +3387,11 @@ fn run_final_stopped_full_reconciliation(
     launch.ensure_store_paths()?;
     launch.ensure_final_writer_fence()?;
     launch.authorize_checkpoint("target-terminal-audit", None, None)?;
-    let terminal_reader = PoolStoreReader::open(launch.pool(), pool_config)?;
+    let terminal_reader = PoolStoreReader::open_sequential_with_read_concurrency(
+        launch.pool(),
+        pool_config,
+        source_read_concurrency,
+    )?;
     let target_content = validate_terminal_catalog_target_evidence(
         &terminal_reader,
         &target_evidence_authorities,

@@ -2242,8 +2242,8 @@ mod linux {
                         sync: true,
                         pack_target_bytes: None,
                     });
-            let reader =
-                hashtree_lmdb::LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+            let reader = hashtree_lmdb::LmdbBlobReader::
+                open_sequential_with_external_read_concurrency_and_pinned_identity(
                 source.runtime_path(),
                 external,
                 self.options.source_read_concurrency,
@@ -2365,8 +2365,12 @@ mod linux {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let reader = hashtree_lmdb::PoolStoreReader::open(catalog.runtime_path(), config)
-                .context("root-open exact online target audit reader")?;
+            let reader = hashtree_lmdb::PoolStoreReader::open_sequential_with_read_concurrency(
+                catalog.runtime_path(),
+                config,
+                self.options.source_read_concurrency,
+            )
+            .context("root-open exact online target audit reader")?;
             let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
             let locations = reader
                 .blob_catalog_locations(&hashes)
@@ -2588,6 +2592,7 @@ mod linux {
                 &self.pool_topology_input.sha256,
                 std::slice::from_ref(&receipt.target_evidence),
                 self.options.batch_size,
+                self.options.source_read_concurrency,
             )
             .context("root replay target catalog coverage before online certification")?;
             if target_content.evidence.as_slice() != std::slice::from_ref(&target_summary) {
@@ -5425,8 +5430,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 sync: true,
                 pack_target_bytes: None,
             });
-        let reader =
-            hashtree_lmdb::LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+        let reader = hashtree_lmdb::LmdbBlobReader::
+            open_sequential_with_external_read_concurrency_and_pinned_identity(
                 source_runtime_path,
                 external,
                 source_read_concurrency,
@@ -5648,6 +5653,7 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             topology_sha256,
             &target_evidence,
             options.batch_size,
+            options.source_read_concurrency,
         )?;
         for (source, evidence) in source_receipts.iter().zip(&target_content.evidence) {
             if evidence.entries != source.receipt.online_target_verified_entries
@@ -5732,6 +5738,7 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         topology_sha256: &str,
         target_evidence: &[super::super::pool_migration_evidence::SourceEvidenceManifestAuthorityV3],
         page_size: usize,
+        read_concurrency: usize,
     ) -> Result<(
         hashtree_lmdb::PoolPhysicalAudit,
         super::super::pool_migration_evidence::TargetEvidenceReplayV3,
@@ -5816,8 +5823,12 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let reader = hashtree_lmdb::PoolStoreReader::open(catalog.runtime_path(), config)
-            .context("open exact target Pool for terminal recovery audit")?;
+        let reader = hashtree_lmdb::PoolStoreReader::open_sequential_with_read_concurrency(
+            catalog.runtime_path(),
+            config,
+            read_concurrency,
+        )
+        .context("open exact target Pool for terminal recovery audit")?;
         let target_content =
             validate_terminal_catalog_target_evidence(&reader, target_evidence, page_size, || {
                 Ok(())
