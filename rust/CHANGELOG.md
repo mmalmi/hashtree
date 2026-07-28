@@ -84,6 +84,10 @@
 
 ### Fixed
 
+- Root-brokered online source audits now open their exact source LMDB and
+  external corpus through retained directory descriptors before validating a
+  checkpoint page. Linux pinned opens no longer receive an ordinary namespace
+  path, and source-path replacement cannot redirect the audit.
 - Ordinary online Pool migration checkpoints no longer require the nonempty
   runtime writer-mask set reserved for target-fenced and stopped-final passes.
   The root broker still revalidates its controller, worker, and legacy-worker

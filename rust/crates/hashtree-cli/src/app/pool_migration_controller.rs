@@ -2217,16 +2217,40 @@ mod linux {
         }
 
         fn open_online_source_audit_reader(&self) -> Result<hashtree_lmdb::LmdbBlobReader> {
-            let external = self.options.source_external_dir.as_ref().map(|path| {
-                hashtree_lmdb::ExternalBlobOptions {
-                    base_path: path.clone(),
-                    min_bytes: 1,
-                    sync: true,
-                    pack_target_bytes: None,
+            let source =
+                PinnedDirectory::open_exact(&self.options.source, "online audit source LMDB")?;
+            source.require_authority_identity(
+                self.source_identity.directory,
+                "online audit source LMDB",
+            )?;
+            let external_source = match (
+                self.options.source_external_dir.as_deref(),
+                self.source_external_identity,
+            ) {
+                (Some(path), Some(identity)) => {
+                    let directory =
+                        PinnedDirectory::open_exact(path, "online audit source external corpus")?;
+                    directory.require_authority_identity(
+                        identity,
+                        "online audit source external corpus",
+                    )?;
+                    Some(directory)
                 }
-            });
-            hashtree_lmdb::LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
-                &self.options.source,
+                (None, None) => None,
+                _ => bail!("online audit source external authority is incomplete"),
+            };
+            let external =
+                external_source
+                    .as_ref()
+                    .map(|directory| hashtree_lmdb::ExternalBlobOptions {
+                        base_path: directory.runtime_path(),
+                        min_bytes: 1,
+                        sync: true,
+                        pack_target_bytes: None,
+                    });
+            let reader =
+                hashtree_lmdb::LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+                source.runtime_path(),
                 external,
                 self.options.source_read_concurrency,
                 hashtree_lmdb::PinnedLmdbIdentity {
@@ -2240,7 +2264,10 @@ mod linux {
                     },
                 },
             )
-            .context("root-open exact online source audit reader")
+            .context("root-open exact online source audit reader")?;
+            drop(external_source);
+            drop(source);
+            Ok(reader)
         }
 
         fn verify_online_source_coverage(&self, audit: &PoolMigrationAuditStore) -> Result<()> {
