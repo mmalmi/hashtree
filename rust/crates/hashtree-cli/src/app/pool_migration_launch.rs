@@ -2835,6 +2835,24 @@ fn list_loaded_legacy_worker_instances(systemctl: &Path) -> Result<Vec<String>> 
 }
 
 #[cfg(target_os = "linux")]
+fn reject_loaded_legacy_worker_instances_without_masks(
+    systemctl: &Path,
+    expected_masks: &[String],
+) -> Result<()> {
+    // A concrete runtime mask is itself a loaded unit on current systemd, so
+    // "no loaded instances" would reject the fence that we just installed.
+    // Reject only loaded instances outside the exact, sorted mask authority.
+    let loaded = list_loaded_legacy_worker_instances(systemctl)?;
+    if let Some(unit) = loaded
+        .iter()
+        .find(|unit| expected_masks.binary_search(unit).is_err())
+    {
+        bail!("loaded legacy migration-worker instance {unit} has no exact runtime instance mask");
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
 fn list_runtime_legacy_worker_instance_masks() -> Result<Vec<String>> {
     let runtime_dir = Path::new("/run/systemd/system");
     let mut units = Vec::new();
@@ -2879,9 +2897,7 @@ pub(super) fn validate_legacy_worker_activation_fence_with_systemctl(
             "legacy migration-worker authority does not exactly cover every runtime instance mask"
         );
     }
-    if !list_loaded_legacy_worker_instances(systemctl)?.is_empty() {
-        bail!("a legacy migration-worker instance remains loaded despite the exact runtime masks");
-    }
+    reject_loaded_legacy_worker_instances_without_masks(systemctl, &expected)?;
     for mask in instances {
         let output = std::process::Command::new(systemctl)
             .env_clear()
@@ -2936,9 +2952,7 @@ pub(super) fn validate_legacy_worker_activation_fence_with_systemctl(
         )?;
         validate_runtime_masked_writer_property_map(&mask.unit, mask, &properties)?;
     }
-    if !list_loaded_legacy_worker_instances(systemctl)?.is_empty() {
-        bail!("a legacy migration-worker instance became loaded during fence validation");
-    }
+    reject_loaded_legacy_worker_instances_without_masks(systemctl, &expected)?;
     if list_runtime_legacy_worker_instance_masks()? != expected {
         bail!("legacy migration-worker runtime instance-mask set changed during validation");
     }
@@ -3036,9 +3050,12 @@ pub(super) fn validate_batched_runtime_masked_final_fence_with_systemctl(
             "legacy migration-worker authority does not exactly cover every runtime instance mask"
         );
     }
+    reject_loaded_legacy_worker_instances_without_masks(systemctl, &expected_legacy_instances)?;
 
+    // systemd does not accept an uninstantiated `name@.service` in `show`.
+    // The exact root-owned template symlink was validated directly above;
+    // query concrete units to bind the manager's loaded state as well.
     let mut units = writer_units.to_vec();
-    units.push(legacy_template.unit.clone());
     units.extend(legacy_instances.iter().map(|mask| mask.unit.clone()));
     let mut command = std::process::Command::new(systemctl);
     command
@@ -3087,7 +3104,7 @@ pub(super) fn validate_batched_runtime_masked_final_fence_with_systemctl(
             .with_context(|| format!("systemctl omitted runtime-masked writer unit {unit}"))?;
         validate_runtime_masked_writer_property_map(unit, mask, &properties)?;
     }
-    for mask in std::iter::once(legacy_template).chain(legacy_instances) {
+    for mask in legacy_instances {
         let properties = unit_properties
             .remove(mask.unit.as_str())
             .with_context(|| {
@@ -3104,6 +3121,7 @@ pub(super) fn validate_batched_runtime_masked_final_fence_with_systemctl(
 
     validate_runtime_writer_mask_authorities(writer_units, writer_masks)?;
     validate_legacy_worker_mask_authorities(legacy_template, legacy_instances)?;
+    reject_loaded_legacy_worker_instances_without_masks(systemctl, &expected_legacy_instances)?;
     if list_runtime_legacy_worker_instance_masks()? != expected_legacy_instances {
         bail!("legacy migration-worker runtime instance-mask set changed during validation");
     }

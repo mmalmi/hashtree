@@ -1812,12 +1812,9 @@ mod linux {
                 self.options.systemd_unit.clone(),
             ];
             units.extend(self.controller_state.stopped_writer_units.iter().cloned());
-            units.push(
-                self.controller_state
-                    .legacy_worker_template_mask
-                    .unit
-                    .clone(),
-            );
+            // An uninstantiated `name@.service` is not a valid `systemctl
+            // show` target. Its exact root-owned runtime symlink is validated
+            // directly; concrete instance masks also bind systemd's view.
             units.extend(
                 self.controller_state
                     .legacy_worker_instance_masks
@@ -1863,9 +1860,7 @@ mod linux {
                     .with_context(|| format!("batched checkpoint query omitted writer {unit}"))?;
                 validate_runtime_masked_writer_owned_properties(unit, mask, &unit_properties)?;
             }
-            for mask in std::iter::once(&self.controller_state.legacy_worker_template_mask)
-                .chain(&self.controller_state.legacy_worker_instance_masks)
-            {
+            for mask in &self.controller_state.legacy_worker_instance_masks {
                 let unit_properties = properties.remove(&mask.unit).with_context(|| {
                     format!(
                         "batched checkpoint query omitted legacy worker mask {}",
@@ -1881,6 +1876,10 @@ mod linux {
             if !properties.is_empty() {
                 bail!("batched checkpoint systemd query retained an unvalidated unit");
             }
+            validate_legacy_worker_mask_authorities(
+                &self.controller_state.legacy_worker_template_mask,
+                &self.controller_state.legacy_worker_instance_masks,
+            )?;
             Ok(worker)
         }
 
