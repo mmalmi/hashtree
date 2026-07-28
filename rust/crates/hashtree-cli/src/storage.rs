@@ -45,10 +45,10 @@ pub use maintenance::{
     compact_lmdb_environments_under, CompactResult, R2ImportOptions, R2ImportResult, VerifyResult,
 };
 pub use retention::{
-    OwnedBlobStats, PinTreeError, PinTreeResult, PinnedItem, ProfileRepairRetentionLease,
-    ProfileRepairRetentionPublicationGuard, RootRetentionReport, StorageByPriority, StorageStats,
-    TreeIndexLimits, TreeMeta, PROFILE_REPAIR_RETENTION_LEASE_FORMAT,
-    PROFILE_REPAIR_RETENTION_LEASE_RELATIVE_PATH,
+    acquire_existing_profile_repair_retention_guard, OwnedBlobStats, PinTreeError, PinTreeResult,
+    PinnedItem, ProfileRepairRetentionLease, ProfileRepairRetentionPublicationGuard,
+    RootRetentionReport, StorageByPriority, StorageStats, TreeIndexLimits, TreeMeta,
+    PROFILE_REPAIR_RETENTION_LEASE_FORMAT, PROFILE_REPAIR_RETENTION_LEASE_RELATIVE_PATH,
 };
 
 /// Priority levels for tree eviction

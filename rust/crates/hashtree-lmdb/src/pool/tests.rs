@@ -19,6 +19,22 @@ const HELPER_SOURCE: &str = "HASHTREE_POOL_HELPER_SOURCE";
 const HELPER_TARGET: &str = "HASHTREE_POOL_HELPER_TARGET";
 const PENDING_DATA: &[u8] = b"pool pending crash recovery bytes";
 
+#[cfg(target_os = "linux")]
+fn test_lmdb_identity(path: &Path) -> PinnedLmdbIdentity {
+    let data = fs::metadata(path.join("data.mdb")).expect("data metadata");
+    let lock = fs::metadata(path.join("lock.mdb")).expect("lock metadata");
+    PinnedLmdbIdentity {
+        data: PinnedLmdbFileIdentity {
+            device: data.dev(),
+            inode: data.ino(),
+        },
+        lock: PinnedLmdbFileIdentity {
+            device: lock.dev(),
+            inode: lock.ino(),
+        },
+    }
+}
+
 #[derive(serde::Serialize)]
 struct LegacyPoolMemberConfig {
     path: PathBuf,
@@ -1097,21 +1113,6 @@ fn batch_delete_removes_member_blobs_and_catalog_locations() {
 #[cfg(target_os = "linux")]
 #[test]
 fn exact_offline_stale_pending_cleanup_is_atomic_and_idempotent() {
-    fn lmdb_identity(path: &Path) -> PinnedLmdbIdentity {
-        let data = fs::metadata(path.join("data.mdb")).expect("data metadata");
-        let lock = fs::metadata(path.join("lock.mdb")).expect("lock metadata");
-        PinnedLmdbIdentity {
-            data: PinnedLmdbFileIdentity {
-                device: data.dev(),
-                inode: data.ino(),
-            },
-            lock: PinnedLmdbFileIdentity {
-                device: lock.dev(),
-                inode: lock.ino(),
-            },
-        }
-    }
-
     let temp = TempDir::new().expect("temp dir");
     let catalog = temp.path().join("catalog");
     let member_path = temp.path().join("member");
@@ -1147,8 +1148,8 @@ fn exact_offline_stale_pending_cleanup_is_atomic_and_idempotent() {
     let reader = PoolStoreReader::open(&catalog, ordinary_config).expect("manifest reader");
     let manifest_sha256 = reader.manifest_identity().sha256;
     drop(reader);
-    let catalog_identity = lmdb_identity(&catalog);
-    let member_identity = lmdb_identity(&member_path);
+    let catalog_identity = test_lmdb_identity(&catalog);
+    let member_identity = test_lmdb_identity(&member_path);
     let catalog_fd = File::open(&catalog).expect("pin catalog directory");
     let member_fd = File::open(&member_path).expect("pin member directory");
     let catalog_runtime = PathBuf::from(format!("/proc/self/fd/{}", catalog_fd.as_raw_fd()));
@@ -1217,6 +1218,131 @@ fn exact_offline_stale_pending_cleanup_is_atomic_and_idempotent() {
         .cleanup_stale_pending_exact_offline_sync(&expected)
         .expect("idempotent exact replay");
     assert!(replay.already_cleaned);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn controlled_writer_resumes_pending_before_and_after_member_write() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member_path = temp.path().join("member");
+    let mut ordinary_config = PoolStoreConfig::default();
+    ordinary_config.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, ordinary_config.clone()).expect("open ordinary Pool");
+    let member = pool
+        .add_member(PoolMemberConfig::new(member_path.clone(), 16 * 1024 * 1024))
+        .expect("add member");
+
+    let absent_data = b"controlled Pending whose member write never started";
+    let absent_hash = sha256(absent_data);
+    let present_data = b"controlled Pending whose member write already committed";
+    let present_hash = sha256(present_data);
+    {
+        let member_store = pool.get_member(member).expect("open ordinary member");
+        assert_eq!(
+            member_store
+                .blob_size_sync(&absent_hash)
+                .expect("absent member size"),
+            None
+        );
+        member_store
+            .put_sync(present_hash, present_data)
+            .expect("write physically present Pending body");
+    }
+    let mut wtxn = pool.env.write_txn().expect("catalog write transaction");
+    for (hash, size) in [
+        (absent_hash, absent_data.len() as u64),
+        (present_hash, present_data.len() as u64),
+    ] {
+        pool.set_location_txn(
+            &mut wtxn,
+            hash,
+            Some(LocationRecord::Pending { member, size }),
+        )
+        .expect("inject Pending location");
+    }
+    wtxn.commit().expect("commit Pending locations");
+    pool.force_sync().expect("sync generated crash states");
+    drop(pool);
+
+    let ordinary_reader =
+        PoolStoreReader::open(&catalog, ordinary_config).expect("read exact manifest identity");
+    let manifest_sha256 = ordinary_reader.manifest_identity().sha256;
+    drop(ordinary_reader);
+    let catalog_identity = test_lmdb_identity(&catalog);
+    let member_identity = test_lmdb_identity(&member_path);
+    let catalog_fd = File::open(&catalog).expect("pin catalog directory");
+    let member_fd = File::open(&member_path).expect("pin member directory");
+    let catalog_runtime = PathBuf::from(format!("/proc/self/fd/{}", catalog_fd.as_raw_fd()));
+    let member_runtime = PathBuf::from(format!("/proc/self/fd/{}", member_fd.as_raw_fd()));
+    let mut controlled_config = PoolStoreConfig::default();
+    controlled_config.temperature.enabled = false;
+    controlled_config.catalog_lmdb_identity = Some(catalog_identity);
+    controlled_config.expected_manifest_sha256 = Some(manifest_sha256);
+    controlled_config.member_runtime_paths = vec![PoolMemberRuntimePaths {
+        id: member,
+        configured_path: member_path,
+        runtime_path: member_runtime,
+        configured_external_path: None,
+        runtime_external_path: None,
+        lmdb_identity: member_identity,
+    }];
+    let audit_config = controlled_config.clone();
+    let controlled =
+        PoolStore::open(&catalog_runtime, controlled_config).expect("open exact controlled writer");
+
+    assert_eq!(
+        controlled
+            .read_location(&absent_hash)
+            .expect("absent-body Pending location"),
+        Some(LocationRecord::Pending {
+            member,
+            size: absent_data.len() as u64,
+        })
+    );
+    assert_eq!(
+        controlled
+            .read_location(&present_hash)
+            .expect("present-body Pending location"),
+        Some(LocationRecord::Pending {
+            member,
+            size: present_data.len() as u64,
+        })
+    );
+    assert!(controlled
+        .put_sync(absent_hash, absent_data)
+        .expect("repair absent-body Pending"));
+    assert!(!controlled
+        .put_sync(present_hash, present_data)
+        .expect("finalize present-body Pending"));
+    controlled.force_sync().expect("sync repaired Pool");
+    for (hash, size) in [
+        (absent_hash, absent_data.len() as u64),
+        (present_hash, present_data.len() as u64),
+    ] {
+        assert_eq!(
+            controlled
+                .read_location(&hash)
+                .expect("read committed location"),
+            Some(LocationRecord::Stored { member, size })
+        );
+    }
+    drop(controlled);
+
+    let reader = ReadOnlyPoolStore::open_controlled(&catalog_runtime, audit_config)
+        .expect("open exact read-only verifier");
+    let audit = reader
+        .validate_committed_catalog()
+        .expect("prove committed catalog");
+    assert_eq!(audit.stored_locations, 2);
+    assert_eq!(
+        reader.get_sync(&absent_hash).expect("read repaired body"),
+        Some(absent_data.to_vec())
+    );
+    assert_eq!(
+        reader.get_sync(&present_hash).expect("read finalized body"),
+        Some(present_data.to_vec())
+    );
 }
 
 #[test]

@@ -20,7 +20,7 @@ pub use pool::{
     PoolMemberId, PoolMemberRuntimePaths, PoolMemberState, PoolMemberStatus, PoolReadBatchItem,
     PoolStalePending, PoolStalePendingCleanupReport, PoolStore, PoolStoreConfig, PoolStoreReader,
     PoolTemperatureConfig, PoolTemperatureReport, PoolTerminalAudit, ReadOnlyPoolCatalogAudit,
-    ReadOnlyPoolStore,
+    ReadOnlyPoolManifestMember, ReadOnlyPoolManifestSnapshot, ReadOnlyPoolStore,
 };
 
 use async_trait::async_trait;

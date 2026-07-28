@@ -199,6 +199,12 @@ pub(super) struct BulkProjectionExactIndexParityEvidence {
     pub(super) evidence_sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct BulkProjectionMissingEventBlob {
+    pub(super) event_id: String,
+    pub(super) cid: Cid,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct BulkProjectionQueryAudit {
     query: String,
@@ -470,7 +476,7 @@ impl BulkProjectionSpool {
         })
     }
 
-    fn event_record(&self, event_id: &str) -> Result<Option<SpoolEventRecord>> {
+    pub(super) fn event_record(&self, event_id: &str) -> Result<Option<SpoolEventRecord>> {
         let rtxn = self.env.read_txn()?;
         self.events
             .get(&rtxn, event_id.as_bytes())?
@@ -1142,6 +1148,12 @@ fn manifest_root_for_index(
     }
 }
 
+struct IndexAuditAccumulators<'a> {
+    expected_entries: &'a mut [EntrySetProof; 9],
+    missing_event_blobs: Option<&'a mut Vec<BulkProjectionMissingEventBlob>>,
+    max_missing_event_blobs: usize,
+}
+
 async fn audit_index_root(
     spool: &BulkProjectionSpool,
     target: &NostrEventStore<ReadOnlyPoolStore>,
@@ -1149,7 +1161,7 @@ async fn audit_index_root(
     index: NostrEventIndex,
     root: Option<&Cid>,
     page_size: usize,
-    expected_entries: &mut [EntrySetProof; 9],
+    accumulators: &mut IndexAuditAccumulators<'_>,
 ) -> Result<(BulkProjectionIndexAudit, EntrySetProof)> {
     let mut digest = Sha256::new();
     digest.update(b"hashtree-nostr-bulk-index-parity-v1\0");
@@ -1225,18 +1237,50 @@ async fn audit_index_root(
                 if record_cid != *cid {
                     anyhow::bail!("by-id event record CID differs at key `{key}`");
                 }
-                let durable = target
-                    .load_event_blob(cid)
-                    .await
-                    .with_context(|| format!("exhaustively load durable by-id event `{key}`"))?;
-                if durable.id != *key || durable != record.event {
-                    anyhow::bail!(
-                        "durable by-id event `{key}` differs from its exact spool record"
-                    );
+                match accumulators.missing_event_blobs.as_deref_mut() {
+                    Some(missing) => {
+                        match target.try_load_event_blob(cid).await.with_context(|| {
+                            format!("exhaustively probe durable by-id event `{key}`")
+                        })? {
+                            Some(durable) => {
+                                if durable.id != *key || durable != record.event {
+                                    anyhow::bail!(
+                                    "durable by-id event `{key}` differs from its exact spool record"
+                                );
+                                }
+                                durable_values_validated =
+                                    durable_values_validated.checked_add(1).context(
+                                        "bulk index durable value validation count overflow",
+                                    )?;
+                            }
+                            None => {
+                                if missing.len() >= accumulators.max_missing_event_blobs {
+                                    anyhow::bail!(
+                                        "event-blob repair missing set exceeds explicit limit {}",
+                                        accumulators.max_missing_event_blobs
+                                    );
+                                }
+                                missing.push(BulkProjectionMissingEventBlob {
+                                    event_id: key.clone(),
+                                    cid: cid.clone(),
+                                });
+                            }
+                        }
+                    }
+                    None => {
+                        let durable = target.load_event_blob(cid).await.with_context(|| {
+                            format!("exhaustively load durable by-id event `{key}`")
+                        })?;
+                        if durable.id != *key || durable != record.event {
+                            anyhow::bail!(
+                                "durable by-id event `{key}` differs from its exact spool record"
+                            );
+                        }
+                        durable_values_validated = durable_values_validated
+                            .checked_add(1)
+                            .context("bulk index durable value validation count overflow")?;
+                    }
                 }
-                durable_values_validated = durable_values_validated
-                    .checked_add(1)
-                    .context("bulk index durable value validation count overflow")?;
                 let entries = nostr_event_index_entries(&record.event, cid);
                 for (position, entry) in entries.iter().enumerate() {
                     if entries[..position]
@@ -1245,7 +1289,7 @@ async fn audit_index_root(
                     {
                         continue;
                     }
-                    expected_entries[entry.index.stable_id() as usize].insert(
+                    accumulators.expected_entries[entry.index.stable_id() as usize].insert(
                         entry.index,
                         &entry.key,
                         &entry.cid,
@@ -1405,16 +1449,23 @@ async fn audit_exact_event_index_parity_with_details(
             .expect("all exact parity roots checked");
         let root = parse_root_text(encoded)
             .with_context(|| format!("parse exact parity {} root", index.name()))?;
-        let (audit, retained_set) = audit_index_root(
-            spool,
-            &target,
-            &btree,
-            index,
-            Some(&root),
-            page_size,
-            &mut expected_entries,
-        )
-        .await?;
+        let (audit, retained_set) = {
+            let mut accumulators = IndexAuditAccumulators {
+                expected_entries: &mut expected_entries,
+                missing_event_blobs: None,
+                max_missing_event_blobs: 0,
+            };
+            audit_index_root(
+                spool,
+                &target,
+                &btree,
+                index,
+                Some(&root),
+                page_size,
+                &mut accumulators,
+            )
+            .await?
+        };
         let expected = expected_entries[index.stable_id() as usize];
         if retained_set != expected {
             anyhow::bail!(
@@ -1475,6 +1526,96 @@ pub(super) async fn audit_exact_event_index_parity(
     )
     .await?
     .0)
+}
+
+pub(super) async fn audit_event_index_layout_and_collect_missing_blobs(
+    spool: &BulkProjectionSpool,
+    store: Arc<ReadOnlyPoolStore>,
+    built_roots: &BTreeMap<u8, String>,
+    btree_order: usize,
+    page_size: usize,
+    max_missing_event_blobs: usize,
+) -> Result<(u64, Vec<BulkProjectionMissingEventBlob>)> {
+    if btree_order < 2 {
+        anyhow::bail!("event-blob repair layout audit requires B-tree order at least 2");
+    }
+    if page_size == 0 {
+        anyhow::bail!("event-blob repair layout audit page size must be non-zero");
+    }
+    if max_missing_event_blobs == 0 {
+        anyhow::bail!("event-blob repair missing-set limit must be non-zero");
+    }
+    validate_complete_built_roots("event-blob repair layout authority", built_roots)?;
+    if NostrEventIndex::ALL.first().copied() != Some(NostrEventIndex::ById) {
+        anyhow::bail!(
+            "event-blob repair layout audit requires by-id to be the first canonical index"
+        );
+    }
+    let target = NostrEventStore::new(Arc::clone(&store));
+    let btree = BTree::new(
+        store,
+        BTreeOptions {
+            order: Some(btree_order),
+        },
+    );
+    let mut expected_entries = [EntrySetProof::default(); 9];
+    let mut missing = Vec::new();
+    let mut durable_by_id = None::<u64>;
+    for index in NostrEventIndex::ALL {
+        let encoded = built_roots
+            .get(&index.stable_id())
+            .expect("all event-blob repair layout roots checked");
+        let root = parse_root_text(encoded)
+            .with_context(|| format!("parse event-blob repair {} root", index.name()))?;
+        let (audit, retained_set) = {
+            let mut accumulators = IndexAuditAccumulators {
+                expected_entries: &mut expected_entries,
+                missing_event_blobs: Some(&mut missing),
+                max_missing_event_blobs,
+            };
+            audit_index_root(
+                spool,
+                &target,
+                &btree,
+                index,
+                Some(&root),
+                page_size,
+                &mut accumulators,
+            )
+            .await?
+        };
+        let expected = expected_entries[index.stable_id() as usize];
+        if retained_set != expected {
+            anyhow::bail!(
+                "{} root/spool entries do not exactly match the retained by-id event set: \
+                 actual_count={} expected_count={} actual_digest={} expected_digest={}",
+                index.name(),
+                retained_set.count,
+                expected.count,
+                retained_set.evidence_sha256(),
+                expected.evidence_sha256()
+            );
+        }
+        if index == NostrEventIndex::ById {
+            durable_by_id = Some(audit.durable_values_validated);
+        }
+    }
+    let spool_event_records = spool.event_record_count()?;
+    let accounted = durable_by_id
+        .context("event-blob repair layout audit omitted by-id validation count")?
+        .checked_add(missing.len() as u64)
+        .context("event-blob repair layout accounting overflow")?;
+    if accounted != spool_event_records {
+        anyhow::bail!(
+            "bulk spool contains {spool_event_records} event records but the layout audit accounted for {accounted}"
+        );
+    }
+    for pair in missing.windows(2) {
+        if pair[0].event_id >= pair[1].event_id {
+            anyhow::bail!("event-blob repair layout produced a non-unique missing event set");
+        }
+    }
+    Ok((spool_event_records, missing))
 }
 
 async fn load_spool_prefix_events(

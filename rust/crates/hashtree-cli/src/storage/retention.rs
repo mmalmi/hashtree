@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, OpenOptions};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -120,6 +120,65 @@ impl Drop for ProfileRepairRetentionPublicationGuard {
             libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
         }
     }
+}
+
+/// Acquire the existing retention-root publication lock without creating any
+/// path or opening the application blob writer.
+///
+/// Recovery commands use this before they snapshot profile roots or inspect
+/// retained event DAGs. Requiring an existing direct regular file keeps a
+/// typo, symlink swap, or incomplete Social namespace from silently creating a
+/// different lock authority.
+pub fn acquire_existing_profile_repair_retention_guard(
+    base_path: &Path,
+) -> Result<ProfileRepairRetentionPublicationGuard> {
+    let path = base_path.join(RETENTION_ROOTS_LOCK_FILE);
+    let before = std::fs::symlink_metadata(&path)
+        .with_context(|| format!("inspect existing retention-roots lock {}", path.display()))?;
+    if before.file_type().is_symlink() || !before.file_type().is_file() {
+        anyhow::bail!(
+            "existing retention-roots lock is not a direct regular file: {}",
+            path.display()
+        );
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("open existing retention-roots lock {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+        if result != 0 {
+            return Err(std::io::Error::last_os_error()).with_context(|| {
+                format!("acquire existing retention-roots lock {}", path.display())
+            });
+        }
+        use std::os::unix::fs::MetadataExt;
+        let opened = file
+            .metadata()
+            .with_context(|| format!("inspect opened retention-roots lock {}", path.display()))?;
+        let current = std::fs::symlink_metadata(&path)
+            .with_context(|| format!("reinspect retention-roots lock {}", path.display()))?;
+        if current.file_type().is_symlink()
+            || !current.file_type().is_file()
+            || opened.dev() != before.dev()
+            || opened.ino() != before.ino()
+            || current.dev() != before.dev()
+            || current.ino() != before.ino()
+        {
+            anyhow::bail!(
+                "retention-roots lock identity changed while it was acquired: {}",
+                path.display()
+            );
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = before;
+        anyhow::bail!("retention-root transactions require an operating-system advisory file lock");
+    }
+    Ok(ProfileRepairRetentionPublicationGuard { file })
 }
 
 pub(super) struct ActiveRetentionProtection {
@@ -1866,6 +1925,36 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::storage::PRIORITY_OTHER;
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_profile_repair_retention_guard_never_creates_its_authority() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let lock_path = temp_dir.path().join(RETENTION_ROOTS_LOCK_FILE);
+
+        let error = acquire_existing_profile_repair_retention_guard(temp_dir.path())
+            .err()
+            .expect("missing authority must fail");
+        assert!(error
+            .to_string()
+            .contains("inspect existing retention-roots lock"));
+        assert!(
+            !lock_path.exists(),
+            "recovery guard created a missing lock authority"
+        );
+
+        std::fs::write(&lock_path, b"existing-authority").expect("create existing lock authority");
+        let before = std::fs::metadata(&lock_path).expect("inspect existing lock authority");
+        let guard = acquire_existing_profile_repair_retention_guard(temp_dir.path())
+            .expect("acquire existing lock authority");
+        let after = std::fs::metadata(&lock_path).expect("reinspect existing lock authority");
+        assert_eq!(before.len(), after.len());
+        assert_eq!(
+            std::fs::read(&lock_path).expect("read existing lock authority"),
+            b"existing-authority"
+        );
+        drop(guard);
+    }
 
     fn write_root_file(path: &Path, cid: &Cid) {
         #[derive(Serialize)]

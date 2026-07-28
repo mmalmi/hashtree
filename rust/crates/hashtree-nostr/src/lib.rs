@@ -102,6 +102,20 @@ impl ValidatedNostrEventBlob {
     pub fn cid(&self) -> &Cid {
         &self.cid
     }
+
+    /// Return the exact physical content-addressed block set required by this
+    /// validated event blob.
+    ///
+    /// Recovery tooling records these hashes and sizes in its durable intent
+    /// before writing. The bytes remain private and can only be copied through
+    /// [`NostrEventStore::store_validated_event_blobs`].
+    pub fn stored_block_metadata(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (Hash, u64)> + DoubleEndedIterator + '_ {
+        self.stored_blocks
+            .iter()
+            .map(|(hash, bytes)| (*hash, bytes.len() as u64))
+    }
 }
 
 impl StoredNostrEvent {
@@ -1117,7 +1131,12 @@ impl<S: Store> NostrEventStore<S> {
         &self,
         cid: &Cid,
     ) -> Result<Option<StoredNostrEvent>, NostrEventStoreError> {
-        let Some(data) = self.tree.get(cid, None).await? else {
+        let data = match self.tree.get(cid, None).await {
+            Ok(data) => data,
+            Err(HashTreeError::MissingChunk(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let Some(data) = data else {
             return Ok(None);
         };
         self.decode_event(&data).map(Some)

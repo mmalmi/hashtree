@@ -52,6 +52,15 @@
   incomplete intents fence ordinary event, graph, and profile writers before
   mutation; and profile-root Blossom/relay publication now drains safely in a
   dedicated lane without blocking local ingestion.
+- `nostr-index repair-bulk-projection-event-blobs` now exhaustively walks all
+  nine v2 event roots against the retained signed spool, records every missing
+  immutable event body in a crash-safe intent, verifies signatures and
+  precomputes exact CIDs before writing, and restores only intended body blocks
+  through an fd-pinned Pool manifest/member authority while holding the
+  existing retention and profile-root transactions. Missing and interrupted
+  `Pending` writes resume in bounded force-synced batches without changing
+  index roots; both new and already-published receipts require exact physical
+  readback, a committed catalog, and a fresh full root/spool audit.
 - `nostr-index build-bulk-tranche` now advances a sealed v3 bulk projection
   from its exact Freeze boundary through crash-resumable index construction to
   Candidate. It reattests the frozen stage, spool, profile-distance, and rank
@@ -69,6 +78,9 @@
 
 ### Fixed
 
+- Optional Nostr event-blob reads now classify an absent linked chunk as a
+  missing body, allowing exact spool-authoritative repair to restore partially
+  missing large events while still rejecting corrupt bytes.
 - Bulk profile repair now bootstraps the root-pair transaction lock for
   otherwise valid legacy socialgraph stores created before that lock existed.
   Invalid invocations still fail before creating it, and ordinary read-only

@@ -1215,6 +1215,45 @@ pub(crate) enum NostrIndexCommands {
         #[arg(long, short)]
         out: Option<PathBuf>,
     },
+    /// Restore every missing v2 event blob from the exact retained signed spool
+    RepairBulkProjectionEventBlobs {
+        /// Durable staging directory whose terminal state produced the spool
+        #[arg(long = "staging-data-dir")]
+        staging_data_dir: PathBuf,
+        /// Exact SHA-256 of nostr-index/bulk-projection-v2/state.json
+        #[arg(long = "expected-state-sha256")]
+        expected_state_sha256: String,
+        /// Exact SHA-256 of nostr-stage/crawl-state.json
+        #[arg(long = "expected-stage-state-sha256")]
+        expected_stage_state_sha256: String,
+        /// Exact SHA-256 of canonical JSON for the crawl policy
+        #[arg(long = "expected-policy-sha256")]
+        expected_policy_sha256: String,
+        /// Exact SHA-256 of bulk-projection-v2/spool/data.mdb
+        #[arg(long = "expected-spool-data-sha256")]
+        expected_spool_data_sha256: String,
+        /// Exact SHA-256 of the existing profile-repair retention lease
+        #[arg(long = "expected-profile-repair-retention-lease-sha256")]
+        expected_profile_repair_retention_lease_sha256: String,
+        /// Exact durable author watermark represented by the retained spool
+        #[arg(long = "expected-replayed-author-count")]
+        expected_replayed_author_count: usize,
+        /// Exact complete ordered allowlist author count
+        #[arg(long = "expected-full-author-count")]
+        expected_full_author_count: usize,
+        /// B-tree order used by the retained v2 event roots
+        #[arg(long, default_value_t = 64)]
+        btree_order: usize,
+        /// Maximum event records read or written per bounded page
+        #[arg(long, default_value_t = 1024)]
+        page_size: usize,
+        /// Persist an immutable intent and restore the exact missing set
+        #[arg(long)]
+        apply: bool,
+        /// Immutable receipt output path (default stdout; use "-" for stdout)
+        #[arg(long, short)]
+        out: Option<PathBuf>,
+    },
     /// Pin an audited v2 candidate and rotate into crash-safe v3 append mode
     PrepareBulkTranche {
         /// Durable staging directory containing the immutable author segments

@@ -30,7 +30,10 @@ pub use self::model::{
 use self::move_catalog::{
     move_cleanup_state_key, move_state_key, rebuild_move_cleanup_member_index_txn,
 };
-pub use self::read_only::{ReadOnlyPoolCatalogAudit, ReadOnlyPoolStore};
+pub use self::read_only::{
+    ReadOnlyPoolCatalogAudit, ReadOnlyPoolManifestMember, ReadOnlyPoolManifestSnapshot,
+    ReadOnlyPoolStore,
+};
 pub use self::reader::{
     PoolCatalogLocation, PoolManifestIdentity, PoolReadBatchItem, PoolStoreReader,
     PoolTerminalAudit,

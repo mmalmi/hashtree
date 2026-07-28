@@ -565,6 +565,103 @@ fn test_nostr_bulk_profile_repair_requires_all_authority_pins() {
 }
 
 #[test]
+fn test_nostr_bulk_event_blob_repair_requires_all_authority_pins() {
+    let complete = [
+        "htree",
+        "nostr-index",
+        "repair-bulk-projection-event-blobs",
+        "--staging-data-dir",
+        "/stage",
+        "--expected-state-sha256",
+        &"a".repeat(64),
+        "--expected-stage-state-sha256",
+        &"b".repeat(64),
+        "--expected-policy-sha256",
+        &"c".repeat(64),
+        "--expected-spool-data-sha256",
+        &"d".repeat(64),
+        "--expected-profile-repair-retention-lease-sha256",
+        &"e".repeat(64),
+        "--expected-replayed-author-count",
+        "17177",
+        "--expected-full-author-count",
+        "101267",
+        "--btree-order",
+        "73",
+        "--page-size",
+        "257",
+        "--apply",
+        "--out",
+        "/evidence/event-blob-repair.json",
+    ]
+    .into_iter()
+    .map(ToString::to_string)
+    .collect::<Vec<_>>();
+    for required_flag in [
+        "--staging-data-dir",
+        "--expected-state-sha256",
+        "--expected-stage-state-sha256",
+        "--expected-policy-sha256",
+        "--expected-spool-data-sha256",
+        "--expected-profile-repair-retention-lease-sha256",
+        "--expected-replayed-author-count",
+        "--expected-full-author-count",
+    ] {
+        let mut missing = complete.clone();
+        let flag_index = missing
+            .iter()
+            .position(|argument| argument == required_flag)
+            .unwrap_or_else(|| panic!("test argument list omitted {required_flag}"));
+        missing.drain(flag_index..=flag_index + 1);
+        assert!(
+            Cli::try_parse_from(missing).is_err(),
+            "{required_flag} must be required"
+        );
+    }
+
+    let cli = Cli::try_parse_from(complete).unwrap();
+    assert!(
+        !should_spawn_background_update(&cli),
+        "pinned event-blob repair must not launch the generic background updater"
+    );
+    let Commands::NostrIndex { command } = cli.command else {
+        panic!("expected nostr-index command");
+    };
+    let NostrIndexCommands::RepairBulkProjectionEventBlobs {
+        staging_data_dir,
+        expected_state_sha256,
+        expected_stage_state_sha256,
+        expected_policy_sha256,
+        expected_spool_data_sha256,
+        expected_profile_repair_retention_lease_sha256,
+        expected_replayed_author_count,
+        expected_full_author_count,
+        btree_order,
+        page_size,
+        apply,
+        out,
+    } = *command
+    else {
+        panic!("expected repair-bulk-projection-event-blobs command");
+    };
+    assert_eq!(staging_data_dir, PathBuf::from("/stage"));
+    assert_eq!(expected_state_sha256, "a".repeat(64));
+    assert_eq!(expected_stage_state_sha256, "b".repeat(64));
+    assert_eq!(expected_policy_sha256, "c".repeat(64));
+    assert_eq!(expected_spool_data_sha256, "d".repeat(64));
+    assert_eq!(
+        expected_profile_repair_retention_lease_sha256,
+        "e".repeat(64)
+    );
+    assert_eq!(expected_replayed_author_count, 17_177);
+    assert_eq!(expected_full_author_count, 101_267);
+    assert_eq!(btree_order, 73);
+    assert_eq!(page_size, 257);
+    assert!(apply);
+    assert_eq!(out, Some(PathBuf::from("/evidence/event-blob-repair.json")));
+}
+
+#[test]
 fn test_storage_pool_add_and_migration_args() {
     let cli = Cli::try_parse_from([
         "htree",

@@ -119,10 +119,10 @@ struct RootPairPin {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-struct PoolCatalogPin {
-    stored_locations: u64,
-    sha256: String,
-    manifest_sha256: String,
+pub(super) struct PoolCatalogPin {
+    pub(super) stored_locations: u64,
+    pub(super) sha256: String,
+    pub(super) manifest_sha256: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -175,7 +175,7 @@ fn repair_paths(data_dir: &Path) -> (PathBuf, PathBuf) {
     hashtree_cli::socialgraph::profile_repair_evidence_paths(data_dir)
 }
 
-fn require_sha256(label: &str, value: &str) -> Result<()> {
+pub(super) fn require_sha256(label: &str, value: &str) -> Result<()> {
     if value.len() != 64
         || !value
             .bytes()
@@ -186,7 +186,7 @@ fn require_sha256(label: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-fn hash_file(path: &Path) -> Result<String> {
+pub(super) fn hash_file(path: &Path) -> Result<String> {
     let metadata = std::fs::symlink_metadata(path)
         .with_context(|| format!("inspect pinned file {}", path.display()))?;
     if !metadata.file_type().is_file() || metadata.file_type().is_symlink() {
@@ -211,7 +211,7 @@ fn hash_file(path: &Path) -> Result<String> {
     Ok(hex::encode(digest.finalize()))
 }
 
-fn open_exact_durable_pool(data_dir: &Path) -> Result<Arc<ReadOnlyPoolStore>> {
+pub(super) fn open_exact_durable_pool(data_dir: &Path) -> Result<Arc<ReadOnlyPoolStore>> {
     let pool_path = data_dir.join(SHARED_BLOB_POOL_DIR_NAME);
     let store = Arc::new(
         ReadOnlyPoolStore::open(&pool_path)
@@ -223,7 +223,7 @@ fn open_exact_durable_pool(data_dir: &Path) -> Result<Arc<ReadOnlyPoolStore>> {
     Ok(store)
 }
 
-fn pin_committed_pool_catalog(store: &ReadOnlyPoolStore) -> Result<PoolCatalogPin> {
+pub(super) fn pin_committed_pool_catalog(store: &ReadOnlyPoolStore) -> Result<PoolCatalogPin> {
     let ReadOnlyPoolCatalogAudit {
         stored_locations,
         sha256,
@@ -238,7 +238,7 @@ fn pin_committed_pool_catalog(store: &ReadOnlyPoolStore) -> Result<PoolCatalogPi
     })
 }
 
-fn validate_pool_catalog_pin(label: &str, pin: &PoolCatalogPin) -> Result<()> {
+pub(super) fn validate_pool_catalog_pin(label: &str, pin: &PoolCatalogPin) -> Result<()> {
     if pin.stored_locations == 0 {
         anyhow::bail!("{label} contains no committed Pool locations");
     }
@@ -246,7 +246,7 @@ fn validate_pool_catalog_pin(label: &str, pin: &PoolCatalogPin) -> Result<()> {
     require_sha256(&format!("{label} manifest SHA-256"), &pin.manifest_sha256)
 }
 
-fn canonical_json_bytes<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>> {
+pub(super) fn canonical_json_bytes<T: Serialize>(value: &T, label: &str) -> Result<Vec<u8>> {
     let mut bytes = serde_json::to_vec(value).with_context(|| format!("encode {label}"))?;
     bytes.push(b'\n');
     Ok(bytes)

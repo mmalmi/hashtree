@@ -1,6 +1,7 @@
-use super::member::verify_member_path;
+use super::member::{open_member_reader, verify_member_path};
 use super::{
-    decode_manifest, map_heed, LocationRecord, PoolManifest, PoolMemberConfig, PoolMemberId,
+    decode_manifest, map_heed, validate_controlled_manifest, LocationRecord, PoolCatalogLocation,
+    PoolManifest, PoolMemberConfig, PoolMemberId, PoolMemberState, PoolStoreConfig,
     CATALOG_DATABASES, CATALOG_MAX_READERS, EXTERNAL_MARKER_NAME, MANIFEST_KEY, MEMBER_MARKER_NAME,
 };
 use crate::{managed_env::ManagedEnv, ExternalBlobOptions, LmdbBlobReader};
@@ -22,6 +23,7 @@ struct ReadOnlyPoolStoreInner {
     opened_manifest_sha256: String,
     locations: Database<Bytes, Bytes>,
     members: HashMap<PoolMemberId, Arc<LmdbBlobReader>>,
+    manifest_snapshot: ReadOnlyPoolManifestSnapshot,
 }
 
 /// Strictly read-only view of an existing PoolStore catalog and its members.
@@ -43,6 +45,25 @@ pub struct ReadOnlyPoolCatalogAudit {
     pub manifest_sha256: String,
 }
 
+/// One exact member record from a read-only Pool manifest snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOnlyPoolManifestMember {
+    pub id: PoolMemberId,
+    pub state: PoolMemberState,
+    pub config: PoolMemberConfig,
+}
+
+/// The exact stored Pool manifest observed while opening a read-only reader.
+///
+/// `sha256` covers the stored manifest bytes, including generation, member
+/// ordering, member states, and every member configuration field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOnlyPoolManifestSnapshot {
+    pub generation: u64,
+    pub sha256: Hash,
+    pub members: Vec<ReadOnlyPoolManifestMember>,
+}
+
 fn require_opened_manifest(
     current: &[u8],
     opened: &[u8],
@@ -59,7 +80,37 @@ fn require_opened_manifest(
 
 impl ReadOnlyPoolStore {
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, StoreError> {
-        let path = path.as_ref();
+        Self::open_inner(path.as_ref(), None)
+    }
+
+    /// Open an exact, read-only Pool authority captured by a controller.
+    ///
+    /// A controlled open requires a pinned catalog LMDB identity, the exact
+    /// manifest SHA-256, one exact runtime binding for every manifest member,
+    /// and disabled temperature tracking. Member readers use only those
+    /// runtime paths and pinned LMDB identities.
+    pub fn open_controlled<P: AsRef<Path>>(
+        path: P,
+        config: PoolStoreConfig,
+    ) -> Result<Self, StoreError> {
+        if config.temperature.enabled {
+            return Err(StoreError::Other(
+                "controlled read-only Pool open requires temperature tracking to be disabled"
+                    .into(),
+            ));
+        }
+        if config.catalog_lmdb_identity.is_none()
+            || config.expected_manifest_sha256.is_none()
+            || config.member_runtime_paths.is_empty()
+        {
+            return Err(StoreError::Other(
+                "controlled read-only Pool open requires catalog identity, exact manifest SHA-256, and every member runtime binding".into(),
+            ));
+        }
+        Self::open_inner(path.as_ref(), Some(config))
+    }
+
+    fn open_inner(path: &Path, config: Option<PoolStoreConfig>) -> Result<Self, StoreError> {
         if !path.join("data.mdb").is_file() {
             return Err(StoreError::Other(format!(
                 "read-only pool catalog is missing at {}",
@@ -74,7 +125,16 @@ impl ReadOnlyPoolStore {
         unsafe {
             options.flags(EnvFlags::READ_ONLY | EnvFlags::NO_READ_AHEAD);
         }
-        let env = unsafe { ManagedEnv::open(&options, path) }.map_err(|error| {
+        let env = unsafe {
+            match config
+                .as_ref()
+                .and_then(|config| config.catalog_lmdb_identity)
+            {
+                Some(identity) => ManagedEnv::open_pinned(&options, path, identity),
+                None => ManagedEnv::open(&options, path),
+            }
+        }
+        .map_err(|error| {
             StoreError::Other(format!(
                 "open read-only pool catalog {}: {error}",
                 path.display()
@@ -95,11 +155,56 @@ impl ReadOnlyPoolStore {
             .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
         let opened_manifest_bytes = manifest_bytes.to_vec();
         let opened_manifest_sha256 = to_hex(&sha256(&opened_manifest_bytes));
-        let manifest = decode_manifest(&opened_manifest_bytes)?;
+        let mut member_runtime_paths = config
+            .as_ref()
+            .map(|config| {
+                config
+                    .member_runtime_paths
+                    .iter()
+                    .map(|binding| (binding.id, binding.clone()))
+                    .collect::<HashMap<_, _>>()
+            })
+            .unwrap_or_default();
+        if config
+            .as_ref()
+            .is_some_and(|config| member_runtime_paths.len() != config.member_runtime_paths.len())
+        {
+            return Err(StoreError::Other(
+                "duplicate runtime path binding for controlled read-only Pool open".into(),
+            ));
+        }
+        let manifest = match config
+            .as_ref()
+            .and_then(|config| config.expected_manifest_sha256)
+        {
+            Some(expected) => validate_controlled_manifest(
+                &opened_manifest_bytes,
+                expected,
+                &member_runtime_paths,
+            )?,
+            None => decode_manifest(&opened_manifest_bytes)?,
+        };
+        let manifest_snapshot = ReadOnlyPoolManifestSnapshot {
+            generation: manifest.generation,
+            sha256: sha256(&opened_manifest_bytes),
+            members: manifest
+                .members
+                .iter()
+                .map(|member| ReadOnlyPoolManifestMember {
+                    id: member.id,
+                    state: member.state,
+                    config: member.config.clone(),
+                })
+                .collect(),
+        };
         // Publish DBI handles before later transactions use them.
         rtxn.commit().map_err(map_heed)?;
 
-        let members = open_members(&manifest)?;
+        let members = if config.is_some() {
+            open_controlled_members(&manifest, &mut member_runtime_paths)?
+        } else {
+            open_members(&manifest)?
+        };
         Ok(Self {
             inner: Arc::new(ReadOnlyPoolStoreInner {
                 _env: env,
@@ -108,8 +213,82 @@ impl ReadOnlyPoolStore {
                 opened_manifest_sha256,
                 locations,
                 members,
+                manifest_snapshot,
             }),
         })
+    }
+
+    /// Return the exact manifest snapshot captured by this reader.
+    ///
+    /// This first proves that the live manifest still matches the opened
+    /// bytes, so callers cannot accidentally pin a stale topology.
+    pub fn manifest_snapshot(&self) -> Result<ReadOnlyPoolManifestSnapshot, StoreError> {
+        let rtxn = self.inner._env.read_txn().map_err(map_heed)?;
+        let manifest = self
+            .inner
+            .manifest
+            .get(&rtxn, MANIFEST_KEY)
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
+        require_opened_manifest(
+            manifest,
+            &self.inner.opened_manifest_bytes,
+            &self.inner.opened_manifest_sha256,
+        )?;
+        decode_manifest(manifest)?;
+        Ok(self.inner.manifest_snapshot.clone())
+    }
+
+    /// Return exact catalog state for many hashes in one read transaction.
+    ///
+    /// `Pending` and `Moving` are deliberately preserved so crash recovery
+    /// cannot mistake physical bytes for committed catalog residency.
+    pub fn blob_catalog_locations(
+        &self,
+        hashes: &[Hash],
+    ) -> Result<Vec<PoolCatalogLocation>, StoreError> {
+        let rtxn = self.inner._env.read_txn().map_err(map_heed)?;
+        let manifest = self
+            .inner
+            .manifest
+            .get(&rtxn, MANIFEST_KEY)
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
+        require_opened_manifest(
+            manifest,
+            &self.inner.opened_manifest_bytes,
+            &self.inner.opened_manifest_sha256,
+        )?;
+        hashes
+            .iter()
+            .map(|hash| {
+                let record = self
+                    .inner
+                    .locations
+                    .get(&rtxn, hash)
+                    .map_err(map_heed)?
+                    .map(LocationRecord::decode)
+                    .transpose()?;
+                Ok(match record {
+                    None => PoolCatalogLocation::Missing,
+                    Some(LocationRecord::Pending { member, size }) => {
+                        PoolCatalogLocation::Pending { member, size }
+                    }
+                    Some(LocationRecord::Stored { member, size }) => {
+                        PoolCatalogLocation::Stored { member, size }
+                    }
+                    Some(LocationRecord::Moving {
+                        source,
+                        target,
+                        size,
+                    }) => PoolCatalogLocation::Moving {
+                        source,
+                        target,
+                        size,
+                    },
+                })
+            })
+            .collect()
     }
 
     fn read_location(&self, hash: &Hash) -> Result<Option<LocationRecord>, StoreError> {
@@ -310,6 +489,37 @@ fn open_members(
     Ok(stores)
 }
 
+fn open_controlled_members(
+    manifest: &PoolManifest,
+    bindings: &mut HashMap<PoolMemberId, super::PoolMemberRuntimePaths>,
+) -> Result<HashMap<PoolMemberId, Arc<LmdbBlobReader>>, StoreError> {
+    let mut stores = HashMap::with_capacity(manifest.members.len());
+    for member in &manifest.members {
+        let binding = bindings.remove(&member.id).ok_or_else(|| {
+            StoreError::Other(format!(
+                "controlled read-only Pool open has no runtime binding for member {}",
+                member.id
+            ))
+        })?;
+        let mut runtime_config = member.config.clone();
+        runtime_config.path = binding.runtime_path;
+        runtime_config.external_blob_dir = binding.runtime_external_path;
+        let reader = open_member_reader(member.id, &runtime_config, Some(binding.lmdb_identity))?;
+        if stores.insert(member.id, Arc::new(reader)).is_some() {
+            return Err(StoreError::Other(format!(
+                "pool manifest repeats member {}",
+                member.id
+            )));
+        }
+    }
+    if let Some(unexpected) = bindings.keys().next() {
+        return Err(StoreError::Other(format!(
+            "controlled read-only Pool open has runtime binding for unknown member {unexpected}"
+        )));
+    }
+    Ok(stores)
+}
+
 fn external_options(
     id: PoolMemberId,
     config: &PoolMemberConfig,
@@ -395,8 +605,17 @@ impl Store for ReadOnlyPoolStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{PoolStore, PoolStoreConfig};
+    use crate::{
+        PinnedLmdbFileIdentity, PinnedLmdbIdentity, PoolMemberRuntimePaths, PoolStore,
+        PoolStoreConfig,
+    };
     use std::fs;
+    #[cfg(unix)]
+    use std::fs::File;
+    #[cfg(target_os = "linux")]
+    use std::os::fd::AsRawFd;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -418,6 +637,215 @@ mod tests {
         let mut config = PoolStoreConfig::default();
         config.temperature.enabled = false;
         config
+    }
+
+    #[cfg(unix)]
+    fn lmdb_identity(path: &Path) -> PinnedLmdbIdentity {
+        let data = fs::metadata(path.join("data.mdb")).expect("data.mdb metadata");
+        let lock = fs::metadata(path.join("lock.mdb")).expect("lock.mdb metadata");
+        PinnedLmdbIdentity {
+            data: PinnedLmdbFileIdentity {
+                device: data.dev(),
+                inode: data.ino(),
+            },
+            lock: PinnedLmdbFileIdentity {
+                device: lock.dev(),
+                inode: lock.ino(),
+            },
+        }
+    }
+
+    #[cfg(unix)]
+    struct PinnedDirectory {
+        _directory: File,
+        runtime_path: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    fn pin_directory(path: &Path) -> PinnedDirectory {
+        let directory = File::open(path).expect("open directory");
+        #[cfg(target_os = "linux")]
+        let runtime_path =
+            std::path::PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
+        #[cfg(not(target_os = "linux"))]
+        let runtime_path = path.to_path_buf();
+        PinnedDirectory {
+            _directory: directory,
+            runtime_path,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn controlled_open_exposes_exact_manifest_and_catalog_states() {
+        let temp = TempDir::new().expect("temp dir");
+        let catalog = temp.path().join("catalog");
+        let source_path = temp.path().join("source");
+        let target_path = temp.path().join("target");
+        let source_config = PoolMemberConfig::new(source_path.clone(), 16 * 1024 * 1024);
+        let target_config = PoolMemberConfig::new(target_path.clone(), 16 * 1024 * 1024);
+        let pool = PoolStore::open(&catalog, pool_config()).expect("open pool");
+        let source = pool
+            .add_member(source_config.clone())
+            .expect("add source member");
+        let target = pool
+            .add_member(target_config.clone())
+            .expect("add target member");
+
+        let stored_data = b"controlled read-only stored bytes";
+        let stored_hash = sha256(stored_data);
+        pool.put_sync(stored_hash, stored_data)
+            .expect("put stored blob");
+        let stored_location = pool
+            .read_location(&stored_hash)
+            .expect("read stored location")
+            .expect("stored catalog record");
+        let missing_hash = sha256(b"controlled read-only missing");
+        let pending_hash = sha256(b"controlled read-only pending");
+        let moving_hash = sha256(b"controlled read-only moving");
+        let mut wtxn = pool.env.write_txn().expect("catalog write txn");
+        pool.set_location_txn(
+            &mut wtxn,
+            pending_hash,
+            Some(LocationRecord::Pending {
+                member: source,
+                size: 37,
+            }),
+        )
+        .expect("write pending");
+        pool.set_location_txn(
+            &mut wtxn,
+            moving_hash,
+            Some(LocationRecord::Moving {
+                source,
+                target,
+                size: 41,
+            }),
+        )
+        .expect("write moving");
+        wtxn.commit().expect("commit catalog states");
+        pool.force_sync().expect("sync pool");
+        drop(pool);
+
+        let ordinary =
+            ReadOnlyPoolStore::open(&catalog).expect("open ordinary read-only snapshot reader");
+        let expected_snapshot = ordinary.manifest_snapshot().expect("manifest snapshot");
+        assert_eq!(
+            expected_snapshot.sha256,
+            sha256(&ordinary.inner.opened_manifest_bytes)
+        );
+        assert_eq!(expected_snapshot.members.len(), 2);
+        assert_eq!(
+            expected_snapshot
+                .members
+                .iter()
+                .find(|member| member.id == source)
+                .expect("source snapshot")
+                .config,
+            source_config
+        );
+        assert_eq!(
+            expected_snapshot
+                .members
+                .iter()
+                .find(|member| member.id == target)
+                .expect("target snapshot")
+                .config,
+            target_config
+        );
+        drop(ordinary);
+
+        let catalog_identity = lmdb_identity(&catalog);
+        let source_identity = lmdb_identity(&source_path);
+        let target_identity = lmdb_identity(&target_path);
+        let catalog_pin = pin_directory(&catalog);
+        let source_pin = pin_directory(&source_path);
+        let target_pin = pin_directory(&target_path);
+        let mut controlled = pool_config();
+        controlled.catalog_lmdb_identity = Some(catalog_identity);
+        controlled.expected_manifest_sha256 = Some(expected_snapshot.sha256);
+        controlled.member_runtime_paths = vec![
+            PoolMemberRuntimePaths {
+                id: source,
+                configured_path: source_path,
+                runtime_path: source_pin.runtime_path.clone(),
+                configured_external_path: None,
+                runtime_external_path: None,
+                lmdb_identity: source_identity,
+            },
+            PoolMemberRuntimePaths {
+                id: target,
+                configured_path: target_path,
+                runtime_path: target_pin.runtime_path.clone(),
+                configured_external_path: None,
+                runtime_external_path: None,
+                lmdb_identity: target_identity,
+            },
+        ];
+
+        let mut enabled_temperature = controlled.clone();
+        enabled_temperature.temperature.enabled = true;
+        assert!(
+            ReadOnlyPoolStore::open_controlled(&catalog_pin.runtime_path, enabled_temperature)
+                .err()
+                .expect("temperature-enabled controlled open must fail")
+                .to_string()
+                .contains("temperature tracking")
+        );
+
+        let mut wrong_manifest = controlled.clone();
+        wrong_manifest.expected_manifest_sha256 = Some(sha256(b"wrong manifest authority"));
+        assert!(
+            ReadOnlyPoolStore::open_controlled(&catalog_pin.runtime_path, wrong_manifest)
+                .err()
+                .expect("wrong manifest authority must fail")
+                .to_string()
+                .contains("manifest SHA-256 differs")
+        );
+
+        let mut missing_binding = controlled.clone();
+        missing_binding.member_runtime_paths.pop();
+        assert!(
+            ReadOnlyPoolStore::open_controlled(&catalog_pin.runtime_path, missing_binding)
+                .err()
+                .expect("incomplete member authority must fail")
+                .to_string()
+                .contains("pinned pool topology")
+        );
+
+        let reader = ReadOnlyPoolStore::open_controlled(&catalog_pin.runtime_path, controlled)
+            .expect("open controlled read-only Pool");
+        assert_eq!(
+            reader.manifest_snapshot().expect("controlled snapshot"),
+            expected_snapshot
+        );
+        let expected_stored = match stored_location {
+            LocationRecord::Stored { member, size } => PoolCatalogLocation::Stored { member, size },
+            other => panic!("put committed unexpected location {other:?}"),
+        };
+        let locations = reader
+            .blob_catalog_locations(&[missing_hash, pending_hash, stored_hash, moving_hash])
+            .expect("read exact catalog states");
+        assert_eq!(
+            locations,
+            vec![
+                PoolCatalogLocation::Missing,
+                PoolCatalogLocation::Pending {
+                    member: source,
+                    size: 37,
+                },
+                expected_stored,
+                PoolCatalogLocation::Moving {
+                    source,
+                    target,
+                    size: 41,
+                },
+            ]
+        );
+        assert_eq!(
+            reader.get_sync(&stored_hash).expect("read stored blob"),
+            Some(stored_data.to_vec())
+        );
     }
 
     #[tokio::test]

@@ -31,9 +31,9 @@ use hashtree_cli::{Config, HashtreeStore};
 
 mod bulk_projection;
 pub(crate) use bulk_projection::{
-    BulkProfileRepairOptions, BulkProjectionAuditOptions, BulkTrancheAppendOptions,
-    BulkTrancheBuildOptions, BulkTrancheFreezeOptions, BulkTranchePrepareOptions,
-    BulkTrancheTransitionOutput,
+    BulkEventBlobRepairOptions, BulkProfileRepairOptions, BulkProjectionAuditOptions,
+    BulkTrancheAppendOptions, BulkTrancheBuildOptions, BulkTrancheFreezeOptions,
+    BulkTranchePrepareOptions, BulkTrancheTransitionOutput,
 };
 
 const INDEX_DIR: &str = "nostr-index";
@@ -579,6 +579,28 @@ pub(crate) async fn run_nostr_bulk_profile_repair(
         Ok((durable_store, graph))
     };
     bulk_projection::repair_bulk_projection_profiles(&data_dir, options, open_writer).await
+}
+
+pub(crate) async fn run_nostr_bulk_event_blob_repair(
+    data_dir: PathBuf,
+    options: BulkEventBlobRepairOptions,
+) -> Result<()> {
+    for variable in ["HTREE_LMDB_NO_SYNC", "HTREE_LMDB_NO_META_SYNC"] {
+        require_durable_profile_repair_lmdb_value(variable, std::env::var_os(variable).as_deref())?;
+    }
+    require_durable_external_blob_sync_value(
+        "HTREE_LMDB_EXTERNAL_BLOB_SYNC",
+        std::env::var_os("HTREE_LMDB_EXTERNAL_BLOB_SYNC").as_deref(),
+    )?;
+    require_writable_profile_repair_pool_value(
+        hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV,
+        std::env::var_os(hashtree_lmdb::POOL_AUDIT_READ_ONLY_ENV).as_deref(),
+    )?;
+    let _stage_lock = CrawlStateLock::acquire_stage_shared(&options.staging_data_dir)?;
+    let _projection_lock = CrawlStateLock::acquire(&data_dir)?;
+    socialgraph::bootstrap_profile_root_pair_transaction_lock(&data_dir)
+        .context("bootstrap event/profile root-pair transaction lock")?;
+    bulk_projection::repair_bulk_projection_event_blobs(&data_dir, options).await
 }
 
 fn require_durable_profile_repair_lmdb_value(

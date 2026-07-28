@@ -38,10 +38,11 @@ use super::mount_target::{
 };
 use super::mounts::print_active_mounts;
 use super::nostr_index::{
-    run_nostr_bulk_profile_repair, run_nostr_bulk_projection_audit, run_nostr_bulk_tranche_append,
-    run_nostr_bulk_tranche_build, run_nostr_bulk_tranche_freeze, run_nostr_bulk_tranche_prepare,
-    run_nostr_index_import, run_nostr_index_query, run_nostr_replaceable_repair,
-    run_nostr_time_repair_preparation, run_socialgraph_index_from_cli, BulkProfileRepairOptions,
+    run_nostr_bulk_event_blob_repair, run_nostr_bulk_profile_repair,
+    run_nostr_bulk_projection_audit, run_nostr_bulk_tranche_append, run_nostr_bulk_tranche_build,
+    run_nostr_bulk_tranche_freeze, run_nostr_bulk_tranche_prepare, run_nostr_index_import,
+    run_nostr_index_query, run_nostr_replaceable_repair, run_nostr_time_repair_preparation,
+    run_socialgraph_index_from_cli, BulkEventBlobRepairOptions, BulkProfileRepairOptions,
     BulkProjectionAuditOptions, BulkTrancheAppendOptions, BulkTrancheBuildOptions,
     BulkTrancheFreezeOptions, BulkTranchePrepareOptions, NostrIndexImportOptions,
     NostrIndexQueryOptions, NostrReplaceableRepairOptions, NostrTimeRepairPreparationOptions,
@@ -305,6 +306,7 @@ pub(crate) fn should_spawn_background_update(cli: &Cli) -> bool {
             if matches!(
                 command.as_ref(),
                 NostrIndexCommands::RepairBulkProjectionProfiles { .. }
+                    | NostrIndexCommands::RepairBulkProjectionEventBlobs { .. }
             )
     ) && !matches!(
         &cli.command,
@@ -1198,6 +1200,39 @@ pub(crate) async fn run() -> Result<()> {
                         expected_profile_search_root_file_sha256,
                         required_profile_pubkeys,
                         btree_order,
+                        out,
+                    },
+                )
+                .await?;
+            }
+            NostrIndexCommands::RepairBulkProjectionEventBlobs {
+                staging_data_dir,
+                expected_state_sha256,
+                expected_stage_state_sha256,
+                expected_policy_sha256,
+                expected_spool_data_sha256,
+                expected_profile_repair_retention_lease_sha256,
+                expected_replayed_author_count,
+                expected_full_author_count,
+                btree_order,
+                page_size,
+                apply,
+                out,
+            } => {
+                run_nostr_bulk_event_blob_repair(
+                    data_dir,
+                    BulkEventBlobRepairOptions {
+                        staging_data_dir,
+                        expected_state_sha256,
+                        expected_stage_state_sha256,
+                        expected_policy_sha256,
+                        expected_spool_data_sha256,
+                        expected_profile_repair_retention_lease_sha256,
+                        expected_replayed_author_count,
+                        expected_full_author_count,
+                        btree_order,
+                        page_size,
+                        apply,
                         out,
                     },
                 )

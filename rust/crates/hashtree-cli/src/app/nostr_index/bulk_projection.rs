@@ -24,10 +24,13 @@ use super::{
 };
 
 mod audit;
+mod event_blob_repair;
 mod repair;
 mod tranche;
 pub(super) use audit::audit_bulk_projection;
 pub(crate) use audit::BulkProjectionAuditOptions;
+pub(super) use event_blob_repair::repair_bulk_projection_event_blobs;
+pub(crate) use event_blob_repair::BulkEventBlobRepairOptions;
 pub(super) use repair::repair_bulk_projection_profiles;
 pub(crate) use repair::BulkProfileRepairOptions;
 pub(super) use tranche::load_bulk_tranche_progress;
