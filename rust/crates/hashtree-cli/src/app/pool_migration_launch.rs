@@ -1,8 +1,7 @@
 use anyhow::{bail, Context, Result};
 use hashtree_core::from_hex;
 use hashtree_lmdb::{
-    LmdbSourceKeysetAudit, PinnedLmdbFileIdentity, PinnedLmdbIdentity, PoolMigrationAuditSummary,
-    PoolPhysicalAudit,
+    PinnedLmdbFileIdentity, PinnedLmdbIdentity, PoolMigrationAuditSummary, PoolPhysicalAudit,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -45,8 +44,8 @@ use super::pool_migration_receipt::{
     capture_source_generation_fingerprint, load_validated_prior_source_terminal_receipts,
     validate_frozen_source_generation, PoolMigrationSourceTerminalReceiptV3,
     PriorSourceReceiptExpectationV3, SourceContentAuditV3, SourceGenerationFingerprintV3,
-    ValidatedSourceTerminalReceiptV3, MAX_FINAL_SOURCE_RECEIPTS, SOURCE_TERMINAL_FILE_NAME,
-    SOURCE_TERMINAL_SCHEMA,
+    ValidatedSourceTerminalReceiptV3, MAX_FINAL_SOURCE_RECEIPTS, SOURCE_KEY_EVIDENCE_KIND,
+    SOURCE_TERMINAL_FILE_NAME, SOURCE_TERMINAL_SCHEMA,
 };
 
 #[cfg(unix)]
@@ -902,7 +901,7 @@ impl AcknowledgedPoolMigrationLaunch {
 
     pub(super) fn write_source_terminal_receipt(
         &self,
-        source: &LmdbSourceKeysetAudit,
+        source: &hashtree_lmdb::LmdbSourceKeyAudit,
         content: &SourceContentAuditV3,
         source_evidence: SourceEvidenceManifestAuthorityV3,
         source_generation: SourceGenerationFingerprintV3,
@@ -964,15 +963,11 @@ impl AcknowledgedPoolMigrationLaunch {
                 .clone()
                 .context("source-terminal launch has no read-only mount authority")?,
             source_baseline_sha256: self.request.source.baseline.sha256.clone(),
+            source_key_evidence_kind: SOURCE_KEY_EVIDENCE_KIND.to_string(),
             source_blob_entries: source.blob_entries,
-            source_metadata_entries: source.metadata_entries,
-            source_blob_only_entries: source.blob_only_entries,
-            source_legacy_blob_only: source.legacy_blob_only,
-            source_inline_entries: source.inline_entries,
-            source_loose_external_entries: source.loose_external_entries,
-            source_packed_external_entries: source.packed_external_entries,
             source_keyset_sha256: hashtree_core::to_hex(&source.sha256),
-            source_catalog_location_sha256: hashtree_core::to_hex(&source.catalog_location_sha256),
+            source_evidence_kind: super::pool_migration_online_audit::SOURCE_EVIDENCE_KIND
+                .to_string(),
             source_verified_entries: content.verified_entries,
             source_verified_bytes: content.verified_bytes,
             source_content_sha256: hashtree_core::to_hex(&content.sha256),

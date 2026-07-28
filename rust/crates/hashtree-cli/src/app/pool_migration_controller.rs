@@ -2194,18 +2194,16 @@ mod linux {
                 bail!("root source reconciliation requires a nonempty exact entry set");
             }
             let reader = self.open_online_source_audit_reader()?;
-            let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
-            let sizes = reader
+            let expected = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+            if expected.windows(2).any(|pair| pair[0] >= pair[1]) {
+                bail!("root source reconciliation entries are not strictly ordered");
+            }
+            let present = reader
                 .reader
-                .sizes_for_sorted_hashes(&hashes)
-                .context("root-read online source reconciliation metadata")?;
-            if sizes.len() != entries.len()
-                || entries
-                    .iter()
-                    .zip(sizes)
-                    .any(|((_, expected_size), actual_size)| *expected_size != actual_size)
-            {
-                bail!("root source reconciliation metadata differs from checkpoint authority");
+                .existing_blob_keys_in_sorted_candidates(&expected)
+                .context("root-check online source reconciliation keys")?;
+            if present.len() != expected.len() || present.iter().any(|exists| !exists) {
+                bail!("root source reconciliation contains a key absent from raw source blobs");
             }
             Ok(())
         }
@@ -2268,13 +2266,12 @@ mod linux {
 
         fn verify_online_source_coverage(&self, audit: &PoolMigrationAuditStore) -> Result<()> {
             let reader = self.open_online_source_audit_reader()?;
-            if let Some((hash, size)) =
-                audit.first_unreconciled_source(&reader.reader, self.options.batch_size)?
+            if let Some(hash) =
+                audit.first_unreconciled_source_key(&reader.reader, self.options.batch_size)?
             {
                 bail!(
-                    "root source coverage found unverified entry {} / {} bytes",
-                    hashtree_core::to_hex(&hash),
-                    size
+                    "root source coverage found unreconciled key {}",
+                    hashtree_core::to_hex(&hash)
                 );
             }
             Ok(())
@@ -5047,7 +5044,7 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         let value: Value =
             serde_json::from_slice(&bytes).with_context(|| format!("parse strict {label} JSON"))?;
         let expected_schema = match label {
-            "source-terminal receipt" => "hashtree-pool-migration-source-terminal/v3",
+            "source-terminal receipt" => SOURCE_TERMINAL_SCHEMA,
             "online target audit receipt" => ONLINE_TARGET_AUDIT_SCHEMA,
             _ => "hashtree-pool-migration-terminal-audit/v3",
         };
@@ -5389,8 +5386,8 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 sync: true,
                 pack_target_bytes: None,
             });
-        let reader = hashtree_lmdb::LmdbBlobReader::
-            open_sequential_with_external_read_concurrency_and_pinned_identity(
+        let reader =
+            hashtree_lmdb::LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
                 source_runtime_path,
                 external,
                 source_read_concurrency,
@@ -5407,22 +5404,6 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             )
             .context("root-open frozen source for evidence replay")?;
         let generation = reader.environment_generation();
-        let keyset = reader
-            .validate_terminal_migration_keyset()
-            .context("root-audit frozen source keyset")?;
-        if keyset.blob_entries != receipt.source_blob_entries
-            || keyset.metadata_entries != receipt.source_metadata_entries
-            || keyset.blob_only_entries != receipt.source_blob_only_entries
-            || keyset.legacy_blob_only != receipt.source_legacy_blob_only
-            || keyset.inline_entries != receipt.source_inline_entries
-            || keyset.loose_external_entries != receipt.source_loose_external_entries
-            || keyset.packed_external_entries != receipt.source_packed_external_entries
-            || hashtree_core::to_hex(&keyset.sha256) != receipt.source_keyset_sha256
-            || hashtree_core::to_hex(&keyset.catalog_location_sha256)
-                != receipt.source_catalog_location_sha256
-        {
-            bail!("root frozen source keyset differs from its terminal receipt");
-        }
 
         let mut terminal = SourceEvidenceManifestReaderV3::open(&receipt.source_evidence)?;
         let mut next_terminal = terminal.next_entry()?;
@@ -5433,53 +5414,43 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         let mut bytes = 0u64;
         let mut hasher = Sha256::new();
         hasher.update(b"hashtree-pool-migration-source-content/v3\0");
+        let mut keyset = hashtree_lmdb::LmdbSourceKeyAuditBuilder::new();
         loop {
             let hashes = reader.scan_hashes_after(cursor, page_size)?;
             if hashes.is_empty() {
                 break;
             }
-            let sizes = reader.sizes_for_sorted_hashes(&hashes)?;
-            for (hash, size) in hashes.iter().copied().zip(sizes) {
-                match next_terminal {
-                    Some((evidence_hash, evidence_size))
-                        if evidence_hash == hash && evidence_size == size =>
+            keyset.append_sorted(&hashes)?;
+            for hash in hashes.iter().copied() {
+                let size = match (next_terminal, next_online) {
+                    (Some((terminal_hash, terminal_size)), Some((online_hash, online_size)))
+                        if terminal_hash == hash
+                            && online_hash == hash
+                            && terminal_size == online_size =>
                     {
                         next_terminal = terminal.next_entry()?;
-                    }
-                    Some((evidence_hash, evidence_size)) => bail!(
-                        "terminal source evidence {} / {} bytes differs from frozen source {} / {} bytes",
-                        hashtree_core::to_hex(&evidence_hash),
-                        evidence_size,
-                        hashtree_core::to_hex(&hash),
-                        size
-                    ),
-                    None => bail!(
-                        "frozen source {} / {} bytes is absent from terminal source evidence",
-                        hashtree_core::to_hex(&hash),
-                        size
-                    ),
-                }
-                while next_online.is_some_and(|(online_hash, _)| online_hash < hash) {
-                    next_online = online_evidence.next_entry()?;
-                }
-                match next_online {
-                    Some((online_hash, online_size))
-                        if online_hash == hash && online_size == size =>
-                    {
                         next_online = online_evidence.next_entry()?;
+                        terminal_size
                     }
-                    Some((online_hash, online_size)) if online_hash == hash => bail!(
-                        "frozen source size {} for {} differs from certified online size {}",
-                        size,
+                    (Some((terminal_hash, terminal_size)), Some((online_hash, online_size))) => {
+                        bail!(
+                            "frozen source key {} differs from terminal evidence {} / {} bytes or online evidence {} / {} bytes",
+                            hashtree_core::to_hex(&hash),
+                            hashtree_core::to_hex(&terminal_hash),
+                            terminal_size,
+                            hashtree_core::to_hex(&online_hash),
+                            online_size
+                        )
+                    }
+                    (None, _) => bail!(
+                        "frozen source key {} is absent from terminal source evidence",
                         hashtree_core::to_hex(&hash),
-                        online_size
                     ),
-                    _ => bail!(
-                        "frozen source {} / {} bytes is absent from certified online source evidence",
+                    (_, None) => bail!(
+                        "frozen source key {} is absent from certified online source evidence",
                         hashtree_core::to_hex(&hash),
-                        size
                     ),
-                }
+                };
                 entries = entries
                     .checked_add(1)
                     .context("frozen source evidence entry count overflow")?;
@@ -5498,20 +5469,37 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 size
             );
         }
-        while next_online.is_some() {
-            next_online = online_evidence.next_entry()?;
+        if let Some((hash, size)) = next_online {
+            bail!(
+                "certified online source evidence has extra entry {} / {} bytes",
+                hashtree_core::to_hex(&hash),
+                size
+            );
         }
+        let (source_blob_entries, _) = reader.database_entry_counts()?;
+        if keyset.blob_entries() != source_blob_entries {
+            bail!(
+                "root source key replay count {} differs from LMDB blob entry count {}",
+                keyset.blob_entries(),
+                source_blob_entries
+            );
+        }
+        let keyset = keyset.finish();
         let terminal_summary = terminal.validated_summary()?;
         let online_summary = online_evidence.validated_summary()?;
         let content_sha256: [u8; 32] = hasher.finalize().into();
-        if entries != receipt.source_verified_entries
+        if keyset.blob_entries != receipt.source_blob_entries
+            || hashtree_core::to_hex(&keyset.sha256) != receipt.source_keyset_sha256
+            || entries != receipt.source_verified_entries
             || bytes != receipt.source_verified_bytes
             || hashtree_core::to_hex(&content_sha256) != receipt.source_content_sha256
             || terminal_summary.entries != entries
             || terminal_summary.bytes != bytes
             || terminal_summary.content_sha256 != content_sha256
         {
-            bail!("root frozen source content differs from its terminal evidence or receipt");
+            bail!(
+                "root frozen source keys/reconciliation differ from terminal evidence or receipt"
+            );
         }
         if online_summary.entries != online.source_verified_entries
             || online_summary.bytes != online.source_verified_bytes

@@ -330,14 +330,13 @@ pub fn migrate_lmdb_hashes_with_max_buffer_bytes_and_authorizer(
     Ok(batch)
 }
 
-/// Reconcile one sorted source page using metadata first.
+/// Reconcile one sorted source page using source keys and target metadata.
 ///
-/// Exact-size `Stored` target records are accepted without reading either
-/// source or target payload bytes. `Missing` and exact-size `Pending` records
-/// load and hash-check only the needed source bodies. `Moving` and every
-/// declared-size mismatch fail closed. The release path binds this
-/// reconciliation to the earlier online content proof and then proves exact
-/// terminal catalog/physical-member parity.
+/// `Stored` target records supply their exact size without touching the source
+/// value. `Missing` and `Pending` records load and hash-check only the needed
+/// source bodies. `Moving` and every declared-size mismatch fail closed. The
+/// release path separately proves every target body and the complete frozen
+/// source key set.
 pub fn reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer(
     source: &LmdbBlobReader,
     target: &PoolStore,
@@ -364,25 +363,151 @@ pub fn reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer(
             ..PoolMigrationBatch::default()
         });
     }
-    let sizes = source.sizes_for_sorted_hashes(&hashes)?;
-    if sizes.len() != hashes.len() {
-        return Err(StoreError::Other(
-            "source size lookup returned the wrong result count".into(),
-        ));
-    }
-    let source_entries = hashes
-        .iter()
-        .copied()
-        .zip(sizes.iter().copied())
-        .collect::<Vec<_>>();
-    let mut batch = reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer(
+    let mut batch = reconcile_lmdb_source_hashes_with_max_buffer_bytes_and_authorizer(
         source,
         target,
-        &source_entries,
+        &hashes,
         max_buffer_bytes,
         authorize_target_write,
     )?;
     batch.scan_micros = scan_micros;
+    Ok(batch)
+}
+
+/// Reconcile exact ordered source keys, deriving sizes from the target when
+/// already `Stored` and reading source bodies only for `Missing`/`Pending`.
+pub fn reconcile_lmdb_source_hashes_with_max_buffer_bytes_and_authorizer(
+    source: &LmdbBlobReader,
+    target: &PoolStore,
+    hashes: &[Hash],
+    max_buffer_bytes: usize,
+    authorize_target_write: &mut dyn FnMut(Option<Hash>, usize) -> Result<(), StoreError>,
+) -> Result<PoolMigrationBatch, StoreError> {
+    if hashes.is_empty() {
+        return Ok(PoolMigrationBatch::default());
+    }
+    if max_buffer_bytes == 0 {
+        return Err(StoreError::Other(
+            "migration max buffer bytes must be non-zero".into(),
+        ));
+    }
+    if hashes.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(StoreError::Other(
+            "source reconciliation hashes must be unique and strictly sorted".into(),
+        ));
+    }
+
+    let catalog_probe_started = Instant::now();
+    let locations = target.catalog_locations_in_sorted_candidates(hashes)?;
+    let catalog_probe_micros = elapsed_micros(catalog_probe_started.elapsed());
+    if locations.len() != hashes.len() {
+        return Err(StoreError::Other(
+            "target catalog lookup returned the wrong result count".into(),
+        ));
+    }
+
+    let mut source_entries = Vec::with_capacity(hashes.len());
+    let mut needed = Vec::new();
+    let mut already_present = 0usize;
+    for (hash, location) in hashes.iter().copied().zip(locations) {
+        match location {
+            PoolCatalogLocation::Stored { size, .. } => {
+                source_entries.push((hash, size));
+                already_present = already_present.saturating_add(1);
+            }
+            PoolCatalogLocation::Pending { size, .. } => {
+                needed.push((hash, Some(size)));
+            }
+            PoolCatalogLocation::Missing => needed.push((hash, None)),
+            PoolCatalogLocation::Moving { size, .. } => {
+                return Err(StoreError::Other(format!(
+                    "target Moving location is non-terminal for {hash:?} (declared size {size})"
+                )));
+            }
+        }
+    }
+
+    let mut batch = PoolMigrationBatch {
+        scanned: hashes.len(),
+        already_present,
+        catalog_probe_micros,
+        last_hash: hashes.last().copied(),
+        ..PoolMigrationBatch::default()
+    };
+    let max_buffer_bytes = max_buffer_bytes as u64;
+    let mut next = 0usize;
+    while next < needed.len() {
+        let source_read_started = Instant::now();
+        let needed_hashes = needed[next..]
+            .iter()
+            .map(|(hash, _)| *hash)
+            .collect::<Vec<_>>();
+        let items = source.read_hashes_bounded(&needed_hashes, max_buffer_bytes)?;
+        batch.source_read_micros = batch
+            .source_read_micros
+            .saturating_add(elapsed_micros(source_read_started.elapsed()));
+        if items.is_empty() {
+            return Err(StoreError::Other(
+                "bounded key-only source reconciliation read made no progress".into(),
+            ));
+        }
+        batch.source_read_groups = batch.source_read_groups.saturating_add(1);
+
+        let source_verify_started = Instant::now();
+        let mut buffered_bytes = 0u64;
+        let mut writes = Vec::with_capacity(items.len());
+        for (offset, (hash, data)) in items.into_iter().enumerate() {
+            let (expected_hash, pending_size) = needed.get(next + offset).ok_or_else(|| {
+                StoreError::Other(
+                    "bounded key-only source read exceeded the requested hash set".into(),
+                )
+            })?;
+            let size = data.len() as u64;
+            if hash != *expected_hash || sha256(&data) != *expected_hash {
+                return Err(StoreError::Other(format!(
+                    "source payload differs from its content-addressed key for {expected_hash:?}"
+                )));
+            }
+            if pending_size.is_some_and(|expected_size| expected_size != size) {
+                return Err(StoreError::Other(format!(
+                    "target Pending size {} differs from source size {size} for {expected_hash:?}",
+                    pending_size.expect("checked pending size")
+                )));
+            }
+            buffered_bytes = buffered_bytes.saturating_add(size);
+            source_entries.push((*expected_hash, size));
+            batch.verified_source_entries.push((*expected_hash, size));
+            writes.push((*expected_hash, data));
+        }
+        batch.source_verify_micros = batch
+            .source_verify_micros
+            .saturating_add(elapsed_micros(source_verify_started.elapsed()));
+        batch.verified = batch.verified.saturating_add(writes.len());
+        batch.peak_buffered_bytes = batch.peak_buffered_bytes.max(buffered_bytes);
+        authorize_target_write(writes.last().map(|(hash, _)| *hash), writes.len())?;
+        let target_write_started = Instant::now();
+        let report = target.put_many_optimistic_report_sync(&writes)?;
+        batch.target_write_micros = batch
+            .target_write_micros
+            .saturating_add(elapsed_micros(target_write_started.elapsed()));
+        batch.inserted = batch.inserted.saturating_add(report.inserted);
+        batch.inserted_bytes = batch.inserted_bytes.saturating_add(report.inserted_bytes);
+        batch.write_batches = batch.write_batches.saturating_add(1);
+        next = next.saturating_add(writes.len());
+    }
+
+    source_entries.sort_unstable_by_key(|(hash, _)| *hash);
+    if source_entries.len() != hashes.len()
+        || source_entries
+            .iter()
+            .zip(hashes)
+            .any(|((entry_hash, _), expected_hash)| entry_hash != expected_hash)
+    {
+        return Err(StoreError::Other(
+            "key-only source reconciliation did not cover the exact source page".into(),
+        ));
+    }
+    batch.source_entries = source_entries;
     Ok(batch)
 }
 

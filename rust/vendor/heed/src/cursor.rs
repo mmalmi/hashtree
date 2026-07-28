@@ -156,6 +156,80 @@ impl<'txn> RoCursor<'txn> {
         }
     }
 
+    /// Move to an exact key without asking LMDB to resolve its value.
+    ///
+    /// Passing a null data pointer is significant for large values: LMDB can
+    /// answer from the B-tree leaf without touching overflow value pages.
+    pub(crate) fn move_on_key_without_data(&mut self, key: &[u8]) -> Result<bool> {
+        let mut key_val = unsafe { crate::into_val(key) };
+
+        let result = unsafe {
+            mdb_result(ffi::mdb_cursor_get(
+                self.cursor,
+                &mut key_val,
+                ptr::null_mut(),
+                ffi::cursor_op::MDB_SET,
+            ))
+        };
+
+        match result {
+            Ok(()) => Ok(true),
+            Err(e) if e.not_found() => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Move to the first key without asking LMDB to resolve its value.
+    pub(crate) fn move_on_first_key(&mut self) -> Result<Option<&'txn [u8]>> {
+        self.move_on_key_only(ffi::cursor_op::MDB_FIRST)
+    }
+
+    /// Move to the next key without asking LMDB to resolve its value.
+    pub(crate) fn move_on_next_key(&mut self) -> Result<Option<&'txn [u8]>> {
+        self.move_on_key_only(ffi::cursor_op::MDB_NEXT_NODUP)
+    }
+
+    /// Move to the first key greater than or equal to `key` without asking
+    /// LMDB to resolve its value.
+    pub(crate) fn move_on_key_greater_than_or_equal_to_without_data(
+        &mut self,
+        key: &[u8],
+    ) -> Result<Option<&'txn [u8]>> {
+        let mut key_val = unsafe { crate::into_val(key) };
+        let result = unsafe {
+            mdb_result(ffi::mdb_cursor_get(
+                self.cursor,
+                &mut key_val,
+                ptr::null_mut(),
+                ffi::cursor_op::MDB_SET_RANGE,
+            ))
+        };
+
+        match result {
+            Ok(()) => Ok(Some(unsafe { crate::from_val(key_val) })),
+            Err(e) if e.not_found() => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn move_on_key_only(&mut self, operation: libc::c_uint) -> Result<Option<&'txn [u8]>> {
+        let mut key_val = mem::MaybeUninit::uninit();
+        let result = unsafe {
+            mdb_result(ffi::mdb_cursor_get(
+                self.cursor,
+                key_val.as_mut_ptr(),
+                ptr::null_mut(),
+                operation,
+            ))
+        };
+
+        match result {
+            Ok(()) => Ok(Some(unsafe { crate::from_val(key_val.assume_init()) })),
+            Err(e) if e.not_found() => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn move_on_key_greater_than_or_equal_to(
         &mut self,
         key: &[u8],

@@ -25,8 +25,9 @@ use super::pool_migration_terminal_publication::read_validated_source_terminal_c
 use hashtree_lmdb::LmdbEnvironmentGeneration;
 
 pub(super) const SOURCE_TERMINAL_FILE_NAME: &str = "source-terminal.json";
-pub(super) const SOURCE_TERMINAL_SCHEMA: &str = "hashtree-pool-migration-source-terminal/v3";
+pub(super) const SOURCE_TERMINAL_SCHEMA: &str = "hashtree-pool-migration-source-terminal/v4";
 pub(super) const SOURCE_TERMINAL_CAS_LABEL_PREFIX: &str = "source-terminal-";
+pub(super) const SOURCE_KEY_EVIDENCE_KIND: &str = "source-lmdb-blob-keys/sha256/v1";
 pub(super) const MAX_FINAL_SOURCE_RECEIPTS: usize = 64;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -100,15 +101,10 @@ pub(super) struct PoolMigrationSourceTerminalReceiptV3 {
     pub(super) source_external_identity: Option<FileIdentityV3>,
     pub(super) source_read_only_mounts: SourceReadOnlyMountAuthorityV3,
     pub(super) source_baseline_sha256: String,
+    pub(super) source_key_evidence_kind: String,
     pub(super) source_blob_entries: u64,
-    pub(super) source_metadata_entries: u64,
-    pub(super) source_blob_only_entries: u64,
-    pub(super) source_legacy_blob_only: bool,
-    pub(super) source_inline_entries: u64,
-    pub(super) source_loose_external_entries: u64,
-    pub(super) source_packed_external_entries: u64,
     pub(super) source_keyset_sha256: String,
-    pub(super) source_catalog_location_sha256: String,
+    pub(super) source_evidence_kind: String,
     pub(super) source_verified_entries: u64,
     pub(super) source_verified_bytes: u64,
     pub(super) source_content_sha256: String,
@@ -734,10 +730,6 @@ fn validate_receipt_shape(receipt: &PoolMigrationSourceTerminalReceiptV3) -> Res
     validate_sha256("prior controller state", &receipt.controller_state_sha256)?;
     validate_sha256("prior source baseline", &receipt.source_baseline_sha256)?;
     validate_sha256("prior source keyset", &receipt.source_keyset_sha256)?;
-    validate_sha256(
-        "prior source catalog locations",
-        &receipt.source_catalog_location_sha256,
-    )?;
     validate_sha256("prior source content", &receipt.source_content_sha256)?;
     validate_sha256(
         "prior online target audit certification",
@@ -766,24 +758,16 @@ fn validate_receipt_shape(receipt: &PoolMigrationSourceTerminalReceiptV3) -> Res
     if receipt.source_verified_entries != receipt.source_blob_entries {
         bail!("prior source-terminal verified-entry count differs from its source key count");
     }
+    if receipt.source_key_evidence_kind != SOURCE_KEY_EVIDENCE_KIND
+        || receipt.source_evidence_kind != super::pool_migration_online_audit::SOURCE_EVIDENCE_KIND
+    {
+        bail!("prior source-terminal receipt has incompatible key/reconciliation evidence");
+    }
     if receipt.source_evidence.entries != receipt.source_verified_entries {
         bail!("prior source evidence entry count differs from its source verification count");
     }
     if receipt.online_target_evidence.entries != receipt.online_target_verified_entries {
         bail!("prior online target evidence entry count differs from its verification count");
-    }
-    if receipt.source_legacy_blob_only != (receipt.source_metadata_entries == 0)
-        || receipt
-            .source_metadata_entries
-            .checked_add(receipt.source_blob_only_entries)
-            != Some(receipt.source_blob_entries)
-        || receipt
-            .source_inline_entries
-            .checked_add(receipt.source_loose_external_entries)
-            .and_then(|entries| entries.checked_add(receipt.source_packed_external_entries))
-            != Some(receipt.source_blob_entries)
-    {
-        bail!("prior source-terminal raw catalog/location summary is internally inconsistent");
     }
     if receipt.main_pid == 0 || receipt.proc_start_time_ticks == 0 {
         bail!("prior source-terminal worker process identity is incomplete");

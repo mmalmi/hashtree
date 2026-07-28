@@ -19,6 +19,7 @@ pub use migration::{
     migrate_lmdb_hashes_with_max_buffer_bytes_and_authorizer,
     reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer,
     reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer,
+    reconcile_lmdb_source_hashes_with_max_buffer_bytes_and_authorizer,
     reconcile_lmdb_source_union_page_with_max_buffer_bytes_and_authorizer, LmdbSourceAuditBatch,
     PoolMigrationBatch, DEFAULT_POOL_MIGRATION_MAX_BUFFER_BYTES,
 };
@@ -698,6 +699,77 @@ pub struct LmdbSourceKeysetAudit {
     pub catalog_location_sha256: Hash,
 }
 
+/// Exhaustive proof of the ordered raw blob keys in a frozen migration source.
+///
+/// This deliberately excludes blob values, metadata, and storage locations.
+/// Once the same content-addressed keys have exact `Stored` Pool catalog rows
+/// and the Pool bodies are independently SHA-256 audited, touching legacy
+/// source values adds I/O but no preservation evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LmdbSourceKeyAudit {
+    pub blob_entries: u64,
+    pub sha256: Hash,
+}
+
+/// Streaming builder for [`LmdbSourceKeyAudit`].
+pub struct LmdbSourceKeyAuditBuilder {
+    hasher: Sha256,
+    blob_entries: u64,
+    previous: Option<Hash>,
+}
+
+impl LmdbSourceKeyAuditBuilder {
+    pub fn new() -> Self {
+        let mut hasher = Sha256::new();
+        hasher.update(b"hashtree-lmdb-terminal-source-keys/v1\0");
+        Self {
+            hasher,
+            blob_entries: 0,
+            previous: None,
+        }
+    }
+
+    pub fn append_sorted(&mut self, hashes: &[Hash]) -> Result<(), StoreError> {
+        if hashes.windows(2).any(|pair| pair[0] >= pair[1])
+            || self
+                .previous
+                .zip(hashes.first().copied())
+                .is_some_and(|(previous, first)| previous >= first)
+        {
+            return Err(StoreError::Other(
+                "terminal source keys must be globally unique and strictly sorted".into(),
+            ));
+        }
+        for hash in hashes {
+            self.hasher.update(hash);
+        }
+        self.blob_entries = self
+            .blob_entries
+            .checked_add(hashes.len() as u64)
+            .ok_or_else(|| StoreError::Other("terminal source key count overflow".into()))?;
+        self.previous = hashes.last().copied().or(self.previous);
+        Ok(())
+    }
+
+    pub fn blob_entries(&self) -> u64 {
+        self.blob_entries
+    }
+
+    pub fn finish(mut self) -> LmdbSourceKeyAudit {
+        self.hasher.update(self.blob_entries.to_be_bytes());
+        LmdbSourceKeyAudit {
+            blob_entries: self.blob_entries,
+            sha256: self.hasher.finalize().into(),
+        }
+    }
+}
+
+impl Default for LmdbSourceKeyAuditBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Stable LMDB generation fields used to bind a source-terminal receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LmdbEnvironmentGeneration {
@@ -884,6 +956,12 @@ impl LmdbBlobReader {
         limit: usize,
     ) -> Result<Vec<Hash>, StoreError> {
         self.store.scan_hashes_after(after, limit)
+    }
+
+    /// Scan raw blob keys from `start` inclusively without requesting LMDB
+    /// values.
+    pub fn scan_hashes_from(&self, start: Hash, limit: usize) -> Result<Vec<Hash>, StoreError> {
+        self.store.scan_hashes_from(start, limit)
     }
 
     /// Resolve exact logical sizes without loading blob payloads.
@@ -1092,6 +1170,16 @@ impl LmdbBlobReader {
     ) -> Result<Vec<bool>, StoreError> {
         self.store
             .existing_hashes_in_sorted_candidates(sorted_hashes)
+    }
+
+    /// Mark exact raw `blobs` keys present without consulting metadata or
+    /// requesting LMDB values.
+    pub fn existing_blob_keys_in_sorted_candidates(
+        &self,
+        sorted_hashes: &[Hash],
+    ) -> Result<Vec<bool>, StoreError> {
+        self.store
+            .existing_blob_keys_in_sorted_candidates(sorted_hashes)
     }
 
     /// Read the aggregate counters without opening the environment writable.
@@ -2123,6 +2211,30 @@ impl LmdbBlobStore {
         Ok(existing)
     }
 
+    /// Mark exact raw `blobs` keys present without consulting metadata or
+    /// requesting LMDB values.
+    pub fn existing_blob_keys_in_sorted_candidates(
+        &self,
+        sorted_hashes: &[Hash],
+    ) -> Result<Vec<bool>, StoreError> {
+        if sorted_hashes.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(StoreError::Other(
+                "raw blob key candidates must be unique and strictly sorted".into(),
+            ));
+        }
+        if sorted_hashes.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+        let keys = sorted_hashes
+            .iter()
+            .map(|hash| hash.as_slice())
+            .collect::<Vec<_>>();
+        self.blobs
+            .contains_raw_keys_without_data(&rtxn, &keys)
+            .map_err(map_heed_error)
+    }
+
     pub fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
         let rtxn = self
             .env
@@ -2381,43 +2493,45 @@ impl LmdbBlobStore {
     /// resumable cursor. The `blobs` database is authoritative for membership:
     /// a partially upgraded legacy store may contain metadata for only a subset
     /// of its blob rows, and selecting `metadata` would silently omit the rest.
+    /// LMDB receives a null data pointer, so large inline values' overflow pages
+    /// are not resolved or faulted merely to enumerate keys.
     pub fn scan_hashes_after(
         &self,
         after: Option<Hash>,
+        limit: usize,
+    ) -> Result<Vec<Hash>, StoreError> {
+        use std::ops::Bound;
+        match after.as_ref() {
+            Some(after) => self.scan_hashes_from_bound(Bound::Excluded(after.as_slice()), limit),
+            None => self.scan_hashes_from_bound(Bound::Unbounded, limit),
+        }
+    }
+
+    /// Scan raw blob keys from `start` inclusively without requesting LMDB
+    /// values.
+    pub fn scan_hashes_from(&self, start: Hash, limit: usize) -> Result<Vec<Hash>, StoreError> {
+        self.scan_hashes_from_bound(std::ops::Bound::Included(start.as_slice()), limit)
+    }
+
+    fn scan_hashes_from_bound(
+        &self,
+        start: std::ops::Bound<&[u8]>,
         limit: usize,
     ) -> Result<Vec<Hash>, StoreError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let rtxn = self.env.read_txn().map_err(map_heed_error)?;
-        let mut hashes = Vec::with_capacity(limit);
-        let decode_hash = |hash: &[u8]| -> Result<Hash, StoreError> {
-            hash.try_into()
-                .map_err(|_| StoreError::Other("invalid hash length".into()))
-        };
-        match after {
-            Some(after) => {
-                use std::ops::Bound;
-                let range = (Bound::Excluded(after.as_slice()), Bound::<&[u8]>::Unbounded);
-                for item in self.blobs.range(&rtxn, &range).map_err(map_heed_error)? {
-                    let (hash, _) = item.map_err(map_heed_error)?;
-                    hashes.push(decode_hash(hash)?);
-                    if hashes.len() >= limit {
-                        break;
-                    }
-                }
-            }
-            None => {
-                for item in self.blobs.iter(&rtxn).map_err(map_heed_error)? {
-                    let (hash, _) = item.map_err(map_heed_error)?;
-                    hashes.push(decode_hash(hash)?);
-                    if hashes.len() >= limit {
-                        break;
-                    }
-                }
-            }
-        }
-        Ok(hashes)
+        self.blobs
+            .raw_keys_from(&rtxn, start, limit)
+            .map_err(map_heed_error)?
+            .into_iter()
+            .map(|hash| {
+                hash.as_slice()
+                    .try_into()
+                    .map_err(|_| StoreError::Other("invalid hash length".into()))
+            })
+            .collect()
     }
 
     /// Sync put operation (for use in sync contexts).
@@ -4441,6 +4555,35 @@ mod tests {
     }
 
     #[test]
+    fn exact_blob_key_candidates_allow_sparse_overlap_and_require_strict_order(
+    ) -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let store = LmdbBlobStore::new(temp.path().join("blobs"))?;
+        let mut entries = [
+            b"raw key one".as_slice(),
+            b"raw key two".as_slice(),
+            b"raw key three".as_slice(),
+        ]
+        .map(|data| (sha256(data), data));
+        entries.sort_unstable_by_key(|(hash, _)| *hash);
+        for (hash, data) in entries {
+            store.put_sync(hash, data)?;
+        }
+        let hashes = entries.map(|(hash, _)| hash);
+
+        assert_eq!(
+            store.existing_blob_keys_in_sorted_candidates(&[hashes[0], hashes[2]])?,
+            vec![true, true],
+            "already-covered raw keys may occur between new audit candidates"
+        );
+        let error = store
+            .existing_blob_keys_in_sorted_candidates(&[hashes[0], hashes[0]])
+            .expect_err("duplicate candidates must fail closed");
+        assert!(error.to_string().contains("unique and strictly sorted"));
+        Ok(())
+    }
+
+    #[test]
     fn generated_partial_metadata_source_scans_and_audits_every_raw_blob_row(
     ) -> Result<(), StoreError> {
         let temp = TempDir::new().unwrap();
@@ -4561,10 +4704,141 @@ mod tests {
         drop(store);
 
         let reader = LmdbBlobReader::open(&path, None)?;
+        assert_eq!(
+            reader.existing_hashes_in_sorted_candidates(&[hash])?,
+            vec![true],
+            "the legacy metadata-or-blob helper demonstrates why it cannot prove raw keys"
+        );
+        assert_eq!(
+            reader.existing_blob_keys_in_sorted_candidates(&[hash])?,
+            vec![false],
+            "metadata-only rows must not satisfy exact raw source membership"
+        );
+        assert!(reader.scan_hashes_from(hash, 1)?.is_empty());
         let error = reader
             .validate_terminal_migration_keyset()
             .expect_err("metadata without a raw blob row must withhold completion");
         assert!(error.to_string().contains("has no raw blob row"));
+        Ok(())
+    }
+
+    #[test]
+    fn key_only_reconciliation_never_reads_an_already_stored_source_value() -> Result<(), StoreError>
+    {
+        let temp = TempDir::new().unwrap();
+        let source_path = temp.path().join("source");
+        let valid = vec![0x42; 128 * 1024];
+        let hash = sha256(&valid);
+        let source = LmdbBlobStore::new(&source_path)?;
+        source.put_sync(hash, &valid)?;
+
+        // Keep the authoritative content-addressed source key but corrupt its
+        // value at equal length. A reconciliation that touches the source
+        // value must fail; the key-only Stored path must not.
+        let corrupt = vec![0xa5; valid.len()];
+        let mut wtxn = source.env.write_txn().map_err(map_heed_error)?;
+        source
+            .blobs
+            .put(&mut wtxn, &hash, &corrupt)
+            .map_err(map_heed_error)?;
+        wtxn.commit().map_err(map_heed_error)?;
+        source.force_sync()?;
+        drop(source);
+        let source = LmdbBlobReader::open(&source_path, None)?;
+
+        let pool = PoolStore::open(temp.path().join("pool"), PoolStoreConfig::default())?;
+        pool.add_member(PoolMemberConfig::new(
+            temp.path().join("pool-member"),
+            16 * 1024 * 1024,
+        ))?;
+        assert!(pool.put_sync(hash, &valid)?);
+        pool.force_sync()?;
+
+        let batch =
+            crate::migration::reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer(
+                &source,
+                &pool,
+                None,
+                1,
+                1024 * 1024,
+                &mut |_, _| Ok(()),
+            )?;
+        assert_eq!(batch.scanned, 1);
+        assert_eq!(batch.already_present, 1);
+        assert_eq!(batch.verified, 0);
+        assert_eq!(batch.source_read_groups, 0);
+        assert_eq!(batch.source_entries, vec![(hash, valid.len() as u64)]);
+        assert_eq!(pool.get_sync(&hash)?, Some(valid));
+        Ok(())
+    }
+
+    #[test]
+    fn key_only_reconciliation_still_hashes_a_missing_target_source_body() -> Result<(), StoreError>
+    {
+        let temp = TempDir::new().unwrap();
+        let source_path = temp.path().join("source");
+        let valid = b"a missing target must be recovered from verified source bytes";
+        let hash = sha256(valid);
+        let source = LmdbBlobStore::new(&source_path)?;
+        source.put_sync(hash, valid)?;
+        let corrupt = vec![0x3c; valid.len()];
+        let mut wtxn = source.env.write_txn().map_err(map_heed_error)?;
+        source
+            .blobs
+            .put(&mut wtxn, &hash, &corrupt)
+            .map_err(map_heed_error)?;
+        wtxn.commit().map_err(map_heed_error)?;
+        source.force_sync()?;
+        drop(source);
+        let source = LmdbBlobReader::open(&source_path, None)?;
+
+        let pool = PoolStore::open(temp.path().join("pool"), PoolStoreConfig::default())?;
+        pool.add_member(PoolMemberConfig::new(
+            temp.path().join("pool-member"),
+            16 * 1024 * 1024,
+        ))?;
+        let error =
+            crate::migration::reconcile_lmdb_source_batch_with_max_buffer_bytes_and_authorizer(
+                &source,
+                &pool,
+                None,
+                1,
+                1024 * 1024,
+                &mut |_, _| Ok(()),
+            )
+            .expect_err("missing target must not accept corrupt source bytes");
+        assert!(error
+            .to_string()
+            .contains("differs from its content-addressed key"));
+        assert_eq!(pool.get_sync(&hash)?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn terminal_source_key_audit_is_streaming_and_order_bound() -> Result<(), StoreError> {
+        let mut hashes = vec![
+            sha256(b"terminal source key one"),
+            sha256(b"terminal source key two"),
+            sha256(b"terminal source key three"),
+        ];
+        hashes.sort_unstable();
+        let mut paged = LmdbSourceKeyAuditBuilder::new();
+        paged.append_sorted(&hashes[..1])?;
+        paged.append_sorted(&hashes[1..])?;
+        let paged = paged.finish();
+
+        let mut single = LmdbSourceKeyAuditBuilder::new();
+        single.append_sorted(&hashes)?;
+        assert_eq!(paged, single.finish());
+        assert_eq!(paged.blob_entries, 3);
+
+        let mut invalid = LmdbSourceKeyAuditBuilder::new();
+        invalid.append_sorted(&hashes[1..])?;
+        assert!(invalid
+            .append_sorted(&hashes[..1])
+            .expect_err("global key order must be strict")
+            .to_string()
+            .contains("globally unique"));
         Ok(())
     }
 

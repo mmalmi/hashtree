@@ -4,6 +4,15 @@
 
 ### Added
 
+- Pool migration online authority v6 now reconciles an exact source key
+  directly with the target Pool's `Stored` size, avoiding legacy source-value
+  reads when the target already has the content address. Missing and pending
+  targets still require a source payload read and SHA-256 verification, every
+  target body remains independently audited, and source-terminal v4 proves
+  the complete frozen source key sequence without rereading source sizes or
+  storage locations. Raw-key cursors pass a null data pointer to LMDB so key
+  evidence does not fault overflow-value pages, and metadata-only rows cannot
+  satisfy source membership.
 - The daemon can temporarily serve exact-hash misses from one independently
   pinned, strict read-only PoolStore while keeping its main PoolStore as the
   sole write and enumeration authority. Startup requires an explicit mode,

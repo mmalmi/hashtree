@@ -24,11 +24,11 @@ pub struct PoolMigrationAuditSummary {
 
 /// Durable, provenance-separated source reconciliation and target body proofs.
 ///
-/// A source entry means root independently observed the exact source
-/// hash/size metadata and an exact-size terminal `Stored` target catalog
-/// location. It is not a source-body or target-body proof. A target entry
-/// means the target body was independently hash-verified. The root controller
-/// owns the writable instance. Workers open it read-only.
+/// A source entry means root independently observed the exact source key and a
+/// terminal `Stored` target catalog location whose catalog supplied the size.
+/// It is not a source-body or target-body proof. A target entry means the
+/// target body was independently hash-verified. The root controller owns the
+/// writable instance. Workers open it read-only.
 pub struct PoolMigrationAuditStore {
     path: PathBuf,
     env: ManagedEnv,
@@ -338,15 +338,15 @@ impl PoolMigrationAuditStore {
         })
     }
 
-    /// Find the first source hash/size pair not covered by this durable set.
+    /// Find the first source key not covered by this durable set.
     ///
-    /// The scan reads only source catalog metadata (and external file lengths
-    /// for legacy rows), never payload bodies.
-    pub fn first_unreconciled_source(
+    /// This scans only the authoritative raw blob keys. It never reads source
+    /// values, metadata sizes, external file lengths, or payload bodies.
+    pub fn first_unreconciled_source_key(
         &self,
         source: &crate::LmdbBlobReader,
         page_size: usize,
-    ) -> Result<Option<(Hash, u64)>, StoreError> {
+    ) -> Result<Option<Hash>, StoreError> {
         if page_size == 0 {
             return Err(StoreError::Other(
                 "online migration audit coverage page size must be non-zero".into(),
@@ -358,11 +358,16 @@ impl PoolMigrationAuditStore {
             if hashes.is_empty() {
                 return Ok(None);
             }
-            let sizes = source.sizes_for_sorted_hashes(&hashes)?;
-            let entries = hashes.iter().copied().zip(sizes).collect::<Vec<_>>();
-            let covered = self.contains_source_reconciled_exact_sorted(&entries)?;
-            if let Some((entry, _)) = entries.iter().zip(covered).find(|(_, present)| !present) {
-                return Ok(Some(*entry));
+            let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+            for hash in &hashes {
+                if self
+                    .source_reconciled
+                    .get(&rtxn, hash)
+                    .map_err(map_heed_error)?
+                    .is_none()
+                {
+                    return Ok(Some(*hash));
+                }
             }
             cursor = hashes.last().copied();
         }
@@ -522,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn coverage_scan_reads_catalog_sizes_and_finds_only_unverified_source() {
+    fn coverage_scan_reads_only_keys_and_finds_only_unreconciled_source() {
         let temp = tempfile::tempdir().expect("temporary migration root");
         let source_path = temp.path().join("source");
         let source = LmdbBlobStore::new(&source_path).expect("create source");
@@ -549,16 +554,16 @@ mod tests {
             .expect("record first source");
         assert_eq!(
             audit
-                .first_unreconciled_source(&reader, 1)
+                .first_unreconciled_source_key(&reader, 1)
                 .expect("scan coverage"),
-            Some((second, second_body.len() as u64))
+            Some(second)
         );
         audit
             .record_reconciled_source(&[(second, second_body.len() as u64)])
             .expect("record second source");
         assert_eq!(
             audit
-                .first_unreconciled_source(&reader, 1)
+                .first_unreconciled_source_key(&reader, 1)
                 .expect("scan complete coverage"),
             None
         );

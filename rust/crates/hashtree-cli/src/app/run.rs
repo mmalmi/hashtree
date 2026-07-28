@@ -2509,7 +2509,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 resume,
             } => {
                 use hashtree_lmdb::{
-                    reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer,
+                    reconcile_lmdb_source_hashes_with_max_buffer_bytes_and_authorizer,
                     ExternalBlobOptions, LmdbBlobReader, PoolMigrationAuditStore,
                 };
 
@@ -2691,15 +2691,14 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         if hashes.is_empty() {
                             launch.ensure_checkpoint_broker_alive()?;
                             launch.ensure_final_writer_masks()?;
-                            if let Some((missing, size)) =
-                                online_audit.first_unreconciled_source(&reader, batch_size)?
+                            if let Some(missing) =
+                                online_audit.first_unreconciled_source_key(&reader, batch_size)?
                             {
                                 launch.reset_online_cursor()?;
                                 cursor = None;
                                 println!(
-                                    "Online source reconciliation catch-up: source {} / {} bytes is not yet in the durable reconciled set; restarting the metadata scan",
+                                    "Online source reconciliation catch-up: source key {} is not yet in the durable reconciled set; restarting the key scan",
                                     hashtree_core::to_hex(&missing),
-                                    size,
                                 );
                                 if max_items.is_some_and(|maximum| scanned >= maximum) {
                                     break 'mapping_epochs;
@@ -2709,8 +2708,20 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                             source_completed = true;
                             break 'mapping_epochs;
                         }
-                        let sizes = reader.sizes_for_sorted_hashes(&hashes)?;
-                        let source_entries = hashes.iter().copied().zip(sizes).collect::<Vec<_>>();
+                        let batch =
+                            reconcile_lmdb_source_hashes_with_max_buffer_bytes_and_authorizer(
+                                &reader,
+                                &pool,
+                                &hashes,
+                                max_buffer_bytes,
+                                &mut authorize_target_write,
+                            )?;
+                        if batch.last_hash != hashes.last().copied()
+                            || batch.source_entries.len() != hashes.len()
+                        {
+                            bail!("key-only source reconciliation changed its exact scanned page");
+                        }
+                        let source_entries = batch.source_entries.clone();
                         let covered = online_audit
                             .contains_source_reconciled_exact_sorted(&source_entries)?;
                         let missing_entries = source_entries
@@ -2718,17 +2729,6 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                             .zip(&covered)
                             .filter_map(|(entry, present)| (!present).then_some(*entry))
                             .collect::<Vec<_>>();
-                        let mut batch =
-                            reconcile_lmdb_source_entries_with_max_buffer_bytes_and_authorizer(
-                                &reader,
-                                &pool,
-                                &missing_entries,
-                                max_buffer_bytes,
-                                &mut authorize_target_write,
-                            )?;
-                        batch.scanned = hashes.len();
-                        batch.last_hash = hashes.last().copied();
-                        batch.source_entries = source_entries;
                         launch.ensure_checkpoint_broker_alive()?;
                         launch.ensure_final_writer_masks()?;
                         scanned = scanned.saturating_add(batch.scanned);
@@ -2740,11 +2740,12 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         inserted_bytes = inserted_bytes.saturating_add(batch.inserted_bytes);
                         cursor = batch.last_hash;
                         let cursor_hash = cursor.expect("non-empty migration batch has a cursor");
+                        if batch.write_batches > 0 {
+                            pool.validate_controlled_authority_and_sync()?;
+                        }
                         if !missing_entries.is_empty() {
                             if batch.write_batches == 0 {
                                 pool.validate_controlled_authority()?;
-                            } else {
-                                pool.validate_controlled_authority_and_sync()?;
                             }
                             launch.authorize_online_source_audit_batch(
                                 cursor_hash,
@@ -3033,7 +3034,9 @@ fn run_final_stopped_source_audit(
     source_read_concurrency: usize,
     reopen_batches: usize,
 ) -> Result<()> {
-    use hashtree_lmdb::{ExternalBlobOptions, LmdbBlobReader, LmdbEnvironmentGeneration};
+    use hashtree_lmdb::{
+        ExternalBlobOptions, LmdbBlobReader, LmdbEnvironmentGeneration, LmdbSourceKeyAuditBuilder,
+    };
 
     let online = launch.online_target_audit()?.receipt.clone();
     let mut online_evidence = SourceEvidenceManifestReaderV3::open(&online.source_evidence)?;
@@ -3044,6 +3047,7 @@ fn run_final_stopped_source_audit(
     let mut verified_bytes = 0u64;
     let mut source_content_hasher = Sha256::new();
     source_content_hasher.update(b"hashtree-pool-migration-source-content/v3\0");
+    let mut source_key_audit = LmdbSourceKeyAuditBuilder::new();
     let mut source_evidence = launch.create_source_evidence_writer()?;
     let mut generation: Option<LmdbEnvironmentGeneration> = None;
     loop {
@@ -3055,13 +3059,12 @@ fn run_final_stopped_source_audit(
             sync: true,
             pack_target_bytes: None,
         });
-        let reader =
-            LmdbBlobReader::open_sequential_with_external_read_concurrency_and_pinned_identity(
-                launch.source(),
-                external,
-                source_read_concurrency,
-                launch.source_lmdb_identity(),
-            )?;
+        let reader = LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+            launch.source(),
+            external,
+            source_read_concurrency,
+            launch.source_lmdb_identity(),
+        )?;
         let opened_generation = reader.environment_generation();
         if generation.is_some_and(|expected| expected != opened_generation) {
             bail!("source LMDB generation changed across mapping reopen");
@@ -3075,12 +3078,26 @@ fn run_final_stopped_source_audit(
             launch.ensure_final_writer_masks()?;
             if hashes.is_empty() {
                 launch.authorize_checkpoint("source-keyset-audit", cursor, None)?;
-                let source_audit = reader.validate_terminal_migration_keyset()?;
+                let (source_blob_entries, _) = reader.database_entry_counts()?;
+                if source_key_audit.blob_entries() != source_blob_entries {
+                    bail!(
+                        "terminal source key scan count {} differs from LMDB blob entry count {}",
+                        source_key_audit.blob_entries(),
+                        source_blob_entries
+                    );
+                }
+                let source_audit = source_key_audit.finish();
                 launch.ensure_checkpoint_broker_alive()?;
                 if reader.environment_generation() != opened_generation {
                     bail!("source LMDB generation changed during terminal source audit");
                 }
-                while online_evidence.next_entry()?.is_some() {}
+                if let Some((hash, size)) = next_online {
+                    bail!(
+                        "certified online evidence has extra source key {} / {} bytes",
+                        hashtree_core::to_hex(&hash),
+                        size
+                    );
+                }
                 let online_summary = online_evidence.validated_summary()?;
                 if online_summary.entries != online.source_verified_entries
                     || online_summary.bytes != online.source_verified_bytes
@@ -3115,16 +3132,10 @@ fn run_final_stopped_source_audit(
                 launch.ensure_final_writer_fence()?;
                 launch.authorize_checkpoint("terminal-readiness", cursor, None)?;
                 println!(
-                    "Terminal source boundary: {} raw blob keys / {} metadata keys / {} blob-only / {} inline / {} loose external / {} packed external / {} online-reconciled bytes, keyset {}, locations {}, content {}",
+                    "Terminal source boundary: {} exact raw blob keys / {} Pool-sized reconciliation bytes, keyset {}, reconciliation {}",
                     source_audit.blob_entries,
-                    source_audit.metadata_entries,
-                    source_audit.blob_only_entries,
-                    source_audit.inline_entries,
-                    source_audit.loose_external_entries,
-                    source_audit.packed_external_entries,
                     content.verified_bytes,
                     hashtree_core::to_hex(&source_audit.sha256),
-                    hashtree_core::to_hex(&source_audit.catalog_location_sha256),
                     hashtree_core::to_hex(&content.sha256),
                 );
                 println!(
@@ -3132,32 +3143,27 @@ fn run_final_stopped_source_audit(
                 );
                 return Ok(());
             }
-            let sizes = reader.sizes_for_sorted_hashes(&hashes)?;
-            let entries = hashes.iter().copied().zip(sizes).collect::<Vec<_>>();
-            for (hash, bytes) in &entries {
-                while next_online.is_some_and(|(online_hash, _)| online_hash < *hash) {
-                    next_online = online_evidence.next_entry()?;
-                }
+            source_key_audit.append_sorted(&hashes)?;
+            let mut entries = Vec::with_capacity(hashes.len());
+            for hash in &hashes {
                 match next_online {
-                    Some((online_hash, online_size))
-                        if online_hash == *hash && online_size == *bytes =>
-                    {
+                    Some((online_hash, online_size)) if online_hash == *hash => {
+                        entries.push((*hash, online_size));
                         next_online = online_evidence.next_entry()?;
                     }
-                    Some((online_hash, online_size)) if online_hash == *hash => {
-                        bail!(
-                            "stopped source size {} for {} differs from online target audit size {}",
-                            bytes,
-                            hashtree_core::to_hex(hash),
-                            online_size,
-                        )
-                    }
-                    _ => bail!(
-                        "stopped source {} / {} bytes is absent from the certified online target audit; rerun online-bounded catch-up",
+                    Some((online_hash, online_size)) => bail!(
+                        "stopped source key {} differs from certified online key {} / {} bytes",
                         hashtree_core::to_hex(hash),
-                        bytes,
+                        hashtree_core::to_hex(&online_hash),
+                        online_size,
+                    ),
+                    None => bail!(
+                        "stopped source key {} is absent from the certified online target audit; rerun online-bounded catch-up",
+                        hashtree_core::to_hex(hash),
                     ),
                 }
+            }
+            for (hash, bytes) in &entries {
                 source_content_hasher.update(hash);
                 source_content_hasher.update(bytes.to_be_bytes());
             }

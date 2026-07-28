@@ -16,14 +16,15 @@ use super::pool_migration_protocol::{
 };
 
 pub(super) const ONLINE_TARGET_AUDIT_SCHEMA: &str =
-    "hashtree-pool-migration-online-target-audit/v4";
+    "hashtree-pool-migration-online-target-audit/v6";
 pub(super) const ONLINE_TARGET_AUDIT_FILE_NAME: &str = "online-target-audit.json";
 pub(super) const ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA: &str =
-    "hashtree-pool-migration-online-target-audit-certification/v4";
+    "hashtree-pool-migration-online-target-audit-certification/v6";
 pub(super) const ONLINE_TARGET_AUDIT_CERTIFICATION_FILE_NAME: &str =
     "online-target-audit-certification.json";
 pub(super) const ONLINE_TARGET_AUDIT_CAS_LABEL_PREFIX: &str = "online-target-audit-";
-pub(super) const SOURCE_EVIDENCE_KIND: &str = "source-target-catalog-reconciliation/hash-size/v1";
+pub(super) const SOURCE_EVIDENCE_KIND: &str =
+    "source-key-target-catalog-reconciliation/sha256-key-target-size/v2";
 pub(super) const TARGET_EVIDENCE_KIND: &str = "target-body/sha256-hash-size/v1";
 
 pub(super) fn online_audit_path(cursor_path: &Path) -> Result<PathBuf> {
@@ -31,7 +32,7 @@ pub(super) fn online_audit_path(cursor_path: &Path) -> Result<PathBuf> {
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
         .context("online audit cursor name is not UTF-8")?;
-    Ok(cursor_path.with_file_name(format!("{cursor_name}.online-audit-v4")))
+    Ok(cursor_path.with_file_name(format!("{cursor_name}.online-audit-v6")))
 }
 
 #[cfg(feature = "lmdb")]
@@ -122,7 +123,7 @@ pub(super) fn compute_online_audit_binding(
     pool_manifest_sha256: Hash,
 ) -> Result<Hash> {
     let mut hasher = Sha256::new();
-    hasher.update(b"hashtree-pool-migration-online-audit-authority/v4\0");
+    hasher.update(b"hashtree-pool-migration-online-audit-authority/v6\0");
     hasher.update(SOURCE_EVIDENCE_KIND.as_bytes());
     hasher.update(b"\0");
     hasher.update(TARGET_EVIDENCE_KIND.as_bytes());

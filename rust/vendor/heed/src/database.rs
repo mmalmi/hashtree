@@ -1032,6 +1032,64 @@ impl<KC, DC, C> Database<KC, DC, C> {
         RoCursor::new(txn, self.dbi).map(|cursor| RoIter::new(cursor))
     }
 
+    /// Return copied raw keys in lexicographic order without requesting their
+    /// values from LMDB.
+    ///
+    /// This is useful for databases with large overflow values when only
+    /// membership or key-order evidence is required. `start` is a lower bound
+    /// and `limit` bounds both cursor work and allocation.
+    pub fn raw_keys_from(
+        &self,
+        txn: &RoTxn,
+        start: Bound<&[u8]>,
+        limit: usize,
+    ) -> Result<Vec<Vec<u8>>> {
+        assert_eq_env_db_txn!(self, txn);
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut cursor = RoCursor::new(txn, self.dbi)?;
+        let mut current = match start {
+            Bound::Unbounded => cursor.move_on_first_key()?,
+            Bound::Included(start) => {
+                cursor.move_on_key_greater_than_or_equal_to_without_data(start)?
+            }
+            Bound::Excluded(start) => {
+                match cursor.move_on_key_greater_than_or_equal_to_without_data(start)? {
+                    Some(key) if key == start => cursor.move_on_next_key()?,
+                    current => current,
+                }
+            }
+        };
+        let mut keys = Vec::with_capacity(limit);
+        while let Some(key) = current {
+            keys.push(key.to_vec());
+            if keys.len() == limit {
+                break;
+            }
+            current = cursor.move_on_next_key()?;
+        }
+        Ok(keys)
+    }
+
+    /// Return whether an encoded key exists without requesting its value from
+    /// LMDB.
+    pub fn contains_raw_key_without_data(&self, txn: &RoTxn, key: &[u8]) -> Result<bool> {
+        assert_eq_env_db_txn!(self, txn);
+        RoCursor::new(txn, self.dbi)?.move_on_key_without_data(key)
+    }
+
+    /// Return whether each encoded key exists without requesting any values
+    /// from LMDB. One cursor is reused for the whole candidate set.
+    pub fn contains_raw_keys_without_data(&self, txn: &RoTxn, keys: &[&[u8]]) -> Result<Vec<bool>> {
+        assert_eq_env_db_txn!(self, txn);
+        let mut cursor = RoCursor::new(txn, self.dbi)?;
+        keys.iter()
+            .map(|key| cursor.move_on_key_without_data(key))
+            .collect()
+    }
+
     /// Return a mutable lexicographically ordered iterator of all key-value pairs in this database.
     ///
     /// ```
@@ -2713,6 +2771,40 @@ mod tests {
         db.put(&mut txn, b"hello", b"bye").unwrap();
         assert_eq!(db.get(&txn, b"hello").unwrap(), Some(&b"bye"[..]));
 
+        Ok(())
+    }
+
+    #[test]
+    fn raw_keys_skip_dups_and_honor_excluded_start() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let env = unsafe {
+            EnvOpenOptions::new()
+                .map_size(10 * 1024 * 1024)
+                .open(dir.path())?
+        };
+        let mut txn = env.write_txn()?;
+        let db = env
+            .database_options()
+            .types::<Bytes, Bytes>()
+            .flags(DatabaseFlags::DUP_SORT)
+            .create(&mut txn)?;
+        db.put(&mut txn, b"a", b"one")?;
+        db.put(&mut txn, b"a", b"two")?;
+        db.put(&mut txn, b"b", b"three")?;
+        db.put(&mut txn, b"c", b"four")?;
+
+        assert_eq!(
+            db.raw_keys_from(&txn, Bound::Unbounded, 8)?,
+            [b"a".to_vec(), b"b".to_vec(), b"c".to_vec()]
+        );
+        assert_eq!(
+            db.raw_keys_from(&txn, Bound::Excluded(b"a".as_slice()), 8)?,
+            [b"b".to_vec(), b"c".to_vec()]
+        );
+        assert_eq!(
+            db.raw_keys_from(&txn, Bound::Included(b"b".as_slice()), 1)?,
+            [b"b".to_vec()]
+        );
         Ok(())
     }
 
