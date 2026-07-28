@@ -34,6 +34,83 @@ pub(super) fn online_audit_path(cursor_path: &Path) -> Result<PathBuf> {
     Ok(cursor_path.with_file_name(format!("{cursor_name}.online-audit-v4")))
 }
 
+#[cfg(feature = "lmdb")]
+pub(super) fn verify_exact_stored_target_catalog_entries(
+    reader: &hashtree_lmdb::PoolStoreReader,
+    entries: &[(Hash, u64)],
+) -> Result<()> {
+    exact_stored_target_locations(reader, entries).map(|_| ())
+}
+
+#[cfg(feature = "lmdb")]
+pub(super) fn verify_and_record_target_body_page(
+    reader: &hashtree_lmdb::PoolStoreReader,
+    audit: &hashtree_lmdb::PoolMigrationAuditStore,
+    entries: &[(Hash, u64)],
+    cursor: Hash,
+    byte_limit: u64,
+) -> Result<()> {
+    if byte_limit == 0 {
+        bail!("root target audit buffer limit must be non-zero");
+    }
+    let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+    let locations = exact_stored_target_locations(reader, entries)?;
+    let mut offset = 0usize;
+    while offset < hashes.len() {
+        let bodies = reader
+            .read_hashes_bounded(&hashes[offset..], byte_limit)
+            .context("root-read online target audit bodies")?;
+        if bodies.is_empty() {
+            bail!("root target audit body reader made no progress");
+        }
+        for (body, (expected_hash, expected_size)) in bodies.iter().zip(&entries[offset..]) {
+            if body.hash != *expected_hash
+                || body.declared_size != Some(*expected_size)
+                || body.data.as_ref().map(|data| data.len() as u64) != Some(*expected_size)
+                || body.error.is_some()
+            {
+                bail!("root target audit body differs from checkpoint hash/size authority");
+            }
+        }
+        offset = offset
+            .checked_add(bodies.len())
+            .context("root target audit offset overflow")?;
+    }
+    let final_locations = reader
+        .blob_catalog_locations(&hashes)
+        .context("root-revalidate online target audit catalog")?;
+    if final_locations != locations {
+        bail!("online target catalog changed during root content verification");
+    }
+    audit.record_verified_target_page(entries, cursor)?;
+    Ok(())
+}
+
+#[cfg(feature = "lmdb")]
+fn exact_stored_target_locations(
+    reader: &hashtree_lmdb::PoolStoreReader,
+    entries: &[(Hash, u64)],
+) -> Result<Vec<hashtree_lmdb::PoolCatalogLocation>> {
+    let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+    let locations = reader
+        .blob_catalog_locations(&hashes)
+        .context("root-read online target audit catalog")?;
+    for ((hash, expected_size), location) in entries.iter().zip(&locations) {
+        if !matches!(
+            location,
+            hashtree_lmdb::PoolCatalogLocation::Stored { size, .. }
+                if size == expected_size
+        ) {
+            bail!(
+                "root target audit requires exact Stored location for {} / {} bytes",
+                hashtree_core::to_hex(hash),
+                expected_size
+            );
+        }
+    }
+    Ok(locations)
+}
+
 pub(super) fn compute_online_audit_binding(
     rollout_id: &str,
     worker_binary_sha256: &str,
@@ -463,5 +540,73 @@ mod tests {
         };
 
         assert_ne!(binding(&"00".repeat(32)), binding(&"11".repeat(32)));
+    }
+
+    #[cfg(feature = "lmdb")]
+    #[test]
+    fn corrupt_exact_size_stored_target_cannot_enter_body_proof_ledger() {
+        use hashtree_lmdb::{
+            LmdbBlobStore, PoolMemberConfig, PoolMigrationAuditStore, PoolStore, PoolStoreConfig,
+            PoolStoreReader,
+        };
+
+        let temp = tempfile::tempdir().expect("temporary real Pool");
+        let catalog = temp.path().join("catalog");
+        let member = temp.path().join("member");
+        let pool =
+            PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open real target Pool");
+        pool.add_member(PoolMemberConfig::new(member.clone(), 1024 * 1024))
+            .expect("add real target member");
+        let body = b"target body proof must hash physical bytes".repeat(32);
+        let hash = hashtree_core::sha256(&body);
+        assert!(pool.put_sync(hash, &body).expect("store valid target body"));
+        drop(pool);
+
+        let raw_member = LmdbBlobStore::with_exact_map_size_and_external_blob_options(
+            &member,
+            16 * 1024 * 1024,
+            None,
+        )
+        .expect("open physical target member");
+        assert!(raw_member
+            .delete_sync(&hash)
+            .expect("delete valid physical body"));
+        let corrupt = vec![0xa5; body.len()];
+        assert_eq!(corrupt.len(), body.len());
+        assert!(raw_member
+            .put_sync(hash, &corrupt)
+            .expect("write equal-size corrupt bytes under the catalogued hash"));
+        raw_member.force_sync().expect("sync corrupt physical body");
+        drop(raw_member);
+
+        let mut reader_config = PoolStoreConfig::default();
+        reader_config.temperature.enabled = false;
+        let reader =
+            PoolStoreReader::open(&catalog, reader_config).expect("open real target reader");
+        let entries = [(hash, body.len() as u64)];
+        verify_exact_stored_target_catalog_entries(&reader, &entries)
+            .expect("catalog metadata alone still looks exactly Stored");
+
+        let audit = PoolMigrationAuditStore::open(
+            &temp.path().join("audit"),
+            hashtree_core::sha256(b"negative target body proof authority"),
+        )
+        .expect("open real root-owned proof ledger");
+        let error = verify_and_record_target_body_page(&reader, &audit, &entries, hash, u64::MAX)
+            .expect_err("equal-size corrupt target bytes must not become a body proof");
+        assert!(error
+            .to_string()
+            .contains("body differs from checkpoint hash/size authority"));
+        assert_eq!(
+            audit
+                .contains_target_exact_sorted(&entries)
+                .expect("query target proof ledger"),
+            vec![false]
+        );
+        assert_eq!(
+            audit.target_cursor().expect("query target proof cursor"),
+            None,
+            "a failed physical proof must not advance the durable target cursor"
+        );
     }
 }

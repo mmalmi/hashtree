@@ -115,7 +115,8 @@ mod linux {
     };
     use super::super::pool_migration_online_audit::{
         compute_online_audit_binding, compute_online_target_fence_binding,
-        load_validated_online_target_audit, online_audit_path, OnlineTargetAuditExpectationV3,
+        load_validated_online_target_audit, online_audit_path, verify_and_record_target_body_page,
+        verify_exact_stored_target_catalog_entries, OnlineTargetAuditExpectationV3,
         PoolMigrationOnlineTargetAuditCertificationV3, PoolMigrationOnlineTargetAuditReceiptV3,
         ONLINE_TARGET_AUDIT_CERTIFICATION_FILE_NAME, ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA,
         ONLINE_TARGET_AUDIT_FILE_NAME, ONLINE_TARGET_AUDIT_SCHEMA, SOURCE_EVIDENCE_KIND,
@@ -2170,10 +2171,9 @@ mod linux {
                 .collect::<Result<Vec<_>>>()?;
             if checkpoint.operation == "online-source-audit-batch" {
                 self.verify_online_source_reconciliation_entries(&entries)?;
-                self.verify_online_target_entries(&entries, false)?;
+                self.verify_online_target_entries(&entries, None)?;
                 audit.record_reconciled_source(&entries)?;
             } else {
-                self.verify_online_target_entries(&entries, true)?;
                 let cursor: [u8; 32] = hashtree_core::from_hex(
                     checkpoint
                         .audit_target_cursor
@@ -2181,7 +2181,7 @@ mod linux {
                         .context("online target audit checkpoint has no cursor")?,
                 )
                 .context("decode online target audit cursor")?;
-                audit.record_verified_target_page(&entries, cursor)?;
+                self.verify_online_target_entries(&entries, Some((audit, cursor)))?;
             }
             Ok(())
         }
@@ -2283,9 +2283,12 @@ mod linux {
         fn verify_online_target_entries(
             &self,
             entries: &[([u8; 32], u64)],
-            verify_payloads: bool,
+            target_record: Option<(&PoolMigrationAuditStore, [u8; 32])>,
         ) -> Result<()> {
             if entries.is_empty() {
+                if let Some((audit, cursor)) = target_record {
+                    audit.record_verified_target_page(entries, cursor)?;
+                }
                 return Ok(());
             }
             let catalog =
@@ -2371,60 +2374,16 @@ mod linux {
                 self.options.source_read_concurrency,
             )
             .context("root-open exact online target audit reader")?;
-            let hashes = entries.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
-            let locations = reader
-                .blob_catalog_locations(&hashes)
-                .context("root-read online target audit catalog")?;
-            for ((hash, expected_size), location) in entries.iter().zip(&locations) {
-                if !matches!(
-                    location,
-                    hashtree_lmdb::PoolCatalogLocation::Stored { size, .. }
-                        if size == expected_size
-                ) {
-                    bail!(
-                        "root target audit requires exact Stored location for {} / {} bytes",
-                        hashtree_core::to_hex(hash),
-                        expected_size
-                    );
-                }
+            if let Some((audit, cursor)) = target_record {
+                let byte_limit = self
+                    .options
+                    .max_buffer_mib
+                    .checked_mul(1024 * 1024)
+                    .context("root target audit buffer limit overflow")?;
+                verify_and_record_target_body_page(&reader, audit, entries, cursor, byte_limit)
+            } else {
+                verify_exact_stored_target_catalog_entries(&reader, entries)
             }
-            if !verify_payloads {
-                return Ok(());
-            }
-            let byte_limit = self
-                .options
-                .max_buffer_mib
-                .checked_mul(1024 * 1024)
-                .context("root target audit buffer limit overflow")?;
-            let mut offset = 0usize;
-            while offset < hashes.len() {
-                let bodies = reader
-                    .read_hashes_bounded(&hashes[offset..], byte_limit)
-                    .context("root-read online target audit bodies")?;
-                if bodies.is_empty() {
-                    bail!("root target audit body reader made no progress");
-                }
-                for (body, (expected_hash, expected_size)) in bodies.iter().zip(&entries[offset..])
-                {
-                    if body.hash != *expected_hash
-                        || body.declared_size != Some(*expected_size)
-                        || body.data.as_ref().map(|data| data.len() as u64) != Some(*expected_size)
-                        || body.error.is_some()
-                    {
-                        bail!("root target audit body differs from checkpoint hash/size authority");
-                    }
-                }
-                offset = offset
-                    .checked_add(bodies.len())
-                    .context("root target audit offset overflow")?;
-            }
-            let final_locations = reader
-                .blob_catalog_locations(&hashes)
-                .context("root-revalidate online target audit catalog")?;
-            if final_locations != locations {
-                bail!("online target catalog changed during root content verification");
-            }
-            Ok(())
         }
 
         fn certify_online_target_audit(
