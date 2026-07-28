@@ -1413,7 +1413,8 @@ fn controlled_authority_revalidation_rejects_a_manifest_change() {
         .write_txn()
         .expect("open manifest mutation transaction");
     controlled
-        .manifest
+        .inner
+        .manifest_db
         .put(&mut wtxn, MANIFEST_KEY, &encoded)
         .expect("write changed manifest");
     wtxn.commit().expect("commit changed manifest");
