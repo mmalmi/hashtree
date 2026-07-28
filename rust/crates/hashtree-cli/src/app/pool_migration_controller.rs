@@ -2242,8 +2242,8 @@ mod linux {
                         sync: true,
                         pack_target_bytes: None,
                     });
-            let reader = hashtree_lmdb::LmdbBlobReader::
-                open_sequential_with_external_read_concurrency_and_pinned_identity(
+            let reader =
+                hashtree_lmdb::LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
                 source.runtime_path(),
                 external,
                 self.options.source_read_concurrency,

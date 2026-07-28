@@ -2656,8 +2656,8 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         sync: true,
                         pack_target_bytes: None,
                     });
-                    let reader = LmdbBlobReader::
-                        open_sequential_with_external_read_concurrency_and_pinned_identity(
+                    let reader =
+                        LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
                             launch.source(),
                             external,
                             source_read_concurrency,
