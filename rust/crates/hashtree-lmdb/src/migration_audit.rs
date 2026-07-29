@@ -6,13 +6,22 @@ use heed::{Database, EnvFlags, EnvOpenOptions};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
-const AUDIT_MAP_SIZE: usize = 16 * 1024 * 1024 * 1024;
-// Reserve one extra named DB so opening a pre-provenance v3 store can fail on
-// its authority binding instead of failing earlier with MDB_DBS_FULL.
-const AUDIT_DATABASE_COUNT: u32 = 4;
+// The audit retains independent source-reconciliation and target-body proof
+// B-trees. At the 4 GiB reusable-evidence bound, each can contain roughly
+// 107 million hash/size rows; 32 GiB leaves room for both trees plus LMDB page
+// split overhead. This is a virtual address-space cap and grows on demand.
+const AUDIT_MAP_SIZE: usize = 32 * 1024 * 1024 * 1024;
+// The fourth named DB quarantines target evidence until the complete external
+// manifest has been authenticated. Keep one spare so older environments can
+// still fail on their authority binding rather than MDB_DBS_FULL.
+const AUDIT_DATABASE_COUNT: u32 = 5;
 const BINDING_KEY: &[u8] = b"authority-binding-v1";
 const TARGET_CURSOR_KEY: &[u8] = b"target-catalog-cursor-v1";
 const TARGET_FENCE_BINDING_KEY: &[u8] = b"target-fence-binding-v1";
+const TARGET_IMPORT_STAGING_AUTHORITY_KEY: &[u8] = b"target-import-staging-authority-v1";
+const TARGET_IMPORT_AUTHENTICATED_KEY: &[u8] = b"target-import-authenticated-v1";
+const TARGET_IMPORT_PROMOTION_CURSOR_KEY: &[u8] = b"target-import-promotion-cursor-v1";
+const TARGET_IMPORT_PROMOTED_KEY: &[u8] = b"target-import-promoted-v1";
 
 /// Exact summary of a durable online migration verified set.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +43,7 @@ pub struct PoolMigrationAuditStore {
     env: ManagedEnv,
     source_reconciled: Database<Bytes, Bytes>,
     target_verified: Database<Bytes, Bytes>,
+    target_import_staging: Database<Bytes, Bytes>,
     metadata: Database<Bytes, Bytes>,
     binding: Hash,
     writable: bool,
@@ -53,6 +63,9 @@ impl PoolMigrationAuditStore {
             .map_err(map_heed_error)?;
         let target_verified = env
             .create_database(&mut wtxn, Some("target_verified"))
+            .map_err(map_heed_error)?;
+        let target_import_staging = env
+            .create_database(&mut wtxn, Some("target_import_staging"))
             .map_err(map_heed_error)?;
         let metadata = env
             .create_database(&mut wtxn, Some("metadata"))
@@ -75,6 +88,7 @@ impl PoolMigrationAuditStore {
             env,
             source_reconciled,
             target_verified,
+            target_import_staging,
             metadata,
             binding,
             writable: true,
@@ -103,6 +117,14 @@ impl PoolMigrationAuditStore {
             .ok_or_else(|| {
                 StoreError::Other("online migration target audit database is missing".into())
             })?;
+        let target_import_staging = env
+            .open_database(&rtxn, Some("target_import_staging"))
+            .map_err(map_heed_error)?
+            .ok_or_else(|| {
+                StoreError::Other(
+                    "online migration target import staging database is missing".into(),
+                )
+            })?;
         let metadata = env
             .open_database(&rtxn, Some("metadata"))
             .map_err(map_heed_error)?
@@ -126,6 +148,7 @@ impl PoolMigrationAuditStore {
             env,
             source_reconciled,
             target_verified,
+            target_import_staging,
             metadata,
             binding,
             writable: false,
@@ -246,6 +269,290 @@ impl PoolMigrationAuditStore {
             .map_err(map_heed_error)?;
         wtxn.commit().map_err(map_heed_error)?;
         self.env.force_sync().map_err(map_heed_error)
+    }
+
+    /// Prepare a quarantined import bound to the complete certification and
+    /// evidence authority. Returns `true` when the caller must rebuild the
+    /// staging database, or `false` when an authenticated promotion can be
+    /// resumed (or has already completed).
+    ///
+    /// Unauthenticated staging rows are never consulted by target queries or
+    /// exports. A changed authority fails closed for the lifetime of this
+    /// rollout-bound audit store.
+    pub fn prepare_target_import(&self, authority: Hash) -> Result<bool, StoreError> {
+        self.require_writable()?;
+        let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
+        if let Some(actual) = self
+            .metadata
+            .get(&wtxn, TARGET_IMPORT_PROMOTED_KEY)
+            .map_err(map_heed_error)?
+        {
+            require_exact_import_authority(actual, authority)?;
+            wtxn.commit().map_err(map_heed_error)?;
+            return Ok(false);
+        }
+        if let Some(actual) = self
+            .metadata
+            .get(&wtxn, TARGET_IMPORT_AUTHENTICATED_KEY)
+            .map_err(map_heed_error)?
+        {
+            require_exact_import_authority(actual, authority)?;
+            wtxn.commit().map_err(map_heed_error)?;
+            return Ok(false);
+        }
+        self.target_import_staging
+            .clear(&mut wtxn)
+            .map_err(map_heed_error)?;
+        self.metadata
+            .delete(&mut wtxn, TARGET_IMPORT_PROMOTION_CURSOR_KEY)
+            .map_err(map_heed_error)?;
+        self.metadata
+            .put(
+                &mut wtxn,
+                TARGET_IMPORT_STAGING_AUTHORITY_KEY,
+                authority.as_slice(),
+            )
+            .map_err(map_heed_error)?;
+        wtxn.commit().map_err(map_heed_error)?;
+        self.env.force_sync().map_err(map_heed_error)?;
+        Ok(true)
+    }
+
+    /// Append exact hash/size rows to the untrusted quarantine. This never
+    /// changes the target proof set visible to migration workers.
+    pub fn stage_target_import_entries(
+        &self,
+        authority: Hash,
+        entries: &[(Hash, u64)],
+    ) -> Result<(), StoreError> {
+        self.require_writable()?;
+        require_sorted_candidates(entries)?;
+        if entries.is_empty() {
+            return Ok(());
+        }
+        let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
+        self.require_staging_authority(&wtxn, authority)?;
+        if self
+            .metadata
+            .get(&wtxn, TARGET_IMPORT_AUTHENTICATED_KEY)
+            .map_err(map_heed_error)?
+            .is_some()
+        {
+            return Err(StoreError::Other(
+                "authenticated target import staging is immutable".into(),
+            ));
+        }
+        self.put_verified_txn(
+            &mut wtxn,
+            self.target_import_staging,
+            entries,
+            "staged target import",
+        )?;
+        wtxn.commit().map_err(map_heed_error)?;
+        self.env.force_sync().map_err(map_heed_error)
+    }
+
+    /// Make a completely validated staging database eligible for promotion.
+    /// The caller may invoke this only after authenticated EOF and exact
+    /// receipt-summary validation. The marker and all prior staging batches
+    /// are ordered by force-synced LMDB commits.
+    pub fn authenticate_target_import(&self, authority: Hash) -> Result<(), StoreError> {
+        self.require_writable()?;
+        let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
+        self.require_staging_authority(&wtxn, authority)?;
+        match self
+            .metadata
+            .get(&wtxn, TARGET_IMPORT_AUTHENTICATED_KEY)
+            .map_err(map_heed_error)?
+        {
+            Some(actual) => require_exact_import_authority(actual, authority)?,
+            None => self
+                .metadata
+                .put(
+                    &mut wtxn,
+                    TARGET_IMPORT_AUTHENTICATED_KEY,
+                    authority.as_slice(),
+                )
+                .map_err(map_heed_error)?,
+        }
+        wtxn.commit().map_err(map_heed_error)?;
+        self.env.force_sync().map_err(map_heed_error)
+    }
+
+    /// Promote at most one authenticated staging batch into the visible proof
+    /// set. Returns `true` once promotion and quarantine cleanup are durable.
+    ///
+    /// A crash can expose only a prefix whose complete source manifest was
+    /// already authenticated. The promotion cursor and target writes share one
+    /// LMDB transaction. Each promoted staging row is deleted in that same
+    /// transaction, so promotion never needs a second full-size copy of the
+    /// imported proof set. The authenticated marker makes destructive draining
+    /// safe, while the cursor makes retries exact and idempotent.
+    pub fn promote_authenticated_target_import_batch(
+        &self,
+        authority: Hash,
+        batch_size: usize,
+    ) -> Result<bool, StoreError> {
+        self.require_writable()?;
+        if batch_size == 0 {
+            return Err(StoreError::Other(
+                "target import promotion batch size must be non-zero".into(),
+            ));
+        }
+        {
+            let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+            if let Some(actual) = self
+                .metadata
+                .get(&rtxn, TARGET_IMPORT_PROMOTED_KEY)
+                .map_err(map_heed_error)?
+            {
+                require_exact_import_authority(actual, authority)?;
+                rtxn.commit().map_err(map_heed_error)?;
+                return Ok(true);
+            }
+            require_exact_import_authority(
+                self.metadata
+                    .get(&rtxn, TARGET_IMPORT_AUTHENTICATED_KEY)
+                    .map_err(map_heed_error)?
+                    .ok_or_else(|| {
+                        StoreError::Other(
+                            "target import cannot promote before authenticated EOF".into(),
+                        )
+                    })?,
+                authority,
+            )?;
+            rtxn.commit().map_err(map_heed_error)?;
+        }
+
+        let cursor = {
+            let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+            let cursor: Option<Hash> = self
+                .metadata
+                .get(&rtxn, TARGET_IMPORT_PROMOTION_CURSOR_KEY)
+                .map_err(map_heed_error)?
+                .map(|bytes| {
+                    bytes.try_into().map_err(|_| {
+                        StoreError::Other(
+                            "target import promotion cursor has an invalid length".into(),
+                        )
+                    })
+                })
+                .transpose()?;
+            rtxn.commit().map_err(map_heed_error)?;
+            cursor
+        };
+        let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+        let mut entries = Vec::with_capacity(batch_size);
+        if let Some(cursor) = cursor {
+            use std::ops::Bound::{Excluded, Unbounded};
+            let range = (Excluded(cursor.as_slice()), Unbounded);
+            for item in self
+                .target_import_staging
+                .range(&rtxn, &range)
+                .map_err(map_heed_error)?
+                .take(batch_size)
+            {
+                let (hash, encoded) = item.map_err(map_heed_error)?;
+                entries.push((
+                    hash.try_into().map_err(|_| {
+                        StoreError::Other(
+                            "target import staging contains an invalid hash key".into(),
+                        )
+                    })?,
+                    decode_size(encoded)?,
+                ));
+            }
+        } else {
+            for item in self
+                .target_import_staging
+                .iter(&rtxn)
+                .map_err(map_heed_error)?
+                .take(batch_size)
+            {
+                let (hash, encoded) = item.map_err(map_heed_error)?;
+                entries.push((
+                    hash.try_into().map_err(|_| {
+                        StoreError::Other(
+                            "target import staging contains an invalid hash key".into(),
+                        )
+                    })?,
+                    decode_size(encoded)?,
+                ));
+            }
+        }
+        rtxn.commit().map_err(map_heed_error)?;
+
+        let mut wtxn = self.env.write_txn().map_err(map_heed_error)?;
+        self.require_staging_authority(&wtxn, authority)?;
+        require_exact_import_authority(
+            self.metadata
+                .get(&wtxn, TARGET_IMPORT_AUTHENTICATED_KEY)
+                .map_err(map_heed_error)?
+                .ok_or_else(|| {
+                    StoreError::Other(
+                        "target import authentication disappeared during promotion".into(),
+                    )
+                })?,
+            authority,
+        )?;
+        if entries.is_empty() {
+            self.target_import_staging
+                .clear(&mut wtxn)
+                .map_err(map_heed_error)?;
+            for key in [
+                TARGET_IMPORT_STAGING_AUTHORITY_KEY,
+                TARGET_IMPORT_AUTHENTICATED_KEY,
+                TARGET_IMPORT_PROMOTION_CURSOR_KEY,
+            ] {
+                self.metadata
+                    .delete(&mut wtxn, key)
+                    .map_err(map_heed_error)?;
+            }
+            self.metadata
+                .put(&mut wtxn, TARGET_IMPORT_PROMOTED_KEY, authority.as_slice())
+                .map_err(map_heed_error)?;
+        } else {
+            self.put_verified_txn(
+                &mut wtxn,
+                self.target_verified,
+                &entries,
+                "promoted target import",
+            )?;
+            for (hash, _) in &entries {
+                self.target_import_staging
+                    .delete(&mut wtxn, hash.as_slice())
+                    .map_err(map_heed_error)?;
+            }
+            self.metadata
+                .put(
+                    &mut wtxn,
+                    TARGET_IMPORT_PROMOTION_CURSOR_KEY,
+                    entries
+                        .last()
+                        .expect("nonempty target import batch")
+                        .0
+                        .as_slice(),
+                )
+                .map_err(map_heed_error)?;
+        }
+        wtxn.commit().map_err(map_heed_error)?;
+        self.env.force_sync().map_err(map_heed_error)?;
+        Ok(entries.is_empty())
+    }
+
+    pub fn promoted_target_import_authority(&self) -> Result<Option<Hash>, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+        self.metadata
+            .get(&rtxn, TARGET_IMPORT_PROMOTED_KEY)
+            .map_err(map_heed_error)?
+            .map(|bytes| {
+                bytes.try_into().map_err(|_| {
+                    StoreError::Other(
+                        "promoted target import authority has an invalid length".into(),
+                    )
+                })
+            })
+            .transpose()
     }
 
     pub fn target_cursor(&self) -> Result<Option<Hash>, StoreError> {
@@ -462,6 +769,31 @@ impl PoolMigrationAuditStore {
         }
         Ok(())
     }
+
+    fn require_staging_authority(
+        &self,
+        txn: &heed::RoTxn<'_>,
+        authority: Hash,
+    ) -> Result<(), StoreError> {
+        require_exact_import_authority(
+            self.metadata
+                .get(txn, TARGET_IMPORT_STAGING_AUTHORITY_KEY)
+                .map_err(map_heed_error)?
+                .ok_or_else(|| {
+                    StoreError::Other("target import staging has no authority".into())
+                })?,
+            authority,
+        )
+    }
+}
+
+fn require_exact_import_authority(actual: &[u8], expected: Hash) -> Result<(), StoreError> {
+    if actual != expected {
+        return Err(StoreError::Other(
+            "target import authority changed; use a new rollout".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn require_sorted_candidates(candidates: &[(Hash, u64)]) -> Result<(), StoreError> {
@@ -729,5 +1061,157 @@ mod tests {
             .expect_err("fence authority change must fail closed")
             .to_string()
             .contains("changed"));
+    }
+
+    #[test]
+    fn certified_target_import_is_quarantined_resumable_and_authority_bound() {
+        let temp = tempfile::tempdir().expect("temporary audit root");
+        let mut entries = (0_u64..17)
+            .map(|index| {
+                let body = format!("prior target body {index}");
+                (sha256(body.as_bytes()), body.len() as u64)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|(hash, _)| *hash);
+        let promotion_batch_size = 4;
+        let imported_path = temp.path().join("imported-audit");
+        let binding = sha256(b"new source, binary, and parent-cert authority");
+        let import_authority = sha256(b"exact certification plus evidence authority");
+        let changed_authority = sha256(b"different certification authority");
+
+        {
+            let imported =
+                PoolMigrationAuditStore::open(&imported_path, binding).expect("create new audit");
+            assert_eq!(
+                imported.env.info().map_size,
+                AUDIT_MAP_SIZE,
+                "fresh audit must reserve capacity for both full proof trees"
+            );
+            assert!(imported
+                .prepare_target_import(import_authority)
+                .expect("prepare quarantine"));
+            imported
+                .stage_target_import_entries(import_authority, &entries[..3])
+                .expect("stage unauthenticated prefix");
+            assert_eq!(
+                imported
+                    .contains_target_exact_sorted(&entries)
+                    .expect("query proof set before authenticated EOF"),
+                vec![false; entries.len()],
+                "unmarked staging must remain invisible"
+            );
+        }
+
+        {
+            let imported = PoolMigrationAuditStore::open(&imported_path, binding)
+                .expect("reopen after pre-marker crash");
+            assert!(imported
+                .prepare_target_import(import_authority)
+                .expect("discard untrusted prefix"));
+            imported
+                .stage_target_import_entries(import_authority, &entries)
+                .expect("stage complete authenticated input");
+            imported
+                .authenticate_target_import(import_authority)
+                .expect("publish authenticated marker");
+        }
+
+        {
+            let imported = PoolMigrationAuditStore::open(&imported_path, binding)
+                .expect("reopen after post-marker crash");
+            assert!(!imported
+                .prepare_target_import(import_authority)
+                .expect("resume authenticated staging"));
+            assert!(!imported
+                .promote_authenticated_target_import_batch(import_authority, promotion_batch_size,)
+                .expect("promote one production batch"));
+            let rtxn = imported.env.read_txn().expect("read staged row count");
+            assert_eq!(
+                imported
+                    .target_import_staging
+                    .len(&rtxn)
+                    .expect("count remaining staged rows"),
+                (entries.len() - promotion_batch_size) as u64,
+                "each promoted row must drain from staging in the same transaction"
+            );
+            assert_eq!(
+                imported
+                    .contains_target_exact_sorted(&entries)
+                    .expect("query partially promoted proofs"),
+                [
+                    vec![true; promotion_batch_size],
+                    vec![false; entries.len() - promotion_batch_size]
+                ]
+                .concat(),
+                "only an authenticated prefix may become visible"
+            );
+        }
+
+        let imported = PoolMigrationAuditStore::open(&imported_path, binding)
+            .expect("reopen during promotion");
+        assert_eq!(
+            imported.env.info().map_size,
+            AUDIT_MAP_SIZE,
+            "reopened audit must retain the full proof-tree capacity"
+        );
+        let rtxn = imported
+            .env
+            .read_txn()
+            .expect("read staged rows after reopen");
+        assert_eq!(
+            imported
+                .target_import_staging
+                .len(&rtxn)
+                .expect("count staged rows after reopen"),
+            (entries.len() - promotion_batch_size) as u64,
+            "a crash/reopen must preserve the exact drained prefix"
+        );
+        drop(rtxn);
+        while !imported
+            .promote_authenticated_target_import_batch(import_authority, promotion_batch_size)
+            .expect("resume exact idempotent promotion")
+        {}
+        let rtxn = imported
+            .env
+            .read_txn()
+            .expect("read final staged row count");
+        assert_eq!(
+            imported
+                .target_import_staging
+                .len(&rtxn)
+                .expect("count final staged rows"),
+            0,
+            "completed promotion must leave no duplicate staging tree"
+        );
+        drop(rtxn);
+        assert_eq!(
+            imported
+                .promoted_target_import_authority()
+                .expect("read durable import provenance"),
+            Some(import_authority)
+        );
+        assert_eq!(
+            imported
+                .contains_target_exact_sorted(&entries)
+                .expect("query promoted body proofs"),
+            vec![true; entries.len()]
+        );
+        assert_eq!(
+            imported.target_cursor().expect("query imported cursor"),
+            None,
+            "imported body evidence must not skip the new rollout's catalog scan"
+        );
+        assert_eq!(
+            imported
+                .contains_source_reconciled_exact_sorted(&entries)
+                .expect("query source provenance"),
+            vec![false; entries.len()],
+            "target evidence must not become source reconciliation evidence"
+        );
+        assert!(imported
+            .prepare_target_import(changed_authority)
+            .expect_err("changed parent authority must fail closed")
+            .to_string()
+            .contains("authority changed"));
     }
 }

@@ -4,6 +4,15 @@
 
 ### Added
 
+- Pool migration can import an exact root-certified target-body evidence
+  manifest from an earlier source rollout that addresses the same pinned Pool.
+  The parent certification is explicit in controller state, audit binding,
+  receipt, and certification; evidence is streamed through a bounded
+  quarantine and becomes reusable only after authenticated EOF, with
+  crash-resumable promotion. Every current catalog row is still rescanned,
+  while unchanged bodies avoid another multi-terabyte read. Online checkpoint
+  pages may contain up to 32,768 entries under a hard 4 MiB read bound;
+  stopped-final pages remain fixed at 4,096.
 - Pool migration online authority v6 now reconciles an exact source key
   directly with the target Pool's `Stored` size, avoiding legacy source-value
   reads when the target already has the content address. Missing and pending
