@@ -1145,6 +1145,150 @@ fn batch_delete_removes_member_blobs_and_catalog_locations() {
         .expect("retained member lookup"));
 }
 
+#[cfg(unix)]
+#[test]
+fn durable_delete_protection_blocks_deletes_across_pool_handles_but_not_writes() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member = temp.path().join("member");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    pool.add_member(PoolMemberConfig::new(member, 16 * 1024 * 1024))
+        .expect("add member");
+    let protected_hash = sha256(b"delete-protected-existing-blob");
+    pool.put_sync(protected_hash, b"delete-protected-existing-blob")
+        .expect("put protected blob");
+
+    let lease_id = sha256(b"legacy-retirement-delete-protection-lease");
+    let acquired = pool
+        .acquire_delete_protection(lease_id, "legacy-source-retirement")
+        .expect("acquire durable delete protection");
+    assert!(acquired.changed);
+    assert_eq!(acquired.status.lease_id, lease_id);
+    assert_eq!(acquired.status.reason, "legacy-source-retirement");
+    assert_ne!(acquired.status.record_sha256, [0; 32]);
+
+    let reopened = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("reopen pool");
+    assert_eq!(
+        reopened
+            .delete_protection_status()
+            .expect("read durable protection"),
+        Some(acquired.status.clone())
+    );
+    let delete_error = reopened
+        .delete_sync(&protected_hash)
+        .expect_err("single delete must fail closed");
+    assert!(delete_error.to_string().contains(POOL_DELETE_PROTECTED));
+    let batch_error = reopened
+        .delete_many_sync(&[protected_hash])
+        .expect_err("batch delete must fail closed");
+    assert!(batch_error.to_string().contains(POOL_DELETE_PROTECTED));
+    assert_eq!(
+        reopened
+            .get_sync(&protected_hash)
+            .expect("read protected blob"),
+        Some(b"delete-protected-existing-blob".to_vec())
+    );
+
+    let new_hash = sha256(b"writes-remain-enabled-during-delete-protection");
+    assert!(reopened
+        .put_sync(new_hash, b"writes-remain-enabled-during-delete-protection")
+        .expect("write while deletes protected"));
+    assert_eq!(
+        reopened.get_sync(&new_hash).expect("read new blob"),
+        Some(b"writes-remain-enabled-during-delete-protection".to_vec())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_protection_release_requires_exact_lease_and_record_identity() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member = temp.path().join("member");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    pool.add_member(PoolMemberConfig::new(member, 16 * 1024 * 1024))
+        .expect("add member");
+    let hash = sha256(b"delete-after-exact-protection-release");
+    pool.put_sync(hash, b"delete-after-exact-protection-release")
+        .expect("put blob");
+
+    let lease_id = sha256(b"exact-delete-protection-release-lease");
+    let acquired = pool
+        .acquire_delete_protection(lease_id, "legacy-source-retirement")
+        .expect("acquire protection");
+    let repeated = pool
+        .acquire_delete_protection(lease_id, "legacy-source-retirement")
+        .expect("idempotent acquire");
+    assert!(!repeated.changed);
+    assert_eq!(repeated.status, acquired.status);
+
+    assert!(pool
+        .release_delete_protection(
+            sha256(b"wrong-delete-protection-lease"),
+            acquired.status.record_sha256,
+        )
+        .expect_err("wrong lease must fail")
+        .to_string()
+        .contains("lease identity"));
+    assert!(pool
+        .release_delete_protection(lease_id, sha256(b"wrong-record-identity"))
+        .expect_err("wrong record identity must fail")
+        .to_string()
+        .contains("record identity"));
+    assert_eq!(
+        pool.delete_protection_status().expect("status remains"),
+        Some(acquired.status.clone())
+    );
+
+    let released = pool
+        .release_delete_protection(lease_id, acquired.status.record_sha256)
+        .expect("release exact protection");
+    assert!(released.changed);
+    assert_eq!(released.status, acquired.status);
+    assert!(pool
+        .delete_protection_status()
+        .expect("protection removed")
+        .is_none());
+    assert!(pool.delete_sync(&hash).expect("delete after release"));
+}
+
+#[cfg(unix)]
+#[test]
+fn delete_protection_acquisition_waits_for_an_inflight_delete_epoch() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member = temp.path().join("member");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    pool.add_member(PoolMemberConfig::new(member, 16 * 1024 * 1024))
+        .expect("add member");
+    let in_flight_delete = pool
+        .acquire_delete_coordination_lock(false)
+        .expect("begin simulated in-flight delete epoch");
+
+    let acquiring_pool =
+        PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open acquiring handle");
+    let lease_id = sha256(b"wait-for-inflight-delete-lease");
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let acquire_thread = thread::spawn(move || {
+        let result = acquiring_pool
+            .acquire_delete_protection(lease_id, "legacy-source-retirement")
+            .expect("acquire after in-flight delete");
+        completed_tx.send(result).expect("send acquisition result");
+    });
+
+    assert!(matches!(
+        completed_rx.recv_timeout(std::time::Duration::from_millis(100)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    drop(in_flight_delete);
+    let acquired = completed_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("acquisition finishes after delete epoch");
+    assert!(acquired.changed);
+    assert_eq!(acquired.status.lease_id, lease_id);
+    acquire_thread.join().expect("join acquisition thread");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn exact_offline_stale_pending_cleanup_is_atomic_and_idempotent() {

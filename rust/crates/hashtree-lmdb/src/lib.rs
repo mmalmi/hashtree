@@ -27,12 +27,13 @@ pub use migration::{
 pub use migration_audit::{PoolMigrationAuditStore, PoolMigrationAuditSummary};
 pub use parallel_key_scan::{LmdbParallelRawKeyScanner, MAX_PARALLEL_RAW_KEY_SCAN_CONCURRENCY};
 pub use pool::{
-    PoolCatalogLocation, PoolMaintenanceReport, PoolManifestIdentity, PoolMemberConfig,
-    PoolMemberId, PoolMemberRuntimePaths, PoolMemberState, PoolMemberStatus, PoolPhysicalAudit,
+    PoolCatalogLocation, PoolDeleteProtectionChange, PoolDeleteProtectionStatus,
+    PoolMaintenanceReport, PoolManifestIdentity, PoolMemberConfig, PoolMemberId,
+    PoolMemberRuntimePaths, PoolMemberState, PoolMemberStatus, PoolPhysicalAudit,
     PoolReadBatchItem, PoolStalePending, PoolStalePendingCleanupReport, PoolStore, PoolStoreConfig,
     PoolStoreReader, PoolTemperatureConfig, PoolTemperatureReport, PoolTerminalAudit,
     ReadOnlyPoolCatalogAudit, ReadOnlyPoolManifestMember, ReadOnlyPoolManifestSnapshot,
-    ReadOnlyPoolStore,
+    ReadOnlyPoolStore, POOL_DELETE_PROTECTED,
 };
 
 use async_trait::async_trait;

@@ -935,6 +935,61 @@ fn test_storage_pool_add_and_migration_args() {
 }
 
 #[test]
+fn test_storage_pool_delete_protection_args_require_exact_identities() {
+    let lease_id = "11".repeat(32);
+    let cli = Cli::try_parse_from([
+        "htree",
+        "storage",
+        "pool",
+        "protect-deletes",
+        "--lease-id",
+        &lease_id,
+        "--reason",
+        "legacy-source-retirement",
+    ])
+    .expect("parse delete protection acquisition");
+    let Commands::Storage {
+        command: StorageCommands::Pool { command },
+    } = cli.command
+    else {
+        panic!("expected storage pool command");
+    };
+    assert!(matches!(
+        command,
+        PoolCommands::ProtectDeletes {
+            lease_id: parsed_lease,
+            reason,
+        } if parsed_lease == lease_id && reason == "legacy-source-retirement"
+    ));
+
+    let record_sha256 = "22".repeat(32);
+    let cli = Cli::try_parse_from([
+        "htree",
+        "storage",
+        "pool",
+        "release-delete-protection",
+        "--lease-id",
+        &lease_id,
+        "--record-sha256",
+        &record_sha256,
+    ])
+    .expect("parse exact delete protection release");
+    let Commands::Storage {
+        command: StorageCommands::Pool { command },
+    } = cli.command
+    else {
+        panic!("expected storage pool command");
+    };
+    assert!(matches!(
+        command,
+        PoolCommands::ReleaseDeleteProtection {
+            lease_id: parsed_lease,
+            record_sha256: parsed_record,
+        } if parsed_lease == lease_id && parsed_record == record_sha256
+    ));
+}
+
+#[test]
 fn test_build_daemon_args_with_addr_override() {
     let args = args_to_strings(build_daemon_args(Some("0.0.0.0:8080"), None, None, None));
     assert_eq!(args, vec!["--addr", "0.0.0.0:8080"]);

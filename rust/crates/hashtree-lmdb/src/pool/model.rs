@@ -221,6 +221,24 @@ pub struct PoolStoreConfig {
     pub expected_manifest_sha256: Option<Hash>,
 }
 
+/// One durable, non-expiring guard that keeps PoolStore writable while
+/// rejecting logical deletion. The exact catalog record identity is required
+/// to release it, preventing a stale operator command from removing a newer
+/// guard.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolDeleteProtectionStatus {
+    pub lease_id: Hash,
+    pub reason: String,
+    pub acquired_at_unix_secs: u64,
+    pub record_sha256: Hash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolDeleteProtectionChange {
+    pub changed: bool,
+    pub status: PoolDeleteProtectionStatus,
+}
+
 impl Default for PoolStoreConfig {
     fn default() -> Self {
         Self {

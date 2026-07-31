@@ -2331,12 +2331,35 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
             }
         };
         let gib = 1024u64 * 1024 * 1024;
+        let parse_exact_sha256 = |value: &str, label: &str| {
+            if value.len() != 64
+                || !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            {
+                bail!("{label} must be exactly 64 lowercase hexadecimal characters");
+            }
+            from_hex(value).with_context(|| format!("decode {label}"))
+        };
 
         match command {
             PoolCommands::Status => {
                 let pool = open_existing()?;
                 let members = pool.members()?;
                 println!("Storage pool: {}", pool_path.display());
+                match pool.delete_protection_status()? {
+                    Some(status) => {
+                        println!("Delete protection: active");
+                        println!("  lease: {}", hashtree_core::to_hex(&status.lease_id));
+                        println!("  reason: {}", status.reason);
+                        println!("  acquired: {}", status.acquired_at_unix_secs);
+                        println!(
+                            "  record SHA-256: {}",
+                            hashtree_core::to_hex(&status.record_sha256)
+                        );
+                    }
+                    None => println!("Delete protection: inactive"),
+                }
                 println!("Members: {}", members.len());
                 for member in members {
                     println!("  {}", member.id);
@@ -2370,6 +2393,44 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         println!("    error: {error}");
                     }
                 }
+            }
+            PoolCommands::ProtectDeletes { lease_id, reason } => {
+                let pool = open_existing()?;
+                let lease_id = parse_exact_sha256(&lease_id, "--lease-id")?;
+                let change = pool.acquire_delete_protection(lease_id, &reason)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema": "hashtree-pool-delete-protection/v1",
+                        "action": "acquire",
+                        "changed": change.changed,
+                        "leaseId": hashtree_core::to_hex(&change.status.lease_id),
+                        "reason": change.status.reason,
+                        "acquiredAtUnixSecs": change.status.acquired_at_unix_secs,
+                        "recordSha256": hashtree_core::to_hex(&change.status.record_sha256),
+                    }))?
+                );
+            }
+            PoolCommands::ReleaseDeleteProtection {
+                lease_id,
+                record_sha256,
+            } => {
+                let pool = open_existing()?;
+                let lease_id = parse_exact_sha256(&lease_id, "--lease-id")?;
+                let record_sha256 = parse_exact_sha256(&record_sha256, "--record-sha256")?;
+                let change = pool.release_delete_protection(lease_id, record_sha256)?;
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "schema": "hashtree-pool-delete-protection/v1",
+                        "action": "release",
+                        "changed": change.changed,
+                        "leaseId": hashtree_core::to_hex(&change.status.lease_id),
+                        "reason": change.status.reason,
+                        "acquiredAtUnixSecs": change.status.acquired_at_unix_secs,
+                        "recordSha256": hashtree_core::to_hex(&change.status.record_sha256),
+                    }))?
+                );
             }
             PoolCommands::Add {
                 path,

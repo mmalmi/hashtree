@@ -24,6 +24,12 @@
   satisfy source membership. Frozen-source replay tolerates stale online
   evidence for keys deleted before the source fence while still requiring
   every frozen raw key and its Pool-derived size exactly.
+- PoolStore now supports a durable, non-expiring logical-delete protection
+  record for online legacy retirement. All delete paths coordinate through a
+  cross-process lock, while reads, writes, migration copies, and physical
+  member moves remain available. Acquisition is idempotent, release requires
+  both the exact lease and stored-record SHA-256, and the real CLI exposes
+  status plus receipt-producing protect/release commands.
 - The daemon can temporarily serve exact-hash misses from one independently
   pinned, strict read-only PoolStore while keeping its main PoolStore as the
   sole write and enumeration authority. Startup requires an explicit mode,

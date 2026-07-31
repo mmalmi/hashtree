@@ -1,5 +1,6 @@
 mod adaptive;
 mod catalog;
+mod delete_protection;
 mod gate;
 mod maintenance;
 mod maintenance_batch;
@@ -19,13 +20,15 @@ mod temperature_worker;
 mod tests;
 
 use self::adaptive::AdaptivePoolState;
+pub use self::delete_protection::POOL_DELETE_PROTECTED;
 use self::gate::ConcurrencyGate;
 use self::member::{open_member_store, prepare_member_paths, validate_member_config};
 use self::model::{LocationRecord, MemberRecord, PoolManifest, MIN_MEMBER_MAP_SIZE_BYTES};
 pub use self::model::{
-    PoolMaintenanceReport, PoolMemberConfig, PoolMemberId, PoolMemberRuntimePaths, PoolMemberState,
-    PoolMemberStatus, PoolStalePending, PoolStalePendingCleanupReport, PoolStoreConfig,
-    PoolTemperatureConfig, PoolTemperatureReport,
+    PoolDeleteProtectionChange, PoolDeleteProtectionStatus, PoolMaintenanceReport,
+    PoolMemberConfig, PoolMemberId, PoolMemberRuntimePaths, PoolMemberState, PoolMemberStatus,
+    PoolStalePending, PoolStalePendingCleanupReport, PoolStoreConfig, PoolTemperatureConfig,
+    PoolTemperatureReport,
 };
 use self::move_catalog::{
     move_cleanup_state_key, move_state_key, rebuild_move_cleanup_member_index_txn,
@@ -50,7 +53,7 @@ use heed::{Database, EnvOpenOptions};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -79,6 +82,7 @@ pub struct PoolStore {
 #[doc(hidden)]
 pub struct PoolStoreInner {
     env: ManagedEnv,
+    catalog_path: PathBuf,
     manifest_db: Database<Bytes, Bytes>,
     locations: Database<Bytes, Bytes>,
     by_member: Database<Bytes, Unit>,
@@ -401,6 +405,7 @@ impl PoolStore {
         let store = Self {
             inner: Arc::new(PoolStoreInner {
                 env,
+                catalog_path: path.to_path_buf(),
                 manifest_db,
                 locations,
                 by_member,
@@ -1083,6 +1088,8 @@ impl PoolStore {
     }
 
     pub fn delete_sync(&self, hash: &Hash) -> Result<bool, StoreError> {
+        let _coordination = self.acquire_delete_coordination_lock(false)?;
+        self.require_deletes_unprotected()?;
         let Some(location) = self.read_location(hash)? else {
             return Ok(false);
         };
@@ -1108,6 +1115,8 @@ impl PoolStore {
         if hashes.is_empty() {
             return Ok(0);
         }
+        let _coordination = self.acquire_delete_coordination_lock(false)?;
+        self.require_deletes_unprotected()?;
         let rtxn = self.env.read_txn().map_err(map_heed)?;
         let mut seen = HashSet::with_capacity(hashes.len());
         let mut located = Vec::new();

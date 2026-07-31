@@ -692,6 +692,24 @@ pub(crate) enum StorageCommands {
 pub(crate) enum PoolCommands {
     /// Show members, placement usage, lifecycle state, and configured limits
     Status,
+    /// Durably reject logical deletion while continuing reads and writes
+    ProtectDeletes {
+        /// Exact 64-character lowercase SHA-256 lease identity
+        #[arg(long)]
+        lease_id: String,
+        /// Short safe-ASCII operator reason recorded in the Pool catalog
+        #[arg(long)]
+        reason: String,
+    },
+    /// Release deletion protection using both exact stored identities
+    ReleaseDeleteProtection {
+        /// Exact lease identity returned by protect-deletes
+        #[arg(long)]
+        lease_id: String,
+        /// Exact protection-record SHA-256 returned by protect-deletes
+        #[arg(long)]
+        record_sha256: String,
+    },
     /// Add one empty storage member; creates the pool catalog if needed
     Add {
         /// Empty LMDB directory for this member
