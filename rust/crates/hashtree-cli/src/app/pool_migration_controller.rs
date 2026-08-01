@@ -32,6 +32,8 @@ pub(super) struct PoolMigrationControllerOptions {
     pub(super) migration_binary: PathBuf,
     pub(super) target_data_dir: PathBuf,
     pub(super) pool: PathBuf,
+    pub(super) delete_protection_lease_id: Option<String>,
+    pub(super) delete_protection_record_sha256: Option<String>,
     pub(super) source: PathBuf,
     pub(super) source_external_dir: Option<PathBuf>,
     pub(super) state_file: PathBuf,
@@ -97,9 +99,10 @@ mod linux {
         validate_runtime_writer_mask_authorities, validate_source_read_concurrency,
         validate_stopped_final_batch_size, ControllerAuthorityV3, ControllerStateV3,
         CursorAuthorityV3, FileAuthorityV3, FileIdentityV3, LmdbIdentityV3, NamedFileAuthorityV3,
-        PoolAuthorityV3, PoolMigrationLaunchRequestV3, PoolTopologyV3, SourceAuthorityV3,
-        ACK_SCHEMA, ATTEMPT_NAMESPACE_NAME, CONTROLLER_STATE_SCHEMA, MAX_FINAL_REOPEN_BATCHES,
-        POOL_TOPOLOGY_SCHEMA, REQUEST_FILE_NAME, REQUEST_SCHEMA,
+        PoolAuthorityV3, PoolDeleteProtectionAuthorityV1, PoolMigrationLaunchRequestV3,
+        PoolTopologyV3, SourceAuthorityV3, ACK_SCHEMA, ATTEMPT_NAMESPACE_NAME,
+        CONTROLLER_STATE_SCHEMA, MAX_FINAL_REOPEN_BATCHES, POOL_TOPOLOGY_SCHEMA, REQUEST_FILE_NAME,
+        REQUEST_SCHEMA,
     };
     use super::super::pool_migration_mount::{
         ensure_source_read_only_mount_authority_from_plan, host_execution_namespace_authority,
@@ -363,6 +366,7 @@ mod linux {
         expected_argv: Vec<String>,
         source_receipts: Vec<ValidatedSourceTerminalReceiptV3>,
         prior_target_audit: Option<ValidatedOnlineTargetAuditV3>,
+        _delete_protection_guard: Option<hashtree_lmdb::PoolDeleteProtectionGuard>,
         broker_pid: u32,
         broker_proc_start_time_ticks: u64,
     }
@@ -975,7 +979,7 @@ mod linux {
                 &options.controller_systemd_unit,
             )?;
 
-            Ok(PreparedLaunchOutcome::Ready(Self {
+            let mut prepared = Self {
                 options,
                 nonce,
                 boot_id,
@@ -1007,9 +1011,44 @@ mod linux {
                 expected_argv,
                 source_receipts,
                 prior_target_audit,
+                _delete_protection_guard: None,
                 broker_pid,
                 broker_proc_start_time_ticks,
-            }))
+            };
+            prepared._delete_protection_guard = prepared.hold_delete_protection()?;
+            Ok(PreparedLaunchOutcome::Ready(prepared))
+        }
+
+        fn delete_protection_authority(&self) -> Option<PoolDeleteProtectionAuthorityV1> {
+            match (
+                self.options.delete_protection_lease_id.as_ref(),
+                self.options.delete_protection_record_sha256.as_ref(),
+            ) {
+                (Some(lease_id), Some(record_sha256)) => Some(PoolDeleteProtectionAuthorityV1 {
+                    lease_id: lease_id.clone(),
+                    record_sha256: record_sha256.clone(),
+                }),
+                (None, None) => None,
+                _ => unreachable!("delete-protection option pairing was validated"),
+            }
+        }
+
+        fn hold_delete_protection(
+            &self,
+        ) -> Result<Option<hashtree_lmdb::PoolDeleteProtectionGuard>> {
+            let Some(authority) = self.delete_protection_authority() else {
+                return Ok(None);
+            };
+            let target = self.open_online_target_audit_reader()?;
+            let lease_id = hashtree_core::from_hex(&authority.lease_id)
+                .context("decode Pool delete-protection lease ID")?;
+            let record_sha256 = hashtree_core::from_hex(&authority.record_sha256)
+                .context("decode Pool delete-protection record SHA-256")?;
+            let guard = target
+                .reader
+                .hold_delete_protection(lease_id, record_sha256)
+                .context("hold exact Pool delete protection for root migration controller")?;
+            Ok(Some(guard))
         }
 
         fn launch(self) -> Result<()> {
@@ -3125,6 +3164,7 @@ mod linux {
                     topology: self
                         .pool_topology_input
                         .authority_at(self.topology_output.clone()),
+                    delete_protection: self.delete_protection_authority(),
                 },
                 cursor: self.cursor.clone(),
                 cas: additional_cas,
@@ -3266,6 +3306,28 @@ mod linux {
                 bail!("stopped final controller launch forbids --max-items")
             }
             _ => {}
+        }
+        match (
+            options.delete_protection_lease_id.as_deref(),
+            options.delete_protection_record_sha256.as_deref(),
+        ) {
+            (Some(lease_id), Some(record_sha256)) => {
+                if options.phase != PoolMigrationControllerPhase::OnlineBounded {
+                    bail!(
+                        "Pool delete-protection authority is accepted only for online-bounded migration"
+                    );
+                }
+                require_lower_hex("Pool delete-protection lease ID", lease_id, 64)?;
+                require_lower_hex(
+                    "Pool delete-protection record SHA-256",
+                    record_sha256,
+                    64,
+                )?;
+            }
+            (None, None) => {}
+            _ => bail!(
+                "Pool delete-protection lease ID and record SHA-256 must be present or absent together"
+            ),
         }
         let mut previous_writer: Option<&str> = None;
         for unit in &options.writer_units {

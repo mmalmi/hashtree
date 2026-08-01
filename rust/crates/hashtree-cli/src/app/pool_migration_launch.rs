@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use hashtree_core::from_hex;
 use hashtree_lmdb::{
-    PinnedLmdbFileIdentity, PinnedLmdbIdentity, PoolMigrationAuditSummary, PoolPhysicalAudit,
+    PinnedLmdbFileIdentity, PinnedLmdbIdentity, PoolDeleteProtectionGuard, PoolMemberRuntimePaths,
+    PoolMigrationAuditSummary, PoolPhysicalAudit, PoolStoreConfig, PoolStoreReader,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -39,8 +40,9 @@ use super::pool_migration_online_audit::{
 use super::pool_migration_pinned::{PinnedDirectory, PinnedRegularEntry};
 pub(super) use super::pool_migration_protocol::{
     ControllerAuthorityV3, ControllerStateV3, CursorAuthorityV3, FileAuthorityV3, FileIdentityV3,
-    LmdbIdentityV3, NamedFileAuthorityV3, PoolAuthorityV3, PoolMigrationLaunchRequestV3,
-    PoolTopologyMemberV3, PoolTopologyV3, SourceAuthorityV3, WriterUnitMaskV3,
+    LmdbIdentityV3, NamedFileAuthorityV3, PoolAuthorityV3, PoolDeleteProtectionAuthorityV1,
+    PoolMigrationLaunchRequestV3, PoolTopologyMemberV3, PoolTopologyV3, SourceAuthorityV3,
+    WriterUnitMaskV3,
 };
 use super::pool_migration_receipt::{
     capture_source_generation_fingerprint, load_validated_prior_source_terminal_receipts,
@@ -242,6 +244,7 @@ pub(super) struct AcknowledgedPoolMigrationLaunch {
     attempt: PinnedDirectory,
     pins: PinnedMigrationPaths,
     online_target_audit: Option<ValidatedOnlineTargetAuditV3>,
+    _delete_protection_guard: Option<PoolDeleteProtectionGuard>,
 }
 
 struct CheckpointChainState {
@@ -1438,6 +1441,43 @@ impl PinnedMigrationPaths {
             .collect()
     }
 
+    fn hold_delete_protection(
+        &self,
+        authority: Option<&PoolDeleteProtectionAuthorityV1>,
+    ) -> Result<Option<PoolDeleteProtectionGuard>> {
+        let Some(authority) = authority else {
+            return Ok(None);
+        };
+        let mut config = PoolStoreConfig::default();
+        config.temperature.enabled = false;
+        config.catalog_lmdb_identity = Some(self.pool_lmdb_files.identity());
+        config.expected_manifest_sha256 = Some(self.pool_manifest_sha256);
+        config.member_runtime_paths = self
+            .pool_member_runtime_paths()
+            .into_iter()
+            .map(|paths| {
+                Ok(PoolMemberRuntimePaths {
+                    id: paths.id.parse()?,
+                    configured_path: paths.configured_path,
+                    runtime_path: paths.runtime_path,
+                    configured_external_path: paths.configured_external_path,
+                    runtime_external_path: paths.runtime_external_path,
+                    lmdb_identity: paths.lmdb_identity,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let reader = PoolStoreReader::open(self.pool.runtime_path(), config)
+            .context("worker-open exact target Pool delete-protection authority")?;
+        let lease_id = from_hex(&authority.lease_id)
+            .context("decode worker Pool delete-protection lease ID")?;
+        let record_sha256 = from_hex(&authority.record_sha256)
+            .context("decode worker Pool delete-protection record SHA-256")?;
+        let guard = reader
+            .hold_delete_protection(lease_id, record_sha256)
+            .context("hold exact Pool delete protection for migration worker")?;
+        Ok(Some(guard))
+    }
+
     fn prior_source_runtime_paths(
         &self,
         receipts: Vec<ValidatedSourceTerminalReceiptV3>,
@@ -1819,6 +1859,9 @@ pub(super) fn acknowledge_pool_migration_launch(
     }
     second.paths.ensure_path_identities()?;
     second.paths.acquire_cursor_parent_lease()?;
+    let delete_protection_guard = second
+        .paths
+        .hold_delete_protection(request.pool.delete_protection.as_ref())?;
 
     let attempt_dir = request_path
         .parent()
@@ -1928,6 +1971,7 @@ pub(super) fn acknowledge_pool_migration_launch(
         attempt,
         pins: second.paths,
         online_target_audit: second.online_target_audit,
+        _delete_protection_guard: delete_protection_guard,
     })
 }
 
@@ -2024,6 +2068,17 @@ fn validate_request_shape(
     )?;
     validate_sha256("source baseline", &request.source.baseline.sha256)?;
     validate_sha256("Pool topology", &request.pool.topology.sha256)?;
+    if let Some(authority) = &request.pool.delete_protection {
+        if request.controller.phase != "online-bounded" {
+            bail!("Pool delete-protection authority is accepted only for online-bounded migration");
+        }
+        require_lower_hex("Pool delete-protection lease ID", &authority.lease_id, 64)?;
+        require_lower_hex(
+            "Pool delete-protection record SHA-256",
+            &authority.record_sha256,
+            64,
+        )?;
+    }
 
     if request.argv.is_empty() {
         bail!("Pool migration launch request argv must not be empty");

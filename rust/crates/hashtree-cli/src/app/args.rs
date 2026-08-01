@@ -894,6 +894,12 @@ pub(crate) struct PoolMigrationControllerArgs {
     /// Exact target Pool catalog directory
     #[arg(long)]
     pub(crate) pool: PathBuf,
+    /// Exact active Pool delete-protection lease held for an online retirement audit
+    #[arg(long, requires = "delete_protection_record_sha256")]
+    pub(crate) delete_protection_lease_id: Option<String>,
+    /// SHA-256 of the exact durable Pool delete-protection record
+    #[arg(long, requires = "delete_protection_lease_id")]
+    pub(crate) delete_protection_record_sha256: Option<String>,
     /// Exact existing source LMDB directory
     #[arg(long)]
     pub(crate) source: PathBuf,

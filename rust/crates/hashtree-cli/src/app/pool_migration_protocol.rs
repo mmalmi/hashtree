@@ -122,6 +122,15 @@ pub(super) struct PoolAuthorityV3 {
     pub(super) path: PathBuf,
     pub(super) lmdb_identity: LmdbIdentityV3,
     pub(super) topology: FileAuthorityV3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) delete_protection: Option<PoolDeleteProtectionAuthorityV1>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct PoolDeleteProtectionAuthorityV1 {
+    pub(super) lease_id: String,
+    pub(super) record_sha256: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
