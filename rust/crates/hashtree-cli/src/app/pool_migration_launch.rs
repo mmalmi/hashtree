@@ -4202,7 +4202,7 @@ fn validate_systemd_membership(
         bail!("Pool migration v3 must run under the system manager, never a user manager");
     }
 
-    validate_systemd_fragment_authority(expected_fragment)?;
+    validate_systemd_fragment_authority(expected_fragment, expected_unit)?;
     let loaded_environment =
         validate_systemd_environment_file_authority(expected_environment_file)?;
     for (key, expected) in &loaded_environment {
@@ -4420,12 +4420,16 @@ fn validate_systemd_membership(
 }
 
 #[cfg(target_os = "linux")]
-fn validate_systemd_fragment_authority(authority: &FileAuthorityV3) -> Result<()> {
+fn validate_systemd_fragment_authority(
+    authority: &FileAuthorityV3,
+    expected_unit: &str,
+) -> Result<()> {
     let fragment = canonical_regular_path(&authority.path, "systemd unit fragment")?;
-    if fragment.file_name().and_then(|value| value.to_str())
-        != Some("hashtree-pool-migration-worker@.service")
+    let fragment_name = fragment.file_name().and_then(|value| value.to_str());
+    if fragment_name != Some("hashtree-pool-migration-worker@.service")
+        && fragment_name != Some(expected_unit)
     {
-        bail!("systemd unit fragment must be named hashtree-pool-migration-worker@.service");
+        bail!("systemd unit fragment must use the shared template or exact worker instance name");
     }
     let metadata = std::fs::symlink_metadata(&fragment)
         .context("inspect systemd Pool migration unit fragment")?;

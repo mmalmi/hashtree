@@ -635,14 +635,15 @@ mod linux {
                 &options.controller_systemd_fragment,
                 "controller systemd unit fragment",
             )?;
-            if controller_systemd_fragment
+            let controller_fragment_name = controller_systemd_fragment
                 .path
                 .file_name()
-                .and_then(OsStr::to_str)
-                != Some("hashtree-pool-migration-controller@.service")
+                .and_then(OsStr::to_str);
+            if controller_fragment_name != Some("hashtree-pool-migration-controller@.service")
+                && controller_fragment_name != Some(options.controller_systemd_unit.as_str())
             {
                 bail!(
-                    "controller systemd fragment must be named hashtree-pool-migration-controller@.service"
+                    "controller systemd fragment must use the shared template or exact controller instance name"
                 );
             }
             let controller_systemd_environment_file = PinnedAuthorityFile::open_hashed(
@@ -689,10 +690,13 @@ mod linux {
                 &options.systemd_fragment,
                 "systemd unit fragment",
             )?;
-            if systemd_fragment.path.file_name().and_then(OsStr::to_str)
-                != Some("hashtree-pool-migration-worker@.service")
+            let worker_fragment_name = systemd_fragment.path.file_name().and_then(OsStr::to_str);
+            if worker_fragment_name != Some("hashtree-pool-migration-worker@.service")
+                && worker_fragment_name != Some(options.systemd_unit.as_str())
             {
-                bail!("systemd fragment must be named hashtree-pool-migration-worker@.service");
+                bail!(
+                    "systemd fragment must use the shared template or exact worker instance name"
+                );
             }
             require_service_access(
                 &controller_executable.snapshot,
