@@ -29,7 +29,8 @@
   cross-process lock, while reads, writes, migration copies, and physical
   member moves remain available. Acquisition is idempotent, release requires
   both the exact lease and stored-record SHA-256, and the real CLI exposes
-  status plus receipt-producing protect/release commands.
+  status plus receipt-producing protect/release commands. Long-running audits
+  can hold that exact record against release without blocking ordinary writes.
 - The daemon can temporarily serve exact-hash misses from one independently
   pinned, strict read-only PoolStore while keeping its main PoolStore as the
   sole write and enumeration authority. Startup requires an explicit mode,

@@ -20,7 +20,7 @@ mod temperature_worker;
 mod tests;
 
 use self::adaptive::AdaptivePoolState;
-pub use self::delete_protection::POOL_DELETE_PROTECTED;
+pub use self::delete_protection::{PoolDeleteProtectionGuard, POOL_DELETE_PROTECTED};
 use self::gate::ConcurrencyGate;
 use self::member::{open_member_store, prepare_member_paths, validate_member_config};
 use self::model::{LocationRecord, MemberRecord, PoolManifest, MIN_MEMBER_MAP_SIZE_BYTES};

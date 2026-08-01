@@ -84,6 +84,41 @@ impl PoolStore {
         })
     }
 
+    /// Hold the exact durable delete-protection record against release while
+    /// a long-running online retirement audit uses it as an append-only Pool
+    /// authority. Ordinary writes and physical member moves remain available.
+    pub fn hold_delete_protection(
+        &self,
+        lease_id: Hash,
+        expected_record_sha256: Hash,
+    ) -> Result<PoolDeleteProtectionGuard, StoreError> {
+        require_unix_coordination()?;
+        validate_lease_id(lease_id)?;
+        validate_lease_id(expected_record_sha256)?;
+        let coordination = self.acquire_delete_coordination_lock(false)?;
+        let status = self
+            .delete_protection_status()?
+            .ok_or_else(|| StoreError::Other("PoolStore delete protection is not active".into()))?;
+        if status.lease_id != lease_id {
+            return Err(StoreError::Other(format!(
+                "PoolStore delete protection lease identity differs: expected {}, found {}",
+                to_hex(&lease_id),
+                to_hex(&status.lease_id),
+            )));
+        }
+        if status.record_sha256 != expected_record_sha256 {
+            return Err(StoreError::Other(format!(
+                "PoolStore delete protection record identity differs: expected {}, found {}",
+                to_hex(&expected_record_sha256),
+                to_hex(&status.record_sha256),
+            )));
+        }
+        Ok(PoolDeleteProtectionGuard {
+            _coordination: coordination,
+            status,
+        })
+    }
+
     pub fn release_delete_protection(
         &self,
         lease_id: Hash,
@@ -274,6 +309,20 @@ impl Drop for DeleteCoordinationGuard {
 
 #[cfg(not(unix))]
 pub(super) struct DeleteCoordinationGuard;
+
+/// An exact durable delete-protection record held against concurrent release.
+/// Dropping this value releases only the coordination lock, not the durable
+/// protection record.
+pub struct PoolDeleteProtectionGuard {
+    _coordination: DeleteCoordinationGuard,
+    status: PoolDeleteProtectionStatus,
+}
+
+impl PoolDeleteProtectionGuard {
+    pub fn status(&self) -> &PoolDeleteProtectionStatus {
+        &self.status
+    }
+}
 
 #[cfg(unix)]
 fn require_unix_coordination() -> Result<(), StoreError> {

@@ -1289,6 +1289,49 @@ fn delete_protection_acquisition_waits_for_an_inflight_delete_epoch() {
     acquire_thread.join().expect("join acquisition thread");
 }
 
+#[cfg(unix)]
+#[test]
+fn held_delete_protection_blocks_release_until_online_audit_finishes() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member = temp.path().join("member");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    pool.add_member(PoolMemberConfig::new(member, 16 * 1024 * 1024))
+        .expect("add member");
+
+    let lease_id = sha256(b"held-online-retirement-delete-protection");
+    let acquired = pool
+        .acquire_delete_protection(lease_id, "legacy-source-retirement")
+        .expect("acquire protection");
+    let held = pool
+        .hold_delete_protection(lease_id, acquired.status.record_sha256)
+        .expect("hold exact protection");
+    assert_eq!(held.status(), &acquired.status);
+
+    let releasing_pool =
+        PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open releasing handle");
+    let record_sha256 = acquired.status.record_sha256;
+    let (completed_tx, completed_rx) = std::sync::mpsc::channel();
+    let release_thread = thread::spawn(move || {
+        let result = releasing_pool
+            .release_delete_protection(lease_id, record_sha256)
+            .expect("release after held audit");
+        completed_tx.send(result).expect("send release result");
+    });
+
+    assert!(matches!(
+        completed_rx.recv_timeout(std::time::Duration::from_millis(100)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+    drop(held);
+    let released = completed_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("release finishes after audit guard drops");
+    assert!(released.changed);
+    assert_eq!(released.status, acquired.status);
+    release_thread.join().expect("join release thread");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn exact_offline_stale_pending_cleanup_is_atomic_and_idempotent() {
