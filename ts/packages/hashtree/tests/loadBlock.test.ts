@@ -40,6 +40,19 @@ describe('loadBlock', () => {
     await expect(pending).rejects.toThrow('caller-cancelled');
   });
 
+  it('rejects when aborted while the initial store read is still pending', async () => {
+    const hash = new Uint8Array(32).fill(12);
+    const controller = new AbortController();
+    const store = {
+      get: () => new Promise<Uint8Array | null>(() => {}),
+    } as MemoryStore;
+
+    const pending = loadBlock(store, hash, controller.signal);
+    controller.abort(new Error('cancel-pending-initial-read'));
+
+    await expect(pending).rejects.toThrow('cancel-pending-initial-read');
+  });
+
   it('rejects synchronously when the signal is already aborted', async () => {
     const store = new MemoryStore();
     const hash = new Uint8Array(32).fill(10);

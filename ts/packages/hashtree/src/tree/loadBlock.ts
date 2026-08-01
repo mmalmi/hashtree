@@ -15,6 +15,43 @@ import { Store, Hash } from '../types.js';
 /** How often to fall back to polling when the store has no `watch`. */
 const POLL_INTERVAL_MS = 500;
 
+async function getBlock(
+  store: Store,
+  hash: Hash,
+  signal?: AbortSignal
+): Promise<Uint8Array | null> {
+  if (!signal) return store.get(hash);
+  if (signal.aborted) {
+    throw signal.reason ?? new DOMException('Aborted', 'AbortError');
+  }
+
+  return new Promise<Uint8Array | null>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener('abort', onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    void store.get(hash).then(
+      (data) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(data);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      }
+    );
+  });
+}
+
 /**
  * Load a block by hash, waiting until it's available.
  *
@@ -33,7 +70,7 @@ export async function loadBlock(
     throw signal.reason ?? new DOMException('Aborted', 'AbortError');
   }
 
-  const initial = await store.get(hash);
+  const initial = await getBlock(store, hash, signal);
   if (initial) return initial;
   if (signal?.aborted) {
     throw signal.reason ?? new DOMException('Aborted', 'AbortError');
@@ -68,16 +105,20 @@ export async function loadBlock(
       // Race: data may have been put between our initial get and the watch
       // registration. Re-check once so we don't hang on data that's already
       // local.
-      void store.get(hash).then((data) => {
+      void getBlock(store, hash, signal).then((data) => {
         if (settled || !data) return;
         cleanup();
         resolve(data);
+      }, (error) => {
+        if (settled) return;
+        cleanup();
+        reject(error);
       });
     } else {
       const poll = async () => {
         if (settled) return;
         try {
-          const data = await store.get(hash);
+          const data = await getBlock(store, hash, signal);
           if (settled) return;
           if (data) {
             cleanup();
