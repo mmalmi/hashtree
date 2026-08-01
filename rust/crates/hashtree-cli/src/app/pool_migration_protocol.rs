@@ -92,6 +92,8 @@ pub(super) struct ControllerStateV3 {
     pub(super) legacy_worker_template_mask: WriterUnitMaskV3,
     pub(super) legacy_worker_instance_masks: Vec<WriterUnitMaskV3>,
     pub(super) source_terminal_receipt_sha256: Vec<String>,
+    #[serde(default)]
+    pub(super) prior_target_audit_certification_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

@@ -104,10 +104,11 @@ Use an empty `HTREE_POOL_SOURCE_EXTERNAL_ARGS=` when the source has no
 external directory. Set `HTREE_POOL_LIMIT_ARGS=--max-items N` for each
 `online-bounded` tranche and leave it empty for both stopped-final phases.
 Stopped-final batch size is fixed at 4096 to keep the durable checkpoint
-namespace practical; source read concurrency is hard capped at 64. Unknown,
-duplicate, quoted, or loader-affecting assignments are rejected. Htree binds
-the file path, inode, bytes, SHA-256, systemd-loaded path, and resulting
-process environment.
+namespace practical. Online batches may contain up to 32768 entries and every
+checkpoint request has a hard 4 MiB read bound; source read concurrency is
+hard capped at 64. Unknown, duplicate, quoted, or loader-affecting assignments
+are rejected. Htree binds the file path, inode, bytes, SHA-256, systemd-loaded
+path, and resulting process environment.
 
 Create `/etc/hashtree/pool-migration-controller-NAME.env` as a root-owned
 `0644` file containing one unquoted `HTREE_POOL_CONTROLLER_ARGS=` assignment.
@@ -319,7 +320,8 @@ LMDB identities, and full Pool manifest as the request:
   "legacyWorkerInstanceMasks": [],
   "sourceTerminalReceiptSha256": [
     "0000000000000000000000000000000000000000000000000000000000000000"
-  ]
+  ],
+  "priorTargetAuditCertificationSha256": null
 }
 ```
 
@@ -337,6 +339,13 @@ fences held until htree has durably published `complete`; the state file is an
 attestation, not a substitute for the controller's process/open-handle audit.
 `sourceTerminalReceiptSha256` is empty for `final-stopped-source` and contains
 the uniquely sorted exact receipt set for `final-stopped-full`.
+`priorTargetAuditCertificationSha256` is normally null. An `online-bounded`
+rollout may set it to the exact certification SHA supplied by its matching
+`online-target-audit-NONCE` CAS in order to reuse body proofs from an earlier
+source rollout over the same pinned Pool. The parent digest enters the audit
+binding and every new receipt/certification. Imported evidence is quarantined
+until authenticated EOF, then promoted idempotently; the new rollout still
+rescans every current Pool catalog row.
 
 The topology CAS is strict JSON:
 

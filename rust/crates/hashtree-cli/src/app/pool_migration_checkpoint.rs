@@ -5,7 +5,11 @@ use std::time::Duration;
 
 pub(super) const CHECKPOINT_REQUEST_SCHEMA: &str = "hashtree-pool-migration-checkpoint-request/v3";
 pub(super) const CHECKPOINT_ACK_SCHEMA: &str = "hashtree-pool-migration-checkpoint-ack/v3";
-pub(super) const MAX_CHECKPOINT_BYTES: u64 = 1024 * 1024;
+pub(super) const MAX_CHECKPOINT_AUDIT_ENTRIES: usize = 32_768;
+// A 32,768-entry target-audit page serializes to at most about 3.32 MiB:
+// each entry is a 64-byte lowercase hash plus a worst-case 20-digit u64 size.
+// Keep bounded headroom for the exact launch/checkpoint authority fields.
+pub(super) const MAX_CHECKPOINT_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -277,4 +281,47 @@ pub(super) fn validate_root_broker_process(
 #[cfg(not(target_os = "linux"))]
 pub(super) fn validate_root_broker_service(_authority: &CheckpointBrokerAuthorityV3) -> Result<()> {
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maximum_audit_page_fits_the_bounded_checkpoint_file() {
+        let hash = "f".repeat(64);
+        let request = MigrationCheckpointRequestV3 {
+            schema: CHECKPOINT_REQUEST_SCHEMA.to_string(),
+            sequence: u64::MAX,
+            previous_ack_sha256: Some(hash.clone()),
+            operation: "online-target-audit-batch".to_string(),
+            cursor: Some(hash.clone()),
+            range_limit: Some(MAX_CHECKPOINT_AUDIT_ENTRIES as u64),
+            audit_entries: (0..MAX_CHECKPOINT_AUDIT_ENTRIES)
+                .map(|_| MigrationCheckpointAuditEntryV3 {
+                    hash: hash.clone(),
+                    size: u64::MAX,
+                })
+                .collect(),
+            audit_target_cursor: Some(hash.clone()),
+            worker_pid: u32::MAX,
+            worker_proc_start_time_ticks: u64::MAX,
+            broker_pid: u32::MAX,
+            broker_proc_start_time_ticks: u64::MAX,
+            boot_id: hash.clone(),
+            attempt_nonce: hash.clone(),
+            launch_request_sha256: hash,
+            requested_at_boottime_millis: u64::MAX,
+            start_before_boottime_millis: u64::MAX,
+        };
+        let mut serialized =
+            serde_json::to_vec(&request).expect("serialize maximum checkpoint page");
+        serialized.push(b'\n');
+        assert!(
+            serialized.len() as u64 <= MAX_CHECKPOINT_BYTES,
+            "maximum checkpoint page is {} bytes, over the {}-byte bound",
+            serialized.len(),
+            MAX_CHECKPOINT_BYTES
+        );
+    }
 }

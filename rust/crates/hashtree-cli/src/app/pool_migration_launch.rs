@@ -19,7 +19,7 @@ use super::pool_migration_checkpoint::{
     validate_checkpoint_operation, validate_root_broker_process, validate_root_broker_service,
     CheckpointBrokerAuthorityV3, MigrationCheckpointAckV3, MigrationCheckpointAuditEntryV3,
     MigrationCheckpointRequestV3, CHECKPOINT_ACK_SCHEMA, CHECKPOINT_REQUEST_SCHEMA,
-    MAX_CHECKPOINT_BYTES,
+    MAX_CHECKPOINT_AUDIT_ENTRIES, MAX_CHECKPOINT_BYTES,
 };
 use super::pool_migration_evidence::{
     SourceEvidenceManifestAuthorityV3, SourceEvidenceManifestWriterV3, SourceEvidenceSummaryV3,
@@ -30,9 +30,11 @@ use super::pool_migration_mount::{
 };
 use super::pool_migration_online_audit::{
     compute_online_audit_binding, compute_online_target_fence_binding,
-    load_validated_online_target_audit, online_audit_path, OnlineTargetAuditExpectationV3,
-    PoolMigrationOnlineTargetAuditReceiptV3, ValidatedOnlineTargetAuditV3,
-    ONLINE_TARGET_AUDIT_FILE_NAME, ONLINE_TARGET_AUDIT_SCHEMA,
+    load_validated_online_target_audit, load_validated_prior_online_target_audit,
+    online_audit_path, OnlineTargetAuditExpectationV3, PoolMigrationOnlineTargetAuditReceiptV3,
+    PriorOnlineTargetAuditExpectationV3, ValidatedOnlineTargetAuditV3,
+    ONLINE_TARGET_AUDIT_CAS_LABEL_PREFIX, ONLINE_TARGET_AUDIT_FILE_NAME,
+    ONLINE_TARGET_AUDIT_SCHEMA,
 };
 use super::pool_migration_pinned::{PinnedDirectory, PinnedRegularEntry};
 pub(super) use super::pool_migration_protocol::{
@@ -74,6 +76,7 @@ pub(super) const POOL_TOPOLOGY_SCHEMA: &str = "hashtree-pool-migration-topology/
 pub(super) const CONTROLLER_STATE_SCHEMA: &str = "hashtree-pool-migration-controller-state/v3";
 pub(super) const MAX_FINAL_REOPEN_BATCHES: usize = 256;
 pub(super) const MAX_FINAL_BATCH_SIZE: usize = 4_096;
+pub(super) const MAX_ONLINE_BATCH_SIZE: usize = MAX_CHECKPOINT_AUDIT_ENTRIES;
 pub(super) const MAX_FINAL_SOURCE_READ_CONCURRENCY: usize = 64;
 const MEMBER_MARKER_NAME: &str = ".hashtree-pool-member-v1";
 const EXTERNAL_MARKER_NAME: &str = ".hashtree-pool-external-v1";
@@ -85,6 +88,11 @@ pub(super) fn validate_stopped_final_batch_size(
     if final_stopped && batch_size != MAX_FINAL_BATCH_SIZE {
         bail!(
             "stopped final migration requires --batch-size {MAX_FINAL_BATCH_SIZE} to bound durable checkpoint amplification"
+        );
+    }
+    if !final_stopped && batch_size > MAX_ONLINE_BATCH_SIZE {
+        bail!(
+            "online migration requires --batch-size <= {MAX_ONLINE_BATCH_SIZE} to bound durable checkpoint amplification"
         );
     }
     Ok(())
@@ -305,6 +313,9 @@ impl AcknowledgedPoolMigrationLaunch {
             self.request.pool.lmdb_identity,
             &self.request.pool.topology.sha256,
             self.pins.pool_manifest_sha256,
+            self.controller_state
+                .prior_target_audit_certification_sha256
+                .as_deref(),
         )
     }
 
@@ -856,6 +867,10 @@ impl AcknowledgedPoolMigrationLaunch {
             main_pid: self.request.main_pid,
             proc_start_time_ticks: self.request.proc_start_time_ticks,
             controller_state_sha256: self.controller_state_authority.sha256.clone(),
+            prior_target_audit_certification_sha256: self
+                .controller_state
+                .prior_target_audit_certification_sha256
+                .clone(),
             source_path: self.request.source.lmdb_path.clone(),
             source_lmdb_identity: self.request.source.lmdb_identity,
             source_external_path: self.request.source.external_path.clone(),
@@ -2369,37 +2384,75 @@ fn validate_launch_authority(
         cursor_name,
     };
     let controller_state = validate_controller_state(request, &paths, &boot_id)?;
-    let online_target_audit = load_validated_online_target_audit(
-        &request.cas,
-        &OnlineTargetAuditExpectationV3 {
-            rollout_id: &request.controller.rollout_id,
-            worker_binary_sha256: &request.binary.sha256,
-            source_baseline_sha256: &request.source.baseline.sha256,
-            source_path: &request.source.lmdb_path,
-            source_lmdb_identity: request.source.lmdb_identity,
-            source_external_path: request.source.external_path.as_deref(),
-            source_external_identity: request.source.external_identity,
-            pool_path: &request.pool.path,
-            pool_lmdb_identity: request.pool.lmdb_identity,
-            pool_topology_sha256: &request.pool.topology.sha256,
-            pool_manifest_sha256: &controller_state.pool_manifest_sha256,
-            target_writer_units: &controller_state.stopped_writer_units,
-            target_writer_unit_masks: &controller_state.writer_unit_masks,
-            legacy_worker_template_mask: &controller_state.legacy_worker_template_mask,
-            legacy_worker_instance_masks: &controller_state.legacy_worker_instance_masks,
-            expected_service_gid: service_gid()
-                .context("online target audit validation requires a service GID")?,
-            validate_evidence_content: false,
-        },
-    )?;
-    match request.controller.phase.as_str() {
-        "final-stopped-source" if online_target_audit.is_none() => {
-            bail!("final-stopped-source requires one root-certified online target audit CAS")
+    let service_gid =
+        service_gid().context("online target audit validation requires a service GID")?;
+    let (online_target_audit, prior_target_audit) = match request.controller.phase.as_str() {
+        "final-stopped-source" => {
+            let audit = load_validated_online_target_audit(
+                &request.cas,
+                &OnlineTargetAuditExpectationV3 {
+                    rollout_id: &request.controller.rollout_id,
+                    worker_binary_sha256: &request.binary.sha256,
+                    source_baseline_sha256: &request.source.baseline.sha256,
+                    source_path: &request.source.lmdb_path,
+                    source_lmdb_identity: request.source.lmdb_identity,
+                    source_external_path: request.source.external_path.as_deref(),
+                    source_external_identity: request.source.external_identity,
+                    pool_path: &request.pool.path,
+                    pool_lmdb_identity: request.pool.lmdb_identity,
+                    pool_topology_sha256: &request.pool.topology.sha256,
+                    pool_manifest_sha256: &controller_state.pool_manifest_sha256,
+                    target_writer_units: &controller_state.stopped_writer_units,
+                    target_writer_unit_masks: &controller_state.writer_unit_masks,
+                    legacy_worker_template_mask: &controller_state.legacy_worker_template_mask,
+                    legacy_worker_instance_masks: &controller_state.legacy_worker_instance_masks,
+                    expected_service_gid: service_gid,
+                    validate_evidence_content: false,
+                },
+            )?;
+            if audit.is_none() {
+                bail!("final-stopped-source requires one root-certified online target audit CAS");
+            }
+            (audit, None)
         }
-        "online-bounded" | "final-stopped-full" if online_target_audit.is_some() => {
-            bail!("online target audit CAS is accepted only by final-stopped-source")
+        "online-bounded" => {
+            let audit = load_validated_prior_online_target_audit(
+                &request.cas,
+                &PriorOnlineTargetAuditExpectationV3 {
+                    boot_id: &boot_id,
+                    pool_path: &request.pool.path,
+                    pool_lmdb_identity: request.pool.lmdb_identity,
+                    pool_topology_sha256: &request.pool.topology.sha256,
+                    pool_manifest_sha256: &controller_state.pool_manifest_sha256,
+                    expected_service_gid: service_gid,
+                    validate_evidence_content: false,
+                },
+            )?;
+            (None, audit)
         }
-        _ => {}
+        "final-stopped-full" => {
+            if request.cas.iter().any(|authority| {
+                authority
+                    .label
+                    .starts_with(ONLINE_TARGET_AUDIT_CAS_LABEL_PREFIX)
+            }) {
+                bail!(
+                    "online target audit CAS is accepted only by online-bounded import or final-stopped-source"
+                );
+            }
+            (None, None)
+        }
+        _ => unreachable!("release phase was validated"),
+    };
+    let prior_target_sha256 = prior_target_audit
+        .as_ref()
+        .map(|validated| validated.certification_sha256.as_str());
+    if prior_target_sha256
+        != controller_state
+            .prior_target_audit_certification_sha256
+            .as_deref()
+    {
+        bail!("prior target-audit certification CAS differs from controller state");
     }
     let prior_receipts =
         load_request_source_terminal_receipts(request, &controller_state, &paths, false)?;
@@ -2508,6 +2561,12 @@ fn validate_controller_state(
         && !state.source_terminal_receipt_sha256.is_empty()
     {
         bail!("only final-stopped-full may consume source-terminal receipts");
+    }
+    if let Some(sha256) = &state.prior_target_audit_certification_sha256 {
+        validate_sha256("prior target-audit certification", sha256)?;
+        if request.controller.phase != "online-bounded" {
+            bail!("only online-bounded may import a prior target-audit certification");
+        }
     }
     let final_stopped = matches!(
         request.controller.phase.as_str(),
@@ -4671,6 +4730,16 @@ mod tests {
     fn stopped_final_batch_size_is_fixed_to_bound_checkpoint_files() {
         validate_stopped_final_batch_size(false, 1)
             .expect("online bounded passes may use a smaller batch");
+        validate_stopped_final_batch_size(false, MAX_ONLINE_BATCH_SIZE)
+            .expect("the largest bounded online checkpoint page is accepted");
+        let online_error = validate_stopped_final_batch_size(false, MAX_ONLINE_BATCH_SIZE + 1)
+            .expect_err("oversized online checkpoint amplification must fail closed");
+        assert!(
+            online_error
+                .to_string()
+                .contains(&MAX_ONLINE_BATCH_SIZE.to_string()),
+            "unexpected online batch error: {online_error:#}"
+        );
         validate_stopped_final_batch_size(true, MAX_FINAL_BATCH_SIZE)
             .expect("the fixed stopped-final batch is accepted");
         for batch_size in [1, MAX_FINAL_BATCH_SIZE - 1, MAX_FINAL_BATCH_SIZE + 1] {

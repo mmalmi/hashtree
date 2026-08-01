@@ -79,12 +79,13 @@ mod linux {
         ack_file_name, boottime_millis, request_file_name, timeout_millis,
         validate_checkpoint_operation, CheckpointBrokerAuthorityV3, MigrationCheckpointAckV3,
         MigrationCheckpointRequestV3, CHECKPOINT_ACK_SCHEMA, CHECKPOINT_REQUEST_SCHEMA,
-        MAX_CHECKPOINT_BYTES,
+        MAX_CHECKPOINT_AUDIT_ENTRIES, MAX_CHECKPOINT_BYTES,
     };
     use super::super::pool_migration_evidence::{
-        consume_matching_source_evidence, validate_source_evidence_metadata,
-        validate_terminal_catalog_target_evidence, SourceEvidenceManifestReaderV3,
-        SourceEvidenceUnionReaderV3, ONLINE_TARGET_EVIDENCE_FILE_NAME, SOURCE_EVIDENCE_FILE_NAME,
+        consume_matching_source_evidence, seize_source_evidence_for_root_certification,
+        validate_source_evidence_metadata, validate_terminal_catalog_target_evidence,
+        SourceEvidenceManifestReaderV3, SourceEvidenceUnionReaderV3,
+        ONLINE_TARGET_EVIDENCE_FILE_NAME, SOURCE_EVIDENCE_FILE_NAME,
     };
     use super::super::pool_migration_launch::{
         validate_batched_runtime_masked_final_fence_with_systemctl,
@@ -115,9 +116,12 @@ mod linux {
     };
     use super::super::pool_migration_online_audit::{
         compute_online_audit_binding, compute_online_target_fence_binding,
-        load_validated_online_target_audit, online_audit_path, verify_and_record_target_body_page,
-        verify_exact_stored_target_catalog_entries, OnlineTargetAuditExpectationV3,
-        PoolMigrationOnlineTargetAuditCertificationV3, PoolMigrationOnlineTargetAuditReceiptV3,
+        compute_prior_target_import_authority, load_validated_online_target_audit,
+        load_validated_prior_online_target_audit, online_audit_path,
+        verify_and_record_target_body_page, verify_exact_stored_target_catalog_entries,
+        OnlineTargetAuditExpectationV3, PoolMigrationOnlineTargetAuditCertificationV3,
+        PoolMigrationOnlineTargetAuditReceiptV3, PriorOnlineTargetAuditExpectationV3,
+        ValidatedOnlineTargetAuditV3, ONLINE_TARGET_AUDIT_CAS_LABEL_PREFIX,
         ONLINE_TARGET_AUDIT_CERTIFICATION_FILE_NAME, ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA,
         ONLINE_TARGET_AUDIT_FILE_NAME, ONLINE_TARGET_AUDIT_SCHEMA, SOURCE_EVIDENCE_KIND,
         TARGET_EVIDENCE_KIND,
@@ -358,6 +362,7 @@ mod linux {
         environment_bytes: Vec<u8>,
         expected_argv: Vec<String>,
         source_receipts: Vec<ValidatedSourceTerminalReceiptV3>,
+        prior_target_audit: Option<ValidatedOnlineTargetAuditV3>,
         broker_pid: u32,
         broker_proc_start_time_ticks: u64,
     }
@@ -427,6 +432,42 @@ mod linux {
         reader: hashtree_lmdb::LmdbBlobReader,
         _source: PinnedDirectory,
         _external: Option<PinnedDirectory>,
+    }
+
+    struct PinnedOnlineTargetAuditReader {
+        reader: hashtree_lmdb::PoolStoreReader,
+        _catalog: PinnedDirectory,
+        _members: Vec<(PinnedDirectory, Option<PinnedDirectory>)>,
+    }
+
+    fn current_stored_target_evidence(
+        reader: &hashtree_lmdb::PoolStoreReader,
+        certified: &[([u8; 32], u64)],
+    ) -> Result<Vec<([u8; 32], u64)>> {
+        let hashes = certified.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+        let locations = reader
+            .blob_catalog_locations(&hashes)
+            .context("read current Pool catalog while importing prior target evidence")?;
+        certified
+            .iter()
+            .zip(locations)
+            .filter_map(|((hash, certified_size), location)| match location {
+                hashtree_lmdb::PoolCatalogLocation::Stored { size, .. }
+                    if size == *certified_size =>
+                {
+                    Some(Ok((*hash, *certified_size)))
+                }
+                hashtree_lmdb::PoolCatalogLocation::Stored { size, .. } => Some(Err(
+                    anyhow::anyhow!(
+                        "current Pool size {size} for {} conflicts with prior certified size {certified_size}",
+                        hashtree_core::to_hex(hash)
+                    ),
+                )),
+                hashtree_lmdb::PoolCatalogLocation::Missing
+                | hashtree_lmdb::PoolCatalogLocation::Pending { .. }
+                | hashtree_lmdb::PoolCatalogLocation::Moving { .. } => None,
+            })
+            .collect()
     }
 
     struct PreparedMountTeardown {
@@ -803,44 +844,77 @@ mod linux {
                     "source-terminal receipt CAS set differs from the exact controller-state receipt set"
                 );
             }
-            let online_target_audit = load_validated_online_target_audit(
-                &receipt_authorities,
-                &OnlineTargetAuditExpectationV3 {
-                    rollout_id: &options.rollout_id,
-                    worker_binary_sha256: &migration_binary.sha256,
-                    source_baseline_sha256: &source_baseline_input.sha256,
-                    source_path: &source,
-                    source_lmdb_identity: source_identity,
-                    source_external_path: options.source_external_dir.as_deref(),
-                    source_external_identity,
-                    pool_path: &pool,
-                    pool_lmdb_identity: pool_identity,
-                    pool_topology_sha256: &pool_topology_input.sha256,
-                    pool_manifest_sha256: &controller_state.pool_manifest_sha256,
-                    target_writer_units: &controller_state.stopped_writer_units,
-                    target_writer_unit_masks: &controller_state.writer_unit_masks,
-                    legacy_worker_template_mask: &controller_state.legacy_worker_template_mask,
-                    legacy_worker_instance_masks: &controller_state.legacy_worker_instance_masks,
-                    expected_service_gid: options.service_gid,
-                    validate_evidence_content: false,
-                },
-            )?;
-            match options.phase {
-                PoolMigrationControllerPhase::FinalStoppedSource
-                    if online_target_audit.is_none() =>
-                {
-                    bail!(
-                        "final-stopped-source requires one root-certified online target audit CAS"
-                    )
+            let (_online_target_audit, prior_target_audit) = match options.phase {
+                PoolMigrationControllerPhase::FinalStoppedSource => {
+                    let audit = load_validated_online_target_audit(
+                        &receipt_authorities,
+                        &OnlineTargetAuditExpectationV3 {
+                            rollout_id: &options.rollout_id,
+                            worker_binary_sha256: &migration_binary.sha256,
+                            source_baseline_sha256: &source_baseline_input.sha256,
+                            source_path: &source,
+                            source_lmdb_identity: source_identity,
+                            source_external_path: options.source_external_dir.as_deref(),
+                            source_external_identity,
+                            pool_path: &pool,
+                            pool_lmdb_identity: pool_identity,
+                            pool_topology_sha256: &pool_topology_input.sha256,
+                            pool_manifest_sha256: &controller_state.pool_manifest_sha256,
+                            target_writer_units: &controller_state.stopped_writer_units,
+                            target_writer_unit_masks: &controller_state.writer_unit_masks,
+                            legacy_worker_template_mask: &controller_state
+                                .legacy_worker_template_mask,
+                            legacy_worker_instance_masks: &controller_state
+                                .legacy_worker_instance_masks,
+                            expected_service_gid: options.service_gid,
+                            validate_evidence_content: false,
+                        },
+                    )?;
+                    if audit.is_none() {
+                        bail!(
+                            "final-stopped-source requires one root-certified online target audit CAS"
+                        );
+                    }
+                    (audit, None)
                 }
-                PoolMigrationControllerPhase::OnlineBounded
-                | PoolMigrationControllerPhase::FinalStoppedFull
-                    if online_target_audit.is_some() =>
-                {
-                    bail!("online target audit CAS is accepted only by final-stopped-source")
+                PoolMigrationControllerPhase::OnlineBounded => {
+                    let audit = load_validated_prior_online_target_audit(
+                        &receipt_authorities,
+                        &PriorOnlineTargetAuditExpectationV3 {
+                            boot_id: &boot_id,
+                            pool_path: &pool,
+                            pool_lmdb_identity: pool_identity,
+                            pool_topology_sha256: &pool_topology_input.sha256,
+                            pool_manifest_sha256: &controller_state.pool_manifest_sha256,
+                            expected_service_gid: options.service_gid,
+                            validate_evidence_content: false,
+                        },
+                    )?;
+                    let actual = audit
+                        .as_ref()
+                        .map(|validated| validated.certification_sha256.as_str());
+                    if actual
+                        != controller_state
+                            .prior_target_audit_certification_sha256
+                            .as_deref()
+                    {
+                        bail!("prior target-audit certification CAS differs from controller state");
+                    }
+                    (None, audit)
                 }
-                _ => {}
-            }
+                PoolMigrationControllerPhase::FinalStoppedFull => {
+                    if receipt_authorities.iter().any(|authority| {
+                        authority
+                            .label
+                            .starts_with(ONLINE_TARGET_AUDIT_CAS_LABEL_PREFIX)
+                    }) {
+                        bail!(
+                            "online target audit CAS is accepted only by online-bounded import or final-stopped-source"
+                        );
+                    }
+                    (None, None)
+                }
+            };
 
             validate_authority_isolation(
                 &rollout_dir,
@@ -923,6 +997,7 @@ mod linux {
                 environment_bytes,
                 expected_argv,
                 source_receipts,
+                prior_target_audit,
                 broker_pid,
                 broker_proc_start_time_ticks,
             }))
@@ -1138,9 +1213,102 @@ mod linux {
                 self.pool_identity,
                 &self.pool_topology_input.sha256,
                 manifest_sha256,
+                self.controller_state
+                    .prior_target_audit_certification_sha256
+                    .as_deref(),
             )?;
             let store = PoolMigrationAuditStore::open(&path, binding)
                 .context("open root-owned online migration audit")?;
+            if created {
+                secure_created_online_audit_files(&path, self.options.service_gid)?;
+            }
+            if let Some(prior) = &self.prior_target_audit {
+                let import_authority = compute_prior_target_import_authority(
+                    &prior.certification_sha256,
+                    &prior.receipt.target_evidence,
+                )?;
+                if store
+                    .prepare_target_import(import_authority)
+                    .context("prepare quarantined prior target import")?
+                {
+                    let target = self.open_online_target_audit_reader()?;
+                    let mut evidence =
+                        SourceEvidenceManifestReaderV3::open(&prior.receipt.target_evidence)
+                            .context("open prior certified target evidence for import")?;
+                    let mut batch = Vec::with_capacity(MAX_CHECKPOINT_AUDIT_ENTRIES);
+                    let mut imported_entries = 0u64;
+                    let mut imported_bytes = 0u64;
+                    while let Some(entry) = evidence.next_entry()? {
+                        batch.push(entry);
+                        if batch.len() == MAX_CHECKPOINT_AUDIT_ENTRIES {
+                            let imported = current_stored_target_evidence(&target.reader, &batch)?;
+                            store
+                                .stage_target_import_entries(import_authority, &imported)
+                                .context(
+                                    "stage current intersection of prior target body proofs",
+                                )?;
+                            imported_entries = imported_entries
+                                .checked_add(imported.len() as u64)
+                                .context("imported target evidence count overflow")?;
+                            imported_bytes =
+                                imported
+                                    .iter()
+                                    .try_fold(imported_bytes, |total, (_, size)| {
+                                        total
+                                            .checked_add(*size)
+                                            .context("imported target evidence byte count overflow")
+                                    })?;
+                            batch.clear();
+                        }
+                    }
+                    if !batch.is_empty() {
+                        let imported = current_stored_target_evidence(&target.reader, &batch)?;
+                        store
+                            .stage_target_import_entries(import_authority, &imported)
+                            .context(
+                                "stage final current intersection of prior target body proofs",
+                            )?;
+                        imported_entries = imported_entries
+                            .checked_add(imported.len() as u64)
+                            .context("imported target evidence count overflow")?;
+                        imported_bytes =
+                            imported
+                                .iter()
+                                .try_fold(imported_bytes, |total, (_, size)| {
+                                    total
+                                        .checked_add(*size)
+                                        .context("imported target evidence byte count overflow")
+                                })?;
+                    }
+                    let summary = evidence.validated_summary()?;
+                    if summary.entries != prior.receipt.target_verified_entries
+                        || summary.bytes != prior.receipt.target_verified_bytes
+                        || hashtree_core::to_hex(&summary.content_sha256)
+                            != prior.receipt.target_content_sha256
+                    {
+                        bail!("imported prior target evidence differs from its certified summary");
+                    }
+                    store
+                        .authenticate_target_import(import_authority)
+                        .context("authenticate complete staged prior target evidence")?;
+                    eprintln!(
+                        "Authenticated {imported_entries} current prior-certified target body proofs / {imported_bytes} bytes from {} certified entries; the current catalog will still be rescanned",
+                        summary.entries
+                    );
+                }
+                while !store
+                    .promote_authenticated_target_import_batch(
+                        import_authority,
+                        MAX_CHECKPOINT_AUDIT_ENTRIES,
+                    )
+                    .context("promote authenticated prior target evidence")?
+                {}
+                if store.promoted_target_import_authority()? != Some(import_authority) {
+                    bail!("prior target evidence promotion lost its exact authority");
+                }
+            } else if store.promoted_target_import_authority()?.is_some() {
+                bail!("online audit store has imported target proofs without a parent authority");
+            }
             if self.controller_state.target_writers_fenced {
                 let target_fence_binding = compute_online_target_fence_binding(
                     &self.options.rollout_id,
@@ -1156,25 +1324,6 @@ mod linux {
                 bail!(
                     "online migration target-fence epoch already began; keep the exact target fence held"
                 );
-            }
-            if created {
-                set_root_service_path_authority(
-                    &path.join("data.mdb"),
-                    false,
-                    self.options.service_gid,
-                    0o640,
-                    "online audit data.mdb",
-                )?;
-                set_root_service_path_authority(
-                    &path.join("lock.mdb"),
-                    false,
-                    self.options.service_gid,
-                    0o660,
-                    "online audit lock.mdb",
-                )?;
-                File::open(&path)?
-                    .sync_all()
-                    .context("fsync online audit directory")?;
             }
             store.validate_binding()?;
             Ok(Some(store))
@@ -2296,17 +2445,7 @@ mod linux {
             Ok(())
         }
 
-        fn verify_online_target_entries(
-            &self,
-            entries: &[([u8; 32], u64)],
-            target_record: Option<(&PoolMigrationAuditStore, [u8; 32])>,
-        ) -> Result<()> {
-            if entries.is_empty() {
-                if let Some((audit, cursor)) = target_record {
-                    audit.record_verified_target_page(entries, cursor)?;
-                }
-                return Ok(());
-            }
+        fn open_online_target_audit_reader(&self) -> Result<PinnedOnlineTargetAuditReader> {
             let catalog =
                 PinnedDirectory::open_exact(&self.options.pool, "online audit target Pool")?;
             catalog.require_authority_identity(
@@ -2344,7 +2483,7 @@ mod linux {
                         member.id
                     ),
                 };
-                retained_members.push((member, directory, external));
+                retained_members.push((directory, external));
             }
             let mut config = hashtree_lmdb::PoolStoreConfig::default();
             config.temperature.enabled = false;
@@ -2362,9 +2501,12 @@ mod linux {
                 hashtree_core::from_hex(&self.pool_topology.manifest_sha256)
                     .context("decode online audit Pool manifest")?,
             );
-            config.member_runtime_paths = retained_members
+            config.member_runtime_paths = self
+                .pool_topology
+                .members
                 .iter()
-                .map(|(member, directory, external)| {
+                .zip(&retained_members)
+                .map(|(member, (directory, external))| {
                     Ok(hashtree_lmdb::PoolMemberRuntimePaths {
                         id: member.id.parse()?,
                         configured_path: member.path.clone(),
@@ -2390,15 +2532,35 @@ mod linux {
                 self.options.source_read_concurrency,
             )
             .context("root-open exact online target audit reader")?;
+            Ok(PinnedOnlineTargetAuditReader {
+                reader,
+                _catalog: catalog,
+                _members: retained_members,
+            })
+        }
+
+        fn verify_online_target_entries(
+            &self,
+            entries: &[([u8; 32], u64)],
+            target_record: Option<(&PoolMigrationAuditStore, [u8; 32])>,
+        ) -> Result<()> {
+            if entries.is_empty() {
+                if let Some((audit, cursor)) = target_record {
+                    audit.record_verified_target_page(entries, cursor)?;
+                }
+                return Ok(());
+            }
+            let pinned_reader = self.open_online_target_audit_reader()?;
+            let reader = &pinned_reader.reader;
             if let Some((audit, cursor)) = target_record {
                 let byte_limit = self
                     .options
                     .max_buffer_mib
                     .checked_mul(1024 * 1024)
                     .context("root target audit buffer limit overflow")?;
-                verify_and_record_target_body_page(&reader, audit, entries, cursor, byte_limit)
+                verify_and_record_target_body_page(reader, audit, entries, cursor, byte_limit)
             } else {
-                verify_exact_stored_target_catalog_entries(&reader, entries)
+                verify_exact_stored_target_catalog_entries(reader, entries)
             }
         }
 
@@ -2433,6 +2595,9 @@ mod linux {
                 request.pool.lmdb_identity,
                 &request.pool.topology.sha256,
                 pool_manifest_sha256,
+                self.controller_state
+                    .prior_target_audit_certification_sha256
+                    .as_deref(),
             )?;
             let target_fence_binding = compute_online_target_fence_binding(
                 &request.controller.rollout_id,
@@ -2464,6 +2629,10 @@ mod linux {
                 || receipt.main_pid != process.main_pid
                 || receipt.proc_start_time_ticks != process.start_time_ticks
                 || receipt.controller_state_sha256 != request.controller.state.sha256
+                || receipt.prior_target_audit_certification_sha256
+                    != self
+                        .controller_state
+                        .prior_target_audit_certification_sha256
                 || receipt.source_path != request.source.lmdb_path
                 || receipt.source_lmdb_identity != request.source.lmdb_identity
                 || receipt.source_external_path != request.source.external_path
@@ -2492,6 +2661,19 @@ mod linux {
                     != self.controller_state.legacy_worker_instance_masks
             {
                 bail!("online target audit receipt differs from the exact live launch authority");
+            }
+            let expected_import_authority = self
+                .prior_target_audit
+                .as_ref()
+                .map(|prior| {
+                    compute_prior_target_import_authority(
+                        &prior.certification_sha256,
+                        &prior.receipt.target_evidence,
+                    )
+                })
+                .transpose()?;
+            if audit.promoted_target_import_authority()? != expected_import_authority {
+                bail!("root-owned target proof ledger differs from its exact parent certification");
             }
             validate_source_evidence_metadata(
                 &receipt.source_evidence,
@@ -2589,17 +2771,32 @@ mod linux {
                 self.source_external_identity,
             )
             .context("revalidate source writer-handle census after online certification replay")?;
+            seize_source_evidence_for_root_certification(
+                &receipt.source_evidence,
+                self.options.service_gid,
+            )
+            .context("seize online source evidence for root certification")?;
+            seize_source_evidence_for_root_certification(
+                &receipt.target_evidence,
+                self.options.service_gid,
+            )
+            .context("seize online target evidence for root certification")?;
             let certification = PoolMigrationOnlineTargetAuditCertificationV3 {
                 schema: ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA.to_string(),
                 status: "certified".to_string(),
                 rollout_id: self.options.rollout_id.clone(),
                 controller_state_sha256: self.controller_state_input.sha256.clone(),
+                prior_target_audit_certification_sha256: self
+                    .controller_state
+                    .prior_target_audit_certification_sha256
+                    .clone(),
                 receipt: FileAuthorityV3 {
                     path: authority.path.clone(),
                     sha256: authority.sha256.clone(),
                 },
                 source_evidence: receipt.source_evidence,
                 target_evidence: receipt.target_evidence,
+                evidence_root_owned: true,
                 certified_at_unix_seconds: SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .context("system clock precedes Unix epoch")?
@@ -3499,6 +3696,12 @@ mod linux {
         {
             bail!("only final-stopped-full may consume source-terminal receipts");
         }
+        if let Some(sha256) = &state.prior_target_audit_certification_sha256 {
+            require_lower_hex("prior target-audit certification SHA-256", sha256, 64)?;
+            if options.phase != PoolMigrationControllerPhase::OnlineBounded {
+                bail!("only online-bounded may import a prior target-audit certification");
+            }
+        }
         if options.phase == PoolMigrationControllerPhase::FinalStoppedFull
             && state.source_terminal_receipt_sha256.is_empty()
         {
@@ -4242,6 +4445,26 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         validate_root_service_path_authority(path, directory, gid, mode, label)
     }
 
+    fn secure_created_online_audit_files(path: &Path, service_gid: u32) -> Result<()> {
+        set_root_service_path_authority(
+            &path.join("data.mdb"),
+            false,
+            service_gid,
+            0o640,
+            "online audit data.mdb",
+        )?;
+        set_root_service_path_authority(
+            &path.join("lock.mdb"),
+            false,
+            service_gid,
+            0o660,
+            "online audit lock.mdb",
+        )?;
+        File::open(path)?
+            .sync_all()
+            .context("fsync online audit directory")
+    }
+
     fn validate_root_service_path_authority(
         path: &Path,
         directory: bool,
@@ -4816,9 +5039,14 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 "checkpoint request is not an exact worker-owned mode 0640 bounded single-link file"
             );
         }
-        let mut bytes = Vec::with_capacity(before.len() as usize);
-        file.read_to_end(&mut bytes)
+        let mut bytes = Vec::with_capacity(before.len().min(MAX_CHECKPOINT_BYTES) as usize);
+        std::io::Read::by_ref(&mut file)
+            .take(MAX_CHECKPOINT_BYTES + 1)
+            .read_to_end(&mut bytes)
             .context("read checkpoint request")?;
+        if bytes.len() as u64 > MAX_CHECKPOINT_BYTES {
+            bail!("checkpoint request exceeded its hard read bound");
+        }
         let after = file.metadata().context("reinspect checkpoint request")?;
         let path_metadata =
             std::fs::symlink_metadata(path).context("reinspect checkpoint request path")?;
@@ -6781,6 +7009,97 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                 PoolMigrationControllerPhase::FinalStoppedFull,
                 false,
             ));
+        }
+
+        #[test]
+        fn fresh_online_audit_authority_survives_crash_before_import_and_reopen() {
+            if unsafe { libc::geteuid() } != 0 {
+                return;
+            }
+            let temp = tempfile::tempdir().expect("create audit parent");
+            let path = temp.path().join("online-audit");
+            std::fs::create_dir(&path).expect("create audit directory");
+            set_root_service_path_authority(&path, true, 0, 0o750, "test online audit directory")
+                .expect("secure audit directory");
+            let binding = hashtree_core::sha256(b"fresh audit crash/reopen authority");
+            let audit =
+                PoolMigrationAuditStore::open(&path, binding).expect("create real audit LMDB");
+            secure_created_online_audit_files(&path, 0)
+                .expect("secure audit files before any import");
+            drop(audit);
+
+            validate_root_service_path_authority(
+                &path,
+                true,
+                0,
+                0o750,
+                "reopened online audit directory",
+            )
+            .expect("validate audit directory after simulated crash");
+            validate_root_service_path_authority(
+                &path.join("data.mdb"),
+                false,
+                0,
+                0o640,
+                "reopened online audit data.mdb",
+            )
+            .expect("validate data authority after simulated crash");
+            validate_root_service_path_authority(
+                &path.join("lock.mdb"),
+                false,
+                0,
+                0o660,
+                "reopened online audit lock.mdb",
+            )
+            .expect("validate lock authority after simulated crash");
+            let reopened =
+                PoolMigrationAuditStore::open(&path, binding).expect("reopen strict audit LMDB");
+            reopened
+                .validate_binding()
+                .expect("validate exact audit binding after reopen");
+        }
+
+        #[test]
+        fn prior_target_import_intersects_a_real_current_pool_catalog() {
+            use hashtree_lmdb::{PoolMemberConfig, PoolStore, PoolStoreConfig, PoolStoreReader};
+
+            let temp = tempfile::tempdir().expect("create real generated Pool");
+            let catalog = temp.path().join("catalog");
+            let pool =
+                PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open generated Pool");
+            pool.add_member(PoolMemberConfig::new(
+                temp.path().join("member"),
+                64 * 1024 * 1024,
+            ))
+            .expect("add generated Pool member");
+            let current_body = b"current prior-certified target body".repeat(8);
+            let current_hash = hashtree_core::sha256(&current_body);
+            assert!(pool
+                .put_sync(current_hash, &current_body)
+                .expect("write current Pool body"));
+            drop(pool);
+
+            let mut config = PoolStoreConfig::default();
+            config.temperature.enabled = false;
+            let reader = PoolStoreReader::open(&catalog, config).expect("open strict Pool reader");
+            let missing_body = b"deleted prior-certified target body";
+            let missing_hash = hashtree_core::sha256(missing_body);
+            let mut prior = vec![
+                (current_hash, current_body.len() as u64),
+                (missing_hash, missing_body.len() as u64),
+            ];
+            prior.sort_unstable_by_key(|(hash, _)| *hash);
+            assert_eq!(
+                current_stored_target_evidence(&reader, &prior)
+                    .expect("intersect prior evidence with current catalog"),
+                vec![(current_hash, current_body.len() as u64)]
+            );
+            let error = current_stored_target_evidence(
+                &reader,
+                &[(current_hash, current_body.len() as u64 + 1)],
+            )
+            .expect_err("same hash with a conflicting catalog size must fail closed");
+            assert!(error.to_string().contains("conflicts"));
         }
 
         #[test]

@@ -231,6 +231,17 @@ impl SourceEvidenceManifestReaderV3 {
         if self.finished {
             return Ok(None);
         }
+        if self.entries == self.authority.entries {
+            let mut trailing = [0u8; 1];
+            match self.file.read(&mut trailing) {
+                Ok(0) => {
+                    self.finish_validation()?;
+                    return Ok(None);
+                }
+                Ok(_) => bail!("source evidence manifest has data after its authorized records"),
+                Err(error) => return Err(error).context("check source evidence authenticated EOF"),
+            }
+        }
         let mut record = [0u8; SOURCE_EVIDENCE_RECORD_BYTES as usize];
         let mut read = 0usize;
         while read < record.len() {
@@ -510,6 +521,74 @@ pub(super) fn validate_source_evidence_metadata(
     Ok(())
 }
 
+#[cfg(unix)]
+pub(super) fn validate_root_owned_source_evidence_metadata(
+    authority: &SourceEvidenceManifestAuthorityV3,
+    expected_service_gid: u32,
+) -> Result<()> {
+    let (_, file) = open_source_evidence(authority, Some(expected_service_gid))?;
+    if file
+        .metadata()
+        .context("inspect root-owned source evidence")?
+        .uid()
+        != 0
+    {
+        bail!("certification claims evidence that is not root-owned");
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(super) fn validate_root_owned_source_evidence_metadata(
+    authority: &SourceEvidenceManifestAuthorityV3,
+    expected_service_gid: u32,
+) -> Result<()> {
+    validate_source_evidence_metadata(authority, Some(expected_service_gid), false)
+}
+
+/// Transfer a fully published evidence inode to root and re-hash it through
+/// the retained descriptor before certification. The service group retains
+/// read access, but the former worker owner can no longer chmod or rewrite the
+/// certified artifact.
+#[cfg(unix)]
+pub(super) fn seize_source_evidence_for_root_certification(
+    authority: &SourceEvidenceManifestAuthorityV3,
+    expected_service_gid: u32,
+) -> Result<()> {
+    if unsafe { libc::geteuid() } != 0 {
+        bail!("only root may seize evidence for certification");
+    }
+    let (_, mut file) = open_source_evidence(authority, Some(expected_service_gid))?;
+    if unsafe { libc::fchown(file.as_raw_fd(), 0, expected_service_gid) } != 0 {
+        return Err(std::io::Error::last_os_error())
+            .context("transfer certified evidence ownership to root");
+    }
+    file.sync_all()
+        .context("fsync root-owned certified evidence")?;
+    if hash_open_regular_file(
+        &mut file,
+        authority.len,
+        "root-owned certified evidence manifest",
+    )? != authority.sha256
+    {
+        bail!("root-owned certified evidence differs from its receipt authority");
+    }
+    let metadata = file
+        .metadata()
+        .context("inspect root-owned certified evidence")?;
+    if metadata.uid() != 0
+        || metadata.gid() != expected_service_gid
+        || metadata.mode() & 0o7777 != 0o440
+        || metadata.nlink() != 1
+        || metadata.dev() != authority.identity.device
+        || metadata.ino() != authority.identity.inode
+        || metadata.len() != authority.len
+    {
+        bail!("root-owned certified evidence metadata differs from its authority");
+    }
+    Ok(())
+}
+
 fn open_source_evidence(
     authority: &SourceEvidenceManifestAuthorityV3,
     expected_service_gid: Option<u32>,
@@ -592,7 +671,14 @@ fn hash_open_regular_file(file: &mut File, expected_len: u64, label: &str) -> Re
         bail!("{label} length changed before hashing");
     }
     let mut hasher = Sha256::new();
-    std::io::copy(&mut *file, &mut hasher).with_context(|| format!("hash {label}"))?;
+    let read_limit = expected_len
+        .checked_add(1)
+        .context("evidence hash read limit overflow")?;
+    let copied = std::io::copy(&mut (&mut *file).take(read_limit), &mut hasher)
+        .with_context(|| format!("hash {label}"))?;
+    if copied != expected_len {
+        bail!("{label} length changed while hashing");
+    }
     let after = file
         .metadata()
         .with_context(|| format!("reinspect open {label}"))?;
@@ -709,6 +795,39 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reader_rejects_a_tail_appended_after_open_at_authorized_entry_count() {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = TempDir::new().expect("temp dir");
+        let authority = publish(&temp.path().join("evidence"), &[([7u8; 32], 17)]);
+        let mut reader =
+            SourceEvidenceManifestReaderV3::open(&authority).expect("open exact evidence");
+
+        std::fs::set_permissions(&authority.path, std::fs::Permissions::from_mode(0o640))
+            .expect("temporarily make generated evidence writable");
+        OpenOptions::new()
+            .append(true)
+            .open(&authority.path)
+            .expect("open generated evidence for append")
+            .write_all(&[9u8; SOURCE_EVIDENCE_RECORD_BYTES as usize])
+            .expect("append corrupt tail");
+        std::fs::set_permissions(&authority.path, std::fs::Permissions::from_mode(0o440))
+            .expect("restore evidence mode");
+
+        assert_eq!(
+            reader.next_entry().expect("read authorized record"),
+            Some(([7u8; 32], 17))
+        );
+        assert!(reader
+            .next_entry()
+            .expect_err("reader must reject data after the authority count")
+            .to_string()
+            .contains("after its authorized records"));
     }
 
     #[cfg(feature = "lmdb")]
