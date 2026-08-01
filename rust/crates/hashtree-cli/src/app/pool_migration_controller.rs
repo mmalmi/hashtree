@@ -643,6 +643,15 @@ mod linux {
                 &options.controller_systemd_environment_file,
                 "controller systemd environment file",
             )?;
+            // The unprivileged worker re-reads and hashes this file when it
+            // validates the controller as its checkpoint broker. Reject an
+            // unreadable authority before an exhaustive audit can begin.
+            require_service_access(
+                &controller_systemd_environment_file.snapshot,
+                options.service_gid,
+                false,
+                "controller systemd environment file",
+            )?;
             let controller_systemd_invocation_id = std::env::var("INVOCATION_ID")
                 .context("dedicated controller service did not provide INVOCATION_ID")?;
             require_lower_hex(
