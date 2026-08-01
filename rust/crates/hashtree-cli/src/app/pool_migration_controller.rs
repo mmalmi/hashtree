@@ -98,11 +98,11 @@ mod linux {
         validate_runtime_masked_writer_units_with_systemctl,
         validate_runtime_writer_mask_authorities, validate_source_read_concurrency,
         validate_stopped_final_batch_size, ControllerAuthorityV3, ControllerStateV3,
-        CursorAuthorityV3, FileAuthorityV3, FileIdentityV3, LmdbIdentityV3, NamedFileAuthorityV3,
-        PoolAuthorityV3, PoolDeleteProtectionAuthorityV1, PoolMigrationLaunchRequestV3,
-        PoolTopologyV3, SourceAuthorityV3, ACK_SCHEMA, ATTEMPT_NAMESPACE_NAME,
-        CONTROLLER_STATE_SCHEMA, MAX_FINAL_REOPEN_BATCHES, POOL_TOPOLOGY_SCHEMA, REQUEST_FILE_NAME,
-        REQUEST_SCHEMA,
+        CursorAuthorityV3, FileAuthorityV3, FileIdentityV3, LmdbGenerationAuthorityV1,
+        LmdbIdentityV3, NamedFileAuthorityV3, PoolAuthorityV3, PoolDeleteProtectionAuthorityV1,
+        PoolMigrationLaunchRequestV3, PoolTopologyV3, SourceAuthorityV3, ACK_SCHEMA,
+        ATTEMPT_NAMESPACE_NAME, CONTROLLER_STATE_SCHEMA, MAX_FINAL_REOPEN_BATCHES,
+        POOL_TOPOLOGY_SCHEMA, REQUEST_FILE_NAME, REQUEST_SCHEMA,
     };
     use super::super::pool_migration_mount::{
         ensure_source_read_only_mount_authority_from_plan, host_execution_namespace_authority,
@@ -118,13 +118,14 @@ mod linux {
         PreparedMountLifecycleV3,
     };
     use super::super::pool_migration_online_audit::{
-        compute_online_audit_binding, compute_online_target_fence_binding,
-        compute_prior_target_import_authority, load_validated_online_target_audit,
-        load_validated_prior_online_target_audit, online_audit_path,
-        verify_and_record_target_body_page, verify_exact_stored_target_catalog_entries,
-        OnlineTargetAuditExpectationV3, PoolMigrationOnlineTargetAuditCertificationV3,
-        PoolMigrationOnlineTargetAuditReceiptV3, PriorOnlineTargetAuditExpectationV3,
-        ValidatedOnlineTargetAuditV3, ONLINE_TARGET_AUDIT_CAS_LABEL_PREFIX,
+        compute_online_audit_binding, compute_online_target_delete_protection_binding,
+        compute_online_target_fence_binding, compute_prior_target_import_authority,
+        load_validated_online_target_audit, load_validated_prior_online_target_audit,
+        online_audit_path, verify_and_record_target_body_page,
+        verify_exact_stored_target_catalog_entries, OnlineTargetAuditExpectationV3,
+        PoolMigrationOnlineTargetAuditCertificationV3, PoolMigrationOnlineTargetAuditReceiptV3,
+        PriorOnlineTargetAuditExpectationV3, ValidatedOnlineTargetAuditV3, COMPLETE_TARGET_SCOPE,
+        LEGACY_SOURCE_SCOPE, ONLINE_TARGET_AUDIT_CAS_LABEL_PREFIX,
         ONLINE_TARGET_AUDIT_CERTIFICATION_FILE_NAME, ONLINE_TARGET_AUDIT_CERTIFICATION_SCHEMA,
         ONLINE_TARGET_AUDIT_FILE_NAME, ONLINE_TARGET_AUDIT_SCHEMA, SOURCE_EVIDENCE_KIND,
         TARGET_EVIDENCE_KIND,
@@ -366,6 +367,7 @@ mod linux {
         expected_argv: Vec<String>,
         source_receipts: Vec<ValidatedSourceTerminalReceiptV3>,
         prior_target_audit: Option<ValidatedOnlineTargetAuditV3>,
+        source_lmdb_generation: Option<LmdbGenerationAuthorityV1>,
         _delete_protection_guard: Option<hashtree_lmdb::PoolDeleteProtectionGuard>,
         broker_pid: u32,
         broker_proc_start_time_ticks: u64,
@@ -928,6 +930,9 @@ mod linux {
                     (None, None)
                 }
             };
+            if options.delete_protection_lease_id.is_some() && prior_target_audit.is_some() {
+                bail!("online retirement cannot import prior complete-target audit evidence");
+            }
 
             validate_authority_isolation(
                 &rollout_dir,
@@ -1011,11 +1016,13 @@ mod linux {
                 expected_argv,
                 source_receipts,
                 prior_target_audit,
+                source_lmdb_generation: None,
                 _delete_protection_guard: None,
                 broker_pid,
                 broker_proc_start_time_ticks,
             };
             prepared._delete_protection_guard = prepared.hold_delete_protection()?;
+            prepared.source_lmdb_generation = prepared.capture_source_lmdb_generation()?;
             Ok(PreparedLaunchOutcome::Ready(prepared))
         }
 
@@ -1049,6 +1056,42 @@ mod linux {
                 .hold_delete_protection(lease_id, record_sha256)
                 .context("hold exact Pool delete protection for root migration controller")?;
             Ok(Some(guard))
+        }
+
+        fn capture_source_lmdb_generation(&self) -> Result<Option<LmdbGenerationAuthorityV1>> {
+            if self.delete_protection_authority().is_none() {
+                return Ok(None);
+            }
+            let source = self.open_online_source_audit_reader()?;
+            let generation = source.reader.environment_generation();
+            Ok(Some(LmdbGenerationAuthorityV1 {
+                map_size: generation.map_size,
+                last_page_number: generation.last_page_number,
+                last_txn_id: generation.last_txn_id,
+            }))
+        }
+
+        fn ensure_online_retirement_source_generation(&self) -> Result<()> {
+            match (
+                self.source_lmdb_generation.as_ref(),
+                self._delete_protection_guard.as_ref(),
+            ) {
+                (Some(expected), Some(_)) => {
+                    let actual = self
+                        .capture_source_lmdb_generation()?
+                        .context("online retirement source generation disappeared")?;
+                    if actual != *expected {
+                        bail!(
+                            "source LMDB generation changed during online retirement: expected {:?}, found {:?}",
+                            expected,
+                            actual,
+                        );
+                    }
+                    Ok(())
+                }
+                (None, None) => Ok(()),
+                _ => bail!("online retirement controller authority is internally incomplete"),
+            }
         }
 
         fn launch(self) -> Result<()> {
@@ -1264,6 +1307,11 @@ mod linux {
                 self.controller_state
                     .prior_target_audit_certification_sha256
                     .as_deref(),
+                self.delete_protection_authority().as_ref(),
+                self.source_lmdb_generation.as_ref(),
+                self.delete_protection_authority()
+                    .as_ref()
+                    .map(|_| self.nonce.as_str()),
             )?;
             let store = PoolMigrationAuditStore::open(&path, binding)
                 .context("open root-owned online migration audit")?;
@@ -1675,6 +1723,17 @@ mod linux {
                         );
                         self.revalidate_process_census(process, deep_external_census)
                             .context("revalidate target-fenced online handle census")?;
+                    }
+                    if self.delete_protection_authority().is_some()
+                        && matches!(
+                            checkpoint.operation.as_str(),
+                            "online-evidence-publication"
+                                | "online-audit-publication"
+                                | "online-readiness"
+                        )
+                    {
+                        self.ensure_online_retirement_source_generation()
+                            .context("revalidate immutable legacy source generation")?;
                     }
                     let authorized_at = boottime_millis()?;
                     if authorized_at > checkpoint.start_before_boottime_millis {
@@ -2381,7 +2440,11 @@ mod linux {
                 )
                 .context("online source audit range limit exceeds usize")?;
                 self.verify_online_source_reconciliation_entries(&entries, cursor, range_limit)?;
-                self.verify_online_target_entries(&entries, None)?;
+                if self.delete_protection_authority().is_some() {
+                    self.verify_online_target_entries(&entries, Some((audit, cursor)))?;
+                } else {
+                    self.verify_online_target_entries(&entries, None)?;
+                }
                 audit.record_reconciled_source(&entries)?;
             } else {
                 let cursor: [u8; 32] = hashtree_core::from_hex(
@@ -2646,6 +2709,13 @@ mod linux {
                 self.controller_state
                     .prior_target_audit_certification_sha256
                     .as_deref(),
+                request.pool.delete_protection.as_ref(),
+                request.source.lmdb_generation.as_ref(),
+                request
+                    .pool
+                    .delete_protection
+                    .as_ref()
+                    .map(|_| request.nonce.as_str()),
             )?;
             let target_fence_binding = compute_online_target_fence_binding(
                 &request.controller.rollout_id,
@@ -2654,9 +2724,28 @@ mod linux {
                 &self.controller_state.legacy_worker_template_mask,
                 &self.controller_state.legacy_worker_instance_masks,
             )?;
+            let target_delete_protection_binding_sha256 = request
+                .pool
+                .delete_protection
+                .as_ref()
+                .map(|authority| {
+                    compute_online_target_delete_protection_binding(
+                        &request.controller.rollout_id,
+                        authority,
+                    )
+                    .map(|binding| hashtree_core::to_hex(&binding))
+                })
+                .transpose()?;
+            let online_retirement = target_delete_protection_binding_sha256.is_some();
+            let expected_scope = if online_retirement {
+                LEGACY_SOURCE_SCOPE
+            } else {
+                COMPLETE_TARGET_SCOPE
+            };
             if receipt.schema != ONLINE_TARGET_AUDIT_SCHEMA
                 || receipt.status != "verified"
                 || receipt.phase != "online-bounded"
+                || receipt.coverage_scope != expected_scope
                 || receipt.rollout_id != self.options.rollout_id
                 || receipt.boot_id != request.boot_id
                 || receipt.attempt_namespace != request.attempt_namespace
@@ -2683,6 +2772,7 @@ mod linux {
                         .prior_target_audit_certification_sha256
                 || receipt.source_path != request.source.lmdb_path
                 || receipt.source_lmdb_identity != request.source.lmdb_identity
+                || receipt.source_lmdb_generation != request.source.lmdb_generation
                 || receipt.source_external_path != request.source.external_path
                 || receipt.source_external_identity != request.source.external_identity
                 || receipt.source_baseline_sha256 != request.source.baseline.sha256
@@ -2701,6 +2791,9 @@ mod linux {
                 || receipt.target_evidence.entries != receipt.target_verified_entries
                 || receipt.target_fence_binding_sha256
                     != hashtree_core::to_hex(&target_fence_binding)
+                || receipt.target_delete_protection != request.pool.delete_protection
+                || receipt.target_delete_protection_binding_sha256
+                    != target_delete_protection_binding_sha256
                 || receipt.target_writer_units != self.controller_state.stopped_writer_units
                 || receipt.target_writer_unit_masks != self.controller_state.writer_unit_masks
                 || receipt.legacy_worker_template_mask
@@ -2749,7 +2842,13 @@ mod linux {
             {
                 bail!("online source evidence differs from its receipt or root-owned ledger");
             }
+            if online_retirement {
+                self.ensure_online_retirement_source_generation()?;
+            }
             self.verify_online_source_coverage(audit)?;
+            if online_retirement {
+                self.ensure_online_retirement_source_generation()?;
+            }
             let mut target_evidence =
                 SourceEvidenceManifestReaderV3::open(&receipt.target_evidence)?;
             while target_evidence.next_entry()?.is_some() {}
@@ -2766,59 +2865,92 @@ mod linux {
             {
                 bail!("online target evidence differs from its receipt or root-owned ledger");
             }
-            if audit.target_fence_binding()? != Some(target_fence_binding) {
-                bail!("root-owned target proof ledger is not bound to this exact writer fence");
+            let audit_target_fence_binding = audit.target_fence_binding()?;
+            if (online_retirement && audit_target_fence_binding.is_some())
+                || (!online_retirement && audit_target_fence_binding != Some(target_fence_binding))
+            {
+                bail!("root-owned target proof ledger has an invalid preservation binding");
             }
-            if !self.controller_state.target_writers_fenced {
-                bail!("online target audit certification requires the held target-writer fence");
+            if online_retirement {
+                self.ensure_online_retirement_source_generation()?;
+                if source_summary != target_summary {
+                    bail!(
+                        "online retirement target-body evidence differs from its exhaustive source evidence"
+                    );
+                }
+                if self.controller_state.source_writers_fenced
+                    || self.controller_state.target_writers_fenced
+                    || self.controller_state.fence_held_until_completion
+                {
+                    bail!("online retirement must use delete protection instead of writer fences");
+                }
+                if self.prior_target_audit.is_some()
+                    || audit.promoted_target_import_authority()?.is_some()
+                {
+                    bail!("online retirement cannot reuse prior target-body proof state");
+                }
+                self.ensure_online_retirement_source_generation()?;
+            } else {
+                if !self.controller_state.target_writers_fenced {
+                    bail!(
+                        "online target audit certification requires the held target-writer fence"
+                    );
+                }
+                if !self.controller_state.source_writers_fenced {
+                    bail!(
+                        "online target audit certification requires the held source-writer fence"
+                    );
+                }
+                validate_runtime_masked_writer_units_with_systemctl(
+                    &self.systemctl.path,
+                    &self.controller_state.stopped_writer_units,
+                    &self.controller_state.writer_unit_masks,
+                )
+                .context("revalidate target writer-unit masks before online certification")?;
+                census_recovery_target_handles(&self.controller_state, &self.pool_topology)
+                    .context(
+                        "revalidate target writer-handle census before online certification",
+                    )?;
+                census_recovery_source_handles(
+                    &self.controller_state,
+                    &self.options.source,
+                    self.options.source_external_dir.as_deref(),
+                    self.source_external_identity,
+                )
+                .context("revalidate source writer-handle census before online certification")?;
+                let (_, target_content) = audit_recoverable_target_pool(
+                    &self.options.pool,
+                    self.pool_identity,
+                    &self.pool_topology,
+                    &self.pool_topology_input.sha256,
+                    std::slice::from_ref(&receipt.target_evidence),
+                    self.options.batch_size,
+                    self.options.source_read_concurrency,
+                )
+                .context("root replay target catalog coverage before online certification")?;
+                if target_content.evidence.as_slice() != std::slice::from_ref(&target_summary) {
+                    bail!("root target catalog replay used unexpected target evidence");
+                }
+                validate_runtime_masked_writer_units_with_systemctl(
+                    &self.systemctl.path,
+                    &self.controller_state.stopped_writer_units,
+                    &self.controller_state.writer_unit_masks,
+                )
+                .context("revalidate target writer-unit masks after online certification replay")?;
+                census_recovery_target_handles(&self.controller_state, &self.pool_topology)
+                    .context(
+                        "revalidate target writer-handle census after online certification replay",
+                    )?;
+                census_recovery_source_handles(
+                    &self.controller_state,
+                    &self.options.source,
+                    self.options.source_external_dir.as_deref(),
+                    self.source_external_identity,
+                )
+                .context(
+                    "revalidate source writer-handle census after online certification replay",
+                )?;
             }
-            if !self.controller_state.source_writers_fenced {
-                bail!("online target audit certification requires the held source-writer fence");
-            }
-            validate_runtime_masked_writer_units_with_systemctl(
-                &self.systemctl.path,
-                &self.controller_state.stopped_writer_units,
-                &self.controller_state.writer_unit_masks,
-            )
-            .context("revalidate target writer-unit masks before online certification")?;
-            census_recovery_target_handles(&self.controller_state, &self.pool_topology)
-                .context("revalidate target writer-handle census before online certification")?;
-            census_recovery_source_handles(
-                &self.controller_state,
-                &self.options.source,
-                self.options.source_external_dir.as_deref(),
-                self.source_external_identity,
-            )
-            .context("revalidate source writer-handle census before online certification")?;
-            let (_, target_content) = audit_recoverable_target_pool(
-                &self.options.pool,
-                self.pool_identity,
-                &self.pool_topology,
-                &self.pool_topology_input.sha256,
-                std::slice::from_ref(&receipt.target_evidence),
-                self.options.batch_size,
-                self.options.source_read_concurrency,
-            )
-            .context("root replay target catalog coverage before online certification")?;
-            if target_content.evidence.as_slice() != std::slice::from_ref(&target_summary) {
-                bail!("root target catalog replay used unexpected target evidence");
-            }
-            validate_runtime_masked_writer_units_with_systemctl(
-                &self.systemctl.path,
-                &self.controller_state.stopped_writer_units,
-                &self.controller_state.writer_unit_masks,
-            )
-            .context("revalidate target writer-unit masks after online certification replay")?;
-            census_recovery_target_handles(&self.controller_state, &self.pool_topology).context(
-                "revalidate target writer-handle census after online certification replay",
-            )?;
-            census_recovery_source_handles(
-                &self.controller_state,
-                &self.options.source,
-                self.options.source_external_dir.as_deref(),
-                self.source_external_identity,
-            )
-            .context("revalidate source writer-handle census after online certification replay")?;
             seize_source_evidence_for_root_certification(
                 &receipt.source_evidence,
                 self.options.service_gid,
@@ -3151,6 +3283,7 @@ mod linux {
                 source: SourceAuthorityV3 {
                     lmdb_path: self.options.source.clone(),
                     lmdb_identity: self.source_identity,
+                    lmdb_generation: self.source_lmdb_generation,
                     external_path: self.options.source_external_dir.clone(),
                     external_identity: self.source_external_identity,
                     read_only_mounts: source_read_only_mounts,

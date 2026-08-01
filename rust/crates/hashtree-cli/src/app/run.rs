@@ -2682,6 +2682,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                     launch.online_audit_binding()?,
                 )
                 .map_err(anyhow::Error::from)?;
+                let online_retirement = launch.online_retirement_authority_held()?;
                 let mut cursor = launch.cursor;
                 let mut verified = 0usize;
                 let mut scanned = 0usize;
@@ -2854,7 +2855,9 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                     }
                 }
                 let mut target_completed = false;
-                if source_completed && max_items.is_none_or(|maximum| scanned < maximum) {
+                if source_completed && online_retirement {
+                    target_completed = true;
+                } else if source_completed && max_items.is_none_or(|maximum| scanned < maximum) {
                     let require_terminal_target = launch.target_writers_fenced();
                     let mut target_cursor = online_audit.target_cursor()?;
                     'target_epochs: loop {
@@ -2986,10 +2989,12 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                         }
                     }
                 }
+                let retirement_authority_held =
+                    online_retirement && launch.online_retirement_authority_held()?;
                 let completed = source_completed
                     && target_completed
-                    && launch.source_writers_fenced()
-                    && launch.target_writers_fenced();
+                    && ((launch.source_writers_fenced() && launch.target_writers_fenced())
+                        || retirement_authority_held);
                 if completed {
                     launch.authorize_checkpoint("online-evidence-publication", cursor, None)?;
                     let mut source_evidence = launch.create_source_evidence_writer()?;

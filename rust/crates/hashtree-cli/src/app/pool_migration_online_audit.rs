@@ -12,8 +12,8 @@ use super::pool_migration_evidence::{
     ONLINE_TARGET_EVIDENCE_FILE_NAME, SOURCE_EVIDENCE_FILE_NAME,
 };
 use super::pool_migration_protocol::{
-    CursorAuthorityV3, FileAuthorityV3, FileIdentityV3, LmdbIdentityV3, NamedFileAuthorityV3,
-    WriterUnitMaskV3,
+    CursorAuthorityV3, FileAuthorityV3, FileIdentityV3, LmdbGenerationAuthorityV1, LmdbIdentityV3,
+    NamedFileAuthorityV3, PoolDeleteProtectionAuthorityV1, WriterUnitMaskV3,
 };
 
 pub(super) const ONLINE_TARGET_AUDIT_SCHEMA: &str =
@@ -32,6 +32,12 @@ pub(super) const MAX_REUSABLE_TARGET_EVIDENCE_BYTES: u64 = 4 * 1024 * 1024 * 102
 pub(super) const SOURCE_EVIDENCE_KIND: &str =
     "source-key-target-catalog-reconciliation/sha256-key-target-size/v2";
 pub(super) const TARGET_EVIDENCE_KIND: &str = "target-body/sha256-hash-size/v1";
+pub(super) const COMPLETE_TARGET_SCOPE: &str = "complete-target";
+pub(super) const LEGACY_SOURCE_SCOPE: &str = "legacy-source";
+
+fn default_online_audit_scope() -> String {
+    COMPLETE_TARGET_SCOPE.to_string()
+}
 
 pub(super) fn online_audit_path(cursor_path: &Path) -> Result<PathBuf> {
     let cursor_name = cursor_path
@@ -55,6 +61,17 @@ pub(super) fn verify_and_record_target_body_page(
     audit: &hashtree_lmdb::PoolMigrationAuditStore,
     entries: &[(Hash, u64)],
     cursor: Hash,
+    byte_limit: u64,
+) -> Result<()> {
+    verify_exact_stored_target_bodies(reader, entries, byte_limit)?;
+    audit.record_verified_target_page(entries, cursor)?;
+    Ok(())
+}
+
+#[cfg(feature = "lmdb")]
+pub(super) fn verify_exact_stored_target_bodies(
+    reader: &hashtree_lmdb::PoolStoreReader,
+    entries: &[(Hash, u64)],
     byte_limit: u64,
 ) -> Result<()> {
     if byte_limit == 0 {
@@ -89,7 +106,6 @@ pub(super) fn verify_and_record_target_body_page(
     if final_locations != locations {
         bail!("online target catalog changed during root content verification");
     }
-    audit.record_verified_target_page(entries, cursor)?;
     Ok(())
 }
 
@@ -128,6 +144,9 @@ pub(super) fn compute_online_audit_binding(
     pool_topology_sha256: &str,
     pool_manifest_sha256: Hash,
     prior_target_audit_certification_sha256: Option<&str>,
+    delete_protection: Option<&PoolDeleteProtectionAuthorityV1>,
+    source_lmdb_generation: Option<&LmdbGenerationAuthorityV1>,
+    online_retirement_attempt_nonce: Option<&str>,
 ) -> Result<Hash> {
     let mut hasher = Sha256::new();
     hasher.update(b"hashtree-pool-migration-online-audit-authority/v6\0");
@@ -162,6 +181,48 @@ pub(super) fn compute_online_audit_binding(
         hasher.update(b"\0prior-target-audit-certification\0");
         hasher.update(parent.as_bytes());
     }
+    match (
+        delete_protection,
+        source_lmdb_generation,
+        online_retirement_attempt_nonce,
+    ) {
+        (Some(delete_protection), Some(source_lmdb_generation), Some(attempt_nonce)) => {
+            require_sha256("online retirement attempt nonce", attempt_nonce)?;
+            hasher.update(b"\0online-retirement-authority/v1\0");
+            hasher.update(
+                serde_json::to_vec(&(
+                    delete_protection,
+                    source_lmdb_generation,
+                    attempt_nonce,
+                ))
+                    .context("serialize online retirement authority")?,
+            );
+        }
+        (None, None, None) => {}
+        _ => bail!(
+            "online audit delete protection, source LMDB generation, and attempt nonce must be present or absent together"
+        ),
+    }
+    Ok(hasher.finalize().into())
+}
+
+pub(super) fn compute_online_target_delete_protection_binding(
+    rollout_id: &str,
+    authority: &PoolDeleteProtectionAuthorityV1,
+) -> Result<Hash> {
+    require_sha256("Pool delete-protection lease ID", &authority.lease_id)?;
+    require_sha256(
+        "Pool delete-protection record SHA-256",
+        &authority.record_sha256,
+    )?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"hashtree-pool-migration-online-target-delete-protection/v1\0");
+    hasher.update(rollout_id.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(
+        serde_json::to_vec(authority)
+            .context("serialize online target delete-protection authority")?,
+    );
     Ok(hasher.finalize().into())
 }
 
@@ -215,6 +276,8 @@ pub(super) struct PoolMigrationOnlineTargetAuditReceiptV3 {
     pub(super) schema: String,
     pub(super) status: String,
     pub(super) phase: String,
+    #[serde(default = "default_online_audit_scope")]
+    pub(super) coverage_scope: String,
     pub(super) rollout_id: String,
     pub(super) boot_id: String,
     pub(super) attempt_namespace: PathBuf,
@@ -239,6 +302,8 @@ pub(super) struct PoolMigrationOnlineTargetAuditReceiptV3 {
     pub(super) prior_target_audit_certification_sha256: Option<String>,
     pub(super) source_path: PathBuf,
     pub(super) source_lmdb_identity: LmdbIdentityV3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) source_lmdb_generation: Option<LmdbGenerationAuthorityV1>,
     pub(super) source_external_path: Option<PathBuf>,
     pub(super) source_external_identity: Option<FileIdentityV3>,
     pub(super) source_baseline_sha256: String,
@@ -259,6 +324,10 @@ pub(super) struct PoolMigrationOnlineTargetAuditReceiptV3 {
     pub(super) target_content_sha256: String,
     pub(super) target_evidence: SourceEvidenceManifestAuthorityV3,
     pub(super) target_fence_binding_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) target_delete_protection: Option<PoolDeleteProtectionAuthorityV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) target_delete_protection_binding_sha256: Option<String>,
     pub(super) target_writer_units: Vec<String>,
     pub(super) target_writer_unit_masks: Vec<WriterUnitMaskV3>,
     pub(super) legacy_worker_template_mask: WriterUnitMaskV3,
@@ -330,7 +399,11 @@ pub(super) fn load_validated_online_target_audit(
     if receipt.rollout_id != expected.rollout_id {
         bail!("online target audit certification has invalid release authority");
     }
-    if receipt.source_path != expected.source_path
+    if receipt.coverage_scope != COMPLETE_TARGET_SCOPE
+        || receipt.source_lmdb_generation.is_some()
+        || receipt.target_delete_protection.is_some()
+        || receipt.target_delete_protection_binding_sha256.is_some()
+        || receipt.source_path != expected.source_path
         || receipt.source_evidence_kind != SOURCE_EVIDENCE_KIND
         || receipt.target_evidence_kind != TARGET_EVIDENCE_KIND
         || receipt.worker_binary.sha256 != expected.worker_binary_sha256
@@ -360,6 +433,9 @@ pub(super) fn load_validated_online_target_audit(
         hashtree_core::from_hex(expected.pool_manifest_sha256)
             .context("decode online target audit Pool manifest")?,
         receipt.prior_target_audit_certification_sha256.as_deref(),
+        None,
+        None,
+        None,
     )?;
     if receipt.audit_binding_sha256 != hashtree_core::to_hex(&audit_binding) {
         bail!("online target audit receipt has an invalid audit binding");
@@ -427,7 +503,11 @@ pub(super) fn load_validated_prior_online_target_audit(
     };
     let (_, receipt) =
         read_certified_online_target_audit(authority, expected.expected_service_gid)?;
-    if receipt.boot_id != expected.boot_id
+    if receipt.coverage_scope != COMPLETE_TARGET_SCOPE
+        || receipt.source_lmdb_generation.is_some()
+        || receipt.target_delete_protection.is_some()
+        || receipt.target_delete_protection_binding_sha256.is_some()
+        || receipt.boot_id != expected.boot_id
         || receipt.source_evidence_kind != SOURCE_EVIDENCE_KIND
         || receipt.target_evidence_kind != TARGET_EVIDENCE_KIND
         || receipt.pool_path != expected.pool_path
@@ -454,6 +534,9 @@ pub(super) fn load_validated_prior_online_target_audit(
         hashtree_core::from_hex(expected.pool_manifest_sha256)
             .context("decode prior target audit Pool manifest")?,
         receipt.prior_target_audit_certification_sha256.as_deref(),
+        None,
+        None,
+        None,
     )?;
     if receipt.audit_binding_sha256 != hashtree_core::to_hex(&audit_binding) {
         bail!("prior target audit receipt has an invalid audit binding");
@@ -725,6 +808,9 @@ mod tests {
                 &"33".repeat(32),
                 [0x44; 32],
                 None,
+                None,
+                None,
+                None,
             )
             .expect("compute binding")
         };
@@ -745,6 +831,9 @@ mod tests {
                 &"33".repeat(32),
                 [0x44; 32],
                 parent,
+                None,
+                None,
+                None,
             )
             .expect("compute binding")
         };
@@ -752,6 +841,53 @@ mod tests {
         let second = "66".repeat(32);
         assert_ne!(binding(None), binding(Some(&first)));
         assert_ne!(binding(Some(&first)), binding(Some(&second)));
+    }
+
+    #[test]
+    fn online_retirement_binding_is_attempt_and_generation_exact() {
+        let authority = PoolDeleteProtectionAuthorityV1 {
+            lease_id: "77".repeat(32),
+            record_sha256: "88".repeat(32),
+        };
+        let generation = LmdbGenerationAuthorityV1 {
+            map_size: 1024 * 1024,
+            last_page_number: 123,
+            last_txn_id: 456,
+        };
+        let binding = |authority: &PoolDeleteProtectionAuthorityV1,
+                       generation: &LmdbGenerationAuthorityV1,
+                       nonce: &str| {
+            compute_online_audit_binding(
+                "rollout",
+                &"11".repeat(32),
+                &"22".repeat(32),
+                lmdb_identity(10),
+                None,
+                lmdb_identity(30),
+                &"33".repeat(32),
+                [0x44; 32],
+                None,
+                Some(authority),
+                Some(generation),
+                Some(nonce),
+            )
+            .expect("compute online retirement binding")
+        };
+        let first = binding(&authority, &generation, &"99".repeat(32));
+        let mut changed_authority = authority.clone();
+        changed_authority.record_sha256 = "aa".repeat(32);
+        let mut changed_generation = generation;
+        changed_generation.last_txn_id += 1;
+
+        assert_ne!(
+            first,
+            binding(&changed_authority, &generation, &"99".repeat(32))
+        );
+        assert_ne!(
+            first,
+            binding(&authority, &changed_generation, &"99".repeat(32))
+        );
+        assert_ne!(first, binding(&authority, &generation, &"aa".repeat(32)));
     }
 
     #[test]

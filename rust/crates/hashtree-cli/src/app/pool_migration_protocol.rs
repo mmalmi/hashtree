@@ -110,10 +110,20 @@ pub(super) struct WriterUnitMaskV3 {
 pub(super) struct SourceAuthorityV3 {
     pub(super) lmdb_path: PathBuf,
     pub(super) lmdb_identity: LmdbIdentityV3,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) lmdb_generation: Option<LmdbGenerationAuthorityV1>,
     pub(super) external_path: Option<PathBuf>,
     pub(super) external_identity: Option<FileIdentityV3>,
     pub(super) read_only_mounts: Option<SourceReadOnlyMountAuthorityV3>,
     pub(super) baseline: FileAuthorityV3,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct LmdbGenerationAuthorityV1 {
+    pub(super) map_size: u64,
+    pub(super) last_page_number: u64,
+    pub(super) last_txn_id: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

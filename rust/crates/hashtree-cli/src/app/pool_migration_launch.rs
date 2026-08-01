@@ -1,8 +1,9 @@
 use anyhow::{bail, Context, Result};
 use hashtree_core::from_hex;
 use hashtree_lmdb::{
-    PinnedLmdbFileIdentity, PinnedLmdbIdentity, PoolDeleteProtectionGuard, PoolMemberRuntimePaths,
-    PoolMigrationAuditSummary, PoolPhysicalAudit, PoolStoreConfig, PoolStoreReader,
+    LmdbBlobReader, PinnedLmdbFileIdentity, PinnedLmdbIdentity, PoolDeleteProtectionGuard,
+    PoolMemberRuntimePaths, PoolMigrationAuditSummary, PoolPhysicalAudit, PoolStoreConfig,
+    PoolStoreReader,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -30,19 +31,20 @@ use super::pool_migration_mount::{
     validate_source_read_only_mount_authority, SourceReadOnlyMountAuthorityV3,
 };
 use super::pool_migration_online_audit::{
-    compute_online_audit_binding, compute_online_target_fence_binding,
-    load_validated_online_target_audit, load_validated_prior_online_target_audit,
-    online_audit_path, OnlineTargetAuditExpectationV3, PoolMigrationOnlineTargetAuditReceiptV3,
-    PriorOnlineTargetAuditExpectationV3, ValidatedOnlineTargetAuditV3,
+    compute_online_audit_binding, compute_online_target_delete_protection_binding,
+    compute_online_target_fence_binding, load_validated_online_target_audit,
+    load_validated_prior_online_target_audit, online_audit_path, OnlineTargetAuditExpectationV3,
+    PoolMigrationOnlineTargetAuditReceiptV3, PriorOnlineTargetAuditExpectationV3,
+    ValidatedOnlineTargetAuditV3, COMPLETE_TARGET_SCOPE, LEGACY_SOURCE_SCOPE,
     ONLINE_TARGET_AUDIT_CAS_LABEL_PREFIX, ONLINE_TARGET_AUDIT_FILE_NAME,
     ONLINE_TARGET_AUDIT_SCHEMA,
 };
 use super::pool_migration_pinned::{PinnedDirectory, PinnedRegularEntry};
 pub(super) use super::pool_migration_protocol::{
     ControllerAuthorityV3, ControllerStateV3, CursorAuthorityV3, FileAuthorityV3, FileIdentityV3,
-    LmdbIdentityV3, NamedFileAuthorityV3, PoolAuthorityV3, PoolDeleteProtectionAuthorityV1,
-    PoolMigrationLaunchRequestV3, PoolTopologyMemberV3, PoolTopologyV3, SourceAuthorityV3,
-    WriterUnitMaskV3,
+    LmdbGenerationAuthorityV1, LmdbIdentityV3, NamedFileAuthorityV3, PoolAuthorityV3,
+    PoolDeleteProtectionAuthorityV1, PoolMigrationLaunchRequestV3, PoolTopologyMemberV3,
+    PoolTopologyV3, SourceAuthorityV3, WriterUnitMaskV3,
 };
 use super::pool_migration_receipt::{
     capture_source_generation_fingerprint, load_validated_prior_source_terminal_receipts,
@@ -319,6 +321,13 @@ impl AcknowledgedPoolMigrationLaunch {
             self.controller_state
                 .prior_target_audit_certification_sha256
                 .as_deref(),
+            self.request.pool.delete_protection.as_ref(),
+            self.request.source.lmdb_generation.as_ref(),
+            self.request
+                .pool
+                .delete_protection
+                .as_ref()
+                .map(|_| self.request.nonce.as_str()),
         )
     }
 
@@ -426,6 +435,21 @@ impl AcknowledgedPoolMigrationLaunch {
 
     pub(super) fn source_writers_fenced(&self) -> bool {
         self.controller_state.source_writers_fenced
+    }
+
+    pub(super) fn online_retirement_authority_held(&self) -> Result<bool> {
+        match (
+            self.request.pool.delete_protection.as_ref(),
+            self.request.source.lmdb_generation.as_ref(),
+            self._delete_protection_guard.as_ref(),
+        ) {
+            (Some(_), Some(expected), Some(_)) => {
+                self.pins.require_source_lmdb_generation(expected)?;
+                Ok(true)
+            }
+            (None, None, None) => Ok(false),
+            _ => bail!("online retirement authority is internally incomplete"),
+        }
     }
 
     pub(super) fn authorize_checkpoint(
@@ -830,7 +854,14 @@ impl AcknowledgedPoolMigrationLaunch {
         if !cursor_shape_valid {
             bail!("completed online target audit has an inconsistent terminal cursor");
         }
-        if !self.controller_state.target_writers_fenced
+        let online_retirement = self.online_retirement_authority_held()?;
+        if online_retirement {
+            if source_summary != target_summary {
+                bail!(
+                    "online retirement target-body evidence must equal its exhaustive source evidence"
+                );
+            }
+        } else if !self.controller_state.target_writers_fenced
             || !self.controller_state.fence_held_until_completion
             || self
                 .controller_state
@@ -846,10 +877,28 @@ impl AcknowledgedPoolMigrationLaunch {
             &self.controller_state.legacy_worker_template_mask,
             &self.controller_state.legacy_worker_instance_masks,
         )?;
+        let target_delete_protection_binding_sha256 = self
+            .request
+            .pool
+            .delete_protection
+            .as_ref()
+            .map(|authority| {
+                compute_online_target_delete_protection_binding(
+                    &self.request.controller.rollout_id,
+                    authority,
+                )
+                .map(|binding| hashtree_core::to_hex(&binding))
+            })
+            .transpose()?;
         let receipt = PoolMigrationOnlineTargetAuditReceiptV3 {
             schema: ONLINE_TARGET_AUDIT_SCHEMA.to_string(),
             status: "verified".to_string(),
             phase: self.request.controller.phase.clone(),
+            coverage_scope: if online_retirement {
+                LEGACY_SOURCE_SCOPE.to_string()
+            } else {
+                COMPLETE_TARGET_SCOPE.to_string()
+            },
             rollout_id: self.request.controller.rollout_id.clone(),
             boot_id: self.request.boot_id.clone(),
             attempt_namespace: self.request.attempt_namespace.clone(),
@@ -876,6 +925,7 @@ impl AcknowledgedPoolMigrationLaunch {
                 .clone(),
             source_path: self.request.source.lmdb_path.clone(),
             source_lmdb_identity: self.request.source.lmdb_identity,
+            source_lmdb_generation: self.request.source.lmdb_generation,
             source_external_path: self.request.source.external_path.clone(),
             source_external_identity: self.request.source.external_identity,
             source_baseline_sha256: self.request.source.baseline.sha256.clone(),
@@ -898,6 +948,8 @@ impl AcknowledgedPoolMigrationLaunch {
             target_content_sha256: hashtree_core::to_hex(&target_summary.content_sha256),
             target_evidence,
             target_fence_binding_sha256: hashtree_core::to_hex(&target_fence_binding),
+            target_delete_protection: self.request.pool.delete_protection.clone(),
+            target_delete_protection_binding_sha256,
             target_writer_units: self.controller_state.stopped_writer_units.clone(),
             target_writer_unit_masks: self.controller_state.writer_unit_masks.clone(),
             legacy_worker_template_mask: self.controller_state.legacy_worker_template_mask.clone(),
@@ -1439,6 +1491,31 @@ impl PinnedMigrationPaths {
                 lmdb_identity: member.lmdb_files.identity(),
             })
             .collect()
+    }
+
+    fn require_source_lmdb_generation(&self, expected: &LmdbGenerationAuthorityV1) -> Result<()> {
+        self.ensure_source_path_identities()?;
+        let reader = LmdbBlobReader::open_with_external_read_concurrency_and_pinned_identity(
+            self.source.runtime_path(),
+            None,
+            1,
+            self.source_lmdb_files.identity(),
+        )
+        .context("open exact source LMDB generation authority")?;
+        let generation = reader.environment_generation();
+        let actual = LmdbGenerationAuthorityV1 {
+            map_size: generation.map_size,
+            last_page_number: generation.last_page_number,
+            last_txn_id: generation.last_txn_id,
+        };
+        if actual != *expected {
+            bail!(
+                "source LMDB generation changed during online retirement: expected {:?}, found {:?}",
+                expected,
+                actual,
+            );
+        }
+        self.ensure_source_path_identities()
     }
 
     fn hold_delete_protection(
@@ -2068,16 +2145,30 @@ fn validate_request_shape(
     )?;
     validate_sha256("source baseline", &request.source.baseline.sha256)?;
     validate_sha256("Pool topology", &request.pool.topology.sha256)?;
-    if let Some(authority) = &request.pool.delete_protection {
-        if request.controller.phase != "online-bounded" {
-            bail!("Pool delete-protection authority is accepted only for online-bounded migration");
+    match (
+        request.pool.delete_protection.as_ref(),
+        request.source.lmdb_generation.as_ref(),
+    ) {
+        (Some(authority), Some(generation)) => {
+            if request.controller.phase != "online-bounded" {
+                bail!(
+                    "Pool delete-protection authority is accepted only for online-bounded migration"
+                );
+            }
+            require_lower_hex("Pool delete-protection lease ID", &authority.lease_id, 64)?;
+            require_lower_hex(
+                "Pool delete-protection record SHA-256",
+                &authority.record_sha256,
+                64,
+            )?;
+            if generation.map_size == 0 {
+                bail!("source LMDB generation map size must be non-zero");
+            }
         }
-        require_lower_hex("Pool delete-protection lease ID", &authority.lease_id, 64)?;
-        require_lower_hex(
-            "Pool delete-protection record SHA-256",
-            &authority.record_sha256,
-            64,
-        )?;
+        (None, None) => {}
+        _ => bail!(
+            "Pool delete-protection authority and source LMDB generation must be present or absent together"
+        ),
     }
 
     if request.argv.is_empty() {
@@ -2533,6 +2624,9 @@ fn validate_launch_authority(
         }
     }
     paths.ensure_isolated_authority_roots(request, context.launch_request)?;
+    if let Some(expected) = request.source.lmdb_generation.as_ref() {
+        paths.require_source_lmdb_generation(expected)?;
+    }
     Ok(ValidatedLaunch {
         cursor,
         boot_id,
