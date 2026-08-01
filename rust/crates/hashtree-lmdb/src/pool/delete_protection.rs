@@ -1,7 +1,11 @@
 use super::{map_heed, PoolDeleteProtectionChange, PoolDeleteProtectionStatus, PoolStore};
+use crate::managed_env::ManagedEnv;
 use hashtree_core::store::StoreError;
 use hashtree_core::{sha256, to_hex, types::Hash};
+use heed::types::Bytes;
+use heed::Database;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
@@ -29,12 +33,7 @@ impl PoolStore {
     pub fn delete_protection_status(
         &self,
     ) -> Result<Option<PoolDeleteProtectionStatus>, StoreError> {
-        let rtxn = self.env.read_txn().map_err(map_heed)?;
-        self.manifest_db
-            .get(&rtxn, DELETE_PROTECTION_KEY)
-            .map_err(map_heed)?
-            .map(decode_status)
-            .transpose()
+        delete_protection_status(&self.env, self.manifest_db)
     }
 
     pub fn acquire_delete_protection(
@@ -92,31 +91,13 @@ impl PoolStore {
         lease_id: Hash,
         expected_record_sha256: Hash,
     ) -> Result<PoolDeleteProtectionGuard, StoreError> {
-        require_unix_coordination()?;
-        validate_lease_id(lease_id)?;
-        validate_lease_id(expected_record_sha256)?;
-        let coordination = self.acquire_delete_coordination_lock(false)?;
-        let status = self
-            .delete_protection_status()?
-            .ok_or_else(|| StoreError::Other("PoolStore delete protection is not active".into()))?;
-        if status.lease_id != lease_id {
-            return Err(StoreError::Other(format!(
-                "PoolStore delete protection lease identity differs: expected {}, found {}",
-                to_hex(&lease_id),
-                to_hex(&status.lease_id),
-            )));
-        }
-        if status.record_sha256 != expected_record_sha256 {
-            return Err(StoreError::Other(format!(
-                "PoolStore delete protection record identity differs: expected {}, found {}",
-                to_hex(&expected_record_sha256),
-                to_hex(&status.record_sha256),
-            )));
-        }
-        Ok(PoolDeleteProtectionGuard {
-            _coordination: coordination,
-            status,
-        })
+        hold_delete_protection(
+            &self.catalog_path,
+            &self.env,
+            self.manifest_db,
+            lease_id,
+            expected_record_sha256,
+        )
     }
 
     pub fn release_delete_protection(
@@ -176,44 +157,7 @@ impl PoolStore {
         &self,
         exclusive: bool,
     ) -> Result<DeleteCoordinationGuard, StoreError> {
-        let path = self.catalog_path.join(DELETE_COORDINATION_FILE);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(&path)
-            .map_err(|error| {
-                StoreError::Other(format!(
-                    "open PoolStore delete coordination file {}: {error}",
-                    path.display()
-                ))
-            })?;
-        let metadata = file.metadata().map_err(StoreError::Io)?;
-        if !metadata.is_file() {
-            return Err(StoreError::Other(format!(
-                "PoolStore delete coordination path is not a regular file: {}",
-                path.display()
-            )));
-        }
-        let operation = if exclusive {
-            libc::LOCK_EX
-        } else {
-            libc::LOCK_SH
-        };
-        loop {
-            if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
-                return Ok(DeleteCoordinationGuard { file });
-            }
-            let error = std::io::Error::last_os_error();
-            if error.kind() != std::io::ErrorKind::Interrupted {
-                return Err(StoreError::Other(format!(
-                    "lock PoolStore delete coordination file {}: {error}",
-                    path.display()
-                )));
-            }
-        }
+        acquire_delete_coordination_lock(&self.catalog_path, exclusive)
     }
 
     #[cfg(not(unix))]
@@ -223,6 +167,104 @@ impl PoolStore {
     ) -> Result<DeleteCoordinationGuard, StoreError> {
         Ok(DeleteCoordinationGuard)
     }
+}
+
+pub(super) fn delete_protection_status(
+    env: &ManagedEnv,
+    manifest: Database<Bytes, Bytes>,
+) -> Result<Option<PoolDeleteProtectionStatus>, StoreError> {
+    let rtxn = env.read_txn().map_err(map_heed)?;
+    manifest
+        .get(&rtxn, DELETE_PROTECTION_KEY)
+        .map_err(map_heed)?
+        .map(decode_status)
+        .transpose()
+}
+
+pub(super) fn hold_delete_protection(
+    catalog_path: &Path,
+    env: &ManagedEnv,
+    manifest: Database<Bytes, Bytes>,
+    lease_id: Hash,
+    expected_record_sha256: Hash,
+) -> Result<PoolDeleteProtectionGuard, StoreError> {
+    require_unix_coordination()?;
+    validate_lease_id(lease_id)?;
+    validate_lease_id(expected_record_sha256)?;
+    let coordination = acquire_delete_coordination_lock(catalog_path, false)?;
+    let status = delete_protection_status(env, manifest)?
+        .ok_or_else(|| StoreError::Other("PoolStore delete protection is not active".into()))?;
+    if status.lease_id != lease_id {
+        return Err(StoreError::Other(format!(
+            "PoolStore delete protection lease identity differs: expected {}, found {}",
+            to_hex(&lease_id),
+            to_hex(&status.lease_id),
+        )));
+    }
+    if status.record_sha256 != expected_record_sha256 {
+        return Err(StoreError::Other(format!(
+            "PoolStore delete protection record identity differs: expected {}, found {}",
+            to_hex(&expected_record_sha256),
+            to_hex(&status.record_sha256),
+        )));
+    }
+    Ok(PoolDeleteProtectionGuard {
+        _coordination: coordination,
+        status,
+    })
+}
+
+#[cfg(unix)]
+fn acquire_delete_coordination_lock(
+    catalog_path: &Path,
+    exclusive: bool,
+) -> Result<DeleteCoordinationGuard, StoreError> {
+    let path = catalog_path.join(DELETE_COORDINATION_FILE);
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&path)
+        .map_err(|error| {
+            StoreError::Other(format!(
+                "open PoolStore delete coordination file {}: {error}",
+                path.display()
+            ))
+        })?;
+    let metadata = file.metadata().map_err(StoreError::Io)?;
+    if !metadata.is_file() {
+        return Err(StoreError::Other(format!(
+            "PoolStore delete coordination path is not a regular file: {}",
+            path.display()
+        )));
+    }
+    let operation = if exclusive {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_SH
+    };
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), operation) } == 0 {
+            return Ok(DeleteCoordinationGuard { file });
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted {
+            return Err(StoreError::Other(format!(
+                "lock PoolStore delete coordination file {}: {error}",
+                path.display()
+            )));
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn acquire_delete_coordination_lock(
+    _catalog_path: &Path,
+    _exclusive: bool,
+) -> Result<DeleteCoordinationGuard, StoreError> {
+    Ok(DeleteCoordinationGuard)
 }
 
 fn validate_lease_id(lease_id: Hash) -> Result<(), StoreError> {

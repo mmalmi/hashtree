@@ -1,7 +1,8 @@
 use super::member::open_member_reader;
 use super::{
-    decode_manifest, map_heed, validate_controlled_manifest, LocationRecord, PoolManifest,
-    PoolMemberId, PoolStoreConfig, MANIFEST_KEY,
+    decode_manifest, delete_protection, map_heed, validate_controlled_manifest, LocationRecord,
+    PoolDeleteProtectionGuard, PoolDeleteProtectionStatus, PoolManifest, PoolMemberId,
+    PoolStoreConfig, MANIFEST_KEY,
 };
 use crate::{managed_env::ManagedEnv, LmdbBlobReader};
 use hashtree_core::store::StoreError;
@@ -10,7 +11,7 @@ use heed::types::Bytes;
 use heed::{Database, EnvFlags, EnvOpenOptions};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 const TERMINAL_AUDIT_BATCH_ITEMS: usize = 4_096;
@@ -24,6 +25,7 @@ const TERMINAL_AUDIT_BATCH_BYTES: u64 = 64 * 1024 * 1024;
 /// A validator can therefore inspect an online or copied Pool without changing
 /// any catalog or member bytes.
 pub struct PoolStoreReader {
+    catalog_path: PathBuf,
     env: ManagedEnv,
     manifest: Database<Bytes, Bytes>,
     opened_manifest_bytes: Vec<u8>,
@@ -303,6 +305,7 @@ impl PoolStoreReader {
             }
         }
         Ok(Self {
+            catalog_path: path.to_path_buf(),
             env,
             manifest: manifest_db,
             opened_manifest_bytes,
@@ -314,6 +317,26 @@ impl PoolStoreReader {
             members,
             member_errors,
         })
+    }
+
+    pub fn delete_protection_status(
+        &self,
+    ) -> Result<Option<PoolDeleteProtectionStatus>, StoreError> {
+        delete_protection::delete_protection_status(&self.env, self.manifest)
+    }
+
+    pub fn hold_delete_protection(
+        &self,
+        lease_id: Hash,
+        expected_record_sha256: Hash,
+    ) -> Result<PoolDeleteProtectionGuard, StoreError> {
+        delete_protection::hold_delete_protection(
+            &self.catalog_path,
+            &self.env,
+            self.manifest,
+            lease_id,
+            expected_record_sha256,
+        )
     }
 
     pub fn blob_location(&self, hash: &Hash) -> Result<Option<PoolMemberId>, StoreError> {

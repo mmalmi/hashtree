@@ -1332,6 +1332,42 @@ fn held_delete_protection_blocks_release_until_online_audit_finishes() {
     release_thread.join().expect("join release thread");
 }
 
+#[cfg(unix)]
+#[test]
+fn read_only_pool_audit_can_hold_exact_delete_protection() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let member = temp.path().join("member");
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("open pool");
+    pool.add_member(PoolMemberConfig::new(member, 16 * 1024 * 1024))
+        .expect("add member");
+    let lease_id = sha256(b"read-only-online-retirement-delete-protection");
+    let acquired = pool
+        .acquire_delete_protection(lease_id, "legacy-source-retirement")
+        .expect("acquire protection");
+    drop(pool);
+
+    let mut reader_config = PoolStoreConfig::default();
+    reader_config.temperature.enabled = false;
+    let reader = PoolStoreReader::open(&catalog, reader_config).expect("open read-only audit");
+    assert_eq!(
+        reader
+            .delete_protection_status()
+            .expect("read protection through audit"),
+        Some(acquired.status.clone())
+    );
+    let held = reader
+        .hold_delete_protection(lease_id, acquired.status.record_sha256)
+        .expect("hold exact protection through read-only audit");
+    assert_eq!(held.status(), &acquired.status);
+    drop(held);
+    drop(reader);
+
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("reopen pool");
+    pool.release_delete_protection(lease_id, acquired.status.record_sha256)
+        .expect("release after read-only audit");
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn exact_offline_stale_pending_cleanup_is_atomic_and_idempotent() {
