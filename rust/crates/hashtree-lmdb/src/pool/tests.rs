@@ -132,6 +132,41 @@ fn manifests_without_temperature_watermarks_use_safe_defaults() {
 }
 
 #[test]
+fn ordinary_reopen_grows_catalog_to_page_aligned_explicit_size() {
+    let temp = TempDir::new().expect("create generated catalog resize root");
+    let catalog = temp.path().join("catalog");
+    let mut initial = PoolStoreConfig::default();
+    initial.catalog_map_size_bytes = MIN_MEMBER_MAP_SIZE_BYTES;
+    initial.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, initial).expect("create generated catalog");
+    drop(pool);
+
+    let page_size = (page_size::get() as u64).max(4_096);
+    let requested = MIN_MEMBER_MAP_SIZE_BYTES
+        .checked_mul(2)
+        .expect("generated requested map size")
+        .checked_add(1)
+        .expect("generated unaligned map size");
+    let expected = requested + (page_size - requested % page_size);
+    let mut resized = PoolStoreConfig::default();
+    resized.catalog_map_size_bytes = requested;
+    resized.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, resized).expect("grow generated catalog");
+
+    assert_eq!(pool.catalog_map_size_bytes(), expected);
+    assert_eq!(pool.catalog_map_size_bytes() % page_size, 0);
+    drop(pool);
+
+    let mut ordinary = PoolStoreConfig::default();
+    ordinary.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, ordinary).expect("reopen grown generated catalog");
+    assert_eq!(
+        pool.catalog_map_size_bytes(),
+        super::model::DEFAULT_CATALOG_MAP_SIZE_BYTES
+    );
+}
+
+#[test]
 fn drop_closes_pool_catalog_and_member_environments() {
     let temp = TempDir::new().expect("temp dir");
     let catalog = temp.path().join("catalog");
