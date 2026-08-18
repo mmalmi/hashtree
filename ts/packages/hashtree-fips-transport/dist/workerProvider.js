@@ -16,6 +16,7 @@ export class FipsWorkerP2PProvider {
             endpoint: options.node,
             localStore: options.localStore,
             timeoutMs: options.requestTimeoutMs,
+            allowIncomingPeer: options.allowIncomingPeer,
         });
     }
     fetch(hashHex, peerId, htl) {

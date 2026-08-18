@@ -115,6 +115,12 @@ export class TcpBlobTransport {
         }
     }
     async serve(connection) {
+        const peerId = await this.tcp.peer(connection);
+        if (!peerId || (this.options.allowIncomingPeer
+            && !await this.options.allowIncomingPeer(peerId))) {
+            await this.tcp.abort(connection).catch(() => undefined);
+            return;
+        }
         const deadline = Date.now() + this.timeoutMs;
         const request = await this.readExact(connection, REQUEST_BYTES, deadline);
         const { hash } = decodeTcpBlobRequest(request);

@@ -10,6 +10,8 @@ export interface TcpBlobTransportOptions {
     endpoint: FipsDatagramEndpoint;
     localStore: Store;
     timeoutMs?: number;
+    /** Authorize the authenticated FIPS identity before serving a blob request. */
+    allowIncomingPeer?: (peerId: string) => boolean | Promise<boolean>;
 }
 /** Hash-verified Hashtree blobs carried by one reliable TCP/FIPS stream per request. */
 export declare class TcpBlobTransport {

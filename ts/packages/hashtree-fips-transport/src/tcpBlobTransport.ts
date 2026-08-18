@@ -25,6 +25,8 @@ export interface TcpBlobTransportOptions {
   endpoint: FipsDatagramEndpoint;
   localStore: Store;
   timeoutMs?: number;
+  /** Authorize the authenticated FIPS identity before serving a blob request. */
+  allowIncomingPeer?: (peerId: string) => boolean | Promise<boolean>;
 }
 
 /** Hash-verified Hashtree blobs carried by one reliable TCP/FIPS stream per request. */
@@ -135,6 +137,14 @@ export class TcpBlobTransport {
   }
 
   private async serve(connection: ConnectionId): Promise<void> {
+    const peerId = await this.tcp.peer(connection);
+    if (!peerId || (
+      this.options.allowIncomingPeer
+      && !await this.options.allowIncomingPeer(peerId)
+    )) {
+      await this.tcp.abort(connection).catch(() => undefined);
+      return;
+    }
     const deadline = Date.now() + this.timeoutMs;
     const request = await this.readExact(connection, REQUEST_BYTES, deadline);
     const { hash } = decodeTcpBlobRequest(request);

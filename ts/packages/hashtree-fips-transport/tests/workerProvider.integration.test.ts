@@ -66,6 +66,61 @@ describe('FIPS worker P2P provider integration', () => {
     }
   });
 
+  it('serves blocks only to authenticated peers admitted by the active policy', async () => {
+    const hub = new MemoryHub();
+    const sourceIdentity = await identityFromSecretKey(secret(11));
+    const readerIdentity = await identityFromSecretKey(secret(12));
+    const sourceNode = new FipsNode({
+      identity: sourceIdentity,
+      transports: [new MemoryTransport(hub)],
+      routingMode: 'reply_learned',
+    });
+    const readerNode = new FipsNode({
+      identity: readerIdentity,
+      transports: [new MemoryTransport(hub)],
+      routingMode: 'reply_learned',
+    });
+    const data = new TextEncoder().encode('roster-authorized FIPS blob');
+    const hash = await sha256(data) as Hash;
+    const sourceStore = new MemoryStore();
+    await sourceStore.put(hash, data);
+    const readerPeerId = fipsToHex(readerIdentity.publicKey);
+    let allowed = false;
+    const allowIncomingPeer = vi.fn(async (peerId: string) => (
+      allowed && peerId === readerPeerId
+    ));
+    const sourceProvider = createFipsWorkerP2PProvider({
+      node: sourceNode,
+      localStore: sourceStore,
+      requestTimeoutMs: 500,
+      allowIncomingPeer,
+    });
+    const sourcePeerId = fipsToHex(sourceIdentity.publicKey);
+    const readerProvider = createFipsWorkerP2PProvider({
+      node: readerNode,
+      localStore: new MemoryStore(),
+      requestTimeoutMs: 500,
+      providerRoutes: [{ peerId: sourcePeerId, htl: 10 }],
+    });
+
+    try {
+      await Promise.all([sourceNode.start(), readerNode.start()]);
+      await readerNode.connect({ transport: 'memory', addr: sourcePeerId });
+
+      await expect(readerProvider.fetch(toHex(hash))).rejects.toThrow(
+        'TCP/FIPS blob availability is uncertain',
+      );
+      expect(allowIncomingPeer).toHaveBeenCalledWith(readerPeerId);
+
+      allowed = true;
+      await expect(readerProvider.fetch(toHex(hash))).resolves.toEqual(data);
+    } finally {
+      sourceProvider.close();
+      readerProvider.close();
+      await Promise.all([sourceNode.stop(), readerNode.stop()]);
+    }
+  });
+
   it('does not treat every connected FIPS peer as a blob provider', async () => {
     const hub = new MemoryHub();
     const sourceIdentity = await identityFromSecretKey(secret(7));

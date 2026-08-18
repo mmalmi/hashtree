@@ -10,6 +10,14 @@
   retain corrupt replica failover semantics, and accepted events remain
   defensively copied and deeply frozen.
 
+## @hashtree/fips-transport 0.4.8 - 2026-08-18
+
+### Fixed
+
+- Apply browser peer admission at the authenticated TCP/FIPS blob-service
+  boundary as well as WebRTC offer admission, preventing routed FIPS sessions
+  from reading local blobs after an application revokes their identity.
+
 ## @hashtree/fips-transport 0.4.7 - 2026-08-18
 
 ### Fixed

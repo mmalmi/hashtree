@@ -109,6 +109,7 @@ export async function createBrowserHashtreeFipsProvider(
     localStore: options.localStore,
     requestTimeoutMs: options.requestTimeoutMs,
     providerRoutes: options.providerRoutes,
+    allowIncomingPeer: options.allowIncomingPeer,
   });
 
   let stopped = false;

@@ -41,6 +41,8 @@ export interface FipsWorkerP2PProviderOptions {
   requestTimeoutMs?: number;
   /** Authenticated capability routes or explicitly configured Hashtree peers. */
   providerRoutes?: FipsBlobRouteSource;
+  /** Authorize an authenticated FIPS identity before serving local blobs. */
+  allowIncomingPeer?: (peerId: string) => boolean | Promise<boolean>;
 }
 
 /**
@@ -57,6 +59,7 @@ export class FipsWorkerP2PProvider implements HashtreeWorkerP2PProvider {
       endpoint: options.node,
       localStore: options.localStore,
       timeoutMs: options.requestTimeoutMs,
+      allowIncomingPeer: options.allowIncomingPeer,
     });
   }
 
