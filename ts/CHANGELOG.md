@@ -10,6 +10,15 @@
   retain corrupt replica failover semantics, and accepted events remain
   defensively copied and deeply frozen.
 
+## @hashtree/fips-transport 0.4.7 - 2026-08-18
+
+### Fixed
+
+- Let browser FIPS hosts pass an application admission callback through
+  `createBrowserHashtreeFipsProvider(...)`, so unauthorized unsolicited WebRTC
+  offers can be rejected before a peer connection or authenticated FIPS link is
+  created.
+
 ## TypeScript runtime 0.5.5 - 2026-07-20
 
 ### Fixed

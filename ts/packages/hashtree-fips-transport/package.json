@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/fips-transport",
-  "version": "0.4.6",
+  "version": "0.4.7",
   "description": "Hashtree blob transport over reliable TCP/FIPS streams",
   "type": "module",
   "main": "dist/index.js",

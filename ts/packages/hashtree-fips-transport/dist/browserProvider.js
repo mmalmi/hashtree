@@ -43,6 +43,7 @@ export async function createBrowserHashtreeFipsProvider(options) {
         connectTimeoutMs: options.connectTimeoutMs ?? 30_000,
         relayConnectTimeoutMs: options.relayConnectTimeoutMs ?? 8_000,
         iceGatherTimeoutMs: options.iceGatherTimeoutMs ?? 10_000,
+        allowIncomingPeer: options.allowIncomingPeer,
         logger: options.logger,
     });
     const node = new FipsNode({

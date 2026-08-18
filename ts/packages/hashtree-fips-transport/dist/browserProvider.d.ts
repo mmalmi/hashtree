@@ -1,6 +1,6 @@
 import { type Store } from '@hashtree/core';
 import { FipsNode, type FipsIdentity, type Logger } from '@fips/core';
-import { WebRtcTransport } from '@fips/transport-webrtc';
+import { WebRtcTransport, type WebRtcTransportConfig } from '@fips/transport-webrtc';
 import { WebSocketTransport } from '@fips/transport-websocket';
 import { type FipsBlobRouteSource, type HashtreeWorkerP2PProvider } from './workerProvider.js';
 interface BrowserHashtreeFipsProviderBaseOptions {
@@ -17,6 +17,8 @@ interface BrowserHashtreeFipsProviderBaseOptions {
     requestTimeoutMs?: number;
     /** Authenticated capability routes or explicitly configured remote Hashtree peers. */
     providerRoutes?: FipsBlobRouteSource;
+    /** Reject unsolicited WebRTC offers before creating a peer connection or FIPS link. */
+    allowIncomingPeer?: WebRtcTransportConfig['allowIncomingPeer'];
     forwarding?: boolean;
     logger?: Logger;
 }

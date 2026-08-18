@@ -5,7 +5,7 @@ import {
   type FipsIdentity,
   type Logger,
 } from '@fips/core';
-import { WebRtcTransport } from '@fips/transport-webrtc';
+import { WebRtcTransport, type WebRtcTransportConfig } from '@fips/transport-webrtc';
 import { WebSocketTransport } from '@fips/transport-websocket';
 import {
   DEFAULT_FIPS_DISCOVERY_APP,
@@ -36,6 +36,8 @@ interface BrowserHashtreeFipsProviderBaseOptions {
   requestTimeoutMs?: number;
   /** Authenticated capability routes or explicitly configured remote Hashtree peers. */
   providerRoutes?: FipsBlobRouteSource;
+  /** Reject unsolicited WebRTC offers before creating a peer connection or FIPS link. */
+  allowIncomingPeer?: WebRtcTransportConfig['allowIncomingPeer'];
   forwarding?: boolean;
   logger?: Logger;
 }
@@ -92,6 +94,7 @@ export async function createBrowserHashtreeFipsProvider(
     connectTimeoutMs: options.connectTimeoutMs ?? 30_000,
     relayConnectTimeoutMs: options.relayConnectTimeoutMs ?? 8_000,
     iceGatherTimeoutMs: options.iceGatherTimeoutMs ?? 10_000,
+    allowIncomingPeer: options.allowIncomingPeer,
     logger: options.logger,
   });
   const node = new FipsNode({
