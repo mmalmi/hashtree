@@ -65,6 +65,18 @@ const MEMBER_MARKER_NAME: &str = ".hashtree-pool-member-v1";
 const EXTERNAL_MARKER_NAME: &str = ".hashtree-pool-external-v1";
 const MAX_STALE_PENDING_CLEANUP_ITEMS: usize = 4_096;
 
+fn align_catalog_map_size_bytes(bytes: u64) -> Result<u64, StoreError> {
+    let page_size = (page_size::get() as u64).max(4_096);
+    let remainder = bytes % page_size;
+    if remainder == 0 {
+        Ok(bytes)
+    } else {
+        bytes
+            .checked_add(page_size - remainder)
+            .ok_or_else(|| StoreError::Other("pool catalog map size overflows alignment".into()))
+    }
+}
+
 #[derive(Default)]
 struct RuntimeMembers {
     generation: Option<u64>,
@@ -273,6 +285,7 @@ impl PoolStore {
                 .max(existing_size.saturating_add(existing_size / 10))
                 .max(MIN_MEMBER_MAP_SIZE_BYTES)
         };
+        let requested = align_catalog_map_size_bytes(requested)?;
         let map_size = usize::try_from(requested)
             .map_err(|_| StoreError::Other("pool catalog map size exceeds usize".into()))?;
 
@@ -1614,6 +1627,11 @@ impl PoolStore {
             store.force_sync()?;
         }
         Ok(())
+    }
+
+    /// Current LMDB virtual map size for the Pool catalog.
+    pub fn catalog_map_size_bytes(&self) -> u64 {
+        u64::try_from(self.env.info().map_size).unwrap_or(u64::MAX)
     }
 
     /// Exhaustively prove every controlled member's physical indexes and

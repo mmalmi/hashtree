@@ -2351,6 +2351,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
                 let pool = open_existing()?;
                 let members = pool.members()?;
                 println!("Storage pool: {}", pool_path.display());
+                println!("Catalog LMDB map: {} bytes", pool.catalog_map_size_bytes());
                 match pool.delete_protection_status()? {
                     Some(status) => {
                         println!("Delete protection: active");
