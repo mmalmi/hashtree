@@ -15,6 +15,20 @@ grep -F 'version = "0.2.83"' \
     "${RUST_DIR}/crates/git-remote-htree/Cargo.toml" >/dev/null
 grep -F 'git-remote-htree = { version = "=0.2.83", path = "../git-remote-htree" }' \
     "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" >/dev/null
+grep -F 'hashtree-fips-transport = { version = "0.4.12", path = "crates/hashtree-fips-transport" }' \
+    "${RUST_DIR}/Cargo.toml" >/dev/null
+grep -F 'nostr-pubsub-fips = "0.4.8"' \
+    "${RUST_DIR}/Cargo.toml" >/dev/null
+grep -F 'version = "0.4.12"' \
+    "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" >/dev/null
+grep -F 'fips-core = { package = "nvpn-fips-core", version = "=0.4.65" }' \
+    "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" >/dev/null
+grep -F 'fips-tcp = { package = "nvpn-fips-tcp", version = "=0.2.1" }' \
+    "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" >/dev/null
+grep -F 'fips-tcp-endpoint = { package = "nvpn-fips-tcp-endpoint", version = "=0.2.1" }' \
+    "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" >/dev/null
+grep -F 'hashtree-core = { version = "0.2.86", path = "../hashtree-core" }' \
+    "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" >/dev/null
 
 fake_bin="$(mktemp -d "${TMPDIR:-/tmp}/hashtree-publish-test.XXXXXX")"
 trap 'rm -rf "${fake_bin}"' EXIT
