@@ -1,4 +1,4 @@
-use crate::git::object::ObjectType;
+use crate::git::object::{GitObject, ObjectType};
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -10,6 +10,23 @@ use tracing::debug;
 use super::{fetch_progress_interval, RemoteHelper};
 
 impl RemoteHelper {
+    /// Recover a loose object from Git's ODB, including packed objects, without
+    /// trusting the requested OID or cat-file's header as proof of its contents.
+    pub(super) fn read_verified_compressed_git_object(&self, oid: &str) -> Result<Vec<u8>> {
+        let mut objects = self.read_git_objects_batch(&[oid.to_string()])?;
+        let (obj_type, content) = objects.pop().context("Missing local Git object")?;
+        let object = GitObject::new(obj_type, content);
+        let actual_oid = object.id().to_hex();
+        if actual_oid != oid {
+            bail!("Local Git object id mismatch: expected {oid}, got {actual_oid}");
+        }
+
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&object.to_loose_format())?;
+        Ok(encoder.finish()?)
+    }
+
     /// Batch check which objects git already has (returns set of existing oids)
     pub(super) fn git_batch_check_objects<'a>(
         &self,

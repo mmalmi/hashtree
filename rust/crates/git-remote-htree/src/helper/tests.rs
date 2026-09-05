@@ -20,6 +20,8 @@ use std::thread::JoinHandle;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
+mod hydration;
+
 const TEST_PUBKEY: &str = "4523be58d395b1b196a9b8c82b038b6895cb02b683d0c253a955068dba1facd0";
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 

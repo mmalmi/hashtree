@@ -1407,6 +1407,14 @@ impl RemoteHelper {
         if !failed.is_empty() {
             eprintln!("  Retrying {} failed downloads...", failed.len());
             for (i, (oid, obj_cid)) in failed.iter().enumerate() {
+                match self.read_verified_compressed_git_object(oid) {
+                    Ok(content) => {
+                        eprintln!("  Recovered {} from local Git", oid);
+                        objects.push((oid.clone(), content));
+                        continue;
+                    }
+                    Err(err) => debug!("Local Git recovery unavailable for {}: {}", oid, err),
+                }
                 let hash_hex = hex::encode(obj_cid.hash);
                 eprintln!("  Retrying {}/{}: {}...", i + 1, failed.len(), oid);
 

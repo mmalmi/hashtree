@@ -35,6 +35,12 @@ const DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS: usize = 256;
 pub(super) const GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV: &str =
     "HTREE_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS";
 
+pub(super) fn push_error_status(dst: &str, error: &impl std::fmt::Display) -> String {
+    eprintln!("  Push to {dst} failed: {error}");
+    let reason = error.to_string().replace(['\r', '\n'], " ");
+    format!("error {dst} {reason}")
+}
+
 fn symbolic_head_target_is_deleted(
     refs: &HashMap<String, String>,
     push_specs: &[PushSpec],
@@ -1308,7 +1314,7 @@ impl RemoteHelper {
                         self.nostr.delete_ref(&self.repo_name, &spec.dst)?;
                         results.push(format!("ok {}", spec.dst));
                     }
-                    Err(e) => results.push(format!("error {} {}", spec.dst, e)),
+                    Err(e) => results.push(push_error_status(&spec.dst, &e)),
                 }
             } else {
                 if !spec.force {
@@ -1350,7 +1356,7 @@ impl RemoteHelper {
                         results.push(format!("ok {}", spec.dst));
                         pushed_refs.push((spec.dst, sha));
                     }
-                    Err(e) => results.push(format!("error {} {}", spec.dst, e)),
+                    Err(e) => results.push(push_error_status(&spec.dst, &e)),
                 }
             }
         }
