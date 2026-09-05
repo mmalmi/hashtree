@@ -151,11 +151,20 @@ fn check_cached_root_hydration(corrupt_local: Option<bool>) {
     helper
         .fetch_git_objects_to_local_git(&hex::encode(rebuilt.hash))
         .expect("fresh fetch of rebuilt root");
+    assert_fetched_refs_and_clone(&helper, &rebuilt, &refs, &fresh);
+}
+
+pub(super) fn assert_fetched_refs_and_clone(
+    helper: &RemoteHelper,
+    root: &Cid,
+    refs: &[(&str, String)],
+    fresh: &TempDir,
+) {
     let tree = HashTree::new(HashTreeConfig::new(helper.storage.store().clone()));
-    for (name, expected) in &refs {
+    for (name, expected) in refs {
         let bytes = block_on_result(async {
             let cid = tree
-                .resolve_path(&rebuilt, &format!(".git/{name}"))
+                .resolve_path(root, &format!(".git/{name}"))
                 .await?
                 .expect("retained ref path");
             Ok(tree.get(&cid, None).await?.expect("retained ref contents"))

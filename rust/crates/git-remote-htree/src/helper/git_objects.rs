@@ -1,4 +1,4 @@
-use crate::git::object::{GitObject, ObjectType};
+use crate::git::object::{GitObject, ObjectId, ObjectType};
 use anyhow::{bail, Context, Result};
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -10,6 +10,62 @@ use tracing::debug;
 use super::{fetch_progress_interval, RemoteHelper};
 
 impl RemoteHelper {
+    /// A failed pack is optional only when every requested history is complete
+    /// and valid. Tip presence alone misses absent parents, trees, and blobs.
+    pub(super) fn verify_requested_git_object_closure(&self) -> Result<()> {
+        let mut shas: Vec<_> = self
+            .fetch_specs
+            .iter()
+            .map(|spec| spec.sha.as_str())
+            .collect();
+        shas.sort_unstable();
+        shas.dedup();
+        if shas.is_empty() || shas.iter().any(|sha| ObjectId::from_hex(sha).is_none()) {
+            bail!("Cannot verify pack recovery without valid requested object IDs");
+        }
+        let git = || {
+            let mut command = Command::new("git");
+            command
+                .arg("--no-replace-objects")
+                .env("GIT_NO_LAZY_FETCH", "1")
+                .env("GIT_GRAFT_FILE", "");
+            command
+        };
+        let shallow = git()
+            .args(["rev-parse", "--is-shallow-repository"])
+            .output()?;
+        if !shallow.status.success() || String::from_utf8_lossy(&shallow.stdout).trim() != "false" {
+            bail!("Cannot verify complete pack recovery in a shallow or unreadable repository");
+        }
+        // fsck accepts promised omissions, while traversal alone does not check
+        // object hashes. Require both, without replacement/graft shortcuts.
+        for args in [
+            vec!["rev-list", "--quiet", "--objects", "--missing=error"],
+            vec![
+                "fsck",
+                "--full",
+                "--no-reflogs",
+                "--no-dangling",
+                "--no-progress",
+            ],
+        ] {
+            let output = git()
+                .args(&args)
+                .args(&shas)
+                .output()
+                .with_context(|| format!("run git {} for requested history", args[0]))?;
+            if !output.status.success() {
+                bail!(
+                    "Requested Git history failed {} validation: {}{}",
+                    args[0],
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Recover a loose object from Git's ODB, including packed objects, without
     /// trusting the requested OID or cat-file's header as proof of its contents.
     pub(super) fn read_verified_compressed_git_object(&self, oid: &str) -> Result<Vec<u8>> {

@@ -20,7 +20,7 @@ required-features = ["git-remote-wrapper"]
 
 [dependencies]
 # Git remote helper
-git-remote-htree = { version = "=0.2.84", path = "../git-remote-htree" }
+git-remote-htree = { version = "=0.2.85", path = "../git-remote-htree" }
 
 # Core hashtree crates
 hashtree-core.workspace = true

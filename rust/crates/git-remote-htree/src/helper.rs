@@ -1494,11 +1494,19 @@ impl RemoteHelper {
             );
         }
 
-        if !pack_locations.is_empty() {
-            self.install_git_pack_files_async(&tree, &pack_locations)
+        let pack_error = if !pack_locations.is_empty() {
+            let error = self
+                .install_git_pack_files_async(&tree, &pack_locations)
                 .await
-                .context("install advertised git pack files")?;
-        }
+                .context("install advertised git pack files")
+                .err();
+            if let Some(error) = &error {
+                eprintln!("  Git pack unavailable ({error:#}); recovering available loose objects");
+            }
+            error
+        } else {
+            None
+        };
 
         let local_check_start = std::time::Instant::now();
         let existing =
@@ -1513,6 +1521,7 @@ impl RemoteHelper {
         let cached = existing.len();
 
         if total_to_write == 0 {
+            self.verify_pack_fallback(pack_error.as_ref())?;
             eprintln!("  Writing to .git: 0 new, {} cached    ", cached);
             match local_store_for_eviction.evict_if_needed().await {
                 Ok(freed) if freed > 0 => {
@@ -1648,6 +1657,8 @@ impl RemoteHelper {
             );
         }
 
+        self.verify_pack_fallback(pack_error.as_ref())?;
+
         if cached > 0 {
             eprintln!("  Writing to .git: {} new, {} cached", written, cached);
         } else {
@@ -1676,6 +1687,16 @@ impl RemoteHelper {
             local_check_elapsed,
             download_write_elapsed,
         })
+    }
+
+    fn verify_pack_fallback(&self, pack_error: Option<&anyhow::Error>) -> Result<()> {
+        if let Some(error) = pack_error {
+            self.verify_requested_git_object_closure().with_context(|| {
+                format!("Git pack unavailable ({error:#}); requested history remains incomplete or invalid")
+            })?;
+            eprintln!("  Verified complete requested Git history without the unavailable pack");
+        }
+        Ok(())
     }
 }
 
