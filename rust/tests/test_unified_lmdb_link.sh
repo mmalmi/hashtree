@@ -37,7 +37,7 @@ assert_one_lmdb_implementation() {
         return 1
     fi
     if [[ "$social_graph_packages" != \
-        "hashtree-nostr-social-graph-heed v0.1.3-hashtree.1" ]]; then
+        "hashtree-nostr-social-graph-heed v0.1.3-hashtree.2" ]]; then
         echo "${scope} resolved an unexpected social-graph LMDB adapter:" >&2
         printf '%s\n' "${social_graph_packages:-<none>}" >&2
         return 1
@@ -79,8 +79,8 @@ mkdir -p "$package_dir"
 for archive in \
     hashtree-lmdb-master-sys-0.2.6-hashtree.1.crate \
     hashtree-heed-0.20.5-hashtree.1.crate \
-    hashtree-nostr-social-graph-heed-0.1.3-hashtree.1.crate \
-    hashtree-core-0.2.88.crate \
+    hashtree-nostr-social-graph-heed-0.1.3-hashtree.2.crate \
+    hashtree-core-0.2.89.crate \
     hashtree-lmdb-0.2.87.crate \
     git-remote-htree-0.2.83.crate
 do
@@ -99,11 +99,11 @@ publish = false
 [dependencies]
 hashtree-lmdb = { path = "${package_dir}/hashtree-lmdb-0.2.87" }
 heed = { package = "hashtree-heed", path = "${package_dir}/hashtree-heed-0.20.5-hashtree.1" }
-nostr-social-graph-heed = { package = "hashtree-nostr-social-graph-heed", path = "${package_dir}/hashtree-nostr-social-graph-heed-0.1.3-hashtree.1" }
+nostr-social-graph-heed = { package = "hashtree-nostr-social-graph-heed", path = "${package_dir}/hashtree-nostr-social-graph-heed-0.1.3-hashtree.2" }
 git-remote-htree = { path = "${package_dir}/git-remote-htree-0.2.83" }
 
 [patch.crates-io]
-hashtree-core = { path = "${package_dir}/hashtree-core-0.2.88" }
+hashtree-core = { path = "${package_dir}/hashtree-core-0.2.89" }
 hashtree-heed = { path = "${package_dir}/hashtree-heed-0.20.5-hashtree.1" }
 hashtree-lmdb = { path = "${package_dir}/hashtree-lmdb-0.2.87" }
 hashtree-lmdb-master-sys = { path = "${package_dir}/hashtree-lmdb-master-sys-0.2.6-hashtree.1" }
@@ -143,8 +143,8 @@ assert_one_lmdb_implementation "$downstream_tree" "downstream"
 for extracted_package in \
     "$package_dir/hashtree-lmdb-master-sys-0.2.6-hashtree.1" \
     "$package_dir/hashtree-heed-0.20.5-hashtree.1" \
-    "$package_dir/hashtree-nostr-social-graph-heed-0.1.3-hashtree.1" \
-    "$package_dir/hashtree-core-0.2.88" \
+    "$package_dir/hashtree-nostr-social-graph-heed-0.1.3-hashtree.2" \
+    "$package_dir/hashtree-core-0.2.89" \
     "$package_dir/hashtree-lmdb-0.2.87" \
     "$package_dir/git-remote-htree-0.2.83"
 do

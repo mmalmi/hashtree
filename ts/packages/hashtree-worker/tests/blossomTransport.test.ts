@@ -188,7 +188,7 @@ describe('BlossomTransport.fetch', () => {
     const hashHex = toHex(await sha256(data));
     const slowBase = 'https://slow.example';
     const fastBase = 'https://fast.example';
-    let fastCalls = 0;
+    let dataAvailable = false;
 
     const fetchMock = vi.fn((input: string | URL) => {
       const url = String(input);
@@ -196,8 +196,7 @@ describe('BlossomTransport.fetch', () => {
         return Promise.reject(new Error('slow server offline'));
       }
       if (url === `${fastBase}/${hashHex}.bin`) {
-        fastCalls += 1;
-        if (fastCalls === 1) {
+        if (!dataAvailable) {
           return Promise.resolve({
             ok: false,
             status: 404,
@@ -224,10 +223,11 @@ describe('BlossomTransport.fetch', () => {
     ]);
 
     await expect(transport.fetch(hashHex)).rejects.toThrow(/slow server offline|uncertain/i);
+    dataAvailable = true;
     await expect(transport.fetch(hashHex)).resolves.toEqual(data);
 
     const requestedUrls = fetchMock.mock.calls.map(([url]) => String(url));
     expect(requestedUrls.filter((url) => url === `${slowBase}/${hashHex}.bin`)).toHaveLength(1);
-    expect(requestedUrls.filter((url) => url === `${fastBase}/${hashHex}.bin`)).toHaveLength(2);
+    expect(requestedUrls.filter((url) => url === `${fastBase}/${hashHex}.bin`)).toHaveLength(3);
   });
 });

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.6 - 2026-09-05
+
 ### Added
 
 - Let `@hashtree/nostr-pubsub` readers inject one cancellable asynchronous
@@ -9,6 +11,29 @@
   verification remains the default; malformed verdicts and any invalid event
   retain corrupt replica failover semantics, and accepted events remain
   defensively copied and deeply frozen.
+- Add worker extension message hooks and expose the attached worker runtime to
+  application request handlers, including worker failure and closure callbacks.
+
+### Fixed
+
+- Clean up block-load subscriptions and abort listeners after synchronous
+  delivery, store failures, and delivery while a read remains pending.
+- Apply collection offsets once when a query has no explicit limit, and share
+  filtering and pagination between plain and encrypted collection reads.
+- Retry raw Blossom 404 responses once while bypassing negative caches before
+  treating the response as a missing blob.
+
+### Changed
+
+- Share encrypted and plain core traversal helpers without changing encoded
+  data or transport protocols.
+- Run core tests in Node without redundant DOM emulation, and replace loader
+  timing sleeps with deterministic timer control.
+- Publish updated core and collection packages together with dependent runtime
+  packages pinned to the same immutable bundle: core 0.3.1, index 0.1.13,
+  collection 0.2.9, dexie 0.1.9, git 0.1.8, mesh 0.3.1, nostr 0.2.2,
+  nostr-pubsub 0.1.2, worker 0.4.2, and fips-transport 0.4.9. The unchanged
+  merge package remains 0.1.2.
 
 ## @hashtree/fips-transport 0.4.8 - 2026-08-18
 

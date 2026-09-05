@@ -1548,6 +1548,8 @@ mod linux {
                 }
             };
             let request = self.build_request(&process, source_read_only_mounts)?;
+            #[cfg(test)]
+            let request = publication_test_fixture::before_publication(request)?;
             let mut request_bytes =
                 serde_json::to_vec(&request).context("serialize Pool migration launch request")?;
             request_bytes.push(b'\n');
@@ -7193,6 +7195,14 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             hasher.update(argument.as_bytes());
         }
         hex::encode(hasher.finalize())
+    }
+
+    #[cfg(test)]
+    mod publication_test_fixture {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/common/pool_migration_controller.rs"
+        ));
     }
 
     #[cfg(test)]

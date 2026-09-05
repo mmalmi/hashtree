@@ -619,6 +619,7 @@ impl TestServer {
 bind_address = "127.0.0.1:0"
 enable_auth = false
 public_writes = true
+enable_fips = false
 
 [nostr]
 relays = []

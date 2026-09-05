@@ -16,7 +16,7 @@ use std::process::Command;
 #[cfg(target_os = "linux")]
 use std::process::{Output, Stdio};
 #[cfg(target_os = "linux")]
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 #[cfg(target_os = "linux")]
 use std::thread;
 use std::time::SystemTime;
@@ -635,8 +635,8 @@ impl MigrationScenario {
         let exit_code = wait_for_systemd_terminal(&unit);
         Output {
             status: std::process::ExitStatus::from_raw(exit_code << 8),
-            stdout: fs::read(&stdout_path).unwrap_or_default(),
-            stderr: fs::read(&stderr_path).unwrap_or_default(),
+            stdout: sudo_read_to_string(&stdout_path).into_bytes(),
+            stderr: sudo_read_to_string(&stderr_path).into_bytes(),
         }
     }
 
@@ -918,9 +918,12 @@ fn changed_pool_cas_fails_before_ack_or_migration() {
         .modified()
         .expect("Pool catalog mtime");
 
-    let output = scenario.run_with_request(|request| {
-        request["pool"]["topology"]["sha256"] = Value::String("f".repeat(64));
-    });
+    let (output, request) = run_with_controller_mutations(
+        &scenario,
+        json!([
+            { "pointer": "/pool/topology/sha256", "value": "f".repeat(64) }
+        ]),
+    );
     assert!(
         !output.status.success(),
         "changed Pool CAS unexpectedly passed"
@@ -931,7 +934,7 @@ fn changed_pool_cas_fails_before_ack_or_migration() {
         "unexpected CAS failure\n{stderr}"
     );
     assert!(
-        !scenario.ack.exists(),
+        request.exists() && !request.with_file_name("launch-ack.json").exists(),
         "failed authority must not be acknowledged"
     );
     assert!(
@@ -1089,21 +1092,26 @@ fn complete_cursor_is_a_non_launchable_terminal_state() {
 #[test]
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
 fn exact_argv_authority_rejects_an_unrequested_argument_value() {
-    let scenario = MigrationScenario::generated(None);
-    let mut changed_argv = scenario.args.clone();
-    let batch_size = changed_argv
+    let scenario = MigrationScenario::generated(Some(1));
+    let batch_size = scenario
+        .args
         .iter()
         .position(|argument| argument == "--batch-size")
         .expect("batch-size argument");
-    changed_argv[batch_size + 1] = "2".to_string();
-    let output = scenario.run_with_actual_argv(&changed_argv, |_| {});
+    let (output, request) = run_with_controller_mutations(
+        &scenario,
+        json!([
+            { "pointer": format!("/argv/{}", batch_size + 1), "value": "2" }
+        ]),
+    );
     assert!(!output.status.success(), "changed argv unexpectedly passed");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("argv does not match this process exactly"),
         "unexpected argv failure\n{stderr}"
     );
-    assert!(!scenario.ack.exists());
+    assert!(request.exists());
+    assert!(!request.with_file_name("launch-ack.json").exists());
     assert!(!scenario.cursor.exists());
     assert_eq!(scenario.pool_count(), 0);
 }
@@ -1282,14 +1290,12 @@ fn unsafe_lmdb_durability_environment_is_rejected_before_rendezvous() {
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
 fn main_pid_and_starttime_are_both_required() {
     let scenario = MigrationScenario::generated(Some(1));
-    let output = scenario.run_with_request(|request| {
-        request["procStartTimeTicks"] = Value::from(
-            request["procStartTimeTicks"]
-                .as_u64()
-                .expect("starttime")
-                .saturating_add(1),
-        );
-    });
+    let (output, request) = run_with_controller_mutations(
+        &scenario,
+        json!([
+            { "pointer": "/procStartTimeTicks", "value": 1 }
+        ]),
+    );
     assert!(
         !output.status.success(),
         "wrong process starttime unexpectedly passed"
@@ -1299,9 +1305,88 @@ fn main_pid_and_starttime_are_both_required() {
         stderr.contains("/proc starttime does not match"),
         "unexpected process identity failure\n{stderr}"
     );
-    assert!(!scenario.ack.exists());
+    assert!(
+        request.exists(),
+        "the real controller must publish the malformed authority"
+    );
+    assert!(!request.with_file_name("launch-ack.json").exists());
     assert!(!scenario.cursor.exists());
     assert_eq!(scenario.pool_count(), 0);
+}
+
+#[cfg(target_os = "linux")]
+fn controller_fixture_binary() -> &'static Path {
+    static BINARY: OnceLock<PathBuf> = OnceLock::new();
+    BINARY
+        .get_or_init(|| {
+            // Cargo releases its build lock before running integration tests. Build
+            // the unit-test harness once to obtain the controller's cfg(test) hook;
+            // the worker still runs the ordinary production htree binary.
+            let output = Command::new(env!("CARGO"))
+                .current_dir(env!("CARGO_MANIFEST_DIR"))
+                .args([
+                    "test",
+                    "--locked",
+                    "--bin",
+                    "htree",
+                    "--no-run",
+                    "--message-format=json",
+                ])
+                .output()
+                .expect("build controller fixture test process");
+            assert!(
+                output.status.success(),
+                "controller fixture build failed:\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("UTF-8 Cargo artifacts")
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find_map(|artifact| {
+                    if artifact["reason"] == "compiler-artifact"
+                        && artifact["target"]["name"] == "htree"
+                        && artifact["profile"]["test"] == true
+                    {
+                        artifact["executable"].as_str().map(PathBuf::from)
+                    } else {
+                        None
+                    }
+                })
+                .expect("Cargo reported the htree unit-test executable")
+        })
+        .as_path()
+}
+
+#[cfg(target_os = "linux")]
+fn run_with_controller_mutations(
+    scenario: &MigrationScenario,
+    mutations: Value,
+) -> (Output, PathBuf) {
+    let fixture_binary = controller_fixture_binary();
+    let _serialized = SYSTEM_MANAGER_TEST
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (guard, arguments) = prepare_root_controller_with_binary(scenario, Some(fixture_binary));
+    write_file(
+        &guard
+            .rollout
+            .parent()
+            .expect("fixture root")
+            .join("controller-mutations.json"),
+        &serde_json::to_vec(&mutations).expect("serialize controlled request mutations"),
+    );
+    let mut output = run_root_controller(&guard, &arguments, false);
+    output
+        .stderr
+        .extend_from_slice(sudo_read_to_string(&guard.stderr_path).as_bytes());
+    let request = fs::read_dir(guard.rollout.join("attempts-v3"))
+        .expect("read controller attempts")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("launch-request.json"))
+        .find(|path| path.is_file())
+        .unwrap_or_else(|| scenario.request.clone());
+    (output, request)
 }
 
 #[cfg(unix)]
@@ -1338,9 +1423,12 @@ fn rendezvous_rejects_a_symlinked_attempt_directory() {
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
 fn manager_scope_mismatch_is_rejected_by_the_real_unit_cgroup() {
     let scenario = MigrationScenario::generated(Some(1));
-    let output = scenario.run_with_request(|request| {
-        request["systemdManager"] = Value::String("user".to_string());
-    });
+    let (output, request) = run_with_controller_mutations(
+        &scenario,
+        json!([
+            { "pointer": "/systemdManager", "value": "user" }
+        ]),
+    );
     assert!(
         !output.status.success(),
         "wrong manager unexpectedly passed"
@@ -1350,7 +1438,8 @@ fn manager_scope_mismatch_is_rejected_by_the_real_unit_cgroup() {
         stderr.contains("systemd manager must be exactly system"),
         "unexpected manager failure\n{stderr}"
     );
-    assert!(!scenario.ack.exists());
+    assert!(request.exists());
+    assert!(!request.with_file_name("launch-ack.json").exists());
     assert!(!scenario.cursor.exists());
 }
 
@@ -1426,7 +1515,7 @@ fn root_v3_controller_preflight_is_non_mutating_then_launches_the_real_worker() 
     let source_before = file_snapshot(&source_data);
     let rollout_before = authority_tree_snapshot(&guard.rollout);
 
-    let preflight = run_root_controller(&guard.installed_binary, &controller_args, true);
+    let preflight = run_root_controller(&guard, &controller_args, true);
     assert_success(&preflight);
     let preflight_json: Value =
         serde_json::from_slice(&preflight.stdout).expect("parse controller preflight JSON");
@@ -1449,11 +1538,11 @@ fn root_v3_controller_preflight_is_non_mutating_then_launches_the_real_worker() 
         "preflight started the systemd unit"
     );
 
-    let launched = run_root_controller(&guard.installed_binary, &controller_args, false);
+    let launched = run_root_controller(&guard, &controller_args, false);
     assert_success(&launched);
     let result: Value =
         serde_json::from_slice(&launched.stdout).expect("parse controller result JSON");
-    assert_eq!(result["status"], "acknowledged");
+    assert_eq!(result["status"], "completed");
     let request = PathBuf::from(result["requestPath"].as_str().expect("request path"));
     let ack = PathBuf::from(result["ackPath"].as_str().expect("ack path"));
     assert!(request.is_file(), "controller request is not durable");
@@ -1466,6 +1555,20 @@ fn root_v3_controller_preflight_is_non_mutating_then_launches_the_real_worker() 
         file_sha256(&ack),
         result["ackSha256"].as_str().expect("ack SHA-256")
     );
+    let authority: Value = serde_json::from_slice(&fs::read(&request).expect("launch request"))
+        .expect("parse current controller launch authority");
+    assert_eq!(
+        authority["checkpointBroker"]["systemdUnit"],
+        guard.controller_unit
+    );
+    assert_eq!(authority["systemdUnit"], guard.unit);
+    assert!(
+        authority["executionNamespaces"]["mount"]["inode"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert!(result["authorizedCheckpoints"].as_u64().unwrap() > 0);
     let worker_exit_status = wait_for_systemd_terminal(&guard.unit);
     let worker_stdout = sudo_read_to_string(&guard.stdout_path);
     let worker_stderr = sudo_read_to_string(&guard.stderr_path);
@@ -1486,19 +1589,45 @@ struct RootControllerSystemdGuard {
     stdout_path: PathBuf,
     stderr_path: PathBuf,
     rollout: PathBuf,
+    controller_unit: String,
+    controller_fragment: PathBuf,
+    controller_environment: PathBuf,
+    controller_stdout: PathBuf,
+    controller_stderr: PathBuf,
+    legacy_mask: PathBuf,
+    controller_binary: PathBuf,
+    controller_fixture: bool,
 }
 
 #[cfg(target_os = "linux")]
 impl Drop for RootControllerSystemdGuard {
     fn drop(&mut self) {
+        sudo_best_effort(&[
+            "/usr/bin/systemctl",
+            "--system",
+            "stop",
+            &self.controller_unit,
+        ]);
+        sudo_best_effort(&[
+            "/usr/bin/systemctl",
+            "--system",
+            "reset-failed",
+            &self.controller_unit,
+        ]);
         sudo_best_effort(&["/usr/bin/systemctl", "--system", "stop", &self.unit]);
         sudo_best_effort(&["/usr/bin/systemctl", "--system", "reset-failed", &self.unit]);
         for path in [
             &self.fragment,
             &self.installed_binary,
+            &self.controller_binary,
             &self.installed_environment,
             &self.stdout_path,
             &self.stderr_path,
+            &self.controller_fragment,
+            &self.controller_environment,
+            &self.controller_stdout,
+            &self.controller_stderr,
+            &self.legacy_mask,
         ] {
             sudo_best_effort(&[
                 "/usr/bin/rm",
@@ -1516,30 +1645,55 @@ impl Drop for RootControllerSystemdGuard {
 fn prepare_root_controller_systemd(
     scenario: &MigrationScenario,
 ) -> (RootControllerSystemdGuard, Vec<String>) {
+    prepare_root_controller_with_binary(scenario, None)
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_root_controller_with_binary(
+    scenario: &MigrationScenario,
+    fixture_binary: Option<&Path>,
+) -> (RootControllerSystemdGuard, Vec<String>) {
     let sequence = CONTROLLER_UNIT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let unit = format!(
-        "hashtree-pool-migrate@controller-test-{}-{sequence}.service",
+        "hashtree-pool-migration-worker@controller-test-{}-{sequence}.service",
         std::process::id()
     );
     let runtime_stem = format!(
         "/run/hashtree-pool-controller-test-{}-{sequence}",
         std::process::id()
     );
-    let fragment = PathBuf::from("/run/systemd/system/hashtree-pool-migrate@.service");
+    let fragment = PathBuf::from(format!("/run/systemd/system/{unit}"));
     assert!(
         !fragment.exists(),
         "refusing to overwrite pre-existing migration template {}",
         fragment.display()
     );
     let installed_binary = PathBuf::from(format!("{runtime_stem}-htree"));
+    let controller_binary = fixture_binary
+        .map(|_| PathBuf::from(format!("{runtime_stem}-controller")))
+        .unwrap_or_else(|| installed_binary.clone());
     let installed_environment = PathBuf::from(format!("{runtime_stem}.env"));
     let stdout_path = PathBuf::from(format!("{runtime_stem}.stdout"));
     let stderr_path = PathBuf::from(format!("{runtime_stem}.stderr"));
+    let controller_unit = format!(
+        "hashtree-pool-migration-controller@controller-test-{}-{sequence}.service",
+        std::process::id()
+    );
+    let controller_fragment = PathBuf::from(format!("/run/systemd/system/{controller_unit}"));
+    let controller_environment = PathBuf::from(format!("{runtime_stem}-controller.env"));
+    let controller_stdout = PathBuf::from(format!("{runtime_stem}-controller.stdout"));
+    let controller_stderr = PathBuf::from(format!("{runtime_stem}-controller.stderr"));
+    let legacy_mask = PathBuf::from("/run/systemd/system/hashtree-pool-migrate@.service");
     for path in [
         &installed_binary,
         &installed_environment,
         &stdout_path,
         &stderr_path,
+        &controller_fragment,
+        &controller_environment,
+        &controller_stdout,
+        &controller_stderr,
+        &legacy_mask,
     ] {
         assert!(
             !path.exists(),
@@ -1559,7 +1713,7 @@ fn prepare_root_controller_systemd(
         .to_path_buf();
     let local_fragment = rollout.join("generated-root-controller-template.service");
     let template = format!(
-        "[Unit]\nDescription=Generated root Pool migration v3 controller integration\n\n\
+        "[Unit]\nDescription=Generated root Pool migration v3 controller integration\nBindsTo={controller_unit}\n\n\
 [Service]\nType=oneshot\nUser={}\nGroup={}\nEnvironmentFile={}\n\
 ExecStart={} --data-dir ${{HTREE_POOL_TARGET_DATA_DIR}} storage pool migrate-lmdb --launch-request ${{HTREE_POOL_LAUNCH_REQUEST}} --launch-request-wait-seconds ${{HTREE_POOL_LAUNCH_WAIT_SECONDS}} --source ${{HTREE_POOL_SOURCE_LMDB_DIR}} $HTREE_POOL_SOURCE_EXTERNAL_ARGS --state-file ${{HTREE_POOL_STATE_FILE}} --batch-size ${{HTREE_POOL_BATCH_SIZE}} --max-buffer-mib ${{HTREE_POOL_MAX_BUFFER_MIB}} --source-read-concurrency ${{HTREE_POOL_SOURCE_READ_CONCURRENCY}} --reopen-batches ${{HTREE_POOL_REOPEN_BATCHES}} $HTREE_POOL_LIMIT_ARGS --resume\n\
 Restart=no\nTimeoutStartSec=infinity\nNoNewPrivileges=true\nPrivateNetwork=true\n\
@@ -1585,6 +1739,22 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
         &scenario.args[0],
         installed_binary.to_str().expect("UTF-8 installed binary"),
     ]);
+    if let Some(fixture_binary) = fixture_binary {
+        sudo_success(&[
+            "/usr/bin/install",
+            "-s",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0555",
+            fixture_binary.to_str().expect("fixture controller binary"),
+            controller_binary
+                .to_str()
+                .expect("installed fixture controller"),
+        ]);
+    }
     sudo_success(&[
         "/usr/bin/install",
         "-o",
@@ -1602,6 +1772,47 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
             .as_str()
             .expect("controller-state input"),
     );
+    sudo_success(&[
+        "/usr/bin/ln",
+        "-s",
+        "/dev/null",
+        legacy_mask.to_str().expect("legacy mask"),
+    ]);
+    let mut state: Value =
+        serde_json::from_slice(&fs::read(&controller_state).expect("controller state"))
+            .expect("parse controller state");
+    state["stoppedWriterUnits"] = json!([]);
+    state["legacyWorkerTemplateMask"] = json!({
+        "unit": "hashtree-pool-migrate@.service",
+        "path": legacy_mask,
+        "identity": symlink_identity(&legacy_mask),
+        "target": "/dev/null",
+    });
+    state["legacyWorkerInstanceMasks"] = json!([]);
+    write_file(
+        &controller_state,
+        &serde_json::to_vec(&state).expect("serialize controller state"),
+    );
+    let local_controller_environment = rollout.join("generated-controller.env");
+    write_file(
+        &local_controller_environment,
+        b"# Generated controller authority\n",
+    );
+    sudo_success(&[
+        "/usr/bin/install",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        "-m",
+        "0644",
+        local_controller_environment
+            .to_str()
+            .expect("controller environment source"),
+        controller_environment
+            .to_str()
+            .expect("controller environment"),
+    ]);
     let source_baseline = PathBuf::from(
         scenario.request_template["source"]["baseline"]["path"]
             .as_str()
@@ -1680,7 +1891,13 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
         "--phase".to_string(),
         "online-bounded".to_string(),
         "--controller-executable".to_string(),
-        installed_binary.display().to_string(),
+        controller_binary.display().to_string(),
+        "--controller-systemd-unit".to_string(),
+        controller_unit.clone(),
+        "--controller-systemd-fragment".to_string(),
+        controller_fragment.display().to_string(),
+        "--controller-systemd-environment-file".to_string(),
+        controller_environment.display().to_string(),
         "--controller-state-input".to_string(),
         controller_state.display().to_string(),
         "--source-baseline-input".to_string(),
@@ -1735,33 +1952,116 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
             stdout_path,
             stderr_path,
             rollout,
+            controller_unit,
+            controller_fragment,
+            controller_environment,
+            controller_stdout,
+            controller_stderr,
+            legacy_mask,
+            controller_binary,
+            controller_fixture: fixture_binary.is_some(),
         },
         arguments,
     )
 }
 
 #[cfg(target_os = "linux")]
-fn run_root_controller(binary: &Path, arguments: &[String], preflight: bool) -> Output {
-    let mut command = Command::new("/usr/bin/sudo");
-    command.arg("-n").arg("/usr/bin/env");
-    for variable in [
-        "LD_PRELOAD",
-        "LD_AUDIT",
-        "LD_LIBRARY_PATH",
-        "DYLD_INSERT_LIBRARIES",
-        "DYLD_LIBRARY_PATH",
-        "HTREE_LMDB_NO_SYNC",
-        "HTREE_LMDB_NO_META_SYNC",
-    ] {
-        command.arg("-u").arg(variable);
-    }
-    command.arg(binary).args(arguments);
+fn run_root_controller(
+    guard: &RootControllerSystemdGuard,
+    arguments: &[String],
+    preflight: bool,
+) -> Output {
+    let mut arguments = arguments.to_vec();
     if preflight {
-        command.arg("--preflight");
+        arguments.push("--preflight".to_string());
     }
-    command
-        .output()
-        .expect("run root Pool migration controller")
+    if guard.controller_fixture {
+        let path = guard
+            .rollout
+            .parent()
+            .expect("fixture root")
+            .join("controller-arguments.json");
+        write_file(
+            &path,
+            &serde_json::to_vec(&arguments).expect("serialize fixture controller args"),
+        );
+        let environment = guard
+            .rollout
+            .parent()
+            .expect("fixture root")
+            .join("controller-environment");
+        write_file(&environment, format!(
+            "HTREE_POOL_CONTROLLER_TEST_ARGUMENTS={}\nHTREE_POOL_CONTROLLER_TEST_MUTATIONS={}\n",
+            path.display(), guard.rollout.parent().expect("fixture root").join("controller-mutations.json").display()
+        ).as_bytes());
+        sudo_success(&[
+            "/usr/bin/install",
+            "-o",
+            "root",
+            "-g",
+            "root",
+            "-m",
+            "0644",
+            environment
+                .to_str()
+                .expect("fixture controller environment"),
+            guard
+                .controller_environment
+                .to_str()
+                .expect("installed controller environment"),
+        ]);
+        arguments = vec![
+            "--exact".into(),
+            "app::pool_migration_controller::linux::publication_test_fixture::controller_process"
+                .into(),
+            "--ignored".into(),
+            "--nocapture".into(),
+        ];
+    }
+    let exec_start = std::iter::once(guard.controller_binary.display().to_string())
+        .chain(arguments)
+        .map(|arg| systemd_quote(&arg))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let template = format!(
+        "[Unit]\nDescription=Generated dedicated migration controller\n\n[Service]\nType=exec\nUser=root\nGroup=root\nEnvironmentFile={}\nExecStart={exec_start}\nRestart=no\nTimeoutStartSec=infinity\nNoNewPrivileges=true\nPrivateNetwork=true\nUnsetEnvironment=LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH HTREE_LMDB_NO_SYNC HTREE_LMDB_NO_META_SYNC\nUMask=0027\nStandardOutput=truncate:{}\nStandardError=truncate:{}\n",
+        guard.controller_environment.display(), guard.controller_stdout.display(), guard.controller_stderr.display()
+    );
+    // Keep generated service fragments outside the rollout evidence tree so a
+    // preflight's non-mutation assertion covers the complete rollout authority.
+    let local_fragment = guard
+        .rollout
+        .parent()
+        .expect("fixture root")
+        .join("controller.service");
+    write_file(&local_fragment, template.as_bytes());
+    sudo_success(&[
+        "/usr/bin/install",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        "-m",
+        "0644",
+        local_fragment.to_str().expect("local controller fragment"),
+        guard
+            .controller_fragment
+            .to_str()
+            .expect("installed controller fragment"),
+    ]);
+    sudo_success(&["/usr/bin/systemctl", "--system", "daemon-reload"]);
+    sudo_success(&[
+        "/usr/bin/systemctl",
+        "--system",
+        "start",
+        &guard.controller_unit,
+    ]);
+    let exit_code = wait_for_systemd_terminal(&guard.controller_unit);
+    Output {
+        status: std::process::ExitStatus::from_raw(exit_code << 8),
+        stdout: sudo_read_to_string(&guard.controller_stdout).into_bytes(),
+        stderr: sudo_read_to_string(&guard.controller_stderr).into_bytes(),
+    }
 }
 
 #[cfg(target_os = "linux")]

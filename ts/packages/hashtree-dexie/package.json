@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/dexie",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Dexie-based IndexedDB store for hashtree",
   "type": "module",
   "main": "dist/index.js",
@@ -37,7 +37,7 @@
     "url": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree?tab=issues"
   },
   "dependencies": {
-    "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.0/hashtree-core-0.3.0.tgz",
+    "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.6/hashtree-core-0.3.1.tgz",
     "dexie": "4.4.2"
   },
   "devDependencies": {

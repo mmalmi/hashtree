@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+## 0.2.138 - 2026-09-05
+
+### Fixed
+
+- Resume durable event-body repairs without repeating the planning scan, while
+  retaining intent validation before writes and the complete final integrity audit.
+- Enable thread-independent read transactions in the standalone social-graph
+  storage adapter, matching the workspace configuration.
+- Treat zero traversal concurrency as serial execution and omit decryption keys
+  from tree-walk errors. Collected and streamed diffs share one implementation.
+- Remove unnecessary worker-pool startup from in-memory property tests without
+  reducing randomized coverage.
+
 ### Added
 
 - Pool migration can import an exact root-certified target-body evidence
