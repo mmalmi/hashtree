@@ -1365,6 +1365,10 @@ fn root_v3_controller_preflight_is_non_mutating_then_launches_the_real_worker() 
         serde_json::from_slice(&preflight.stdout).expect("parse controller preflight JSON");
     assert_eq!(preflight_json["status"], "ok");
     assert_eq!(preflight_json["mutation"], false);
+    for unit in [&guard.controller_unit, &guard.unit] {
+        assert_eq!(systemd_property(unit, "PrivateNetwork"), "yes");
+        assert_eq!(systemd_property(unit, "PrivateMounts"), "no");
+    }
     assert!(
         !guard.installed_environment.exists(),
         "preflight created the systemd environment file"
@@ -1406,11 +1410,10 @@ fn root_v3_controller_preflight_is_non_mutating_then_launches_the_real_worker() 
         guard.controller_unit
     );
     assert_eq!(authority["systemdUnit"], guard.unit);
-    assert!(
-        authority["executionNamespaces"]["mount"]["inode"]
-            .as_u64()
-            .unwrap()
-            > 0
+    assert_eq!(
+        authority["executionNamespaces"]["mount"],
+        host_mount_namespace_identity(),
+        "controller request must bind the host mount namespace"
     );
     assert!(result["authorizedCheckpoints"].as_u64().unwrap() > 0);
     let worker_exit_status = wait_for_systemd_terminal(&guard.unit);
@@ -1584,7 +1587,7 @@ fn prepare_root_controller_with_binary(
         "[Unit]\nDescription=Generated root Pool migration v3 controller integration\nBindsTo={controller_unit}\n\n\
 [Service]\nType=oneshot\nUser={}\nGroup={}\nEnvironmentFile={}\n\
 ExecStart={} --data-dir ${{HTREE_POOL_TARGET_DATA_DIR}} storage pool migrate-lmdb --launch-request ${{HTREE_POOL_LAUNCH_REQUEST}} --launch-request-wait-seconds ${{HTREE_POOL_LAUNCH_WAIT_SECONDS}} --source ${{HTREE_POOL_SOURCE_LMDB_DIR}} $HTREE_POOL_SOURCE_EXTERNAL_ARGS --state-file ${{HTREE_POOL_STATE_FILE}} --batch-size ${{HTREE_POOL_BATCH_SIZE}} --max-buffer-mib ${{HTREE_POOL_MAX_BUFFER_MIB}} --source-read-concurrency ${{HTREE_POOL_SOURCE_READ_CONCURRENCY}} --reopen-batches ${{HTREE_POOL_REOPEN_BATCHES}} $HTREE_POOL_LIMIT_ARGS --resume\n\
-Restart=no\nTimeoutStartSec=infinity\nNoNewPrivileges=true\nPrivateNetwork=true\n\
+Restart=no\nTimeoutStartSec=infinity\nNoNewPrivileges=true\nPrivateNetwork=true\nPrivateMounts=false\n\
 UnsetEnvironment=LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH HTREE_LMDB_NO_SYNC HTREE_LMDB_NO_META_SYNC\n\
 UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
         unsafe { libc::geteuid() },
@@ -1902,7 +1905,7 @@ fn run_root_controller(
         .collect::<Vec<_>>()
         .join(" ");
     let template = format!(
-        "[Unit]\nDescription=Generated dedicated migration controller\n\n[Service]\nType=exec\nUser=root\nGroup=root\nEnvironmentFile={}\nExecStart={exec_start}\nRestart=no\nTimeoutStartSec=infinity\nNoNewPrivileges=true\nPrivateNetwork=true\nUnsetEnvironment=LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH HTREE_LMDB_NO_SYNC HTREE_LMDB_NO_META_SYNC\nUMask=0027\nStandardOutput=truncate:{}\nStandardError=truncate:{}\n",
+        "[Unit]\nDescription=Generated dedicated migration controller\n\n[Service]\nType=exec\nUser=root\nGroup=root\nEnvironmentFile={}\nExecStart={exec_start}\nRestart=no\nTimeoutStartSec=infinity\nNoNewPrivileges=true\nPrivateNetwork=true\nPrivateMounts=false\nUnsetEnvironment=LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH HTREE_LMDB_NO_SYNC HTREE_LMDB_NO_META_SYNC\nUMask=0027\nStandardOutput=truncate:{}\nStandardError=truncate:{}\n",
         guard.controller_environment.display(), guard.controller_stdout.display(), guard.controller_stderr.display()
     );
     // Keep generated service fragments outside the rollout evidence tree so a
@@ -1970,6 +1973,29 @@ fn authority_tree_snapshot(root: &Path) -> Vec<(PathBuf, u32, u64, String)> {
         .collect::<Vec<_>>();
     snapshot.sort_by(|left, right| left.0.cmp(&right.0));
     snapshot
+}
+
+#[cfg(target_os = "linux")]
+fn host_mount_namespace_identity() -> Value {
+    // Reading PID 1's namespace link requires root on hardened Linux hosts.
+    let output = Command::new("/usr/bin/sudo")
+        .args([
+            "-n",
+            "/usr/bin/stat",
+            "--dereference",
+            "--format=%d %i",
+            "/proc/1/ns/mnt",
+        ])
+        .output()
+        .expect("inspect host mount namespace");
+    assert_success(&output);
+    let values = String::from_utf8(output.stdout)
+        .expect("namespace identity")
+        .split_whitespace()
+        .map(|part| part.parse::<u64>().expect("namespace device/inode"))
+        .collect::<Vec<_>>();
+    assert_eq!(values.len(), 2);
+    json!({ "device": values[0], "inode": values[1] })
 }
 
 #[cfg(target_os = "linux")]
