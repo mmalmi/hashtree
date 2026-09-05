@@ -346,7 +346,7 @@ pub(super) fn queue_links_for_diff_upload(
     }
 }
 
-async fn collect_complete_hashes<S: Store>(
+pub(super) async fn collect_complete_hashes<S: Store>(
     tree: &HashTree<S>,
     root: &hashtree_core::Cid,
     concurrency: usize,
@@ -953,7 +953,7 @@ impl RemoteHelper {
         }
     }
 
-    fn build_tree_with_progress(&self, label: &str) -> Result<hashtree_core::Cid> {
+    pub(super) fn build_tree_with_progress(&self, label: &str) -> Result<hashtree_core::Cid> {
         let progress = RepoTreeBuildProgress::new();
         let reporter = RepoTreeProgressReporter::start(label, progress.clone());
         let result = self.storage.build_tree_with_progress(&progress);
@@ -1236,6 +1236,10 @@ impl RemoteHelper {
 
     /// Execute queued push operations
     pub(super) fn execute_push(&mut self) -> Result<Option<Vec<String>>> {
+        let rebuild = Self::local_rebuild_requested();
+        if rebuild {
+            self.validate_local_rebuild_mode()?;
+        }
         self.start_op(); // Start timing for conditional verbose logging
         debug!(refs_count = self.push_specs.len(), "execute_push called");
         info!("Pushing {} refs", self.push_specs.len());
@@ -1247,7 +1251,15 @@ impl RemoteHelper {
             "About to call load_existing_remote_state"
         );
 
-        if let Err(e) = self.load_existing_remote_state_with_missing_root_repair() {
+        let loaded = if rebuild {
+            self.load_existing_remote_state()
+                .context("local rebuild requires readable existing remote state")
+        } else {
+            self.load_existing_remote_state_with_missing_root_repair()
+        };
+        if rebuild {
+            loaded?;
+        } else if let Err(e) = loaded {
             let err_str = e.to_string();
             let is_access_error = err_str.contains("link-visible")
                 || err_str.contains("private")
@@ -1380,6 +1392,9 @@ impl RemoteHelper {
 
         let (refs, root_hash, _encryption_key) =
             self.nostr.fetch_refs_with_root(&self.repo_name)?;
+        if Self::local_rebuild_requested() {
+            Self::require_local_rebuild_refs(&refs)?;
+        }
 
         if refs.is_empty() {
             self.detail("  No existing refs found (new repository)");
@@ -1405,6 +1420,12 @@ impl RemoteHelper {
                     &ref_value[..12.min(ref_value.len())]
                 );
             }
+        }
+
+        // Explicit recovery derives every object from verified local history.
+        // Do not hydrate or reupload any part of the damaged old tree first.
+        if Self::local_rebuild_requested() {
+            return Ok(());
         }
 
         let preserved_refs: Vec<(String, String)> = refs
@@ -1528,7 +1549,9 @@ impl RemoteHelper {
 
     /// Resolve a ref to its sha
     pub(super) fn resolve_ref(&self, refspec: &str) -> Result<String> {
-        let output = Command::new("git").args(["rev-parse", refspec]).output()?;
+        let output = Self::git_command_for_push()
+            .args(["rev-parse", refspec])
+            .output()?;
 
         if !output.status.success() {
             bail!("Failed to resolve ref: {}", refspec);
@@ -1566,7 +1589,7 @@ impl RemoteHelper {
 
     /// Check if ancestor_sha is an ancestor of descendant_sha
     pub(super) fn check_ancestor(&self, ancestor_sha: &str, descendant_sha: &str) -> AncestorCheck {
-        let output = Command::new("git")
+        let output = Self::git_command_for_push()
             .args(["merge-base", "--is-ancestor", ancestor_sha, descendant_sha])
             .output();
 
@@ -1751,6 +1774,16 @@ impl RemoteHelper {
             .and_then(|pubkey| pubkey.to_bech32().ok())
     }
 
+    fn ensure_push_signing_key(&self) -> Result<()> {
+        if !self.nostr.can_sign() {
+            bail!(
+                "Cannot push: no secret key for {}. You can only push to your own repos.",
+                self.nostr.npub()
+            );
+        }
+        Ok(())
+    }
+
     /// Push all objects reachable from sha
     pub(super) fn push_objects(
         &mut self,
@@ -1767,120 +1800,128 @@ impl RemoteHelper {
             return Ok(());
         }
 
-        eprintln!("  Listing objects...");
-        let delta_base = self.delta_base_for_push(sha, force_push, remote_tip_sha);
-        let objects = self.list_objects_for_push(sha, delta_base.as_deref())?;
-        if let Some(base) = delta_base.as_deref() {
-            eprintln!(
-                "  Listed {} object(s) (delta from {})",
-                objects.len(),
-                &base[..12.min(base.len())]
-            );
+        let rebuild = Self::local_rebuild_requested();
+        // Ordinary listing must succeed before touching refs: a later push in
+        // the same batch must not publish a ref whose enumeration failed.
+        let (delta_base, objects) = if rebuild {
+            (None, Vec::new())
         } else {
-            eprintln!("  Listed {} object(s)", objects.len());
-        }
-
-        info!("Pushing {} objects for {}", objects.len(), sha);
-
+            eprintln!("  Listing objects...");
+            let delta_base = self.delta_base_for_push(sha, force_push, remote_tip_sha);
+            let objects = self.list_objects_for_push(sha, delta_base.as_deref())?;
+            if let Some(base) = delta_base.as_deref() {
+                eprintln!(
+                    "  Listed {} object(s) (delta from {})",
+                    objects.len(),
+                    &base[..12.min(base.len())]
+                );
+            } else {
+                eprintln!("  Listed {} object(s)", objects.len());
+            }
+            info!("Pushing {} objects for {}", objects.len(), sha);
+            (delta_base, objects)
+        };
         let oid = crate::git::object::ObjectId::from_hex(sha)
             .ok_or_else(|| anyhow::anyhow!("Invalid object id: {}", sha))?;
         self.storage.write_ref(dst_ref, &Ref::Direct(oid))?;
 
-        if dst_ref.starts_with("refs/heads/") {
+        if !rebuild && dst_ref.starts_with("refs/heads/") {
             self.storage
                 .write_ref("HEAD", &Ref::Symbolic(dst_ref.to_string()))?;
             debug!("Set HEAD -> {}", dst_ref);
         }
 
-        let base_has_pack_checkpoint = self.cached_remote_root_pack_checkpoint_available();
-        let rebuild_checkpoint_from_first_bucket =
-            delta_base.is_some() && !base_has_pack_checkpoint;
-        let mut checkpoint_covered = match self.prepare_git_pack_checkpoint(
-            sha,
-            objects.len(),
-            delta_base.as_deref(),
-            rebuild_checkpoint_from_first_bucket,
-        ) {
-            Ok(Some(covered)) => covered,
-            Ok(None) => HashSet::new(),
-            Err(err) => {
-                warn!("Git pack checkpoint skipped: {}", err);
-                if self.is_slow() {
-                    eprintln!("  Warning: git pack checkpoint skipped: {}", err);
-                }
-                HashSet::new()
-            }
-        };
-        let inherited_pack_covered = if base_has_pack_checkpoint {
-            self.inherited_pack_covered_imported_tree_ids(sha, &objects)?
+        let mut root_cid = if rebuild {
+            self.ensure_push_signing_key()?;
+            self.build_local_rebuild()?
         } else {
-            HashSet::new()
-        };
-        if !checkpoint_covered.is_empty() && !inherited_pack_covered.is_empty() {
-            self.storage
-                .add_pack_covered_objects(inherited_pack_covered.clone())?;
-            checkpoint_covered.extend(inherited_pack_covered.iter().cloned());
-        }
-
-        let objects_to_import = self.select_objects_to_import_for_push(
-            sha,
-            &objects,
-            &checkpoint_covered,
-            base_has_pack_checkpoint,
-        )?;
-        if checkpoint_covered.is_empty() && !inherited_pack_covered.is_empty() {
-            self.storage
-                .set_pack_checkpoint_files(BTreeMap::new(), inherited_pack_covered)?;
-        }
-        if checkpoint_covered.is_empty() {
-            eprintln!("  Reading objects...");
-        } else {
-            eprintln!(
-                "  Reading needed objects... {}/{} object(s)",
-                objects_to_import.len(),
-                objects.len()
-            );
-        }
-        let objects_with_content = self.read_git_objects_batch(&objects_to_import)?;
-
-        eprintln!("  Writing to local store...");
-        Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
-
-        if !self.nostr.can_sign() {
-            anyhow::bail!(
-                "Cannot push: no secret key for {}. You can only push to your own repos.",
-                self.nostr.npub()
-            );
-        }
-
-        let mut root_cid = if let Some(base) = delta_base.as_deref() {
-            match self.build_tree_with_cached_remote_root(
-                "Merging delta with cached remote root",
-                Some(base),
+            let base_has_pack_checkpoint = self.cached_remote_root_pack_checkpoint_available();
+            let rebuild_checkpoint_from_first_bucket =
+                delta_base.is_some() && !base_has_pack_checkpoint;
+            let mut checkpoint_covered = match self.prepare_git_pack_checkpoint(
+                sha,
+                objects.len(),
+                delta_base.as_deref(),
+                rebuild_checkpoint_from_first_bucket,
             ) {
-                Ok(Some(root_cid)) => root_cid,
-                Ok(None) => match self.build_tree_with_progress("Building repo tree") {
-                    Ok(root_cid) => root_cid,
+                Ok(Some(covered)) => covered,
+                Ok(None) => HashSet::new(),
+                Err(err) => {
+                    warn!("Git pack checkpoint skipped: {}", err);
+                    if self.is_slow() {
+                        eprintln!("  Warning: git pack checkpoint skipped: {}", err);
+                    }
+                    HashSet::new()
+                }
+            };
+            let inherited_pack_covered = if base_has_pack_checkpoint {
+                self.inherited_pack_covered_imported_tree_ids(sha, &objects)?
+            } else {
+                HashSet::new()
+            };
+            if !checkpoint_covered.is_empty() && !inherited_pack_covered.is_empty() {
+                self.storage
+                    .add_pack_covered_objects(inherited_pack_covered.clone())?;
+                checkpoint_covered.extend(inherited_pack_covered.iter().cloned());
+            }
+
+            let objects_to_import = self.select_objects_to_import_for_push(
+                sha,
+                &objects,
+                &checkpoint_covered,
+                base_has_pack_checkpoint,
+            )?;
+            if checkpoint_covered.is_empty() && !inherited_pack_covered.is_empty() {
+                self.storage
+                    .set_pack_checkpoint_files(BTreeMap::new(), inherited_pack_covered)?;
+            }
+            if checkpoint_covered.is_empty() {
+                eprintln!("  Reading objects...");
+            } else {
+                eprintln!(
+                    "  Reading needed objects... {}/{} object(s)",
+                    objects_to_import.len(),
+                    objects.len()
+                );
+            }
+            let objects_with_content = self.read_git_objects_batch(&objects_to_import)?;
+
+            eprintln!("  Writing to local store...");
+            Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
+            self.ensure_push_signing_key()?;
+
+            if let Some(base) = delta_base.as_deref() {
+                match self.build_tree_with_cached_remote_root(
+                    "Merging delta with cached remote root",
+                    Some(base),
+                ) {
+                    Ok(Some(root_cid)) => root_cid,
+                    Ok(None) => match self.build_tree_with_progress("Building repo tree") {
+                        Ok(root_cid) => root_cid,
+                        Err(err) => self.repair_delta_tree_build(
+                            sha,
+                            dst_ref,
+                            base,
+                            "Cached remote root unavailable",
+                            err.to_string(),
+                        )?,
+                    },
                     Err(err) => self.repair_delta_tree_build(
                         sha,
                         dst_ref,
                         base,
-                        "Cached remote root unavailable",
+                        "Cached-root merge incomplete",
                         err.to_string(),
                     )?,
-                },
-                Err(err) => self.repair_delta_tree_build(
-                    sha,
-                    dst_ref,
-                    base,
-                    "Cached-root merge incomplete",
-                    err.to_string(),
-                )?,
+                }
+            } else {
+                self.build_tree_with_progress("Building repo tree")?
             }
-        } else {
-            self.build_tree_with_progress("Building repo tree")?
         };
         if let Err(validation_err) = self.storage.validate_root_contains_direct_refs(&root_cid) {
+            if rebuild {
+                return Err(validation_err.into());
+            }
             eprintln!(
                 "  Built repo tree is missing ref object(s) ({}); rebuilding from full local import",
                 validation_err
@@ -1922,9 +1963,9 @@ impl RemoteHelper {
         let blossom_result = self.push_to_file_servers_with_diff(
             &root_hash_hex,
             chk_key.as_ref(),
-            old_root_hash.as_deref(),
-            old_encryption_key.as_ref(),
-            true,
+            old_root_hash.as_deref().filter(|_| !rebuild),
+            old_encryption_key.as_ref().filter(|_| !rebuild),
+            !rebuild,
         );
         ensure_blossom_publish_ready(&blossom_result)?;
         self.verify_root_available_on_write_server(&root_hash_hex)?;

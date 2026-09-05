@@ -22,6 +22,7 @@ use tokio::sync::oneshot;
 
 mod closure_validation;
 mod hydration;
+mod local_rebuild;
 mod pack_fallback;
 
 const TEST_PUBKEY: &str = "4523be58d395b1b196a9b8c82b038b6895cb02b683d0c253a955068dba1facd0";
@@ -1820,6 +1821,34 @@ fn test_import_preserved_remote_objects_from_local_git_uses_exclusive_history() 
     assert_eq!(
         helper.storage.object_count().expect("object count"),
         exclusive.len()
+    );
+}
+
+#[test]
+fn test_failed_ordinary_push_listing_preserves_refs() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (home, repo, _, master, _) = create_repo_with_diverged_master_and_dev();
+    let _home = HomeGuard::set(home.path());
+    let _cwd = CwdGuard::set(repo.path());
+    let _git_dir = EnvGuard::clear("GIT_DIR");
+    let _mode = EnvGuard::clear("HTREE_GIT_REBUILD_FROM_LOCAL");
+    let mut helper = create_test_helper().unwrap();
+    helper
+        .storage
+        .import_ref("refs/heads/master", &master)
+        .unwrap();
+    helper
+        .storage
+        .import_ref("HEAD", "ref: refs/heads/dev")
+        .unwrap();
+    let before = helper.storage.list_refs().unwrap();
+    let error = helper
+        .push_objects(&"2".repeat(40), "refs/heads/master", false, None)
+        .unwrap_err();
+    assert_eq!(helper.storage.list_refs().unwrap(), before);
+    assert!(
+        error.to_string().contains("Failed to list objects"),
+        "{error:#}"
     );
 }
 

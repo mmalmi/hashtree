@@ -99,4 +99,17 @@ Override or disable the underfull threshold for experiments:
 HTREE_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS=0 git push htree://npub1.../repo main
 ```
 
+To repair unavailable remote packs from a complete local Git repository, opt in
+on the next ordinary update of a single ref:
+
+```bash
+HTREE_GIT_REBUILD_FROM_LOCAL=1 git push origin main
+```
+
+This requires readable existing remote refs and valid local history for every
+retained ref. It preserves those refs and `HEAD`, rebuilds all reachable objects
+as loose objects, and checks the full upload without trusting the old tree.
+Force pushes, deletions, multiple updates, and `force_upload` are rejected.
+An up-to-date ref remains a no-op; the option does not force an update.
+
 Part of [hashtree-rs](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree).

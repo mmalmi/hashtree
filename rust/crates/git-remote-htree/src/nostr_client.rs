@@ -1373,7 +1373,7 @@ impl NostrClient {
 
     /// Fetch git refs from hashtree structure
     /// Structure: root -> .git/ -> refs/ -> heads/main -> <sha>
-    async fn fetch_refs_from_hashtree(
+    pub(crate) async fn fetch_refs_from_hashtree(
         &self,
         root_hash: &str,
         encryption_key: Option<&[u8; 32]>,
@@ -1479,22 +1479,6 @@ impl NostrClient {
             }
         };
 
-        // Download refs directory
-        let refs_data =
-            self.blossom.download(&refs_hash).await.with_context(|| {
-                format!("Failed to download refs directory {}", &refs_hash[..12])
-            })?;
-
-        let refs_node = self
-            .decrypt_and_decode(&refs_data, refs_key.as_ref())
-            .with_context(|| {
-                format!(
-                    "Failed to decode refs directory {} (encrypted: {})",
-                    &refs_hash[..12.min(refs_hash.len())],
-                    refs_key.is_some()
-                )
-            })?;
-
         // Look for HEAD in .git directory
         if let Some(head_link) = git_node
             .links
@@ -1518,25 +1502,9 @@ impl NostrClient {
             refs.insert("HEAD".to_string(), head_content);
         }
 
-        // Recursively walk refs/ subdirectories (heads, tags, etc.)
-        for subdir_link in &refs_node.links {
-            if subdir_link.link_type != LinkType::Dir {
-                continue;
-            }
-            let subdir_name = match &subdir_link.name {
-                Some(n) => n.clone(),
-                None => continue,
-            };
-            let subdir_hash = hex::encode(subdir_link.hash);
-
-            self.collect_refs_recursive(
-                &subdir_hash,
-                subdir_link.key.as_ref(),
-                &format!("refs/{}", subdir_name),
-                &mut refs,
-            )
+        // Walk the root too: valid refs can be files directly under refs/.
+        self.collect_refs_recursive(&refs_hash, refs_key.as_ref(), "refs", &mut refs)
             .await?;
-        }
 
         debug!("Found {} refs from hashtree", refs.len());
         Ok(refs)
@@ -1598,10 +1566,11 @@ impl NostrClient {
                 } else {
                     String::from_utf8_lossy(&ref_data).trim().to_string()
                 };
-                if !sha.is_empty() {
-                    debug!("Found ref {} -> {}", ref_path, sha);
-                    refs.insert(ref_path, sha);
+                if sha.is_empty() {
+                    anyhow::bail!("Empty Git ref {}", ref_path);
                 }
+                debug!("Found ref {} -> {}", ref_path, sha);
+                refs.insert(ref_path, sha);
             }
         }
 

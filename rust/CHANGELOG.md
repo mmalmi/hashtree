@@ -70,8 +70,8 @@
   social graph share one heed package and one unprefixed native LMDB archive.
   The hardened blob-store dependency is released as `hashtree-lmdb` 0.2.87
   rather than reusing the already-published 0.2.86 manifest. The crate release
-  also releases `git-remote-htree` 0.2.85 with an exact 0.2.87 blob-store
-  dependency rather than reusing its already-published 0.2.84 manifest. The
+  also releases `git-remote-htree` 0.2.86 with an exact 0.2.87 blob-store
+  dependency rather than reusing its already-published 0.2.85 manifest. The
   crate release plan publishes those exact versions before their consumers,
   and a Linux packaged-downstream link gate rejects any second LMDB package
   before release.
@@ -122,6 +122,11 @@
 
 ### Fixed
 
+- Add opt-in local Git mirror rebuilding that preserves every retained ref and
+  `HEAD`, verifies their full object history, and replaces unavailable inherited
+  packs with a complete loose-object tree before checking the full upload.
+  Preserve direct refs such as `refs/stash` when reading and writing mirrors;
+  reject empty remote ref files instead of silently dropping them.
 - Fetch from available loose Git objects when an advertised pack is unavailable,
   requiring complete, valid history for every requested ref before succeeding.
 - Recover unavailable Git mirror objects from local loose or packed history

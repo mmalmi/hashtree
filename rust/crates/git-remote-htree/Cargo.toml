@@ -1,6 +1,6 @@
 [package]
 name = "git-remote-htree"
-version = "0.2.85"
+version = "0.2.86"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

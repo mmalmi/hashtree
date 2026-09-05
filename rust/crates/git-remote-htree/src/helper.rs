@@ -18,6 +18,7 @@ use tracing::{debug, info, warn};
 
 mod cached_store;
 mod git_objects;
+mod local_rebuild;
 mod progress;
 mod push;
 mod storage_support;
@@ -417,6 +418,10 @@ impl RemoteHelper {
 
     /// List refs available on remote
     fn list_refs(&mut self, for_push: bool) -> Result<Option<Vec<String>>> {
+        let rebuild = for_push && Self::local_rebuild_requested();
+        if rebuild && self.config.blossom.force_upload {
+            bail!("local rebuild cannot be combined with force_upload");
+        }
         if for_push && self.config.blossom.force_upload {
             debug!("Returning empty refs for push because force_upload is enabled");
             self.remote_refs.clear();
@@ -427,6 +432,9 @@ impl RemoteHelper {
         self.remote_refs.clear();
         let refs = match self.nostr.fetch_refs(&self.repo_name) {
             Ok(refs) => refs,
+            Err(err) if rebuild => {
+                return Err(err).context("local rebuild requires readable existing refs")
+            }
             Err(err) if for_push && Self::is_repo_not_found_error(&err) => {
                 debug!("Repository not found during push ref advertisement; treating as empty");
                 HashMap::new()
@@ -472,6 +480,9 @@ impl RemoteHelper {
             }
             Err(err) => return Err(err),
         };
+        if rebuild {
+            Self::require_local_rebuild_refs(&refs)?;
+        }
 
         let mut lines = Vec::new();
 

@@ -172,7 +172,11 @@ pub(super) fn assert_fetched_refs_and_clone(
         .unwrap();
         assert_eq!(String::from_utf8(bytes).unwrap().trim(), expected);
         let args = if *name == "HEAD" {
-            vec!["symbolic-ref", "HEAD", "refs/heads/master"]
+            vec![
+                "symbolic-ref",
+                "HEAD",
+                expected.strip_prefix("ref: ").unwrap(),
+            ]
         } else {
             vec!["update-ref", name, expected]
         };

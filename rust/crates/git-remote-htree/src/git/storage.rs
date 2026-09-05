@@ -1894,7 +1894,7 @@ impl GitStorage {
 
         for (ref_name, value) in refs {
             let parts: Vec<&str> = ref_name.split('/').collect();
-            if parts.len() >= 3 && parts[0] == "refs" {
+            if parts.len() >= 2 && parts[0] == "refs" {
                 root.insert(&parts[1..], value.clone());
             }
         }

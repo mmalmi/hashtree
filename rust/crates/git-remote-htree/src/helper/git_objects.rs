@@ -13,25 +13,39 @@ impl RemoteHelper {
     /// A failed pack is optional only when every requested history is complete
     /// and valid. Tip presence alone misses absent parents, trees, and blobs.
     pub(super) fn verify_requested_git_object_closure(&self) -> Result<()> {
-        let mut shas: Vec<_> = self
+        let shas: Vec<_> = self
             .fetch_specs
             .iter()
             .map(|spec| spec.sha.as_str())
             .collect();
+        Self::verify_git_object_closure(&shas)
+    }
+
+    pub(super) fn strict_git_command() -> Command {
+        let mut command = Command::new("git");
+        command
+            .arg("--no-replace-objects")
+            .env("GIT_NO_LAZY_FETCH", "1")
+            .env("GIT_GRAFT_FILE", "");
+        command
+    }
+
+    pub(super) fn git_command_for_push() -> Command {
+        if Self::local_rebuild_requested() {
+            Self::strict_git_command()
+        } else {
+            Command::new("git")
+        }
+    }
+
+    pub(super) fn verify_git_object_closure(shas: &[&str]) -> Result<()> {
+        let mut shas = shas.to_vec();
         shas.sort_unstable();
         shas.dedup();
         if shas.is_empty() || shas.iter().any(|sha| ObjectId::from_hex(sha).is_none()) {
             bail!("Cannot verify pack recovery without valid requested object IDs");
         }
-        let git = || {
-            let mut command = Command::new("git");
-            command
-                .arg("--no-replace-objects")
-                .env("GIT_NO_LAZY_FETCH", "1")
-                .env("GIT_GRAFT_FILE", "");
-            command
-        };
-        let shallow = git()
+        let shallow = Self::strict_git_command()
             .args(["rev-parse", "--is-shallow-repository"])
             .output()?;
         if !shallow.status.success() || String::from_utf8_lossy(&shallow.stdout).trim() != "false" {
@@ -49,7 +63,7 @@ impl RemoteHelper {
                 "--no-progress",
             ],
         ] {
-            let output = git()
+            let output = Self::strict_git_command()
                 .args(&args)
                 .args(&shas)
                 .output()
@@ -168,8 +182,11 @@ impl RemoteHelper {
             return Ok(Vec::new());
         }
 
-        let mut command = Command::new("git");
+        let mut command = Self::git_command_for_push();
         command.arg("rev-list").arg("--objects");
+        if Self::local_rebuild_requested() {
+            command.arg("--missing=error");
+        }
         for sha in include {
             command.arg(sha);
         }
@@ -219,7 +236,7 @@ impl RemoteHelper {
         const BATCH_SIZE: usize = 100;
 
         for (batch_idx, batch) in oids.chunks(BATCH_SIZE).enumerate() {
-            let mut child = Command::new("git")
+            let mut child = Self::git_command_for_push()
                 .args(["cat-file", "--batch"])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
