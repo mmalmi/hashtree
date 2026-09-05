@@ -524,7 +524,7 @@ packages:
 
   '@fips/core@https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.41/fips-core-0.0.41.tgz':
     resolution: {tarball: https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.41/fips-core-0.0.41.tgz}
-    version: 0.0.40
+    version: 0.0.41
 
   '@fips/tcp@https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz':
     resolution: {tarball: https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz}
