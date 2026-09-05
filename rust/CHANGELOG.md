@@ -126,6 +126,8 @@
   correction for replacements with equal timestamps.
 - Release `tauri-plugin-hashtree-updater` 0.2.49 with matching Nostr dependency
   versions so registry consumers use compatible key types.
+- Let final migration workers validate root-certified source receipts without
+  opening the controller’s private publication and mount journals.
 - Wait for systemd to finish assigning migration worker credentials before
   capturing process identity, retaining the existing deadline and identity checks.
 - Validate worker mount namespaces against the root controller’s attestation

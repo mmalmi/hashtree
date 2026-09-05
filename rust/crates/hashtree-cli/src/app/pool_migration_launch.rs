@@ -53,6 +53,7 @@ use super::pool_migration_receipt::{
     ValidatedSourceTerminalReceiptV3, MAX_FINAL_SOURCE_RECEIPTS, SOURCE_KEY_EVIDENCE_KIND,
     SOURCE_TERMINAL_FILE_NAME, SOURCE_TERMINAL_SCHEMA,
 };
+use super::pool_migration_terminal_publication::SourceTerminalCertificationReader;
 
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd};
@@ -695,6 +696,7 @@ impl AcknowledgedPoolMigrationLaunch {
         load_validated_prior_source_terminal_receipts(
             &self.request.cas,
             &PriorSourceReceiptExpectationV3 {
+                certification_reader: SourceTerminalCertificationReader::Worker,
                 boot_id: &self.request.boot_id,
                 pool_path: &self.request.pool.path,
                 pool_lmdb_identity: self.request.pool.lmdb_identity,
@@ -1118,6 +1120,7 @@ fn load_request_source_terminal_receipts(
     let receipts = load_validated_prior_source_terminal_receipts(
         &request.cas,
         &PriorSourceReceiptExpectationV3 {
+            certification_reader: SourceTerminalCertificationReader::Worker,
             boot_id: &request.boot_id,
             pool_path: &request.pool.path,
             pool_lmdb_identity: request.pool.lmdb_identity,

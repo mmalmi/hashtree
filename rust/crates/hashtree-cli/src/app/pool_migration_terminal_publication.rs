@@ -19,7 +19,7 @@ use super::pool_migration_pinned::PinnedDirectory;
 use super::pool_migration_teardown::{
     durable_create_root_receipt, parse_strict, read_bounded_file_authority,
     read_exact_root_receipt, require_boot_id, require_safe_component, serialize_json_line,
-    sha256_bytes, BoundedFileAuthorityV3,
+    sha256_bytes, validate_bounded_terminal_authority, BoundedFileAuthorityV3,
 };
 
 pub(super) const TERMINAL_PUBLICATION_INTENT_FILE: &str = "terminal-publication-intent.json";
@@ -75,6 +75,12 @@ pub(super) struct SourceTerminalCertificationV3 {
     pub(super) source_terminal: BoundedFileAuthorityV3,
     pub(super) mount_retention: FileAuthorityV3,
     pub(super) terminal_publication_intent: FileAuthorityV3,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum SourceTerminalCertificationReader {
+    Controller,
+    Worker,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -513,6 +519,7 @@ pub(super) fn read_validated_source_terminal_certification(
     authority: &FileAuthorityV3,
     expected_boot_id: &str,
     expected_service_gid: u32,
+    reader: SourceTerminalCertificationReader,
 ) -> Result<(BoundedFileAuthorityV3, Vec<u8>)> {
     require_boot_id(expected_boot_id)?;
     let bytes = read_exact_service_file(
@@ -529,26 +536,79 @@ pub(super) fn read_validated_source_terminal_certification(
         .path
         .parent()
         .context("source terminal certification has no attempt directory")?;
-    let publication = load_intent(attempt_dir, &certification.rollout_id)?;
-    validate_source_certification(&certification, attempt_dir, &publication)?;
-    if certification.boot_id != expected_boot_id {
-        bail!("source terminal certification belongs to a different boot");
+    validate_source_certification_handoff(&certification, &authority.path, expected_boot_id)?;
+    if matches!(reader, SourceTerminalCertificationReader::Controller) {
+        let publication = load_intent(attempt_dir, &certification.rollout_id)?;
+        validate_source_certification(&certification, attempt_dir, &publication)?;
+        let expected_retention = validated_terminal_completion_authority(
+            attempt_dir,
+            &certification.rollout_id,
+            expected_boot_id,
+            "final-stopped-source",
+        )?
+        .context("source terminal certification has no retained mount lifecycle")?;
+        if certification.mount_retention != expected_retention {
+            bail!("source terminal certification retention authority changed");
+        }
     }
-    let expected_retention = validated_terminal_completion_authority(
-        attempt_dir,
-        &certification.rollout_id,
-        expected_boot_id,
-        "final-stopped-source",
-    )?
-    .context("source terminal certification has no retained mount lifecycle")?;
-    if certification.mount_retention != expected_retention {
-        bail!("source terminal certification retention authority changed");
-    }
+    // Workers consume this exact root-owned attestation. The controller alone
+    // replays its private journals; both readers verify the pinned evidence.
     let source_bytes = read_bounded_file_authority(
         &certification.source_terminal,
         "certified source terminal evidence",
     )?;
     Ok((certification.source_terminal, source_bytes))
+}
+
+fn validate_source_certification_handoff(
+    certification: &SourceTerminalCertificationV3,
+    certificate_path: &Path,
+    expected_boot_id: &str,
+) -> Result<()> {
+    let attempt = certificate_path
+        .parent()
+        .context("source terminal certification has no attempt directory")?;
+    require_boot_id(&certification.boot_id)?;
+    require_safe_component(
+        "source certification rollout ID",
+        &certification.rollout_id,
+        128,
+    )?;
+    require_safe_component(
+        "source certification attempt nonce",
+        &certification.attempt_nonce,
+        128,
+    )?;
+    if certification.boot_id != expected_boot_id {
+        bail!("source terminal certification belongs to a different boot");
+    }
+    if certification.schema != SOURCE_TERMINAL_CERTIFICATION_SCHEMA
+        || certification.status != "certified"
+        || certificate_path != attempt.join(SOURCE_TERMINAL_CERTIFICATION_FILE)
+        || attempt.file_name().and_then(|name| name.to_str())
+            != Some(certification.attempt_nonce.as_str())
+        || certification.source_terminal.path != attempt.join("source-terminal.json")
+        || certification.mount_retention.path != attempt.join("mount-lifecycle-retained.json")
+        || certification.terminal_publication_intent.path
+            != attempt.join(TERMINAL_PUBLICATION_INTENT_FILE)
+    {
+        bail!("source terminal certification breaks its exact authority chain");
+    }
+    validate_bounded_terminal_authority(&certification.source_terminal)?;
+    for authority in [
+        &certification.mount_retention,
+        &certification.terminal_publication_intent,
+    ] {
+        if authority.sha256.len() != 64
+            || !authority
+                .sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            bail!("source terminal certification has an invalid journal SHA-256 authority");
+        }
+    }
+    Ok(())
 }
 
 fn validate_source_certification(
@@ -1025,6 +1085,78 @@ fn root_io_kind(error: &anyhow::Error) -> Option<ErrorKind> {
         .map(std::io::Error::kind)
 }
 
+#[cfg(test)]
+mod certification_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn source_certification_handoff_rejects_mismatched_authorities() {
+        let nonce = "a".repeat(64);
+        let attempt = PathBuf::from("/generated/attempts-v3").join(&nonce);
+        let path = attempt.join(SOURCE_TERMINAL_CERTIFICATION_FILE);
+        let boot = "00000000-0000-0000-0000-000000000001";
+        let certification = SourceTerminalCertificationV3 {
+            schema: SOURCE_TERMINAL_CERTIFICATION_SCHEMA.to_string(),
+            status: "certified".to_string(),
+            boot_id: boot.to_string(),
+            rollout_id: "generated".to_string(),
+            attempt_nonce: nonce,
+            source_terminal: BoundedFileAuthorityV3 {
+                path: attempt.join("source-terminal.json"),
+                sha256: "1".repeat(64),
+                identity: FileIdentityV3 {
+                    device: 1,
+                    inode: 2,
+                },
+                len: 2,
+                uid: 65_534,
+                gid: 65_534,
+                mode: 0o640,
+                links: 1,
+            },
+            mount_retention: FileAuthorityV3 {
+                path: attempt.join("mount-lifecycle-retained.json"),
+                sha256: "2".repeat(64),
+            },
+            terminal_publication_intent: FileAuthorityV3 {
+                path: attempt.join(TERMINAL_PUBLICATION_INTENT_FILE),
+                sha256: "3".repeat(64),
+            },
+        };
+        validate_source_certification_handoff(&certification, &path, boot)
+            .expect("exact root certification fields are valid without reading private journals");
+        for (pointer, value) in [
+            ("/schema", json!("wrong-schema")),
+            ("/status", json!("unverified")),
+            ("/bootId", json!("00000000-0000-0000-0000-000000000002")),
+            ("/attemptNonce", json!("b".repeat(64))),
+            (
+                "/sourceTerminal/path",
+                json!(attempt.join("other-source.json")),
+            ),
+            (
+                "/mountRetention/path",
+                json!(attempt.join("other-retention.json")),
+            ),
+            (
+                "/terminalPublicationIntent/path",
+                json!(attempt.join("other-intent.json")),
+            ),
+            ("/mountRetention/sha256", json!("not-a-sha256")),
+            ("/terminalPublicationIntent/sha256", json!("not-a-sha256")),
+        ] {
+            let mut changed = serde_json::to_value(&certification).unwrap();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            let changed = serde_json::from_value(changed).unwrap();
+            assert!(
+                validate_source_certification_handoff(&changed, &path, boot).is_err(),
+                "mismatched {pointer} authority was accepted"
+            );
+        }
+    }
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
@@ -1274,6 +1406,7 @@ mod tests {
                     &certification_authority,
                     &current_boot_id(),
                     65_534,
+                    SourceTerminalCertificationReader::Controller,
                 )
                 .expect("validate generated root certification handoff");
             assert_eq!(certified_terminal.path, terminal_path);
@@ -1299,6 +1432,7 @@ mod tests {
                         &certification_authority,
                         &current_boot_id(),
                         65_534,
+                        SourceTerminalCertificationReader::Controller,
                     )
                     .is_err(),
                     "certification mode tampering was accepted"

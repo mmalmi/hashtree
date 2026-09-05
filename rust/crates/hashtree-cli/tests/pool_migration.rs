@@ -1199,6 +1199,22 @@ fn run_fenced_migration(
                 certified["sourceTerminal"]["sha256"], completed["terminalReceiptSha256"],
                 "certification must bind the controller's exact source-terminal receipt"
             );
+            for field in ["terminalPublicationIntent", "mountRetention"] {
+                let journal =
+                    Path::new(certified[field]["path"].as_str().expect("private journal"));
+                let metadata = fs::symlink_metadata(journal).expect("inspect root journal");
+                assert!(metadata.file_type().is_file());
+                assert_eq!(
+                    (metadata.uid(), metadata.gid(), metadata.mode() & 0o7777),
+                    (0, 0, 0o400)
+                );
+                assert_eq!(
+                    fs::read(journal)
+                        .expect_err("worker must not read the controller's private journal")
+                        .kind(),
+                    std::io::ErrorKind::PermissionDenied
+                );
+            }
             state["sourceTerminalReceiptSha256"] = json!([completed["terminalReceiptSha256"]]);
         }
         let input = guard

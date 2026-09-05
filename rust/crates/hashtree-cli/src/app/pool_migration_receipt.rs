@@ -21,7 +21,9 @@ use super::pool_migration_launch::{
 use super::pool_migration_mount::{
     validate_source_read_only_mount_authority, SourceReadOnlyMountAuthorityV3,
 };
-use super::pool_migration_terminal_publication::read_validated_source_terminal_certification;
+use super::pool_migration_terminal_publication::{
+    read_validated_source_terminal_certification, SourceTerminalCertificationReader,
+};
 use hashtree_lmdb::LmdbEnvironmentGeneration;
 
 pub(super) const SOURCE_TERMINAL_FILE_NAME: &str = "source-terminal.json";
@@ -135,6 +137,7 @@ pub(super) struct SourceContentAuditV3 {
 }
 
 pub(super) struct PriorSourceReceiptExpectationV3<'a> {
+    pub(super) certification_reader: SourceTerminalCertificationReader,
     pub(super) boot_id: &'a str,
     pub(super) pool_path: &'a Path,
     pub(super) pool_lmdb_identity: LmdbIdentityV3,
@@ -592,6 +595,7 @@ fn validate_prior_source_terminal_receipt(
         },
         expected.boot_id,
         expected_service_gid,
+        expected.certification_reader,
     )
     .context("validate root-certified source-terminal handoff")?;
     let receipt: PoolMigrationSourceTerminalReceiptV3 =

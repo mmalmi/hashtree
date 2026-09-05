@@ -150,6 +150,7 @@ mod linux {
     use super::super::pool_migration_terminal_publication::{
         complete_terminal_publication, create_terminal_publication_intent,
         recover_rollout_terminal_publications, PreparedTerminalPublicationV3,
+        SourceTerminalCertificationReader,
     };
 
     const MAX_CONTROLLER_STATE_BYTES: u64 = 64 * 1024;
@@ -840,6 +841,7 @@ mod linux {
             let source_receipts = load_validated_prior_source_terminal_receipts(
                 &receipt_authorities,
                 &PriorSourceReceiptExpectationV3 {
+                    certification_reader: SourceTerminalCertificationReader::Controller,
                     boot_id: &boot_id,
                     pool_path: &pool,
                     pool_lmdb_identity: pool_identity,
@@ -6144,6 +6146,7 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         let receipts = load_validated_prior_source_terminal_receipts(
             &authorities,
             &PriorSourceReceiptExpectationV3 {
+                certification_reader: SourceTerminalCertificationReader::Controller,
                 boot_id: current_boot_id,
                 pool_path: &options.pool,
                 pool_lmdb_identity: pool_identity,
