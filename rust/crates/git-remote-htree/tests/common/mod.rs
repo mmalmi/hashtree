@@ -721,10 +721,11 @@ fn find_htree_binary() -> Option<PathBuf> {
     let debug_bin = target_dir.join("debug/htree");
     let release_bin = target_dir.join("release/htree");
 
-    if release_bin.exists() {
-        Some(release_bin)
-    } else if debug_bin.exists() {
+    // Match the helper selection so cached release builds cannot replace the test server.
+    if debug_bin.exists() {
         Some(debug_bin)
+    } else if release_bin.exists() {
+        Some(release_bin)
     } else {
         None
     }

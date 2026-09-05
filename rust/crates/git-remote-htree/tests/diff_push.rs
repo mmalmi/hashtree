@@ -338,6 +338,13 @@ fn test_diff_push_prunes_unchanged_upload_frontier() {
     if !push1.status.success() && !stderr1.contains("-> master") {
         panic!("Initial push failed: {}", stderr1);
     }
+    let initial_progress = parse_final_upload_progress(&stderr1)
+        .expect("initial push should print final upload progress");
+    assert_eq!(initial_progress.failed, 0, "Initial push:\n{stderr1}");
+    assert_eq!(
+        initial_progress.processed, initial_progress.total,
+        "Initial push:\n{stderr1}",
+    );
 
     std::fs::write(
         repo.path().join("bulk-05/one-more.txt"),
@@ -388,8 +395,9 @@ fn test_diff_push_prunes_unchanged_upload_frontier() {
 
     assert!(
         final_progress.total < 128,
-        "second push should prune unchanged upload frontier aggressively: {:?}\n{}",
+        "second push should prune unchanged upload frontier aggressively: {:?}\nInitial push:\n{}\nFollow-up push:\n{}",
         final_progress,
+        stderr1,
         stderr2
     );
     assert!(
