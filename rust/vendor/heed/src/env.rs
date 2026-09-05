@@ -712,16 +712,17 @@ impl Env {
     /// let dir = tempfile::tempdir().unwrap();
     /// let env = unsafe { env_builder.open(dir.path())? };
     ///
-    /// // Env was opened without flags.
-    /// assert_eq!(env.get_flags().unwrap(), EnvFlags::empty().bits());
+    /// // Preserve the flags enabled by default.
+    /// let initial_flags = env.get_flags()?;
+    /// assert_eq!(initial_flags & EnvFlags::NO_SYNC.bits(), 0);
     ///
     /// // Enable a flag after opening.
     /// unsafe { env.set_flags(EnvFlags::NO_SYNC, FlagSetMode::Enable).unwrap(); }
-    /// assert_eq!(env.get_flags().unwrap(), EnvFlags::NO_SYNC.bits());
+    /// assert_eq!(env.get_flags()?, initial_flags | EnvFlags::NO_SYNC.bits());
     ///
     /// // Disable a flag after opening.
     /// unsafe { env.set_flags(EnvFlags::NO_SYNC, FlagSetMode::Disable).unwrap(); }
-    /// assert_eq!(env.get_flags().unwrap(), EnvFlags::empty().bits());
+    /// assert_eq!(env.get_flags()?, initial_flags);
     /// # Ok(()) }
     /// ```
     ///
