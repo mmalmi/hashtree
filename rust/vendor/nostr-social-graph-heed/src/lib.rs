@@ -1223,4 +1223,16 @@ mod tests {
         let flags = store.env.flags().unwrap().unwrap_or(EnvFlags::empty());
         assert!(flags.contains(EnvFlags::NO_LOCK));
     }
+
+    #[test]
+    fn read_snapshots_can_overlap_on_the_same_thread() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let store = HeedSocialGraph::open(tempdir.path(), ROOT).unwrap();
+        let first = store.env.read_txn().unwrap();
+        let second = store.env.read_txn().unwrap();
+        assert_eq!(
+            store.metadata.get(&first, ROOT_KEY).unwrap(),
+            store.metadata.get(&second, ROOT_KEY).unwrap()
+        );
+    }
 }

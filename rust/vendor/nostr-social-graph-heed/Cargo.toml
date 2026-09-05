@@ -14,7 +14,7 @@ name = "nostr_social_graph_heed"
 path = "src/lib.rs"
 
 [dependencies]
-heed = { package = "hashtree-heed", version = "=0.20.5-hashtree.1", path = "../heed" }
+heed = { package = "hashtree-heed", version = "=0.20.5-hashtree.1", path = "../heed", features = ["read-txn-no-tls"] }
 nostr-social-graph = "0.1.2"
 thiserror = "2"
 

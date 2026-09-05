@@ -1310,7 +1310,6 @@ pub(crate) async fn repair_bulk_projection_event_blobs(
         load_canonical(&intent_path, "event-blob repair intent")?;
     let existing_receipt: Option<EventBlobRepairReceipt> =
         load_canonical(&receipt_path, "event-blob repair receipt")?;
-    let had_existing_intent = existing_intent.is_some();
 
     if existing_receipt.is_some() && existing_intent.is_none() {
         anyhow::bail!("event-blob repair receipt exists without its durable intent");
@@ -1363,7 +1362,7 @@ pub(crate) async fn repair_bulk_projection_event_blobs(
     if existing_intent.is_some() && !options.apply {
         anyhow::bail!("event-blob repair has a durable intent and requires --apply to resume");
     }
-    if let Some(intent) = existing_intent.as_ref() {
+    let intent = if let Some(intent) = existing_intent {
         if to_hex(&pool_authority.manifest_sha256) != intent.pre_repair_pool_catalog.manifest_sha256
         {
             anyhow::bail!(
@@ -1379,66 +1378,50 @@ pub(crate) async fn repair_bulk_projection_event_blobs(
         )
         .await
         .context("resume exact durable event-blob repair intent")?;
-    }
-
-    let pre_store = pool_authority.open_read_only()?;
-    let current_catalog = pin_committed_pool_catalog(&pre_store)?;
-    validate_pool_catalog_pin("event-blob repair current prestate", &current_catalog)?;
-    let (scanned_records, layout_missing) = audit_event_index_layout_and_collect_missing_blobs(
-        &spool,
-        Arc::clone(&pre_store),
-        &authority.state.built_roots,
-        options.btree_order,
-        options.page_size,
-        MAX_RECOVERY_EVENTS,
-    )
-    .await
-    .context("audit all nine event-root layouts and collect every missing durable body")?;
-    if pin_committed_pool_catalog(&pre_store)? != current_catalog {
-        anyhow::bail!("PoolStore catalog changed during event-blob repair planning audit");
-    }
-    drop(pre_store);
-
-    let current_pins = layout_missing
-        .into_iter()
-        .map(|missing| {
-            Ok(EventBlobPin {
-                event_id: missing.event_id,
-                cid: cid_to_nhash(&missing.cid)?,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    if !options.apply {
-        let plan = EventBlobRepairPlan {
-            format: EVENT_BLOB_REPAIR_FORMAT.to_string(),
-            applied: false,
-            scanned_records,
-            missing_records: current_pins.len() as u64,
-            missing_set_sha256: missing_set_sha256(&current_pins),
-            missing_event_ids: current_pins
-                .iter()
-                .map(|pin| pin.event_id.clone())
-                .collect(),
-            pool_catalog: current_catalog,
-        };
-        let bytes = canonical_json_bytes(&plan, "event-blob repair plan")?;
-        print!("{}", String::from_utf8_lossy(&bytes));
-        return Ok(());
-    }
-
-    let intent = if let Some(intent) = existing_intent {
-        if scanned_records != intent.scanned_records {
-            anyhow::bail!("retained spool record count changed after durable repair intent");
-        }
-        if let Some(missing) = current_pins.first() {
-            anyhow::bail!(
-                "event {} remains missing after exact durable-intent replay",
-                missing.event_id
-            );
-        }
         intent
     } else {
-        let missing = current_pins;
+        let pre_store = pool_authority.open_read_only()?;
+        let current_catalog = pin_committed_pool_catalog(&pre_store)?;
+        validate_pool_catalog_pin("event-blob repair current prestate", &current_catalog)?;
+        let (scanned_records, layout_missing) = audit_event_index_layout_and_collect_missing_blobs(
+            &spool,
+            Arc::clone(&pre_store),
+            &authority.state.built_roots,
+            options.btree_order,
+            options.page_size,
+            MAX_RECOVERY_EVENTS,
+        )
+        .await
+        .context("audit all nine event-root layouts and collect every missing durable body")?;
+        if pin_committed_pool_catalog(&pre_store)? != current_catalog {
+            anyhow::bail!("PoolStore catalog changed during event-blob repair planning audit");
+        }
+        drop(pre_store);
+
+        let missing = layout_missing
+            .into_iter()
+            .map(|missing| {
+                Ok(EventBlobPin {
+                    event_id: missing.event_id,
+                    cid: cid_to_nhash(&missing.cid)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if !options.apply {
+            let plan = EventBlobRepairPlan {
+                format: EVENT_BLOB_REPAIR_FORMAT.to_string(),
+                applied: false,
+                scanned_records,
+                missing_records: missing.len() as u64,
+                missing_set_sha256: missing_set_sha256(&missing),
+                missing_event_ids: missing.iter().map(|pin| pin.event_id.clone()).collect(),
+                pool_catalog: current_catalog,
+            };
+            let bytes = canonical_json_bytes(&plan, "event-blob repair plan")?;
+            print!("{}", String::from_utf8_lossy(&bytes));
+            return Ok(());
+        }
+
         let stored_blocks = precompute_intended_blocks(&spool, &missing, options.page_size).await?;
         let intent = EventBlobRepairIntent {
             format: EVENT_BLOB_REPAIR_FORMAT.to_string(),
@@ -1472,24 +1455,23 @@ pub(crate) async fn repair_bulk_projection_event_blobs(
             stored_blocks,
             pre_repair_pool_catalog: current_catalog,
         };
+        validate_intent(&intent, data_dir, &options, &authority)?;
         let intent_bytes = canonical_json_bytes(&intent, "event-blob repair intent")?;
         persist_immutable_bytes(&intent_path, &intent_bytes, "event-blob repair intent")?;
+        if intent.missing_records > 0 {
+            replay_intended_event_blobs(
+                &spool,
+                &intent.missing,
+                &intent.stored_blocks,
+                options.page_size,
+                &pool_authority,
+            )
+            .await
+            .context("apply exact durable event-blob repair intent")?;
+        }
         intent
     };
-    validate_intent(&intent, data_dir, &options, &authority)?;
     let intent_bytes = canonical_json_bytes(&intent, "event-blob repair intent")?;
-    if !had_existing_intent && intent.missing_records > 0 {
-        replay_intended_event_blobs(
-            &spool,
-            &intent.missing,
-            &intent.stored_blocks,
-            options.page_size,
-            &pool_authority,
-        )
-        .await
-        .context("apply exact durable event-blob repair intent")?;
-    }
-
     recheck_immutable_authority(data_dir, &options, &authority, &pool_authority)?;
 
     let completion_store = pool_authority.open_read_only()?;
@@ -1538,6 +1520,89 @@ pub(crate) async fn repair_bulk_projection_event_blobs(
 #[cfg(test)]
 mod retention_representation_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn completion_audit_rejects_missing_body_outside_original_repair_set() {
+        use hashtree_core::Store;
+        use hashtree_lmdb::PoolMemberConfig;
+        use hashtree_nostr::{stored_event_from_nostr_sdk_event, NostrEventIndex};
+        use nostr::{EventBuilder, Keys, Kind, Tag};
+
+        let temp = tempfile::tempdir().unwrap();
+        let pool_path = temp.path().join(SHARED_BLOB_POOL_DIR_NAME);
+        let pool = Arc::new(PoolStore::open(&pool_path, PoolStoreConfig::default()).unwrap());
+        pool.add_member(PoolMemberConfig::new(
+            temp.path().join("member"),
+            32 * 1024 * 1024,
+        ))
+        .unwrap();
+        let keys = Keys::generate();
+        let events = [
+            EventBuilder::new(Kind::Metadata, "{}"),
+            EventBuilder::new(Kind::Custom(30_000), "originally intact")
+                .tags([Tag::identifier("repair-audit")]),
+        ]
+        .into_iter()
+        .map(|builder| stored_event_from_nostr_sdk_event(&builder.sign_with_keys(&keys).unwrap()))
+        .collect::<Vec<_>>();
+        let target = NostrEventStore::new(Arc::clone(&pool));
+        let cids = target.store_event_blobs(events.clone()).await.unwrap();
+        let spool = BulkProjectionSpool::open(&temp.path().join("spool")).unwrap();
+        spool
+            .apply(events.clone().into_iter().zip(cids.clone()).collect())
+            .unwrap();
+        let mut roots = BTreeMap::new();
+        for index in NostrEventIndex::ALL {
+            let root = spool
+                .build_index_root(index, Arc::clone(&pool), 8)
+                .await
+                .unwrap()
+                .unwrap();
+            roots.insert(index.stable_id(), cid_to_nhash(&root).unwrap());
+        }
+        pool.delete(&cids[0].hash).await.unwrap();
+        pool.force_sync().unwrap();
+        drop(target);
+        drop(pool);
+
+        let reader = Arc::new(ReadOnlyPoolStore::open(&pool_path).unwrap());
+        let (count, missing) = audit_event_index_layout_and_collect_missing_blobs(
+            &spool,
+            Arc::clone(&reader),
+            &roots,
+            8,
+            1,
+            MAX_RECOVERY_EVENTS,
+        )
+        .await
+        .unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].event_id, events[0].id);
+        drop(reader);
+
+        // Complete the original repair, then lose a different body before the
+        // completion audit. The final gate must examine more than the intent.
+        let pool = Arc::new(PoolStore::open(&pool_path, PoolStoreConfig::default()).unwrap());
+        let target = NostrEventStore::new(Arc::clone(&pool));
+        assert_eq!(
+            target.store_event_blobs([events[0].clone()]).await.unwrap(),
+            [cids[0].clone()]
+        );
+        pool.delete(&cids[1].hash).await.unwrap();
+        pool.force_sync().unwrap();
+        drop(target);
+        drop(pool);
+
+        let reader = Arc::new(ReadOnlyPoolStore::open(&pool_path).unwrap());
+        let error = audit_exact_event_index_parity(&spool, reader, &roots, 8, 1)
+            .await
+            .expect_err("a newly missing body must prevent repair completion");
+        assert!(format!("{error:#}").contains(&format!(
+            "exhaustively load durable by-id event `{}`",
+            events[1].id
+        )));
+    }
 
     fn write_retention_lease(data_dir: &Path, cid: &Cid) -> Vec<u8> {
         let path = data_dir.join(PROFILE_REPAIR_RETENTION_LEASE_RELATIVE_PATH);
@@ -1661,6 +1726,27 @@ mod tests {
             .await
             .expect("load restored real event");
         assert_eq!(loaded, event);
+
+        // A crash after physical replay but before receipt publication must
+        // allow the same durable intent to resume without changing the catalog.
+        let before_resume = authority.open_read_only().expect("read pre-resume catalog");
+        let completed_catalog = pin_committed_pool_catalog(&before_resume).unwrap();
+        drop(before_resume);
+        replay_intended_event_blobs(
+            &spool,
+            std::slice::from_ref(&pin),
+            &stored_blocks,
+            1,
+            &authority,
+        )
+        .await
+        .expect("resume already completed physical replay");
+        let after_resume = authority.open_read_only().expect("read resumed catalog");
+        assert_eq!(
+            pin_committed_pool_catalog(&after_resume).unwrap(),
+            completed_catalog
+        );
+        drop(after_resume);
 
         let writer = authority
             .open_writer()
