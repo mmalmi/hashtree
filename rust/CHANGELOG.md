@@ -122,6 +122,15 @@
 
 ### Fixed
 
+- Raise the default Pool catalog virtual map from 16 GiB to 64 GiB, align
+  reopened maps to the host page size, and report the active map size in
+  `storage pool status`.
+- Scan migration source keys concurrently from one LMDB snapshot with bounded
+  buffers and ordered, resumable output. Concurrent scanners also share the
+  macOS LMDB transaction-acquisition gate.
+- Keep GitHub releases in draft until the canonical installer, release
+  manifest, and platform archives are uploaded successfully, so immutable
+  release publication cannot freeze an incomplete asset set.
 - Release `hashtree-resolver` 0.2.83 with the existing NIP-01 event-ordering
   correction for replacements with equal timestamps.
 - Release `tauri-plugin-hashtree-updater` 0.2.49 with matching Nostr dependency
