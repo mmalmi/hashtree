@@ -5,7 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 overrides:
-  '@fips/core': https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.38/fips-core-0.0.38.tgz
+  '@fips/core': https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.39/fips-core-0.0.39.tgz
   '@fips/tcp': https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz
   '@fips/transport-webrtc': https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.29/fips-transport-webrtc-0.0.45.tgz
   '@fips/transport-websocket': https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.29/fips-transport-websocket-0.0.3.tgz
@@ -139,8 +139,8 @@ importers:
   packages/hashtree-fips-transport:
     dependencies:
       '@fips/core':
-        specifier: https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.38/fips-core-0.0.38.tgz
-        version: https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.38/fips-core-0.0.38.tgz
+        specifier: https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.39/fips-core-0.0.39.tgz
+        version: https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.39/fips-core-0.0.39.tgz
       '@fips/tcp':
         specifier: https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz
         version: https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz
@@ -522,9 +522,9 @@ packages:
     resolution: {integrity: sha512-+CNAzxglkrpNf/kKywqQfk74QjtceuOE7Qm+AF8miRvPF/wmmK5+OJOgVh3AVTT3RP2mH3+FOaxlE5v72owk0A==}
     engines: {node: ^20.19.0 || ^22.13.0 || >=24}
 
-  '@fips/core@https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.38/fips-core-0.0.38.tgz':
-    resolution: {tarball: https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.38/fips-core-0.0.38.tgz}
-    version: 0.0.38
+  '@fips/core@https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.39/fips-core-0.0.39.tgz':
+    resolution: {tarball: https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.39/fips-core-0.0.39.tgz}
+    version: 0.0.39
 
   '@fips/tcp@https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz':
     resolution: {tarball: https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz}
@@ -3299,7 +3299,7 @@ snapshots:
       '@eslint/core': 1.2.1
       levn: 0.4.1
 
-  '@fips/core@https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.38/fips-core-0.0.38.tgz':
+  '@fips/core@https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.39/fips-core-0.0.39.tgz':
     dependencies:
       '@noble/ciphers': 1.3.0
       '@noble/curves': 1.9.7
@@ -3310,14 +3310,14 @@ snapshots:
 
   '@fips/transport-webrtc@https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.29/fips-transport-webrtc-0.0.45.tgz':
     dependencies:
-      '@fips/core': https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.38/fips-core-0.0.38.tgz
+      '@fips/core': https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.39/fips-core-0.0.39.tgz
       '@noble/ciphers': 1.3.0
       '@noble/curves': 1.9.7
       '@noble/hashes': 1.8.0
 
   '@fips/transport-websocket@https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.29/fips-transport-websocket-0.0.3.tgz':
     dependencies:
-      '@fips/core': https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.38/fips-core-0.0.38.tgz
+      '@fips/core': https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.39/fips-core-0.0.39.tgz
 
   '@humanfs/core@0.19.2':
     dependencies:
