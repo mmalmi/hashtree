@@ -1,4 +1,4 @@
-import { BTree, SearchIndex, type SearchLinkResult } from '@hashtree/index';
+import { BTree, type SearchIndex, type SearchLinkResult } from '@hashtree/index';
 import type {
   CID,
   CollectionIndexLinkResult,
@@ -9,11 +9,12 @@ import type {
   Store,
 } from './types.js';
 import { deserializeCid } from './cid.js';
-import { materializeSearchTerms } from './helpers.js';
+import { createSearchIndex, materializeSearchTerms } from './helpers.js';
+
+type QueryOptions = { prefix?: string; limit?: number };
 
 export class CollectionSource {
   readonly manifest: CollectionManifest;
-  private readonly byIdIndex: BTree;
   private readonly linkIndex: BTree;
   private readonly byIdRoot;
   private readonly searchIndexes = new Map<string, SearchIndex>();
@@ -21,17 +22,12 @@ export class CollectionSource {
 
   constructor(store: Store, manifest: CollectionManifest, definition?: CollectionSourceQueryDefinition | null) {
     this.manifest = manifest;
-    this.byIdIndex = new BTree(store);
     this.linkIndex = new BTree(store);
     this.byIdRoot = deserializeCid(manifest.byIdRoot);
 
     for (const [name, index] of Object.entries(manifest.indexes ?? {})) {
       if (index.kind === 'search') {
-        this.searchIndexes.set(name, new SearchIndex(store, {
-          order: index.options?.order,
-          minKeywordLength: index.options?.minKeywordLength,
-          stopWords: index.options?.stopWords ? new Set(index.options.stopWords) : undefined,
-        }));
+        this.searchIndexes.set(name, createSearchIndex(store, index.options));
       }
     }
 
@@ -45,7 +41,7 @@ export class CollectionSource {
       return null;
     }
 
-    return await this.byIdIndex.getLink(this.byIdRoot, id);
+    return await this.linkIndex.getLink(this.byIdRoot, id);
   }
 
   async getIndexLink(indexName: string, key: string): Promise<CID | null> {
@@ -71,7 +67,7 @@ export class CollectionSource {
       return 0;
     }
 
-    return await this.byIdIndex.countReportedLinks(this.byIdRoot);
+    return await this.linkIndex.countReportedLinks(this.byIdRoot);
   }
 
   async exactCount(): Promise<number> {
@@ -79,7 +75,7 @@ export class CollectionSource {
       return 0;
     }
 
-    return await this.byIdIndex.countLinks(this.byIdRoot);
+    return await this.linkIndex.countLinks(this.byIdRoot);
   }
 
   async sampleById(limit: number, random: () => number = Math.random): Promise<CollectionIndexLinkResult[]> {
@@ -87,49 +83,16 @@ export class CollectionSource {
       return [];
     }
 
-    return (await this.byIdIndex.sampleLinks(this.byIdRoot, limit, { random }))
+    return (await this.linkIndex.sampleLinks(this.byIdRoot, limit, { random }))
       .map(([key, cid]) => ({ key, cid }));
   }
 
-  async queryById(options: { prefix?: string; limit?: number } = {}): Promise<CollectionIndexLinkResult[]> {
-    if (!this.byIdRoot) {
-      return [];
-    }
-
-    const results: CollectionIndexLinkResult[] = [];
-    const limit = options.limit ?? Number.POSITIVE_INFINITY;
-    const iterator = options.prefix
-      ? this.byIdIndex.prefixLinks(this.byIdRoot, options.prefix)
-      : this.byIdIndex.linksEntries(this.byIdRoot);
-
-    for await (const [key, cid] of iterator) {
-      results.push({ key, cid });
-      if (results.length >= limit) {
-        break;
-      }
-    }
-
-    return results;
+  async queryById(options: QueryOptions = {}): Promise<CollectionIndexLinkResult[]> {
+    return collectLinks(this.streamQueryById(options));
   }
 
-  async *streamQueryById(options: { prefix?: string; limit?: number } = {}): AsyncGenerator<CollectionIndexLinkResult> {
-    if (!this.byIdRoot) {
-      return;
-    }
-
-    const limit = options.limit ?? Number.POSITIVE_INFINITY;
-    let emitted = 0;
-    const iterator = options.prefix
-      ? this.byIdIndex.prefixLinks(this.byIdRoot, options.prefix)
-      : this.byIdIndex.linksEntries(this.byIdRoot);
-
-    for await (const [key, cid] of iterator) {
-      yield { key, cid };
-      emitted += 1;
-      if (emitted >= limit) {
-        break;
-      }
-    }
+  streamQueryById(options: QueryOptions = {}): AsyncGenerator<CollectionIndexLinkResult> {
+    return this.streamLinks(this.byIdRoot, options);
   }
 
   async search(indexName: string, query: string, options: SearchOptions = {}): Promise<SearchLinkResult[]> {
@@ -187,49 +150,29 @@ export class CollectionSource {
 
   async queryIndex(
     indexName: string,
-    options: { prefix?: string; limit?: number } = {},
+    options: QueryOptions = {},
   ): Promise<CollectionIndexLinkResult[]> {
-    const manifestIndex = this.manifest.indexes[indexName];
-    if (!manifestIndex) {
-      return [];
-    }
-
-    const root = deserializeCid(manifestIndex.root);
-    if (!root) {
-      return [];
-    }
-
-    const results: CollectionIndexLinkResult[] = [];
-    const limit = options.limit ?? Number.POSITIVE_INFINITY;
-    const iterator = options.prefix
-      ? this.linkIndex.prefixLinks(root, options.prefix)
-      : this.linkIndex.linksEntries(root);
-
-    for await (const [key, cid] of iterator) {
-      results.push({ key, cid });
-      if (results.length >= limit) {
-        break;
-      }
-    }
-
-    return results;
+    return collectLinks(this.streamQueryIndex(indexName, options));
   }
 
   async *streamQueryIndex(
     indexName: string,
-    options: { prefix?: string; limit?: number } = {},
+    options: QueryOptions = {},
   ): AsyncGenerator<CollectionIndexLinkResult> {
     const manifestIndex = this.manifest.indexes[indexName];
     if (!manifestIndex) {
       return;
     }
 
-    const root = deserializeCid(manifestIndex.root);
-    if (!root) {
+    yield* this.streamLinks(deserializeCid(manifestIndex.root), options);
+  }
+
+  private async *streamLinks(root: CID | null, options: QueryOptions): AsyncGenerator<CollectionIndexLinkResult> {
+    const limit = options.limit ?? Number.POSITIVE_INFINITY;
+    if (!root || limit <= 0) {
       return;
     }
 
-    const limit = options.limit ?? Number.POSITIVE_INFINITY;
     let emitted = 0;
     const iterator = options.prefix
       ? this.linkIndex.prefixLinks(root, options.prefix)
@@ -252,4 +195,10 @@ export class CollectionSource {
 
     return manifestIndex;
   }
+}
+
+async function collectLinks(iterator: AsyncIterable<CollectionIndexLinkResult>): Promise<CollectionIndexLinkResult[]> {
+  const results: CollectionIndexLinkResult[] = [];
+  for await (const result of iterator) results.push(result);
+  return results;
 }

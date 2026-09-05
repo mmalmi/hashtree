@@ -2678,3 +2678,51 @@ Interpretation:
 - Production performance will depend on blob-size distribution and storage
   latency. The local ratio should not be treated as a promised server speedup;
   the structural bound is up to 256 blobs and at most 64 MiB per batch.
+
+### 2026-09-05: Core tests without DOM emulation
+
+Question: does the core TypeScript suite need its per-worker DOM environment?
+
+The active core tests use native Node APIs and do not use DOM APIs. The excluded
+direct-navigation script runs a separate Playwright browser. Compared the same
+20 files and 324 tests with Vitest 4.1.10 on Node 25.5.0, running happy-dom, Node,
+Node, then happy-dom to include a reverse-order comparison. The loader test file
+was excluded from this timing comparison because its regressions were being
+updated concurrently.
+
+| Environment | First run | Second run | Aggregate worker environment setup |
+| --- | ---: | ---: | ---: |
+| happy-dom | 3.75 s | 2.54 s | 6.68 s / 4.99 s |
+| Node | 2.23 s | 2.04 s | 1 ms / 2 ms |
+
+All four runs passed all 324 tests. Removing the environment override uses
+Vitest's default Node environment and permits removing happy-dom and three
+otherwise unused transitive packages. These local runs show the eliminated setup
+cost; the small sample and concurrent work do not establish a stable CI speedup.
+
+
+### 2026-09-05: Core property tests without per-case Tokio runtimes
+
+Question: can the in-memory tree and diff properties run faster without reducing
+randomized coverage?
+
+Setup:
+- Run the seven properties in `formal_diff_props` and `formal_tree_props`, plus
+  the existing wrong-key regression, using 256 cases per property and RNG seed
+  `20260905`. Run each test binary serially (`--test-threads=1`).
+- Compare three warm debug-binary runs before and after replacing per-case Tokio
+  worker-pool startup with the existing `futures::executor::block_on`. These
+  production paths use `MemoryStore` and an in-memory cursor; they require no
+  Tokio timers, tasks, or I/O driver.
+- The after build also consolidates collected and streamed diffs and removes
+  repeated hash lookups and store reference-count updates. Compilation is
+  excluded; this is a local test-suite measurement, not a production benchmark.
+
+| Combined suites | Run 1 | Run 2 | Run 3 | Median |
+| --- | ---: | ---: | ---: | ---: |
+| Before | 7.140 s | 6.003 s | 6.257 s | 6.257 s |
+| After | 5.340 s | 5.213 s | 6.012 s | 5.340 s |
+
+The median fell about 15%, with all generated cases and assertions retained.
+Individual runs varied with local load; the durable improvement is eliminating
+1,792 unnecessary runtime creations and their worker threads per suite run.

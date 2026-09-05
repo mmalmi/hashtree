@@ -28,8 +28,7 @@ proptest! {
     fn prop_diff_identity_empty(
         files in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..256), 0..12),
     ) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let store = Arc::new(MemoryStore::new());
             let tree = HashTree::new(HashTreeConfig::new(store).public());
 
@@ -45,8 +44,7 @@ proptest! {
         old_files in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..128), 0..10),
         new_files in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..128), 0..10),
     ) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let store = Arc::new(MemoryStore::new());
             let tree = HashTree::new(HashTreeConfig::new(store).public());
 
@@ -68,8 +66,7 @@ proptest! {
     fn prop_first_push_returns_all_reachable(
         files in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..128), 0..10),
     ) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let store = Arc::new(MemoryStore::new());
             let tree = HashTree::new(HashTreeConfig::new(store).public());
 

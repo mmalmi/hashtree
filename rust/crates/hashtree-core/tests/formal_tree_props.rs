@@ -20,8 +20,7 @@ proptest! {
         chunk_size in 1usize..256,
         encrypted in any::<bool>(),
     ) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let store = Arc::new(MemoryStore::new());
             let cfg = if encrypted {
                 HashTreeConfig::new(store).with_chunk_size(chunk_size)
@@ -43,8 +42,7 @@ proptest! {
         chunk_size in 1usize..256,
         encrypted in any::<bool>(),
     ) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let store = Arc::new(MemoryStore::new());
             let cfg = if encrypted {
                 HashTreeConfig::new(store).with_chunk_size(chunk_size)
@@ -70,8 +68,7 @@ proptest! {
         start in 0usize..5000,
         end in prop::option::of(0usize..5000),
     ) {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let store = Arc::new(MemoryStore::new());
             let tree = HashTree::new(HashTreeConfig::new(store.clone()).with_chunk_size(chunk_size).public());
             let reader = TreeReader::new(store);
@@ -96,8 +93,7 @@ proptest! {
         root_data in prop::collection::vec(any::<u8>(), 0..512),
     ) {
         prop_assume!(nested_file != root_file);
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
+        futures::executor::block_on(async {
             let store = Arc::new(MemoryStore::new());
             let tree = HashTree::new(HashTreeConfig::new(store).public());
 

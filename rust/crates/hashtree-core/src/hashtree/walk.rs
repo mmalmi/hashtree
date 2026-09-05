@@ -95,7 +95,8 @@ impl<S: Store> HashTree<S> {
     }
 
     /// Walk entire tree with parallel fetching
-    /// Uses a work-stealing approach: always keeps `concurrency` requests in flight
+    /// Uses a work-stealing approach: keeps up to `concurrency` requests in flight.
+    /// Zero concurrency runs serially.
     pub async fn walk_parallel(
         &self,
         cid: &Cid,
@@ -107,7 +108,8 @@ impl<S: Store> HashTree<S> {
     }
 
     /// Walk entire tree with parallel fetching and optional progress counter
-    /// The counter is incremented for each node fetched (not just entries found)
+    /// The counter is incremented for each node fetched (not just entries found).
+    /// Zero concurrency runs serially.
     ///
     /// OPTIMIZATION: Blobs are NOT fetched - their metadata (hash, size, link_type)
     /// comes from the parent node's link, so we just add them directly to entries.
@@ -124,6 +126,7 @@ impl<S: Store> HashTree<S> {
         use std::sync::atomic::Ordering;
 
         let mut entries = Vec::new();
+        let concurrency = concurrency.max(1);
         let mut pending: VecDeque<(Cid, String)> = VecDeque::new();
         let mut active = FuturesUnordered::new();
 
@@ -171,11 +174,10 @@ impl<S: Store> HashTree<S> {
                 let data = if let Some(key) = &node_cid.key {
                     decrypt_chk(&data, key).map_err(|e| {
                         HashTreeError::Decryption(format!(
-                            "{} at path '{}' hash {} key {}",
+                            "{} at path '{}' hash {}",
                             e,
                             node_path,
-                            hex::encode(node_cid.hash),
-                            hex::encode(key)
+                            hex::encode(node_cid.hash)
                         ))
                     })?
                 } else {
@@ -290,11 +292,10 @@ impl<S: Store> HashTree<S> {
                                 Err(e) => {
                                     return Some((
                                         Err(HashTreeError::Decryption(format!(
-                                            "{} at path '{}' hash {} key {}",
+                                            "{} at path '{}' hash {}",
                                             e,
                                             path,
-                                            hex::encode(cid.hash),
-                                            hex::encode(key)
+                                            hex::encode(cid.hash)
                                         ))),
                                         WalkStreamState::Done,
                                     ))
@@ -384,11 +385,10 @@ impl<S: Store> HashTree<S> {
                     Err(e) => {
                         return Some((
                             Err(HashTreeError::Decryption(format!(
-                                "{} at path '{}' hash {} key {}",
+                                "{} at path '{}' hash {}",
                                 e,
                                 item.path,
-                                hex::encode(item.hash),
-                                hex::encode(key)
+                                hex::encode(item.hash)
                             ))),
                             WalkStreamState::Done,
                         ))

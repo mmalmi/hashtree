@@ -50,7 +50,6 @@
   },
   "devDependencies": {
     "@types/ws": "^8.18.1",
-    "happy-dom": "^20.10.6",
     "playwright": "^1.61.1",
     "typescript": "^5.3.0",
     "vitest": "^4.1.10",

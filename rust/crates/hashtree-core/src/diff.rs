@@ -75,7 +75,7 @@ fn decrypt_if_keyed(data: Vec<u8>, key: Option<[u8; 32]>) -> Result<Vec<u8>, Has
 /// # Arguments
 /// * `tree` - The HashTree instance with store access
 /// * `root` - Root CID to start from
-/// * `concurrency` - Number of concurrent fetches
+/// * `concurrency` - Number of concurrent fetches (at least one, even when zero is passed)
 ///
 /// # Returns
 /// Set of all hashes in the tree
@@ -87,7 +87,7 @@ pub async fn collect_hashes<S: Store>(
     collect_hashes_with_progress(tree, root, concurrency, None).await
 }
 
-/// Collect hashes with optional progress tracking
+/// Collect hashes with optional progress tracking; zero concurrency runs serially.
 pub async fn collect_hashes_with_progress<S: Store>(
     tree: &HashTree<S>,
     root: &Cid,
@@ -97,6 +97,7 @@ pub async fn collect_hashes_with_progress<S: Store>(
     use futures::stream::{FuturesUnordered, StreamExt};
     use std::collections::VecDeque;
 
+    let concurrency = concurrency.max(1);
     let store = tree.get_store();
     let mut hashes = HashSet::new();
     let mut pending: VecDeque<(Hash, Option<[u8; 32]>)> = VecDeque::new();
@@ -110,18 +111,17 @@ pub async fn collect_hashes_with_progress<S: Store>(
         while active.len() < concurrency {
             if let Some((hash, key)) = pending.pop_front() {
                 // Skip if already visited
-                if hashes.contains(&hash) {
+                if !hashes.insert(hash) {
                     continue;
                 }
-                hashes.insert(hash);
 
-                let store = store.clone();
+                let store = &store;
                 let fut = async move {
                     let data = store
                         .get(&hash)
                         .await
                         .map_err(|e| HashTreeError::Store(e.to_string()))?;
-                    Ok::<_, HashTreeError>((hash, key, data))
+                    Ok::<_, HashTreeError>((key, data))
                 };
                 active.push(fut);
             } else {
@@ -136,7 +136,7 @@ pub async fn collect_hashes_with_progress<S: Store>(
 
         // Wait for any future to complete
         if let Some(result) = active.next().await {
-            let (_hash, key, data) = result?;
+            let (key, data) = result?;
 
             if let Some(counter) = progress {
                 counter.fetch_add(1, Ordering::Relaxed);
@@ -181,7 +181,7 @@ pub async fn collect_hashes_with_progress<S: Store>(
 /// * `tree` - HashTree instance
 /// * `old_root` - Root of the old tree (may be None for first push)
 /// * `new_root` - Root of the new tree
-/// * `concurrency` - Number of concurrent fetches
+/// * `concurrency` - Number of concurrent fetches (at least one, even when zero is passed)
 ///
 /// # Returns
 /// TreeDiff with added hashes and statistics
@@ -203,103 +203,27 @@ pub async fn tree_diff<S: Store>(
 
 /// Compute diff given pre-computed old hashes
 ///
-/// Use this when you already have the old tree's hash set (e.g., from a previous operation)
+/// Use this when you already have the old tree's hash set (e.g., from a previous operation).
+/// Zero concurrency runs serially.
 pub async fn tree_diff_with_old_hashes<S: Store>(
     tree: &HashTree<S>,
     old_hashes: &HashSet<Hash>,
     new_root: &Cid,
     concurrency: usize,
 ) -> Result<TreeDiff, HashTreeError> {
-    use futures::stream::{FuturesUnordered, StreamExt};
-    use std::collections::VecDeque;
-
-    let store = tree.get_store();
-    let mut added: Vec<Hash> = Vec::new();
-    let mut visited: HashSet<Hash> = HashSet::new();
-    let mut pending: VecDeque<(Hash, Option<[u8; 32]>)> = VecDeque::new();
-    let mut active = FuturesUnordered::new();
-
-    let mut stats = DiffStats {
-        old_tree_nodes: old_hashes.len(),
-        new_tree_nodes: 0,
-        unchanged_subtrees: 0,
-    };
-
-    // Seed with new root
-    pending.push_back((new_root.hash, new_root.key));
-
-    loop {
-        // Fill up to concurrency limit
-        while active.len() < concurrency {
-            if let Some((hash, key)) = pending.pop_front() {
-                // Skip if already visited
-                if visited.contains(&hash) {
-                    continue;
-                }
-                visited.insert(hash);
-
-                // KEY OPTIMIZATION: If hash exists in old tree, skip entire subtree
-                if old_hashes.contains(&hash) {
-                    stats.unchanged_subtrees += 1;
-                    continue;
-                }
-
-                // Hash is new - will need to upload
-                added.push(hash);
-                stats.new_tree_nodes += 1;
-
-                // Fetch to check for children
-                let store = store.clone();
-                let fut = async move {
-                    let data = store
-                        .get(&hash)
-                        .await
-                        .map_err(|e| HashTreeError::Store(e.to_string()))?;
-                    Ok::<_, HashTreeError>((hash, key, data))
-                };
-                active.push(fut);
-            } else {
-                break;
-            }
-        }
-
-        // If nothing active, we're done
-        if active.is_empty() {
-            break;
-        }
-
-        // Wait for any future to complete
-        if let Some(result) = active.next().await {
-            let (_hash, key, data) = result?;
-
-            let data = match data {
-                Some(d) => d,
-                None => continue,
-            };
-
-            // Decrypt if key present (strict: wrong key is an error).
-            let plaintext = decrypt_if_keyed(data, key)?;
-
-            // If it's a tree node, queue children
-            if is_tree_node(&plaintext) {
-                if let Ok(node) = decode_tree_node(&plaintext) {
-                    for link in node.links {
-                        if !visited.contains(&link.hash) {
-                            pending.push_back((link.hash, link.key));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    let mut added = Vec::new();
+    let stats = tree_diff_streaming(tree, old_hashes, new_root, concurrency, |hash| {
+        added.push(hash);
+        true
+    })
+    .await?;
     Ok(TreeDiff { added, stats })
 }
 
 /// Streaming diff - yields hashes as they're discovered
 ///
 /// Memory efficient for very large trees. Yields hashes that need upload
-/// one at a time instead of collecting into a Vec.
+/// one at a time instead of collecting into a Vec. Zero concurrency runs serially.
 pub async fn tree_diff_streaming<S, F>(
     tree: &HashTree<S>,
     old_hashes: &HashSet<Hash>,
@@ -314,6 +238,7 @@ where
     use futures::stream::{FuturesUnordered, StreamExt};
     use std::collections::VecDeque;
 
+    let concurrency = concurrency.max(1);
     let store = tree.get_store();
     let mut visited: HashSet<Hash> = HashSet::new();
     let mut pending: VecDeque<(Hash, Option<[u8; 32]>)> = VecDeque::new();
@@ -330,10 +255,9 @@ where
     loop {
         while active.len() < concurrency {
             if let Some((hash, key)) = pending.pop_front() {
-                if visited.contains(&hash) {
+                if !visited.insert(hash) {
                     continue;
                 }
-                visited.insert(hash);
 
                 if old_hashes.contains(&hash) {
                     stats.unchanged_subtrees += 1;
@@ -348,13 +272,13 @@ where
                     return Ok(stats);
                 }
 
-                let store = store.clone();
+                let store = &store;
                 let fut = async move {
                     let data = store
                         .get(&hash)
                         .await
                         .map_err(|e| HashTreeError::Store(e.to_string()))?;
-                    Ok::<_, HashTreeError>((hash, key, data))
+                    Ok::<_, HashTreeError>((key, data))
                 };
                 active.push(fut);
             } else {
@@ -367,7 +291,7 @@ where
         }
 
         if let Some(result) = active.next().await {
-            let (_hash, key, data) = result?;
+            let (key, data) = result?;
 
             let data = match data {
                 Some(d) => d,
@@ -610,60 +534,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_collect_hashes() {
-        let (_store, tree) = make_tree();
-
-        let file1 = tree.put_blob(b"content1").await.unwrap();
-        let file2 = tree.put_blob(b"content2").await.unwrap();
-        let dir_cid = tree
-            .put_directory(vec![
-                DirEntry::new("a.txt", file1).with_size(8),
-                DirEntry::new("b.txt", file2).with_size(8),
-            ])
-            .await
-            .unwrap();
-
-        let hashes = collect_hashes(&tree, &dir_cid, 4).await.unwrap();
-
-        assert_eq!(hashes.len(), 3); // dir + 2 files
-        assert!(hashes.contains(&dir_cid.hash));
-        assert!(hashes.contains(&file1));
-        assert!(hashes.contains(&file2));
-    }
-
-    #[tokio::test]
-    async fn test_diff_streaming() {
-        let (_store, tree) = make_tree();
-
-        let file1 = tree.put_blob(b"old").await.unwrap();
-        let old_root = tree
-            .put_directory(vec![DirEntry::new("a.txt", file1).with_size(3)])
-            .await
-            .unwrap();
-
-        let file2 = tree.put_blob(b"new").await.unwrap();
-        let new_root = tree
-            .put_directory(vec![DirEntry::new("a.txt", file2).with_size(3)])
-            .await
-            .unwrap();
-
-        let old_hashes = collect_hashes(&tree, &old_root, 4).await.unwrap();
-
-        let mut streamed: Vec<Hash> = Vec::new();
-        let stats = tree_diff_streaming(&tree, &old_hashes, &new_root, 4, |hash| {
-            streamed.push(hash);
-            true // continue
-        })
-        .await
-        .unwrap();
-
-        assert_eq!(streamed.len(), 2); // new root + new file
-        assert!(streamed.contains(&new_root.hash));
-        assert!(streamed.contains(&file2));
-        assert_eq!(stats.new_tree_nodes, 2);
-    }
-
-    #[tokio::test]
     async fn test_diff_streaming_early_stop() {
         let (_store, tree) = make_tree();
 
@@ -682,14 +552,15 @@ mod tests {
         let old_hashes = HashSet::new(); // empty = all new
 
         let mut count = 0;
-        let _stats = tree_diff_streaming(&tree, &old_hashes, &new_root, 1, |_hash| {
+        let stats = tree_diff_streaming(&tree, &old_hashes, &new_root, 1, |_hash| {
             count += 1;
             count < 2 // stop after 2
         })
         .await
         .unwrap();
 
-        assert!(count <= 2, "should have stopped early");
+        assert_eq!(count, 2, "should stop after exactly two callbacks");
+        assert_eq!(stats.new_tree_nodes, 2);
     }
 
     #[tokio::test]

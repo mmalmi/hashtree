@@ -1,25 +1,19 @@
-import { BTree, SearchIndex } from '@hashtree/index';
+import { BTree } from '@hashtree/index';
 import { deserializeCid } from './cid.js';
-import { materializeSearchTerms } from './helpers.js';
+import { createSearchIndex, materializeSearchTerms } from './helpers.js';
 export class CollectionSource {
     manifest;
-    byIdIndex;
     linkIndex;
     byIdRoot;
     searchIndexes = new Map();
     searchDefinitions = new Map();
     constructor(store, manifest, definition) {
         this.manifest = manifest;
-        this.byIdIndex = new BTree(store);
         this.linkIndex = new BTree(store);
         this.byIdRoot = deserializeCid(manifest.byIdRoot);
         for (const [name, index] of Object.entries(manifest.indexes ?? {})) {
             if (index.kind === 'search') {
-                this.searchIndexes.set(name, new SearchIndex(store, {
-                    order: index.options?.order,
-                    minKeywordLength: index.options?.minKeywordLength,
-                    stopWords: index.options?.stopWords ? new Set(index.options.stopWords) : undefined,
-                }));
+                this.searchIndexes.set(name, createSearchIndex(store, index.options));
             }
         }
         for (const searchIndex of definition?.searchIndexes ?? []) {
@@ -30,7 +24,7 @@ export class CollectionSource {
         if (!this.byIdRoot) {
             return null;
         }
-        return await this.byIdIndex.getLink(this.byIdRoot, id);
+        return await this.linkIndex.getLink(this.byIdRoot, id);
     }
     async getIndexLink(indexName, key) {
         const manifestIndex = this.manifest.indexes[indexName];
@@ -50,54 +44,26 @@ export class CollectionSource {
         if (!this.byIdRoot) {
             return 0;
         }
-        return await this.byIdIndex.countReportedLinks(this.byIdRoot);
+        return await this.linkIndex.countReportedLinks(this.byIdRoot);
     }
     async exactCount() {
         if (!this.byIdRoot) {
             return 0;
         }
-        return await this.byIdIndex.countLinks(this.byIdRoot);
+        return await this.linkIndex.countLinks(this.byIdRoot);
     }
     async sampleById(limit, random = Math.random) {
         if (!this.byIdRoot) {
             return [];
         }
-        return (await this.byIdIndex.sampleLinks(this.byIdRoot, limit, { random }))
+        return (await this.linkIndex.sampleLinks(this.byIdRoot, limit, { random }))
             .map(([key, cid]) => ({ key, cid }));
     }
     async queryById(options = {}) {
-        if (!this.byIdRoot) {
-            return [];
-        }
-        const results = [];
-        const limit = options.limit ?? Number.POSITIVE_INFINITY;
-        const iterator = options.prefix
-            ? this.byIdIndex.prefixLinks(this.byIdRoot, options.prefix)
-            : this.byIdIndex.linksEntries(this.byIdRoot);
-        for await (const [key, cid] of iterator) {
-            results.push({ key, cid });
-            if (results.length >= limit) {
-                break;
-            }
-        }
-        return results;
+        return collectLinks(this.streamQueryById(options));
     }
-    async *streamQueryById(options = {}) {
-        if (!this.byIdRoot) {
-            return;
-        }
-        const limit = options.limit ?? Number.POSITIVE_INFINITY;
-        let emitted = 0;
-        const iterator = options.prefix
-            ? this.byIdIndex.prefixLinks(this.byIdRoot, options.prefix)
-            : this.byIdIndex.linksEntries(this.byIdRoot);
-        for await (const [key, cid] of iterator) {
-            yield { key, cid };
-            emitted += 1;
-            if (emitted >= limit) {
-                break;
-            }
-        }
+    streamQueryById(options = {}) {
+        return this.streamLinks(this.byIdRoot, options);
     }
     async search(indexName, query, options = {}) {
         const manifestIndex = this.manifest.indexes[indexName];
@@ -135,37 +101,20 @@ export class CollectionSource {
         return materializeSearchTerms(definition, searchIndex, query);
     }
     async queryIndex(indexName, options = {}) {
-        const manifestIndex = this.manifest.indexes[indexName];
-        if (!manifestIndex) {
-            return [];
-        }
-        const root = deserializeCid(manifestIndex.root);
-        if (!root) {
-            return [];
-        }
-        const results = [];
-        const limit = options.limit ?? Number.POSITIVE_INFINITY;
-        const iterator = options.prefix
-            ? this.linkIndex.prefixLinks(root, options.prefix)
-            : this.linkIndex.linksEntries(root);
-        for await (const [key, cid] of iterator) {
-            results.push({ key, cid });
-            if (results.length >= limit) {
-                break;
-            }
-        }
-        return results;
+        return collectLinks(this.streamQueryIndex(indexName, options));
     }
     async *streamQueryIndex(indexName, options = {}) {
         const manifestIndex = this.manifest.indexes[indexName];
         if (!manifestIndex) {
             return;
         }
-        const root = deserializeCid(manifestIndex.root);
-        if (!root) {
+        yield* this.streamLinks(deserializeCid(manifestIndex.root), options);
+    }
+    async *streamLinks(root, options) {
+        const limit = options.limit ?? Number.POSITIVE_INFINITY;
+        if (!root || limit <= 0) {
             return;
         }
-        const limit = options.limit ?? Number.POSITIVE_INFINITY;
         let emitted = 0;
         const iterator = options.prefix
             ? this.linkIndex.prefixLinks(root, options.prefix)
@@ -185,5 +134,11 @@ export class CollectionSource {
         }
         return manifestIndex;
     }
+}
+async function collectLinks(iterator) {
+    const results = [];
+    for await (const result of iterator)
+        results.push(result);
+    return results;
 }
 //# sourceMappingURL=source.js.map

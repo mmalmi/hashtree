@@ -24,6 +24,12 @@ function sequenceRandom(sequence: number[]): () => number {
   return () => sequence[index++ % sequence.length] ?? 0;
 }
 
+async function collect<T>(values: AsyncIterable<T>): Promise<T[]> {
+  const results: T[] = [];
+  for await (const value of values) results.push(value);
+  return results;
+}
+
 function cidFromSeed(seed: number): CID {
   const hash = new Uint8Array(32);
   for (let index = 0; index < hash.length; index += 1) {
@@ -145,7 +151,7 @@ describe('@hashtree/collection', () => {
     expect(await source.exactCount()).toBe(2);
   });
 
-  it('streams by-id and key indexes without materializing the whole result set first', async () => {
+  it('applies the same prefixes and limits to array and streaming queries', async () => {
     const store = new MemoryStore();
     const writer = new CollectionWriter(store, songDefinition);
 
@@ -154,18 +160,45 @@ describe('@hashtree/collection', () => {
     await writer.put({ id: 'song-c', title: 'Silent Tide', artist: 'Bea' }, cidFromSeed(8));
 
     const source = new CollectionSource(store, writer.manifest());
-    const byIdKeys: string[] = [];
-    for await (const result of source.streamQueryById({ prefix: 'song-', limit: 2 })) {
-      byIdKeys.push(result.key);
+    for (const [options, byIdKeys, artistKeys] of [
+      [{}, ['song-a', 'song-b', 'song-c'], ['artist:ada', 'artist:bea']],
+      [{ limit: 1 }, ['song-a'], ['artist:ada']],
+      [{ prefix: 'song-', limit: 2 }, ['song-a', 'song-b'], []],
+      [{ prefix: 'artist:ada', limit: 1 }, [], ['artist:ada']],
+    ] as const) {
+      const byId = await source.queryById(options);
+      const artists = await source.queryIndex('artist', options);
+      expect(byId.map((result) => result.key)).toEqual(byIdKeys);
+      expect(artists.map((result) => result.key)).toEqual(artistKeys);
+      expect(await collect(source.streamQueryById(options))).toEqual(byId);
+      expect(await collect(source.streamQueryIndex('artist', options))).toEqual(artists);
     }
 
-    const artistKeys: string[] = [];
-    for await (const result of source.streamQueryIndex('artist', { prefix: 'artist:ada', limit: 1 })) {
-      artistKeys.push(result.key);
-    }
+    expect(await source.queryIndex('missing')).toEqual([]);
+    expect(await collect(source.streamQueryIndex('missing'))).toEqual([]);
+  });
 
-    expect(byIdKeys).toEqual(['song-a', 'song-b']);
-    expect(artistKeys).toEqual(['artist:ada']);
+  it('returns no results and performs no reads for non-positive query limits', async () => {
+    class CountingStore extends MemoryStore {
+      reads = 0;
+      override async get(hash: Uint8Array) {
+        this.reads += 1;
+        return super.get(hash);
+      }
+    }
+    const store = new CountingStore();
+    const writer = new CollectionWriter(store, songDefinition);
+    await writer.put({ id: 'song-a', title: 'Midnight Orchard', artist: 'Ada' }, cidFromSeed(6));
+    const source = new CollectionSource(store, writer.manifest());
+    store.reads = 0;
+
+    for (const limit of [0, -1]) {
+      expect(await source.queryById({ limit })).toEqual([]);
+      expect(await source.queryIndex('artist', { limit })).toEqual([]);
+      expect(await collect(source.streamQueryById({ limit }))).toEqual([]);
+      expect(await collect(source.streamQueryIndex('artist', { limit }))).toEqual([]);
+    }
+    expect(store.reads).toBe(0);
   });
 
   it('exposes pre-tokenized collection search through the source API', async () => {
