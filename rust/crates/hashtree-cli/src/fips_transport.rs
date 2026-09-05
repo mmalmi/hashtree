@@ -1023,20 +1023,30 @@ mod tests {
     }
 
     async fn udp_endpoint(scope: &str) -> (BoundFipsEndpoint, String) {
-        let addr = reserve_udp_addr();
         let keys = nostr::Keys::generate();
         let mut options = FipsEndpointOptions::new(keys.secret_key().to_bech32().unwrap());
         options.discovery_scope = scope.to_string();
         options.enable_udp = true;
-        options.udp_bind_addr = Some(addr.clone());
+        options.udp_bind_addr = Some("127.0.0.1:0".to_string());
         options.enable_webrtc = false;
         options.enable_local_rendezvous = false;
         options.enable_lan_discovery = false;
         options.share_local_candidates = false;
         let endpoint = bind_fips_endpoint(options).await.unwrap();
-        (endpoint, addr)
+        let addrs = endpoint
+            .native_endpoint
+            .bound_udp_listen_addrs()
+            .await
+            .unwrap();
+        let [addr] = addrs.as_slice() else {
+            panic!("expected exactly one bound UDP listener, got {addrs:?}");
+        };
+        assert!(addr.ip().is_loopback());
+        assert_ne!(addr.port(), 0);
+        (endpoint, addr.to_string())
     }
 
+    #[cfg(feature = "experimental-decentralized-pubsub")]
     fn reserve_udp_addr() -> String {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         socket.local_addr().unwrap().to_string()
