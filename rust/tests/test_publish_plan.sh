@@ -11,9 +11,9 @@ grep -F 'hashtree-lmdb = { version = "=0.2.87", path = "crates/hashtree-lmdb" }'
     "${RUST_DIR}/Cargo.toml" >/dev/null
 grep -F 'version = "0.2.87"' \
     "${RUST_DIR}/crates/hashtree-lmdb/Cargo.toml" >/dev/null
-grep -F 'version = "0.2.83"' \
-    "${RUST_DIR}/crates/git-remote-htree/Cargo.toml" >/dev/null
-grep -F 'git-remote-htree = { version = "=0.2.83", path = "../git-remote-htree" }' \
+git_remote_version="$(awk -F '"' '/^version = / { print $2; exit }' "${RUST_DIR}/crates/git-remote-htree/Cargo.toml")"
+: "${git_remote_version:?missing git-remote-htree package version}"
+grep -F "git-remote-htree = { version = \"=${git_remote_version}\", path = \"../git-remote-htree\" }" \
     "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" >/dev/null
 grep -F 'hashtree-fips-transport = { version = "0.4.12", path = "crates/hashtree-fips-transport" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
