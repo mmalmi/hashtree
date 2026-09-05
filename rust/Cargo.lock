@@ -3883,7 +3883,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-resolver"
-version = "0.2.82"
+version = "0.2.83"
 dependencies = [
  "async-trait",
  "futures",
@@ -8175,7 +8175,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-hashtree-updater"
-version = "0.2.48"
+version = "0.2.49"
 dependencies = [
  "hashtree-blossom",
  "hashtree-core",

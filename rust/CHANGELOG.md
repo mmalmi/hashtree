@@ -122,6 +122,14 @@
 
 ### Fixed
 
+- Release `hashtree-resolver` 0.2.83 with the existing NIP-01 event-ordering
+  correction for replacements with equal timestamps.
+- Release `tauri-plugin-hashtree-updater` 0.2.49 with matching Nostr dependency
+  versions so registry consumers use compatible key types.
+- Wait for systemd to finish assigning migration worker credentials before
+  capturing process identity, retaining the existing deadline and identity checks.
+- Validate worker mount namespaces against the root controller’s attestation
+  without requiring privileged access to PID 1, preserving exact mount identity checks.
 - Resume durable event-body repairs without repeating the planning scan, while
   retaining intent validation before writes and the complete final integrity audit.
 - Enable thread-independent read transactions in the standalone social-graph

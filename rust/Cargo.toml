@@ -40,7 +40,7 @@ hashtree-collection = { version = "0.2.84", path = "crates/hashtree-collection" 
 hashtree-lmdb = { version = "=0.2.87", path = "crates/hashtree-lmdb" }
 hashtree-s3 = { version = "0.2.82", path = "crates/hashtree-s3" }
 hashtree-blossom = { version = "0.2.82", path = "crates/hashtree-blossom" }
-hashtree-resolver = { version = "0.2.82", path = "crates/hashtree-resolver" }
+hashtree-resolver = { version = "0.2.83", path = "crates/hashtree-resolver" }
 hashtree-config = { version = "0.2.83", path = "crates/hashtree-config" }
 hashtree-fs = { version = "0.2.82", path = "crates/hashtree-fs" }
 hashtree-nostr = { version = "0.2.87", path = "crates/hashtree-nostr" }
