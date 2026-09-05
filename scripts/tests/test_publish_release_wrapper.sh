@@ -78,7 +78,12 @@ if [ "${1:-}" = "auth" ] && [ "${2:-}" = "status" ]; then
 fi
 
 if [ "${1:-}" = "release" ] && [ "${2:-}" = "view" ]; then
-    exit 1
+    [ "${TEST_RELEASE_EXISTS:-0}" -eq 1 ]
+    exit $?
+fi
+
+if [ "${1:-}" = "release" ] && [ "${2:-}" = "upload" ] && [ "${TEST_UPLOAD_FAILURE:-0}" -eq 1 ]; then
+    exit 37
 fi
 
 exit 0
@@ -114,5 +119,25 @@ grep -F -- '--notes-file' "${LOG_DIR}/gh.log" >/dev/null
 grep -F 'release.json' "${LOG_DIR}/gh.log" >/dev/null
 grep -F 'install.sh' "${LOG_DIR}/gh.log" >/dev/null
 grep -F 'hashtree-aarch64-apple-darwin.tar.gz' "${LOG_DIR}/gh.log" >/dev/null
+
+for upload_failure in 0 1; do
+    : >"${LOG_DIR}/gh.log"
+    status=0
+    TEST_RELEASE_EXISTS=1 TEST_UPLOAD_FAILURE="$upload_failure" TEST_LOG_DIR="${LOG_DIR}" \
+        PATH="${BIN_DIR}:$PATH" "${TEST_REPO}/publish_release.sh" --version v0.0.1 \
+        >"${TMP_DIR}/stdout.txt" 2>"${TMP_DIR}/stderr.txt" || status=$?
+
+    notes_line="$(grep -n -F -- '--notes-file' "${LOG_DIR}/gh.log" | cut -d: -f1)"
+    upload_line="$(grep -n -F 'release upload v0.0.1' "${LOG_DIR}/gh.log" | cut -d: -f1)"
+    [ "$notes_line" -lt "$upload_line" ]
+    if [ "$upload_failure" -eq 1 ]; then
+        [ "$status" -eq 37 ]
+        ! grep -F -- '--draft=false' "${LOG_DIR}/gh.log" >/dev/null
+    else
+        [ "$status" -eq 0 ]
+        publish_line="$(grep -n -F 'release edit v0.0.1 --repo mmalmi/hashtree --draft=false --verify-tag' "${LOG_DIR}/gh.log" | cut -d: -f1)"
+        [ "$upload_line" -lt "$publish_line" ]
+    fi
+done
 
 echo "test_publish_release_wrapper.sh passed"

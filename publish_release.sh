@@ -241,6 +241,10 @@ if gh release view "$VERSION" --repo "$GITHUB_REPO" >/dev/null 2>&1; then
         "${GITHUB_FILES[@]}" \
         --repo "$GITHUB_REPO" \
         --clobber
+    gh release edit "$VERSION" \
+        --repo "$GITHUB_REPO" \
+        --draft=false \
+        --verify-tag
 else
     gh release create "$VERSION" \
         "${GITHUB_FILES[@]}" \

@@ -484,7 +484,7 @@ jobs:
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag || github.ref_name }}
-          draft: false
+          draft: true
           prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
           files: ${{ steps.release_assets.outputs.files }}
           body_path: release-body.md
