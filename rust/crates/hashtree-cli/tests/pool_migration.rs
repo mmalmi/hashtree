@@ -465,7 +465,7 @@ fn stopped_source_rejects_a_blob_omitted_from_online_metadata_reconciliation() {
         .expect("remove one legacy metadata row");
     wtxn.commit().expect("commit mixed source keyset");
     env.force_sync().expect("sync mixed source keyset");
-    drop(env);
+    env.prepare_for_closing().wait();
 
     let (output, request) = run_fenced_migration(&scenario);
     assert!(

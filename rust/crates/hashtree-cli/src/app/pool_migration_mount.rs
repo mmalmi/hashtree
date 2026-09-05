@@ -348,7 +348,9 @@ pub(super) fn validate_source_read_only_mount_authorities(
     if validations.is_empty() {
         bail!("source read-only mount validation requires a nonempty authority set");
     }
-    let namespace = require_host_mount_namespace()?;
+    // The controller certifies the host namespace when creating this authority;
+    // workers validate that attestation without needing access to PID 1's procfs.
+    let namespace = namespace_identity(Path::new("/proc/self/ns/mnt"))?;
     let mounts = read_mountinfo()?;
     for validation in validations {
         if validation.authority.mount_namespace_identity != namespace {
@@ -379,7 +381,7 @@ pub(super) fn validate_source_read_only_mount_authorities(
             _ => bail!("source external read-only mount authority is incomplete"),
         }
     }
-    if require_host_mount_namespace()? != namespace {
+    if namespace_identity(Path::new("/proc/self/ns/mnt"))? != namespace {
         bail!("source read-only mount namespace changed during batched validation");
     }
     Ok(())
@@ -392,7 +394,7 @@ pub(super) fn validate_cached_source_read_only_mount_authorities(
     if authorities.is_empty() {
         bail!("cached source mount validation requires a nonempty authority set");
     }
-    let namespace = require_host_mount_namespace()?;
+    let namespace = namespace_identity(Path::new("/proc/self/ns/mnt"))?;
     let mounts = read_mountinfo()?;
     let mut validated = Vec::<(
         &ReadOnlyBindMountAuthorityV3,
@@ -434,7 +436,7 @@ pub(super) fn validate_cached_source_read_only_mount_authorities(
             validated.push((mount, expected_type, label));
         }
     }
-    if require_host_mount_namespace()? != namespace {
+    if namespace_identity(Path::new("/proc/self/ns/mnt"))? != namespace {
         bail!("source read-only mount namespace changed during cached batched validation");
     }
     Ok(())
@@ -1558,6 +1560,54 @@ mod tests {
         validate_teardown_intent, BoundedFileAuthorityV3, MountTeardownIntentV3,
         MOUNT_TEARDOWN_INTENT_SCHEMA,
     };
+
+    #[test]
+    fn read_only_mount_validation_rejects_another_attested_namespace() {
+        let mut execution =
+            current_execution_namespace_authority().expect("current execution namespaces");
+        execution.mount.inode ^= 1;
+        let error = require_attested_execution_namespace(execution, &[])
+            .expect_err("worker must reject a different attested mount namespace");
+        assert!(error.to_string().contains("execution namespaces differ"));
+
+        // Namespace authority must be rejected before any supplied mount path
+        // is inspected, without requiring a privileged test mount.
+        let authority = SourceReadOnlyMountAuthorityV3 {
+            mount_namespace_identity: execution.mount,
+            data: ReadOnlyBindMountAuthorityV3 {
+                path: PathBuf::new(),
+                path_identity: execution.mount,
+                mount_id: 1,
+                parent_mount_id: 1,
+                device_major: 0,
+                device_minor: 0,
+                root: PathBuf::new(),
+                mount_options: Vec::new(),
+                optional_fields: Vec::new(),
+                filesystem_type: String::new(),
+                mount_source: String::new(),
+                super_options: Vec::new(),
+            },
+            external: None,
+        };
+        for result in [
+            validate_source_read_only_mount_authority(
+                &authority,
+                Path::new(""),
+                LmdbIdentityV3 {
+                    directory: execution.mount,
+                    data: execution.mount,
+                    lock: execution.mount,
+                },
+                None,
+                None,
+            ),
+            validate_cached_source_read_only_mount_authorities(&[&authority]),
+        ] {
+            let error = result.expect_err("mount authority must remain in its attested namespace");
+            assert!(error.to_string().contains("different mount namespace"));
+        }
+    }
 
     struct ExactMountCleanup(PathBuf);
 
