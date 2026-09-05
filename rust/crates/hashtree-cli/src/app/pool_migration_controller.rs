@@ -1549,7 +1549,8 @@ mod linux {
             };
             let request = self.build_request(&process, source_read_only_mounts)?;
             #[cfg(test)]
-            let request = publication_test_fixture::before_publication(request)?;
+            let request =
+                publication_test_fixture::before_publication(request, process.uid, process.gid)?;
             let mut request_bytes =
                 serde_json::to_vec(&request).context("serialize Pool migration launch request")?;
             request_bytes.push(b'\n');

@@ -16,11 +16,17 @@ struct RequestMutation {
 
 pub(super) fn before_publication(
     request: PoolMigrationLaunchRequestV3,
+    worker_uid: u32,
+    worker_gid: u32,
 ) -> Result<PoolMigrationLaunchRequestV3> {
     let Some(path) = std::env::var_os("HTREE_POOL_CONTROLLER_TEST_MUTATIONS") else {
         return Ok(request);
     };
-    let mutations: Vec<RequestMutation> = serde_json::from_slice(&std::fs::read(path)?)?;
+    let options: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+    if options.get("directWorker") == Some(&Value::Bool(true)) {
+        return reject_direct_worker(request, worker_uid, worker_gid);
+    }
+    let mutations: Vec<RequestMutation> = serde_json::from_value(options)?;
     let mut value = serde_json::to_value(request)?;
     for mutation in mutations {
         *value.pointer_mut(&mutation.pointer).with_context(|| {
@@ -31,6 +37,58 @@ pub(super) fn before_publication(
         })? = mutation.value;
     }
     Ok(serde_json::from_value(value)?)
+}
+
+fn reject_direct_worker(
+    mut request: PoolMigrationLaunchRequestV3,
+    worker_uid: u32,
+    worker_gid: u32,
+) -> Result<PoolMigrationLaunchRequestV3> {
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    request.nonce = fresh_nonce();
+    let attempt = request.attempt_namespace.join(&request.nonce);
+    create_attempt_directory(&attempt, worker_gid)?;
+    request.attempt_identity = file_identity(&attempt, "direct-worker test attempt")?;
+    let request_path = attempt.join("launch-request.json");
+    let request_index = request
+        .argv
+        .iter()
+        .position(|arg| arg == "--launch-request")
+        .context("generated worker argv has no launch request")?
+        + 1;
+    request.argv[request_index] = request_path.display().to_string();
+    let child = Command::new(&request.binary.path)
+        .args(&request.argv[1..])
+        .uid(worker_uid)
+        .gid(worker_gid)
+        .env_clear()
+        .env("INVOCATION_ID", &request.systemd_invocation_id)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("spawn direct production worker under the live controller")?;
+    request.main_pid = child.id();
+    request.proc_start_time_ticks = process_start_time(child.id())?;
+    let mut bytes = serde_json::to_vec(&request)?;
+    bytes.push(b'\n');
+    durable_create_atomic(&request_path, &bytes, 0o640, 0, worker_gid, &request.nonce)?;
+    let output = child
+        .wait_with_output()
+        .context("wait for direct worker rejection")?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if output.status.success()
+        || !stderr.contains("is not in the exact requested systemd service cgroup")
+    {
+        bail!("direct worker did not fail at systemd admission: {stderr}");
+    }
+    if attempt.join("launch-ack.json").exists() {
+        bail!("direct worker wrote an acknowledgement before systemd admission");
+    }
+    // Stop before publishing the ordinary worker's request: only the attempted
+    // direct worker ran, while the genuine controller remained its live broker.
+    bail!("direct worker rejected before launch acknowledgement: {stderr}")
 }
 
 #[test]

@@ -14,7 +14,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 #[cfg(target_os = "linux")]
-use std::process::{Output, Stdio};
+use std::process::Output;
 #[cfg(target_os = "linux")]
 use std::sync::{Mutex, OnceLock};
 #[cfg(target_os = "linux")]
@@ -98,14 +98,16 @@ struct MigrationScenario {
     member_id: hashtree_lmdb::PoolMemberId,
     member_external: PathBuf,
     source_dir: PathBuf,
+    source_external: PathBuf,
+    controller_state: PathBuf,
+    source_baseline: PathBuf,
+    safety_cas: PathBuf,
     config_dir: PathBuf,
     cursor: PathBuf,
     request: PathBuf,
     ack: PathBuf,
-    terminal_audit: PathBuf,
     pool_topology: PathBuf,
     args: Vec<String>,
-    request_template: Value,
     blobs: Vec<([u8; 32], Vec<u8>)>,
 }
 
@@ -177,18 +179,12 @@ impl MigrationScenario {
         fs::create_dir_all(&attempt).expect("attempt directory");
         let request = attempt.join("launch-request.json");
         let ack = attempt.join("launch-ack.json");
-        let terminal_audit = attempt.join("terminal-audit.json");
 
-        let controller = rollout.join("controller.sh");
-        write_file(&controller, b"#!/bin/sh\nexit 0\n");
-        #[cfg(unix)]
-        fs::set_permissions(&controller, fs::Permissions::from_mode(0o700))
-            .expect("controller mode");
         let controller_state = rollout.join("state.json");
         let phase = if max_items.is_some() {
             "online-bounded"
         } else {
-            "final-stopped-full"
+            "final-stopped-source"
         };
         let mut controller_state_json = json!({
             "schema": "hashtree-pool-migration-controller-state/v3",
@@ -237,19 +233,6 @@ impl MigrationScenario {
             .expect("serialize generated controller state");
         controller_state_bytes.push(b'\n');
         write_file(&controller_state, &controller_state_bytes);
-        let systemd_fragment = rollout.join("hashtree-pool-migration-worker@.service");
-        write_file(&systemd_fragment, b"[Service]\nType=oneshot\nRestart=no\n");
-        let systemd_environment_file = rollout.join("pool-migrate-generated.env");
-        write_file(
-            &systemd_environment_file,
-            format!(
-                "HTREE_POOL_LIMIT_ARGS={}\n",
-                max_items
-                    .map(|limit| format!("--max-items {limit}"))
-                    .unwrap_or_default()
-            )
-            .as_bytes(),
-        );
         let safety_cas = rollout.join("safety.cas");
         write_file(&safety_cas, b"generated safety authority\n");
 
@@ -283,94 +266,34 @@ impl MigrationScenario {
         }
         args.push("--resume".to_string());
 
-        let request_json = json!({
-            "schema": "hashtree-pool-migration-launch-request/v3",
-            "attemptNamespace": attempts,
-            "attemptNamespaceIdentity": file_identity(&attempts),
-            "attemptIdentity": file_identity(&attempt),
-            "nonce": TEST_NONCE,
-            "bootId": current_boot_id(),
-            "systemdInvocationId": TEST_INVOCATION_ID,
-            "systemdUnit": "hashtree-pool-migration-worker@generated-test.service",
-            "systemdManager": "system",
-            "systemdFragment": file_authority(&systemd_fragment),
-            "systemdEnvironmentFile": file_authority(&systemd_environment_file),
-            "mainPid": 1,
-            "procStartTimeTicks": 1,
-            "binary": file_authority(&binary),
-            "argv": args,
-            "controller": {
-                "rolloutId": "rollout-v3-test",
-                "phase": phase,
-                "executable": file_authority(&controller),
-                "state": file_authority(&controller_state),
-            },
-            "source": {
-                "lmdbPath": source_dir,
-                "lmdbIdentity": lmdb_identity(&source_dir),
-                "externalPath": source_external,
-                "externalIdentity": file_identity(&source_external),
-                "baseline": file_authority(&source_baseline),
-            },
-            "pool": {
-                "path": pool_path,
-                "lmdbIdentity": lmdb_identity(&pool_path),
-                "topology": file_authority(&pool_topology),
-            },
-            "cursor": {
-                "path": cursor,
-                "parentIdentity": file_identity(&cursor_dir),
-                "exists": false,
-                "value": Value::Null,
-                "sha256": Value::Null,
-            },
-            "cas": [{
-                "label": "generated-safety-authority",
-                "path": safety_cas,
-                "sha256": file_sha256(&safety_cas),
-            }],
-        });
-
         Self {
             _temp: temp,
             pool_path,
             member_id,
             member_external,
             source_dir,
+            source_external,
+            controller_state,
+            source_baseline,
+            safety_cas,
             config_dir,
             cursor,
             request,
             ack,
-            terminal_audit,
             pool_topology,
-            args: request_json["argv"]
-                .as_array()
-                .expect("request argv")
-                .iter()
-                .map(|value| value.as_str().expect("string argv").to_string())
-                .collect(),
-            request_template: request_json,
+            args,
             blobs,
         }
     }
 
     #[cfg(target_os = "linux")]
-    fn run(&self) -> Output {
-        self.run_with_request(|_| {})
-    }
-
-    #[cfg(target_os = "linux")]
-    fn run_with_request(&self, mutate: impl FnOnce(&mut Value)) -> Output {
-        self.run_with_actual_argv(&self.args, mutate)
+    fn run(&self) -> (Output, PathBuf) {
+        run_with_controller_mutations(self, json!([]))
     }
 
     #[cfg(target_os = "linux")]
     fn bind_controller_state_to_current_pool_topology(&self) {
-        let controller_state_path = PathBuf::from(
-            self.request_template["controller"]["state"]["path"]
-                .as_str()
-                .expect("generated controller state path"),
-        );
+        let controller_state_path = &self.controller_state;
         let mut controller_state: Value = serde_json::from_slice(
             &fs::read(&controller_state_path).expect("read generated controller state"),
         )
@@ -380,275 +303,6 @@ impl MigrationScenario {
             serde_json::to_vec(&controller_state).expect("serialize rebound controller state");
         bytes.push(b'\n');
         write_file(&controller_state_path, &bytes);
-    }
-
-    #[cfg(target_os = "linux")]
-    fn run_with_actual_argv(
-        &self,
-        actual_argv: &[String],
-        mutate: impl FnOnce(&mut Value),
-    ) -> Output {
-        self.run_under_system_systemd(actual_argv, mutate)
-    }
-
-    #[cfg(target_os = "linux")]
-    fn run_under_system_systemd(
-        &self,
-        actual_argv: &[String],
-        mutate: impl FnOnce(&mut Value),
-    ) -> Output {
-        static UNIT_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let _serialized = SYSTEM_MANAGER_TEST
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert!(
-            !self.request.exists(),
-            "controller request must be published exactly once"
-        );
-        let fragment = PathBuf::from("/run/systemd/system/hashtree-pool-migrate@.service");
-        assert!(
-            !fragment.exists(),
-            "refusing to overwrite pre-existing systemd migration template {}",
-            fragment.display()
-        );
-        let sequence = UNIT_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let unit = format!(
-            "hashtree-pool-migrate@process-test-{}-{sequence}.service",
-            std::process::id()
-        );
-        let writer_template_name = format!(
-            "hashtree-pool-writer-fence-test-{}-{sequence}@.service",
-            std::process::id()
-        );
-        let writer_unit = format!(
-            "hashtree-pool-writer-fence-test-{}-{sequence}@migration.service",
-            std::process::id()
-        );
-        let writer_fragment = PathBuf::from(format!("/run/systemd/system/{writer_template_name}"));
-        let writer_mask = PathBuf::from(format!("/run/systemd/system/{writer_unit}"));
-        let final_phase = self.request_template["controller"]["phase"]
-            == Value::String("final-stopped-full".into());
-        let runtime_stem = format!(
-            "/run/hashtree-pool-migration-v3-test-{}-{sequence}",
-            std::process::id()
-        );
-        let installed_binary = PathBuf::from(format!("{runtime_stem}-htree"));
-        let installed_environment = PathBuf::from(format!("{runtime_stem}.env"));
-        let stdout_path = PathBuf::from(format!("{runtime_stem}.stdout"));
-        let stderr_path = PathBuf::from(format!("{runtime_stem}.stderr"));
-
-        let mut authorized_argv = self.args.clone();
-        authorized_argv[0] = installed_binary.display().to_string();
-        let mut installed_actual_argv = actual_argv.to_vec();
-        installed_actual_argv[0] = installed_binary.display().to_string();
-
-        let local_fragment = self
-            .request
-            .parent()
-            .expect("attempt directory")
-            .parent()
-            .expect("attempt namespace")
-            .parent()
-            .expect("rollout")
-            .join("generated-systemd-template.service");
-        let exec_start = installed_actual_argv
-            .iter()
-            .map(|argument| systemd_quote(argument))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let template = format!(
-            "[Unit]\nDescription=Generated Pool migration v3 integration\n\n[Service]\nType=oneshot\nUser={}\nGroup={}\nEnvironmentFile={}\nExecStart={exec_start}\nRestart=no\nTimeoutStartSec=infinity\nNoNewPrivileges=true\nPrivateNetwork=true\nUnsetEnvironment=LD_PRELOAD LD_AUDIT LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH HTREE_LMDB_NO_SYNC HTREE_LMDB_NO_META_SYNC\nUMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
-            unsafe { libc::geteuid() },
-            unsafe { libc::getegid() },
-            installed_environment.display(),
-            stdout_path.display(),
-            stderr_path.display(),
-        );
-        write_file(&local_fragment, template.as_bytes());
-
-        let _cleanup = SystemManagerTestGuard {
-            unit: unit.clone(),
-            fragment: fragment.clone(),
-            writer_fragment: writer_fragment.clone(),
-            writer_mask: final_phase.then_some(writer_mask.clone()),
-            controller_state: PathBuf::from(
-                self.request_template["controller"]["state"]["path"]
-                    .as_str()
-                    .expect("generated controller state path"),
-            ),
-            installed_binary: installed_binary.clone(),
-            installed_environment: installed_environment.clone(),
-            stdout_path: stdout_path.clone(),
-            stderr_path: stderr_path.clone(),
-            attempts: self
-                .request
-                .parent()
-                .expect("attempt")
-                .parent()
-                .expect("attempt namespace")
-                .to_path_buf(),
-        };
-        prepare_root_attempt_authority(&self.request);
-        sudo_success(&[
-            "/usr/bin/install",
-            "-s",
-            "-o",
-            "root",
-            "-g",
-            "root",
-            "-m",
-            "0555",
-            &actual_argv[0],
-            installed_binary.to_str().expect("UTF-8 binary path"),
-        ]);
-        let local_environment = PathBuf::from(
-            self.request_template["systemdEnvironmentFile"]["path"]
-                .as_str()
-                .expect("generated systemd environment path"),
-        );
-        sudo_success(&[
-            "/usr/bin/install",
-            "-o",
-            "root",
-            "-g",
-            "root",
-            "-m",
-            "0644",
-            local_environment
-                .to_str()
-                .expect("UTF-8 local environment path"),
-            installed_environment
-                .to_str()
-                .expect("UTF-8 installed environment path"),
-        ]);
-        sudo_success(&[
-            "/usr/bin/install",
-            "-o",
-            "root",
-            "-g",
-            "root",
-            "-m",
-            "0644",
-            local_fragment.to_str().expect("UTF-8 local fragment"),
-            fragment.to_str().expect("UTF-8 fragment path"),
-        ]);
-        let local_writer_fragment =
-            local_fragment.with_file_name("generated-stopped-writer.service");
-        write_file(
-            &local_writer_fragment,
-            b"[Unit]\nDescription=Generated stopped Pool writer\n\n[Service]\nType=oneshot\nExecStart=/bin/true\n",
-        );
-        sudo_success(&[
-            "/usr/bin/install",
-            "-o",
-            "root",
-            "-g",
-            "root",
-            "-m",
-            "0644",
-            local_writer_fragment
-                .to_str()
-                .expect("UTF-8 local writer fragment"),
-            writer_fragment
-                .to_str()
-                .expect("UTF-8 installed writer fragment"),
-        ]);
-        let controller_state_path = PathBuf::from(
-            self.request_template["controller"]["state"]["path"]
-                .as_str()
-                .expect("generated controller state path"),
-        );
-        let mut controller_state: Value = serde_json::from_slice(
-            &fs::read(&controller_state_path).expect("read generated controller state"),
-        )
-        .expect("parse generated controller state");
-        controller_state["stoppedWriterUnits"] =
-            Value::Array(vec![Value::String(writer_unit.clone())]);
-        if final_phase {
-            sudo_success(&[
-                "/usr/bin/ln",
-                "-s",
-                "/dev/null",
-                writer_mask.to_str().expect("UTF-8 writer mask"),
-            ]);
-            sudo_success(&["/usr/bin/systemctl", "--system", "daemon-reload"]);
-            controller_state["writerUnitMasks"] = Value::Array(vec![json!({
-                "unit": writer_unit,
-                "path": writer_mask,
-                "identity": symlink_identity(&writer_mask),
-                "target": "/dev/null",
-            })]);
-        }
-        let mut controller_state_bytes =
-            serde_json::to_vec(&controller_state).expect("serialize controller state");
-        controller_state_bytes.push(b'\n');
-        write_file(&controller_state_path, &controller_state_bytes);
-        sudo_success(&[
-            "/usr/bin/chown",
-            "root:root",
-            controller_state_path
-                .to_str()
-                .expect("UTF-8 controller state path"),
-        ]);
-        sudo_success(&[
-            "/usr/bin/chmod",
-            "0644",
-            controller_state_path
-                .to_str()
-                .expect("UTF-8 controller state path"),
-        ]);
-        sudo_success(&["/usr/bin/systemctl", "--system", "daemon-reload"]);
-        // The debug CLI can be hundreds of MiB. Hash every immutable systemd
-        // authority before starting the rendezvous clock so controller-side
-        // evidence construction cannot consume the launcher's request window.
-        let fragment_authority = file_authority(&fragment);
-        let environment_authority = file_authority(&installed_environment);
-        let binary_authority = file_authority(&installed_binary);
-
-        sudo_success(&[
-            "/usr/bin/systemctl",
-            "--system",
-            "start",
-            "--no-block",
-            &unit,
-        ]);
-        let (invocation_id, main_pid) =
-            wait_for_systemd_process_identity(&unit, &installed_actual_argv);
-        let mut request = self.request_template.clone();
-        request["systemdInvocationId"] = Value::String(invocation_id);
-        request["systemdUnit"] = Value::String(unit.clone());
-        request["systemdManager"] = Value::String("system".to_string());
-        request["systemdFragment"] = fragment_authority;
-        request["systemdEnvironmentFile"] = environment_authority;
-        request["controller"]["state"] = file_authority(&controller_state_path);
-        request["mainPid"] = Value::from(main_pid);
-        request["procStartTimeTicks"] = Value::from(process_start_time(main_pid));
-        request["binary"] = binary_authority;
-        request["argv"] = Value::Array(
-            authorized_argv
-                .iter()
-                .map(|argument| Value::String(argument.clone()))
-                .collect(),
-        );
-        mutate(&mut request);
-        controller_publish_json_root(&self.request, &request);
-        let exit_code = wait_for_systemd_terminal(&unit);
-        Output {
-            status: std::process::ExitStatus::from_raw(exit_code << 8),
-            stdout: sudo_read_to_string(&stdout_path).into_bytes(),
-            stderr: sudo_read_to_string(&stderr_path).into_bytes(),
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    fn rerun_without_fresh_request(&self) -> Output {
-        let mut command = migration_command(&self.args[0]);
-        command
-            .args(&self.args[1..])
-            .env("INVOCATION_ID", TEST_INVOCATION_ID)
-            .env("HTREE_CONFIG_DIR", &self.config_dir)
-            .output()
-            .expect("rerun production migration command")
     }
 
     fn pool_count(&self) -> u64 {
@@ -662,8 +316,8 @@ impl MigrationScenario {
 #[test]
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
 fn migration_reopens_live_mappings_and_completes_external_blob_copy() {
-    let scenario = MigrationScenario::generated(None);
-    let output = scenario.run();
+    let scenario = MigrationScenario::generated(Some(64));
+    let (output, request) = run_fenced_migration(&scenario);
     assert_success(&output);
 
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
@@ -683,8 +337,7 @@ fn migration_reopens_live_mappings_and_completes_external_blob_copy() {
         "five one-item batches should close and reopen the live LMDB mappings twice\n{stdout}"
     );
     assert!(
-        stdout
-            .contains("Migration pass: scanned 5, already present 0, verified 5, inserted 5 blobs"),
+        stdout.contains("source bodies read+verified 5, inserted 5 blobs"),
         "unexpected migration report\n{stdout}"
     );
     assert_eq!(
@@ -692,7 +345,7 @@ fn migration_reopens_live_mappings_and_completes_external_blob_copy() {
         "complete\n"
     );
     let terminal_receipt: Value = serde_json::from_slice(
-        &fs::read(&scenario.terminal_audit).expect("terminal audit receipt"),
+        &fs::read(&request.with_file_name("terminal-audit.json")).expect("terminal audit receipt"),
     )
     .expect("parse terminal audit receipt");
     assert_eq!(
@@ -701,19 +354,15 @@ fn migration_reopens_live_mappings_and_completes_external_blob_copy() {
     );
     assert_eq!(terminal_receipt["status"], "verified");
     assert_eq!(
-        terminal_receipt["sourceBlobEntries"],
+        terminal_receipt["sourceEntries"],
         scenario.blobs.len() as u64
     );
     assert_eq!(
         terminal_receipt["targetStoredLocations"],
         scenario.blobs.len() as u64
     );
-    assert!(
-        !scenario.config_dir.exists(),
-        "controlled migration must not load or create global config"
-    );
-
-    let ack_bytes = fs::read(&scenario.ack).expect("durable launch acknowledgement");
+    let ack_bytes = fs::read(&request.with_file_name("launch-ack.json"))
+        .expect("durable launch acknowledgement");
     let ack: Value = serde_json::from_slice(&ack_bytes).expect("parse launch acknowledgement");
     assert_eq!(ack["schema"], "hashtree-pool-migration-launch-ack/v3");
     assert_eq!(ack["status"], "acknowledged");
@@ -724,15 +373,18 @@ fn migration_reopens_live_mappings_and_completes_external_blob_copy() {
             .len(),
         32
     );
-    assert_eq!(ack["requestPath"], scenario.request.display().to_string());
+    assert_eq!(ack["requestPath"], request.display().to_string());
     assert_eq!(
         ack["requestSha256"],
-        file_sha256(&scenario.request),
+        file_sha256(&request),
         "acknowledgement must bind the exact request bytes"
     );
     #[cfg(unix)]
     assert_eq!(
-        fs::metadata(&scenario.ack).expect("ack metadata").mode() & 0o777,
+        fs::metadata(&request.with_file_name("launch-ack.json"))
+            .expect("ack metadata")
+            .mode()
+            & 0o777,
         0o600
     );
 
@@ -753,8 +405,8 @@ fn migration_reopens_live_mappings_and_completes_external_blob_copy() {
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
-fn final_completion_rejects_target_only_catalog_corruption() {
-    let scenario = MigrationScenario::generated(None);
+fn target_only_catalog_corruption_blocks_online_certification_and_final_completion() {
+    let scenario = MigrationScenario::generated(Some(64));
     let target_only = b"target-only body omitted from the source migration";
     let target_only_hash = sha256(target_only);
     let pool =
@@ -771,19 +423,22 @@ fn final_completion_rejects_target_only_catalog_corruption() {
         .join(&hex[4..]);
     fs::remove_file(&external_path).expect("remove target-only external body");
 
-    let output = scenario.run();
+    let (output, request) = run_fenced_migration(&scenario);
     assert!(!output.status.success(), "corrupt target reached complete");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("No such file")
-            || stderr.contains("lost blob")
-            || stderr.contains("missing"),
+        stderr.contains("root target audit body differs from checkpoint hash/size authority")
+            || stderr.contains("root-read online target audit bodies"),
         "unexpected terminal target audit failure\n{stderr}"
     );
-    assert!(scenario.ack.exists());
+    let authority: Value = serde_json::from_slice(&fs::read(&request).unwrap()).unwrap();
+    assert_eq!(authority["controller"]["phase"], "online-bounded");
+    assert!(request.with_file_name("launch-ack.json").exists());
     assert!(
-        !scenario.terminal_audit.exists(),
-        "failed terminal target audit must not publish a verified receipt"
+        !request
+            .with_file_name("online-target-audit-certification.json")
+            .exists(),
+        "failed target audit must not certify a final-source prerequisite"
     );
     assert!(
         !scenario.cursor.exists(),
@@ -794,8 +449,8 @@ fn final_completion_rejects_target_only_catalog_corruption() {
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
-fn final_completion_rejects_mixed_source_blob_and_metadata_keysets() {
-    let scenario = MigrationScenario::generated(None);
+fn stopped_source_rejects_a_blob_omitted_from_online_metadata_reconciliation() {
+    let scenario = MigrationScenario::generated(Some(64));
     let omitted_hash = scenario.blobs[0].0;
     let mut options = heed::EnvOpenOptions::new();
     options.max_dbs(5);
@@ -812,23 +467,26 @@ fn final_completion_rejects_mixed_source_blob_and_metadata_keysets() {
     env.force_sync().expect("sync mixed source keyset");
     drop(env);
 
-    let output = scenario.run();
+    let (output, request) = run_fenced_migration(&scenario);
     assert!(
         !output.status.success(),
         "mixed source keysets reached complete"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("blobs/metadata key sets differ") && stderr.contains("has no metadata row"),
+        stderr.contains("stopped source key")
+            && stderr.contains("is absent from the certified online target audit"),
         "unexpected terminal source audit failure\n{stderr}"
     );
-    assert!(scenario.ack.exists());
+    let authority: Value = serde_json::from_slice(&fs::read(&request).unwrap()).unwrap();
+    assert_eq!(authority["controller"]["phase"], "final-stopped-source");
+    assert!(request.with_file_name("launch-ack.json").exists());
     assert!(
-        !scenario.terminal_audit.exists(),
+        !request.with_file_name("source-terminal.json").exists(),
         "failed terminal source audit must not publish a verified receipt"
     );
     assert!(
-        !scenario.cursor.exists(),
+        !scenario.cursor.exists() && !scenario.cursor.with_extension("source").exists(),
         "terminal source audit failure must precede any final-pass cursor publication"
     );
     assert_eq!(
@@ -843,11 +501,7 @@ fn final_completion_rejects_mixed_source_blob_and_metadata_keysets() {
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
 fn final_launch_requires_both_writer_fences_before_pool_open() {
     let scenario = MigrationScenario::generated(None);
-    let state_path = PathBuf::from(
-        scenario.request_template["controller"]["state"]["path"]
-            .as_str()
-            .expect("controller state path"),
-    );
+    let state_path = &scenario.controller_state;
     let mut state: Value =
         serde_json::from_slice(&fs::read(&state_path).expect("read controller state"))
             .expect("parse controller state");
@@ -857,14 +511,14 @@ fn final_launch_requires_both_writer_fences_before_pool_open() {
     write_file(&state_path, &bytes);
     let pool_before = file_snapshot(&scenario.pool_path.join("data.mdb"));
 
-    let output = scenario.run();
+    let (output, request) = scenario.run();
     assert!(!output.status.success(), "missing target fence launched");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("source and target writer fences"),
         "unexpected writer-fence failure\n{stderr}"
     );
-    assert!(!scenario.ack.exists());
+    assert!(!request.with_file_name("launch-ack.json").exists());
     assert!(!scenario.cursor.exists());
     assert_eq!(
         file_snapshot(&scenario.pool_path.join("data.mdb")),
@@ -877,14 +531,31 @@ fn final_launch_requires_both_writer_fences_before_pool_open() {
 #[test]
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
 fn launch_ack_is_single_use_and_blocks_a_second_pool_open() {
+    let _serialized = SYSTEM_MANAGER_TEST
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let scenario = MigrationScenario::generated(Some(1));
-    let first = scenario.run();
+    let (guard, arguments) = prepare_root_controller_systemd(&scenario);
+    let first = run_root_controller(&guard, &arguments, false);
     assert_success(&first);
+    let completed: Value = serde_json::from_slice(&first.stdout).expect("controller completion");
+    let request = PathBuf::from(completed["requestPath"].as_str().unwrap());
     let cursor_after_first = fs::read(&scenario.cursor).expect("first cursor");
     let count_after_first = scenario.pool_count();
     assert_eq!(count_after_first, 1);
 
-    let second = scenario.rerun_without_fresh_request();
+    let mut replay_args = scenario.args.clone();
+    let request_index = replay_args
+        .iter()
+        .position(|arg| arg == "--launch-request")
+        .unwrap()
+        + 1;
+    replay_args[request_index] = request.display().to_string();
+    let second = migration_command(&replay_args[0])
+        .args(&replay_args[1..])
+        .env("INVOCATION_ID", TEST_INVOCATION_ID)
+        .output()
+        .expect("retry consumed launch request");
     assert!(
         !second.status.success(),
         "reused launch unexpectedly passed"
@@ -987,9 +658,7 @@ fn live_pool_manifest_must_match_the_pinned_member_topology() {
     write_file(&scenario.pool_topology, &bytes);
     scenario.bind_controller_state_to_current_pool_topology();
 
-    let output = scenario.run_with_request(|request| {
-        request["pool"]["topology"]["sha256"] = Value::String(file_sha256(&scenario.pool_topology));
-    });
+    let (output, request) = scenario.run();
     assert!(
         !output.status.success(),
         "mismatched live Pool manifest unexpectedly passed"
@@ -1000,7 +669,7 @@ fn live_pool_manifest_must_match_the_pinned_member_topology() {
         "unexpected live topology failure\n{stderr}"
     );
     assert!(
-        scenario.ack.exists(),
+        request.with_file_name("launch-ack.json").exists(),
         "the Pool must only be opened after the durable acknowledgement"
     );
     assert!(!scenario.cursor.exists());
@@ -1019,7 +688,7 @@ fn exact_pool_manifest_hash_rejects_a_post_request_config_change() {
     pool.force_sync().expect("sync changed Pool manifest");
     drop(pool);
 
-    let output = scenario.run();
+    let (output, request) = scenario.run();
     assert!(
         !output.status.success(),
         "changed live Pool manifest unexpectedly passed"
@@ -1030,7 +699,7 @@ fn exact_pool_manifest_hash_rejects_a_post_request_config_change() {
         "unexpected manifest identity failure\n{stderr}"
     );
     assert!(
-        scenario.ack.exists(),
+        request.with_file_name("launch-ack.json").exists(),
         "the controlled Pool must only be opened after durable acknowledgement"
     );
     assert!(!scenario.cursor.exists());
@@ -1042,7 +711,7 @@ fn exact_pool_manifest_hash_rejects_a_post_request_config_change() {
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
 fn migration_rejects_a_manifest_member_without_durable_external_sync() {
     let scenario = MigrationScenario::generated_with_external_sync(Some(1), false);
-    let output = scenario.run();
+    let (output, request) = scenario.run();
     assert!(
         !output.status.success(),
         "non-durable Pool member unexpectedly passed"
@@ -1052,7 +721,7 @@ fn migration_rejects_a_manifest_member_without_durable_external_sync() {
         stderr.contains("requires external_blob_sync=true"),
         "unexpected external sync failure\n{stderr}"
     );
-    assert!(scenario.ack.exists());
+    assert!(request.with_file_name("launch-ack.json").exists());
     assert!(!scenario.cursor.exists());
     assert_eq!(scenario.pool_count(), 0);
 }
@@ -1063,17 +732,7 @@ fn migration_rejects_a_manifest_member_without_durable_external_sync() {
 fn complete_cursor_is_a_non_launchable_terminal_state() {
     let scenario = MigrationScenario::generated(Some(1));
     write_file(&scenario.cursor, b"complete\n");
-    let output = scenario.run_with_request(|request| {
-        request["cursor"] = json!({
-            "path": scenario.cursor,
-            "parentIdentity": file_identity(
-                scenario.cursor.parent().expect("cursor parent")
-            ),
-            "exists": true,
-            "value": "complete",
-            "sha256": file_sha256(&scenario.cursor),
-        });
-    });
+    let (output, request) = scenario.run();
 
     assert!(
         !output.status.success(),
@@ -1084,7 +743,7 @@ fn complete_cursor_is_a_non_launchable_terminal_state() {
         stderr.contains("complete migration cursor is terminal"),
         "unexpected terminal cursor failure\n{stderr}"
     );
-    assert!(!scenario.ack.exists());
+    assert!(!request.with_file_name("launch-ack.json").exists());
     assert_eq!(scenario.pool_count(), 0);
 }
 
@@ -1127,7 +786,7 @@ fn source_lmdb_leaf_symlink_is_rejected_before_ack() {
     #[cfg(unix)]
     std::os::unix::fs::symlink(&retained_data, &source_data).expect("preplant source data symlink");
 
-    let output = scenario.run();
+    let (output, request) = scenario.run();
     assert!(
         !output.status.success(),
         "symlinked source LMDB data unexpectedly passed"
@@ -1137,7 +796,7 @@ fn source_lmdb_leaf_symlink_is_rejected_before_ack() {
         stderr.contains("source LMDB data.mdb") || stderr.contains("Too many levels"),
         "unexpected source symlink failure\n{stderr}"
     );
-    assert!(!scenario.ack.exists());
+    assert!(!request.with_file_name("launch-ack.json").exists());
     assert!(!scenario.cursor.exists());
     assert_eq!(scenario.pool_count(), 0);
 }
@@ -1166,16 +825,14 @@ fn lmdb_leaf_hardlink_alias_is_rejected_before_ack() {
     scenario.bind_controller_state_to_current_pool_topology();
     let pool_catalog_before = file_snapshot(&scenario.pool_path.join("data.mdb"));
 
-    let output = scenario.run_with_request(|request| {
-        request["pool"]["topology"]["sha256"] = Value::String(file_sha256(&scenario.pool_topology));
-    });
+    let (output, request) = scenario.run();
     assert!(!output.status.success(), "hardlinked LMDB leaves passed");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("LMDB leaf identity alias is forbidden"),
         "unexpected hardlink alias failure\n{stderr}"
     );
-    assert!(!scenario.ack.exists());
+    assert!(!request.with_file_name("launch-ack.json").exists());
     assert!(!scenario.cursor.exists());
     assert_eq!(
         file_snapshot(&scenario.pool_path.join("data.mdb")),
@@ -1363,11 +1020,11 @@ fn run_with_controller_mutations(
     scenario: &MigrationScenario,
     mutations: Value,
 ) -> (Output, PathBuf) {
-    let fixture_binary = controller_fixture_binary();
+    let fixture_binary = (mutations != json!([])).then(controller_fixture_binary);
     let _serialized = SYSTEM_MANAGER_TEST
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let (guard, arguments) = prepare_root_controller_with_binary(scenario, Some(fixture_binary));
+    let (guard, arguments) = prepare_root_controller_with_binary(scenario, fixture_binary);
     write_file(
         &guard
             .rollout
@@ -1377,15 +1034,210 @@ fn run_with_controller_mutations(
         &serde_json::to_vec(&mutations).expect("serialize controlled request mutations"),
     );
     let mut output = run_root_controller(&guard, &arguments, false);
-    output
-        .stderr
-        .extend_from_slice(sudo_read_to_string(&guard.stderr_path).as_bytes());
-    let request = fs::read_dir(guard.rollout.join("attempts-v3"))
+    if guard.stderr_path.exists() {
+        output
+            .stderr
+            .extend_from_slice(sudo_read_to_string(&guard.stderr_path).as_bytes());
+    }
+    if guard.stdout_path.exists() {
+        output
+            .stdout
+            .extend_from_slice(sudo_read_to_string(&guard.stdout_path).as_bytes());
+    }
+    let attempts = guard.rollout.join("attempts-v3");
+    drop(guard);
+    let request = fs::read_dir(attempts)
         .expect("read controller attempts")
         .filter_map(Result::ok)
         .map(|entry| entry.path().join("launch-request.json"))
         .find(|path| path.is_file())
         .unwrap_or_else(|| scenario.request.clone());
+    (output, request)
+}
+
+#[cfg(target_os = "linux")]
+fn set_argument(arguments: &mut [String], flag: &str, value: impl ToString) {
+    let index = arguments
+        .iter()
+        .position(|arg| arg == flag)
+        .expect("controller option")
+        + 1;
+    arguments[index] = value.to_string();
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_next_worker(
+    guard: &mut RootControllerSystemdGuard,
+    arguments: &mut [String],
+    phase: &str,
+) {
+    let unit = guard.unit.replace(".service", &format!("-{phase}.service"));
+    let fragment = guard.fragment.with_file_name(&unit);
+    let environment = guard
+        .installed_environment
+        .with_extension(format!("{phase}.env"));
+    assert!(
+        !fragment.exists() && !environment.exists(),
+        "fresh phase worker already exists"
+    );
+    let template = fs::read_to_string(&guard.fragment)
+        .expect("previous worker fragment")
+        .replace(
+            guard.installed_environment.to_str().unwrap(),
+            environment.to_str().unwrap(),
+        );
+    let local = guard.rollout.parent().unwrap().join("next-worker.service");
+    write_file(&local, template.as_bytes());
+    sudo_success(&[
+        "/usr/bin/install",
+        "-o",
+        "root",
+        "-g",
+        "root",
+        "-m",
+        "0644",
+        local.to_str().unwrap(),
+        fragment.to_str().unwrap(),
+    ]);
+    guard.previous_workers.push((
+        guard.unit.clone(),
+        guard.fragment.clone(),
+        guard.installed_environment.clone(),
+    ));
+    guard.unit = unit;
+    guard.fragment = fragment;
+    guard.installed_environment = environment;
+    set_argument(arguments, "--systemd-unit", &guard.unit);
+    set_argument(arguments, "--systemd-fragment", guard.fragment.display());
+    set_argument(
+        arguments,
+        "--systemd-environment-file",
+        guard.installed_environment.display(),
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn run_fenced_migration(scenario: &MigrationScenario) -> (Output, PathBuf) {
+    let _serialized = SYSTEM_MANAGER_TEST
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let state_path = &scenario.controller_state;
+    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    state["sourceWritersFenced"] = json!(true);
+    state["targetWritersFenced"] = json!(true);
+    state["fenceHeldUntilCompletion"] = json!(true);
+    write_file(&state_path, &serde_json::to_vec(&state).unwrap());
+    let (mut guard, mut arguments) = prepare_root_controller_systemd(scenario);
+    set_argument(
+        &mut arguments,
+        "--state-file",
+        scenario.cursor.with_extension("online").display(),
+    );
+    let mut combined_stdout = Vec::new();
+    let mut launched_phase = "online-bounded";
+    let mut output = run_root_controller(&guard, &arguments, false);
+    for phase in ["final-stopped-source", "final-stopped-full"] {
+        if !output.status.success() {
+            break;
+        }
+        let completed: Value =
+            serde_json::from_slice(&output.stdout).expect("completed controller JSON");
+        assert_eq!(completed["status"], "completed");
+        combined_stdout.extend_from_slice(&output.stdout);
+        let (field, prefix) = if phase == "final-stopped-source" {
+            ("onlineTargetAuditCertification", "online-target-audit-")
+        } else {
+            ("sourceTerminalCertification", "source-terminal-")
+        };
+        let certificate = &completed[field];
+        let certificate_path = certificate["path"]
+            .as_str()
+            .expect("real prerequisite certification");
+        if phase == "final-stopped-full" {
+            let index = arguments
+                .iter()
+                .position(|arg| arg.starts_with("online-target-audit-"))
+                .unwrap();
+            assert_eq!(arguments[index - 1], "--cas");
+            arguments.drain(index - 1..=index);
+        }
+        arguments.extend([
+            "--cas".into(),
+            format!(
+                "{prefix}{}={certificate_path}",
+                completed["nonce"].as_str().unwrap()
+            ),
+        ]);
+        state = serde_json::from_slice(sudo_read_to_string(&state_path).as_bytes()).unwrap();
+        state["phase"] = json!(phase);
+        if phase == "final-stopped-full" {
+            state["sourceTerminalReceiptSha256"] = json!([certificate["sha256"]]);
+        }
+        let input = guard
+            .rollout
+            .parent()
+            .unwrap()
+            .join("next-controller-state.json");
+        write_file(&input, &serde_json::to_vec(&state).unwrap());
+        sudo_success(&[
+            "/usr/bin/install",
+            "-o",
+            "root",
+            "-g",
+            &unsafe { libc::getegid() }.to_string(),
+            "-m",
+            "0440",
+            input.to_str().unwrap(),
+            state_path.to_str().unwrap(),
+        ]);
+        set_argument(&mut arguments, "--phase", phase);
+        set_argument(&mut arguments, "--batch-size", "32768");
+        set_argument(
+            &mut arguments,
+            "--state-file",
+            if phase == "final-stopped-source" {
+                scenario.cursor.with_extension("source")
+            } else {
+                scenario.cursor.clone()
+            }
+            .display(),
+        );
+        if let Some(index) = arguments.iter().position(|arg| arg == "--max-items") {
+            arguments.drain(index..index + 2);
+        }
+        prepare_next_worker(&mut guard, &mut arguments, phase);
+        launched_phase = phase;
+        output = run_root_controller(&guard, &arguments, false);
+    }
+    combined_stdout.extend_from_slice(&output.stdout);
+    output.stdout = combined_stdout;
+    if guard.stdout_path.exists() {
+        output
+            .stdout
+            .extend_from_slice(sudo_read_to_string(&guard.stdout_path).as_bytes());
+    }
+    if guard.stderr_path.exists() {
+        output
+            .stderr
+            .extend_from_slice(sudo_read_to_string(&guard.stderr_path).as_bytes());
+    }
+    let attempts = guard.rollout.join("attempts-v3");
+    drop(guard);
+    let mut requests = fs::read_dir(attempts)
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("launch-request.json"))
+        .filter(|path| path.is_file())
+        .filter(|path| {
+            let request: Value = serde_json::from_slice(&fs::read(path).expect("phase request"))
+                .expect("parse phase request");
+            request["controller"]["phase"] == launched_phase
+        });
+    let request = requests.next().unwrap_or_else(|| scenario.request.clone());
+    assert!(
+        requests.next().is_none(),
+        "more than one attempt in a fixture phase"
+    );
     (output, request)
 }
 
@@ -1448,20 +1300,8 @@ fn manager_scope_mismatch_is_rejected_by_the_real_unit_cgroup() {
 #[ignore = "release gate: verifies direct processes cannot forge systemd ownership"]
 fn direct_process_cannot_forge_systemd_ownership() {
     let scenario = MigrationScenario::generated(Some(1));
-    let _authority = RootAttemptAuthorityGuard::prepare(&scenario.request);
-    let mut command = migration_command(&scenario.args[0]);
-    command
-        .args(&scenario.args[1..])
-        .env("INVOCATION_ID", TEST_INVOCATION_ID)
-        .env("HTREE_CONFIG_DIR", &scenario.config_dir)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let child = command.spawn().expect("spawn direct migration process");
-    let mut request = scenario.request_template.clone();
-    request["mainPid"] = Value::from(child.id());
-    request["procStartTimeTicks"] = Value::from(process_start_time(child.id()));
-    controller_publish_json_root(&scenario.request, &request);
-    let output = child.wait_with_output().expect("wait for direct process");
+    let (output, request) =
+        run_with_controller_mutations(&scenario, json!({ "directWorker": true }));
     assert!(
         !output.status.success(),
         "direct process forged systemd ownership"
@@ -1471,8 +1311,10 @@ fn direct_process_cannot_forge_systemd_ownership() {
         stderr.contains("is not in the exact requested systemd service cgroup"),
         "unexpected direct-process failure\n{stderr}"
     );
-    assert!(!scenario.ack.exists());
+    assert!(request.exists());
+    assert!(!request.with_file_name("launch-ack.json").exists());
     assert!(!scenario.cursor.exists());
+    assert_eq!(scenario.pool_count(), 0);
 }
 
 #[cfg(target_os = "linux")]
@@ -1480,10 +1322,12 @@ fn direct_process_cannot_forge_systemd_ownership() {
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
 fn migration_launch_is_bound_to_a_real_systemd_invocation() {
     let scenario = MigrationScenario::generated(Some(1));
-    let output = scenario.run();
+    let (output, request) = scenario.run();
     assert_success(&output);
-    let ack: Value = serde_json::from_slice(&fs::read(&scenario.ack).expect("systemd ack"))
-        .expect("parse systemd ack");
+    let ack: Value = serde_json::from_slice(
+        &fs::read(&request.with_file_name("launch-ack.json")).expect("systemd ack"),
+    )
+    .expect("parse systemd ack");
     assert_eq!(
         ack["systemdInvocationId"]
             .as_str()
@@ -1597,6 +1441,9 @@ struct RootControllerSystemdGuard {
     legacy_mask: PathBuf,
     controller_binary: PathBuf,
     controller_fixture: bool,
+    writer_mask: Option<PathBuf>,
+    source_mounts: Vec<PathBuf>,
+    previous_workers: Vec<(String, PathBuf, PathBuf)>,
 }
 
 #[cfg(target_os = "linux")]
@@ -1616,6 +1463,13 @@ impl Drop for RootControllerSystemdGuard {
         ]);
         sudo_best_effort(&["/usr/bin/systemctl", "--system", "stop", &self.unit]);
         sudo_best_effort(&["/usr/bin/systemctl", "--system", "reset-failed", &self.unit]);
+        for (unit, fragment, environment) in &self.previous_workers {
+            sudo_best_effort(&["/usr/bin/systemctl", "--system", "stop", unit]);
+            sudo_best_effort(&["/usr/bin/systemctl", "--system", "reset-failed", unit]);
+            for path in [fragment, environment] {
+                sudo_best_effort(&["/usr/bin/rm", "-f", "--", path.to_str().unwrap()]);
+            }
+        }
         for path in [
             &self.fragment,
             &self.installed_binary,
@@ -1636,8 +1490,21 @@ impl Drop for RootControllerSystemdGuard {
                 path.to_str().expect("UTF-8 generated controller path"),
             ]);
         }
+        for path in &self.source_mounts {
+            if Command::new("/usr/bin/mountpoint")
+                .args(["-q", path.to_str().unwrap()])
+                .status()
+                .is_ok_and(|status| status.success())
+            {
+                sudo_best_effort(&["/usr/bin/umount", "--", path.to_str().unwrap()]);
+            }
+        }
+        if let Some(mask) = &self.writer_mask {
+            sudo_best_effort(&["/usr/bin/rm", "-f", "--", mask.to_str().unwrap()]);
+        }
         sudo_best_effort(&["/usr/bin/systemctl", "--system", "daemon-reload"]);
         restore_test_tree_ownership(&self.rollout);
+        restore_test_tree_ownership(self.rollout.parent().expect("fixture root"));
     }
 }
 
@@ -1686,6 +1553,7 @@ fn prepare_root_controller_with_binary(
     let legacy_mask = PathBuf::from("/run/systemd/system/hashtree-pool-migrate@.service");
     for path in [
         &installed_binary,
+        &controller_binary,
         &installed_environment,
         &stdout_path,
         &stderr_path,
@@ -1767,11 +1635,7 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
         fragment.to_str().expect("UTF-8 installed fragment"),
     ]);
 
-    let controller_state = PathBuf::from(
-        scenario.request_template["controller"]["state"]["path"]
-            .as_str()
-            .expect("controller-state input"),
-    );
+    let controller_state = &scenario.controller_state;
     sudo_success(&[
         "/usr/bin/ln",
         "-s",
@@ -1781,7 +1645,25 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
     let mut state: Value =
         serde_json::from_slice(&fs::read(&controller_state).expect("controller state"))
             .expect("parse controller state");
-    state["stoppedWriterUnits"] = json!([]);
+    let writer_mask = if state["sourceWritersFenced"] == true
+        || state["targetWritersFenced"] == true
+    {
+        let writer_unit = format!(
+            "hashtree-pool-test-writer-{}-{sequence}.service",
+            std::process::id()
+        );
+        let path = PathBuf::from(format!("/run/systemd/system/{writer_unit}"));
+        assert!(!path.exists(), "generated writer mask already exists");
+        sudo_success(&["/usr/bin/ln", "-s", "/dev/null", path.to_str().unwrap()]);
+        state["stoppedWriterUnits"] = json!([writer_unit]);
+        state["writerUnitMasks"] = json!([{
+            "unit": writer_unit, "path": path, "identity": symlink_identity(&path), "target": "/dev/null"
+        }]);
+        Some(path)
+    } else {
+        state["stoppedWriterUnits"] = json!([]);
+        None
+    };
     state["legacyWorkerTemplateMask"] = json!({
         "unit": "hashtree-pool-migrate@.service",
         "path": legacy_mask,
@@ -1813,21 +1695,9 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
             .to_str()
             .expect("controller environment"),
     ]);
-    let source_baseline = PathBuf::from(
-        scenario.request_template["source"]["baseline"]["path"]
-            .as_str()
-            .expect("source-baseline input"),
-    );
-    let safety_cas = PathBuf::from(
-        scenario.request_template["cas"][0]["path"]
-            .as_str()
-            .expect("additional safety CAS"),
-    );
-    let source_external = PathBuf::from(
-        scenario.request_template["source"]["externalPath"]
-            .as_str()
-            .expect("source external path"),
-    );
+    let source_baseline = &scenario.source_baseline;
+    let safety_cas = &scenario.safety_cas;
+    let source_external = &scenario.source_external;
     let group = unsafe { libc::getegid() }.to_string();
     sudo_success(&[
         "/usr/bin/chown",
@@ -1852,19 +1722,11 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
             .to_str()
             .expect("UTF-8 attempt namespace"),
     ]);
-    sudo_success(&[
-        "/usr/bin/chmod",
-        "0555",
-        rollout
-            .join("controller.sh")
-            .to_str()
-            .expect("UTF-8 generated controller"),
-    ]);
     for path in [
-        &controller_state,
-        &source_baseline,
+        controller_state,
+        source_baseline,
         &scenario.pool_topology,
-        &safety_cas,
+        safety_cas,
     ] {
         sudo_success(&[
             "/usr/bin/chown",
@@ -1880,7 +1742,8 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
     sudo_success(&["/usr/bin/systemctl", "--system", "daemon-reload"]);
 
     let target_data = scenario.pool_path.parent().expect("target data directory");
-    let arguments = vec![
+    let final_phase = state["phase"] != "online-bounded";
+    let mut arguments = vec![
         "storage".to_string(),
         "pool".to_string(),
         "launch-migrate-lmdb-v3".to_string(),
@@ -1889,7 +1752,7 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
         "--rollout-id".to_string(),
         "rollout-v3-test".to_string(),
         "--phase".to_string(),
-        "online-bounded".to_string(),
+        state["phase"].as_str().unwrap().to_string(),
         "--controller-executable".to_string(),
         controller_binary.display().to_string(),
         "--controller-systemd-unit".to_string(),
@@ -1929,20 +1792,32 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
         "--state-file".to_string(),
         scenario.cursor.display().to_string(),
         "--batch-size".to_string(),
-        "1".to_string(),
+        if final_phase { "32768" } else { "1" }.to_string(),
         "--max-buffer-mib".to_string(),
         "64".to_string(),
         "--source-read-concurrency".to_string(),
         "4".to_string(),
         "--reopen-batches".to_string(),
         "2".to_string(),
-        "--max-items".to_string(),
-        "1".to_string(),
         "--launch-request-wait-seconds".to_string(),
         "30".to_string(),
         "--acknowledgement-wait-seconds".to_string(),
         "30".to_string(),
     ];
+    if !final_phase {
+        let limit = scenario
+            .args
+            .iter()
+            .position(|arg| arg == "--max-items")
+            .expect("online limit");
+        arguments.extend(["--max-items".to_string(), scenario.args[limit + 1].clone()]);
+    }
+    for unit in state["stoppedWriterUnits"].as_array().unwrap() {
+        arguments.extend([
+            "--writer-unit".to_string(),
+            unit.as_str().unwrap().to_string(),
+        ]);
+    }
     (
         RootControllerSystemdGuard {
             unit,
@@ -1960,6 +1835,9 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
             legacy_mask,
             controller_binary,
             controller_fixture: fixture_binary.is_some(),
+            writer_mask,
+            source_mounts: vec![scenario.source_dir.clone(), source_external.clone()],
+            previous_workers: Vec::new(),
         },
         arguments,
     )
@@ -2164,56 +2042,6 @@ fn write_file(path: &Path, bytes: &[u8]) {
 }
 
 #[cfg(target_os = "linux")]
-fn controller_publish_json_root(path: &Path, value: &Value) {
-    let mut bytes = serde_json::to_vec(value).expect("serialize generated request");
-    bytes.push(b'\n');
-    let rollout = path
-        .parent()
-        .expect("attempt")
-        .parent()
-        .expect("attempt namespace")
-        .parent()
-        .expect("rollout");
-    let local = rollout.join(format!(
-        ".generated-launch-request.{}.json",
-        std::process::id()
-    ));
-    let installed = path
-        .parent()
-        .expect("attempt")
-        .join(format!(".launch-request.root.{}", std::process::id()));
-    assert!(!path.exists(), "controller request path already exists");
-    assert!(
-        !installed.exists(),
-        "root request staging path already exists"
-    );
-    write_file(&local, &bytes);
-    let group = unsafe { libc::getegid() }.to_string();
-    sudo_success(&[
-        "/usr/bin/install",
-        "-o",
-        "root",
-        "-g",
-        &group,
-        "-m",
-        "0640",
-        local.to_str().expect("UTF-8 request staging path"),
-        installed.to_str().expect("UTF-8 installed request path"),
-    ]);
-    sudo_success(&[
-        "/usr/bin/mv",
-        "--",
-        installed.to_str().expect("UTF-8 installed request path"),
-        path.to_str().expect("UTF-8 request path"),
-    ]);
-    fs::File::open(path.parent().expect("request parent"))
-        .expect("open request parent")
-        .sync_all()
-        .expect("sync request parent");
-    fs::remove_file(local).expect("remove controller staging request");
-}
-
-#[cfg(target_os = "linux")]
 fn prepare_root_attempt_authority(request: &Path) {
     let attempt = request.parent().expect("request attempt directory");
     let attempts = attempt.parent().expect("attempt namespace");
@@ -2263,63 +2091,6 @@ impl RootAttemptAuthorityGuard {
 #[cfg(target_os = "linux")]
 impl Drop for RootAttemptAuthorityGuard {
     fn drop(&mut self) {
-        restore_test_tree_ownership(&self.attempts);
-    }
-}
-
-#[cfg(target_os = "linux")]
-struct SystemManagerTestGuard {
-    unit: String,
-    fragment: PathBuf,
-    writer_fragment: PathBuf,
-    writer_mask: Option<PathBuf>,
-    controller_state: PathBuf,
-    installed_binary: PathBuf,
-    installed_environment: PathBuf,
-    stdout_path: PathBuf,
-    stderr_path: PathBuf,
-    attempts: PathBuf,
-}
-
-#[cfg(target_os = "linux")]
-impl Drop for SystemManagerTestGuard {
-    fn drop(&mut self) {
-        sudo_best_effort(&["/usr/bin/systemctl", "--system", "stop", &self.unit]);
-        sudo_best_effort(&["/usr/bin/systemctl", "--system", "reset-failed", &self.unit]);
-        for path in [
-            &self.fragment,
-            &self.writer_fragment,
-            &self.installed_binary,
-            &self.installed_environment,
-            &self.stdout_path,
-            &self.stderr_path,
-        ] {
-            sudo_best_effort(&[
-                "/usr/bin/rm",
-                "-f",
-                "--",
-                path.to_str().expect("UTF-8 generated systemd test path"),
-            ]);
-        }
-        if let Some(path) = &self.writer_mask {
-            sudo_best_effort(&[
-                "/usr/bin/rm",
-                "-f",
-                "--",
-                path.to_str().expect("UTF-8 generated writer-mask path"),
-            ]);
-        }
-        sudo_best_effort(&["/usr/bin/systemctl", "--system", "daemon-reload"]);
-        let owner = format!("{}:{}", unsafe { libc::geteuid() }, unsafe {
-            libc::getegid()
-        });
-        sudo_best_effort(&[
-            "/usr/bin/chown",
-            &owner,
-            self.controller_state
-                .to_str()
-                .expect("UTF-8 controller state path"),
-        ]);
         restore_test_tree_ownership(&self.attempts);
     }
 }
@@ -2484,81 +2255,6 @@ fn current_boot_id() -> String {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn current_boot_id() -> String {
     panic!("Pool migration launch tests require a supported OS boot ID");
-}
-
-#[cfg(target_os = "linux")]
-fn process_start_time(pid: u32) -> u64 {
-    let path = format!("/proc/{pid}/stat");
-    let stat = fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {path}: {error}"));
-    let command_end = stat.rfind(") ").expect("parse proc stat process name");
-    stat[command_end + 2..]
-        .split_ascii_whitespace()
-        .nth(19)
-        .expect("proc stat starttime")
-        .parse()
-        .expect("numeric proc stat starttime")
-}
-
-#[cfg(target_os = "linux")]
-fn wait_for_systemd_process_identity(unit: &str, expected_argv: &[String]) -> (String, u32) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let mut matches = Vec::new();
-        for entry in fs::read_dir("/proc").expect("enumerate /proc") {
-            let Ok(entry) = entry else {
-                continue;
-            };
-            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-                continue;
-            };
-            let Ok(cmdline) = fs::read(entry.path().join("cmdline")) else {
-                continue;
-            };
-            let argv = cmdline
-                .split(|byte| *byte == 0)
-                .filter(|argument| !argument.is_empty())
-                .map(|argument| String::from_utf8_lossy(argument).into_owned())
-                .collect::<Vec<_>>();
-            if argv != expected_argv {
-                continue;
-            }
-            let Ok(cgroup) = fs::read_to_string(entry.path().join("cgroup")) else {
-                continue;
-            };
-            if !cgroup.lines().any(|line| {
-                line.rsplit_once(':')
-                    .is_some_and(|(_, path)| path.ends_with(&format!("/{unit}")))
-            }) {
-                continue;
-            }
-            let Ok(environment) = fs::read(entry.path().join("environ")) else {
-                continue;
-            };
-            let invocation_id = environment
-                .split(|byte| *byte == 0)
-                .find_map(|assignment| {
-                    assignment
-                        .strip_prefix(b"INVOCATION_ID=")
-                        .map(|value| String::from_utf8_lossy(value).into_owned())
-                })
-                .filter(|value| value.len() == 32);
-            if let Some(invocation_id) = invocation_id {
-                matches.push((invocation_id, pid));
-            }
-        }
-        assert!(
-            matches.len() <= 1,
-            "multiple processes matched generated systemd migration argv"
-        );
-        if let Some(identity) = matches.pop() {
-            return identity;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "timed out waiting for exact process in real systemd unit {unit}"
-        );
-        thread::sleep(Duration::from_millis(25));
-    }
 }
 
 #[cfg(target_os = "linux")]
