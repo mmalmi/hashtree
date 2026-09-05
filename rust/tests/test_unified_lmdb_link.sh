@@ -3,6 +3,8 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rust_dir="$(cd "${script_dir}/.." && pwd)"
+git_remote_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/crates/git-remote-htree/Cargo.toml")"
+: "${git_remote_version:?missing git-remote-htree package version}"
 
 assert_one_lmdb_implementation() {
     local tree_file=$1
@@ -82,7 +84,7 @@ for archive in \
     hashtree-nostr-social-graph-heed-0.1.3-hashtree.2.crate \
     hashtree-core-0.2.89.crate \
     hashtree-lmdb-0.2.87.crate \
-    git-remote-htree-0.2.83.crate
+    "git-remote-htree-${git_remote_version}.crate"
 do
     test -f "$package_target/package/$archive"
     tar -xzf "$package_target/package/$archive" -C "$package_dir"
@@ -100,7 +102,7 @@ publish = false
 hashtree-lmdb = { path = "${package_dir}/hashtree-lmdb-0.2.87" }
 heed = { package = "hashtree-heed", path = "${package_dir}/hashtree-heed-0.20.5-hashtree.1" }
 nostr-social-graph-heed = { package = "hashtree-nostr-social-graph-heed", path = "${package_dir}/hashtree-nostr-social-graph-heed-0.1.3-hashtree.2" }
-git-remote-htree = { path = "${package_dir}/git-remote-htree-0.2.83" }
+git-remote-htree = { path = "${package_dir}/git-remote-htree-${git_remote_version}" }
 
 [patch.crates-io]
 hashtree-core = { path = "${package_dir}/hashtree-core-0.2.89" }
@@ -146,7 +148,7 @@ for extracted_package in \
     "$package_dir/hashtree-nostr-social-graph-heed-0.1.3-hashtree.2" \
     "$package_dir/hashtree-core-0.2.89" \
     "$package_dir/hashtree-lmdb-0.2.87" \
-    "$package_dir/git-remote-htree-0.2.83"
+    "$package_dir/git-remote-htree-${git_remote_version}"
 do
     grep -F "($extracted_package)" "$downstream_tree" >/dev/null
 done
