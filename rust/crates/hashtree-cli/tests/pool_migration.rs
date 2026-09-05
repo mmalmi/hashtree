@@ -1191,7 +1191,7 @@ fn run_fenced_migration(scenario: &MigrationScenario) -> (Output, PathBuf) {
             state_path.to_str().unwrap(),
         ]);
         set_argument(&mut arguments, "--phase", phase);
-        set_argument(&mut arguments, "--batch-size", "32768");
+        set_argument(&mut arguments, "--batch-size", "4096");
         set_argument(
             &mut arguments,
             "--state-file",
@@ -1795,7 +1795,7 @@ UMask=0027\nStandardOutput=append:{}\nStandardError=append:{}\n",
         "--state-file".to_string(),
         scenario.cursor.display().to_string(),
         "--batch-size".to_string(),
-        if final_phase { "32768" } else { "1" }.to_string(),
+        if final_phase { "4096" } else { "1" }.to_string(),
         "--max-buffer-mib".to_string(),
         "64".to_string(),
         "--source-read-concurrency".to_string(),

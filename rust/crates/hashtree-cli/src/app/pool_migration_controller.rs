@@ -4831,6 +4831,30 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
         Ok(())
     }
 
+    fn ready_systemd_credentials(
+        uid: &str,
+        gid: &str,
+        expected_gid: u32,
+    ) -> Result<Option<(u32, u32)>> {
+        // systemd publishes MainPID before its asynchronous user lookup completes.
+        // Only its exact unset marker is pending; malformed identities remain fatal.
+        let parse = |value: &str, label: &str| -> Result<Option<u32>> {
+            if value == "[not set]" {
+                return Ok(None);
+            }
+            value
+                .parse()
+                .with_context(|| format!("parse systemd service {label}"))
+                .map(Some)
+        };
+        let uid = parse(uid, "UID")?;
+        let gid = parse(gid, "GID")?;
+        if gid.is_some_and(|gid| gid != expected_gid) {
+            bail!("systemd service GID differs from --service-gid");
+        }
+        Ok(uid.zip(gid))
+    }
+
     fn wait_for_process_identity(
         expectation: &ProcessIdentityExpectation<'_>,
     ) -> Result<ProcessIdentity> {
@@ -4878,19 +4902,22 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
             let main_pid = property(&properties, "MainPID")?
                 .parse::<u32>()
                 .context("parse systemd MainPID")?;
-            if !invocation_id.is_empty() && main_pid != 0 {
+            let credentials = if !invocation_id.is_empty() && main_pid != 0 {
                 require_lower_hex("systemd InvocationID", invocation_id, 32)?;
                 if property(&properties, "ControlPID")? != "0"
                     || property(&properties, "NRestarts")? != "0"
                 {
                     bail!("Pool migration unit has a control process or restart");
                 }
-                let gid = property(&properties, "GID")?
-                    .parse::<u32>()
-                    .context("parse systemd service GID")?;
-                if gid != service_gid {
-                    bail!("systemd service GID differs from --service-gid");
-                }
+                ready_systemd_credentials(
+                    property(&properties, "UID")?,
+                    property(&properties, "GID")?,
+                    service_gid,
+                )?
+            } else {
+                None
+            };
+            if let Some((uid, gid)) = credentials {
                 let observed_executable = match std::fs::read_link(format!("/proc/{main_pid}/exe"))
                 {
                     Ok(path) => Some(path),
@@ -4929,6 +4956,11 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                         expected_argv,
                         gid,
                     )?;
+                    if identity.uid != uid {
+                        bail!(
+                            "Pool migration MainPID UID differs from the systemd service identity"
+                        );
+                    }
                     let second = query_systemd_properties(systemctl, unit)?;
                     if property(&second, "InvocationID")? != identity.invocation_id
                         || property(&second, "MainPID")? != identity.main_pid.to_string()
@@ -7209,6 +7241,29 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn systemd_credentials_wait_only_for_the_exact_pending_marker() {
+            for (uid, gid) in [
+                ("[not set]", "[not set]"),
+                ("1001", "[not set]"),
+                ("[not set]", "1002"),
+            ] {
+                assert_eq!(ready_systemd_credentials(uid, gid, 1002).unwrap(), None);
+            }
+            assert_eq!(
+                ready_systemd_credentials("1001", "1002", 1002).unwrap(),
+                Some((1001, 1002))
+            );
+            for malformed in ["", "root", "[not set ]", "-1", "4294967296"] {
+                assert!(ready_systemd_credentials(malformed, "1002", 1002).is_err());
+                assert!(ready_systemd_credentials("1001", malformed, 1002).is_err());
+            }
+            for uid in ["1001", "[not set]"] {
+                let error = ready_systemd_credentials(uid, "1003", 1002).unwrap_err();
+                assert!(error.to_string().contains("GID differs from --service-gid"));
+            }
+        }
 
         #[test]
         fn ordinary_online_checkpoint_does_not_require_final_writer_masks() {
