@@ -24,7 +24,9 @@ use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt, PermissionsExt};
+use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
+use std::os::unix::fs::PermissionsExt;
 
 const TEST_INVOCATION_ID: &str = "0123456789abcdef0123456789abcdef";
 const TEST_NONCE: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
@@ -2212,7 +2214,7 @@ fn file_identity(path: &Path) -> Value {
     })
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn symlink_identity(path: &Path) -> Value {
     let metadata = fs::symlink_metadata(path)
         .unwrap_or_else(|error| panic!("inspect symlink identity {}: {error}", path.display()));
