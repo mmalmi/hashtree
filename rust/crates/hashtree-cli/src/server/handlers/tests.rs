@@ -665,39 +665,39 @@ async fn daemon_status_reports_truthful_native_fips_connection_state() {
     async fn endpoint(
         keys: &Keys,
         scope: &str,
-        udp_addr: &str,
-    ) -> hashtree_fips_transport::BoundFipsEndpoint {
+    ) -> (hashtree_fips_transport::BoundFipsEndpoint, String) {
         let mut options = hashtree_fips_transport::FipsEndpointOptions::new(
             keys.secret_key().to_bech32().unwrap(),
         );
         options.discovery_scope = scope.to_string();
         options.enable_udp = true;
-        options.udp_bind_addr = Some(udp_addr.to_string());
+        options.udp_bind_addr = Some("127.0.0.1:0".to_string());
         options.enable_webrtc = false;
         options.enable_local_rendezvous = false;
         options.enable_lan_discovery = false;
         options.share_local_candidates = false;
         options.relays.clear();
-        hashtree_fips_transport::bind_fips_endpoint(options)
+        let endpoint = hashtree_fips_transport::bind_fips_endpoint(options)
             .await
-            .unwrap()
-    }
-
-    fn reserve_udp_addr() -> String {
-        std::net::UdpSocket::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .to_string()
+            .unwrap();
+        let addrs = endpoint
+            .native_endpoint
+            .bound_udp_listen_addrs()
+            .await
+            .unwrap();
+        let [addr] = addrs.as_slice() else {
+            panic!("expected exactly one bound UDP listener, got {addrs:?}");
+        };
+        assert!(addr.ip().is_loopback());
+        assert_ne!(addr.port(), 0);
+        (endpoint, addr.to_string())
     }
 
     let temp = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp.path()).unwrap());
     let scope = format!("status-connected-test-{}", uuid::Uuid::new_v4());
-    let left_addr = reserve_udp_addr();
-    let right_addr = reserve_udp_addr();
-    let left = endpoint(&Keys::generate(), &scope, &left_addr).await;
-    let right = endpoint(&Keys::generate(), &scope, &right_addr).await;
+    let (left, left_addr) = endpoint(&Keys::generate(), &scope).await;
+    let (right, right_addr) = endpoint(&Keys::generate(), &scope).await;
     hashtree_fips_transport::set_fips_peer_configs(
         left.native_endpoint.as_ref(),
         vec![hashtree_fips_transport::FipsPeerConfig {
