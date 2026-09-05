@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-## 0.2.138 - 2026-09-05
+## 0.2.138 - 2026-09-06
 
 ### Added
 
@@ -113,12 +113,12 @@
 
 ### Changed
 
-- Release `hashtree-fips-transport` 0.4.12 against the renamed Nostr VPN FIPS
-  packages: `nvpn-fips-core` 0.4.65, `nvpn-fips-tcp` 0.2.1, and
-  `nvpn-fips-tcp-endpoint` 0.2.1. Dependency aliases preserve the existing
-  `fips_core`, `fips_tcp`, and `fips_tcp_endpoint` Rust API names, while the
-  workspace advances to `nostr-pubsub-fips` 0.4.8 for the same package-name
-  migration. The adapter retains its `hashtree-core` 0.2.86 registry floor.
+- Release `hashtree-fips-transport` 0.4.13 with `nvpn-fips-core` 0.4.74,
+  `nvpn-fips-tcp` 0.2.1, and `nvpn-fips-tcp-endpoint` 0.2.10; advance the
+  workspace to `nostr-pubsub-fips` 0.4.17. These updates improve connection
+  startup and delivery through reconnects and key rotation without changing
+  the protocol or the existing Rust dependency aliases. The adapter retains
+  its `hashtree-core` 0.2.86 registry floor.
 
 ### Fixed
 

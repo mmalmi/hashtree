@@ -15,17 +15,17 @@ git_remote_version="$(awk -F '"' '/^version = / { print $2; exit }' "${RUST_DIR}
 : "${git_remote_version:?missing git-remote-htree package version}"
 grep -F "git-remote-htree = { version = \"=${git_remote_version}\", path = \"../git-remote-htree\" }" \
     "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" >/dev/null
-grep -F 'hashtree-fips-transport = { version = "0.4.12", path = "crates/hashtree-fips-transport" }' \
+grep -F 'hashtree-fips-transport = { version = "0.4.13", path = "crates/hashtree-fips-transport" }' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
-grep -F 'nostr-pubsub-fips = "0.4.8"' \
+grep -F 'nostr-pubsub-fips = "0.4.17"' \
     "${RUST_DIR}/Cargo.toml" >/dev/null
-grep -F 'version = "0.4.12"' \
+grep -F 'version = "0.4.13"' \
     "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" >/dev/null
-grep -F 'fips-core = { package = "nvpn-fips-core", version = "=0.4.65" }' \
+grep -F 'fips-core = { package = "nvpn-fips-core", version = "=0.4.74" }' \
     "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" >/dev/null
 grep -F 'fips-tcp = { package = "nvpn-fips-tcp", version = "=0.2.1" }' \
     "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" >/dev/null
-grep -F 'fips-tcp-endpoint = { package = "nvpn-fips-tcp-endpoint", version = "=0.2.1" }' \
+grep -F 'fips-tcp-endpoint = { package = "nvpn-fips-tcp-endpoint", version = "=0.2.10" }' \
     "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" >/dev/null
 grep -F 'hashtree-core = { version = "0.2.86", path = "../hashtree-core" }' \
     "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" >/dev/null
