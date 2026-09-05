@@ -319,7 +319,7 @@ impl MigrationScenario {
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
 fn migration_reopens_live_mappings_and_completes_external_blob_copy() {
     let scenario = MigrationScenario::generated(Some(64));
-    let (output, request) = run_fenced_migration(&scenario);
+    let (output, request) = run_fenced_migration(&scenario, || {});
     assert_success(&output);
 
     let stdout = String::from_utf8(output.stdout).expect("utf8 stdout");
@@ -425,7 +425,7 @@ fn target_only_catalog_corruption_blocks_online_certification_and_final_completi
         .join(&hex[4..]);
     fs::remove_file(&external_path).expect("remove target-only external body");
 
-    let (output, request) = run_fenced_migration(&scenario);
+    let (output, request) = run_fenced_migration(&scenario, || {});
     assert!(!output.status.success(), "corrupt target reached complete");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -451,28 +451,33 @@ fn target_only_catalog_corruption_blocks_online_certification_and_final_completi
 #[cfg(target_os = "linux")]
 #[test]
 #[ignore = "release gate: requires passwordless sudo and system systemd"]
-fn stopped_source_rejects_a_blob_omitted_from_online_metadata_reconciliation() {
-    let scenario = MigrationScenario::generated(Some(64));
-    let omitted_hash = scenario.blobs[0].0;
-    let mut options = heed::EnvOpenOptions::new();
-    options.max_dbs(5);
-    let env = unsafe { options.open(&scenario.source_dir) }.expect("open source for keyset fault");
-    let mut wtxn = env.write_txn().expect("source write transaction");
-    let metadata: heed::Database<heed::types::Bytes, heed::types::Bytes> = env
-        .open_database(&wtxn, Some("metadata"))
-        .expect("open metadata database")
-        .expect("metadata database");
-    metadata
-        .delete(&mut wtxn, &omitted_hash)
-        .expect("remove one legacy metadata row");
-    wtxn.commit().expect("commit mixed source keyset");
-    env.force_sync().expect("sync mixed source keyset");
-    env.prepare_for_closing().wait();
-
-    let (output, request) = run_fenced_migration(&scenario);
+fn stopped_source_rejects_a_blob_added_after_online_certification() {
+    let mut scenario = MigrationScenario::generated(Some(64));
+    let added_data = b"source blob added after the certified online boundary".to_vec();
+    let added_hash = sha256(&added_data);
+    scenario.blobs.push((added_hash, added_data.clone()));
+    let (output, request) = run_fenced_migration(&scenario, || {
+        let source = LmdbBlobStore::with_map_size_and_external_blob_options(
+            &scenario.source_dir,
+            64 * 1024 * 1024,
+            Some(ExternalBlobOptions {
+                base_path: scenario.source_external.clone(),
+                min_bytes: 1,
+                sync: true,
+                pack_target_bytes: None,
+            }),
+        )
+        .expect("open unfenced source after online certification");
+        assert!(source
+            .put_sync(added_hash, &added_data)
+            .expect("add source blob"));
+        source.force_sync().expect("sync source addition");
+        // ManagedEnv closes Heed's cached environment before the writer census.
+        drop(source);
+    });
     assert!(
         !output.status.success(),
-        "mixed source keysets reached complete"
+        "uncertified source addition reached complete"
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -494,7 +499,7 @@ fn stopped_source_rejects_a_blob_omitted_from_online_metadata_reconciliation() {
     assert_eq!(
         scenario.pool_count(),
         scenario.blobs.len() as u64 - 1,
-        "the compact scan demonstrates that one blob would otherwise be silently omitted"
+        "the online audit must contain only the blobs present before source mutation"
     );
 }
 
@@ -1119,13 +1124,16 @@ fn prepare_next_worker(
 }
 
 #[cfg(target_os = "linux")]
-fn run_fenced_migration(scenario: &MigrationScenario) -> (Output, PathBuf) {
+fn run_fenced_migration(
+    scenario: &MigrationScenario,
+    mut before_stopped_source: impl FnMut(),
+) -> (Output, PathBuf) {
     let _serialized = SYSTEM_MANAGER_TEST
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let state_path = &scenario.controller_state;
     let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    state["sourceWritersFenced"] = json!(true);
+    state["sourceWritersFenced"] = json!(false);
     state["targetWritersFenced"] = json!(true);
     state["fenceHeldUntilCompletion"] = json!(true);
     write_file(&state_path, &serde_json::to_vec(&state).unwrap());
@@ -1155,6 +1163,13 @@ fn run_fenced_migration(scenario: &MigrationScenario) -> (Output, PathBuf) {
         let certificate_path = certificate["path"]
             .as_str()
             .expect("real prerequisite certification");
+        assert_eq!(
+            certificate["sha256"],
+            file_sha256(Path::new(certificate_path))
+        );
+        if phase == "final-stopped-source" {
+            before_stopped_source();
+        }
         if phase == "final-stopped-full" {
             let index = arguments
                 .iter()
@@ -1172,8 +1187,17 @@ fn run_fenced_migration(scenario: &MigrationScenario) -> (Output, PathBuf) {
         ]);
         state = serde_json::from_slice(sudo_read_to_string(&state_path).as_bytes()).unwrap();
         state["phase"] = json!(phase);
+        state["sourceWritersFenced"] = json!(true);
         if phase == "final-stopped-full" {
-            state["sourceTerminalReceiptSha256"] = json!([certificate["sha256"]]);
+            let certified: Value = serde_json::from_slice(
+                &fs::read(certificate_path).expect("root source-terminal certification"),
+            )
+            .expect("parse root source-terminal certification");
+            assert_eq!(
+                certified["sourceTerminal"]["sha256"], completed["terminalReceiptSha256"],
+                "certification must bind the controller's exact source-terminal receipt"
+            );
+            state["sourceTerminalReceiptSha256"] = json!([completed["terminalReceiptSha256"]]);
         }
         let input = guard
             .rollout
