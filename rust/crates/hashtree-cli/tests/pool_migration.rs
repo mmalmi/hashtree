@@ -1133,7 +1133,7 @@ fn run_fenced_migration(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let state_path = &scenario.controller_state;
     let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
-    state["sourceWritersFenced"] = json!(false);
+    state["sourceWritersFenced"] = json!(true);
     state["targetWritersFenced"] = json!(true);
     state["fenceHeldUntilCompletion"] = json!(true);
     write_file(&state_path, &serde_json::to_vec(&state).unwrap());
@@ -1160,14 +1160,16 @@ fn run_fenced_migration(
             ("sourceTerminalCertification", "source-terminal-")
         };
         let certificate = &completed[field];
-        let certificate_path = certificate["path"]
-            .as_str()
-            .expect("real prerequisite certification");
+        let certificate_path = certificate["path"].as_str().unwrap_or_else(|| {
+            panic!("completed {launched_phase} did not produce {field}: {completed}")
+        });
         assert_eq!(
             certificate["sha256"],
             file_sha256(Path::new(certificate_path))
         );
         if phase == "final-stopped-source" {
+            // The online fence covered the completed epoch. Inject between
+            // epochs, before the stopped-source controller establishes its fence.
             before_stopped_source();
         }
         if phase == "final-stopped-full" {
