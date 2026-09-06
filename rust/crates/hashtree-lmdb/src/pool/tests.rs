@@ -970,6 +970,10 @@ fn automatic_worker_promotes_hot_blob_without_application_maintenance_calls() {
     config.temperature.read_sample_rate = 1;
     config.temperature.minimum_residence = Duration::ZERO;
     let pool = PoolStore::open(temp.path().join("catalog"), config).expect("pool");
+    let setup = pool
+        .temperature_cycle
+        .lock()
+        .expect("pause worker during setup");
     let slow = pool
         .add_member(PoolMemberConfig::new(temp.path().join("slow"), 1024 * 1024))
         .expect("slow");
@@ -982,15 +986,35 @@ fn automatic_worker_promotes_hot_blob_without_application_maintenance_calls() {
     pool.record_read(slow, Duration::from_millis(100), true);
     pool.record_read(fast, Duration::from_millis(5), true);
     pool.get_sync(&hash).expect("hot read");
+    assert_eq!(
+        pool.temperature.lock().expect("temperature").samples.len(),
+        1
+    );
+    drop(setup);
 
-    for _ in 0..100 {
-        if pool.blob_location(&hash).expect("location") == Some(fast) {
-            assert_eq!(pool.get_sync(&hash).expect("read"), Some(data));
-            return;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        // A drained sample plus the released cycle lock proves the worker finished.
+        if let Ok(_cycle) = pool.temperature_cycle.try_lock() {
+            if pool.temperature.lock().expect("temperature").samples.len() == 0 {
+                assert_eq!(
+                    pool.read_location(&hash).expect("location"),
+                    Some(LocationRecord::Stored {
+                        member: fast,
+                        size: data.len() as u64,
+                    }),
+                    "completed background cycle did not promote the hot blob"
+                );
+                assert_eq!(pool.get_sync(&hash).expect("read"), Some(data));
+                return;
+            }
         }
-        thread::sleep(Duration::from_millis(10));
+        assert!(
+            Instant::now() < deadline,
+            "background temperature cycle did not finish"
+        );
+        thread::sleep(Duration::from_millis(1));
     }
-    panic!("automatic temperature worker did not promote the hot blob");
 }
 
 #[test]

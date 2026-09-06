@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use hashtree_core::store::{slice_blob_range, Store, StoreError, StoreStats};
 use hashtree_core::{sha256, to_hex, types::Hash};
 use heed::types::Bytes;
-use heed::{Database, EnvFlags, EnvOpenOptions};
+use heed::{Database, EnvFlags};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::Path;
@@ -32,7 +32,8 @@ struct ReadOnlyPoolStoreInner {
 /// opens a write transaction, repairs pending records, records temperature
 /// samples, or starts a worker. It is intended for live-data verification.
 /// LMDB can still update reader bookkeeping in `lock.mdb`; `data.mdb` remains
-/// read-only.
+/// read-only. On Windows, catalog growth requires reopening the reader after
+/// a `MapResized` error because its mapping covers the file size at open.
 #[derive(Clone)]
 pub struct ReadOnlyPoolStore {
     inner: Arc<ReadOnlyPoolStoreInner>,
@@ -118,12 +119,12 @@ impl ReadOnlyPoolStore {
             )));
         }
 
-        let mut options = EnvOpenOptions::new();
+        let mut options = ManagedEnv::read_only_options(path).map_err(map_heed)?;
         options
             .max_dbs(CATALOG_DATABASES)
             .max_readers(CATALOG_MAX_READERS);
         unsafe {
-            options.flags(EnvFlags::READ_ONLY | EnvFlags::NO_READ_AHEAD);
+            options.flags(EnvFlags::NO_READ_AHEAD);
         }
         let env = unsafe {
             match config
@@ -1139,6 +1140,15 @@ mod tests {
 
     #[test]
     fn live_catalog_audit_rejects_manifest_changed_after_reader_open() {
+        check_live_catalog_manifest_change(true);
+    }
+
+    #[test]
+    fn live_catalog_growth_invalidates_reader_without_crashing() {
+        check_live_catalog_manifest_change(false);
+    }
+
+    fn check_live_catalog_manifest_change(reserve_catalog_space: bool) {
         let temp = TempDir::new().expect("temp dir");
         let catalog = temp.path().join("catalog");
         let initial_member = temp.path().join("initial-member");
@@ -1149,6 +1159,18 @@ mod tests {
         pool.force_sync().expect("sync initial manifest");
         drop(pool);
 
+        let catalog_data = catalog.join("data.mdb");
+        if reserve_catalog_space {
+            // Keep this mutation within the existing mapping so it still
+            // exercises the exact manifest comparison on every platform.
+            let file = fs::OpenOptions::new()
+                .write(true)
+                .open(&catalog_data)
+                .expect("open closed catalog for preallocation");
+            file.set_len(file.metadata().expect("catalog metadata").len() + 128 * 1024)
+                .expect("reserve catalog pages");
+        }
+        let opened_size = fs::metadata(&catalog_data).expect("catalog size").len();
         let reader = ReadOnlyPoolStore::open(&catalog).expect("open pinned read-only pool");
         reader
             .validate_committed_catalog()
@@ -1170,14 +1192,38 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
 
+        let changed_size = fs::metadata(&catalog_data)
+            .expect("changed catalog size")
+            .len();
+        if reserve_catalog_space {
+            assert_eq!(
+                changed_size, opened_size,
+                "manifest change must fit the mapping"
+            );
+        } else {
+            assert!(changed_size > opened_size, "writer must grow the catalog");
+        }
         let error = reader
             .validate_committed_catalog()
             .expect_err("changed live manifest must differ from opened member snapshot");
+        let expected = if cfg!(windows) && !reserve_catalog_space {
+            "MDB_MAP_RESIZED"
+        } else {
+            "manifest changed after read-only members were opened"
+        };
         assert!(
-            error
-                .to_string()
-                .contains("manifest changed after read-only members were opened"),
+            error.to_string().contains(expected),
             "unexpected live manifest mismatch: {error}"
+        );
+        drop(reader);
+        let reopened = ReadOnlyPoolStore::open(&catalog).expect("reopen changed catalog");
+        assert_eq!(
+            reopened
+                .manifest_snapshot()
+                .expect("new manifest")
+                .members
+                .len(),
+            2
         );
     }
 }

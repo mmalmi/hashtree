@@ -1,6 +1,7 @@
 //! LMDB-backed content-addressed blob storage.
 
 mod configured;
+mod external_file;
 mod managed_env;
 mod migration;
 mod migration_audit;
@@ -894,11 +895,11 @@ impl LmdbBlobReader {
                 "external read concurrency must be non-zero".into(),
             ));
         }
-        let mut options = EnvOpenOptions::new();
+        let mut options = ManagedEnv::read_only_options(path).map_err(map_heed_error)?;
         options
             .max_dbs(DATABASE_COUNT)
             .max_readers(DEFAULT_MAX_READERS);
-        let mut flags = env_flags_from_env() | EnvFlags::READ_ONLY;
+        let mut flags = env_flags_from_env();
         if sequential_scan {
             flags.remove(EnvFlags::NO_READ_AHEAD);
         } else {
@@ -2881,12 +2882,9 @@ impl LmdbBlobStore {
         if path.exists() {
             fs::remove_file(&path)?;
         }
-        if let Err(error) = fs::rename(&temp_path, &path) {
+        if let Err(error) = external_file::publish(&temp_path, &path, config.sync) {
             let _ = fs::remove_file(&temp_path);
             return Err(error.into());
-        }
-        if config.sync {
-            File::open(parent)?.sync_all()?;
         }
         let marker = Self::external_blob_ref(hash);
         target
@@ -3644,12 +3642,9 @@ impl LmdbBlobStore {
             }
         }
 
-        if let Err(error) = fs::rename(&temp_path, &path) {
+        if let Err(error) = external_file::publish(&temp_path, &path, config.sync) {
             let _ = fs::remove_file(&temp_path);
             return Err(error.into());
-        }
-        if config.sync {
-            File::open(parent)?.sync_all()?;
         }
         Ok(())
     }
@@ -3745,12 +3740,9 @@ impl LmdbBlobStore {
             let _ = fs::remove_file(&temp_path);
             return Err(error);
         }
-        if let Err(error) = fs::rename(&temp_path, &path) {
+        if let Err(error) = external_file::publish(&temp_path, &path, config.sync) {
             let _ = fs::remove_file(&temp_path);
             return Err(error.into());
-        }
-        if config.sync {
-            File::open(parent)?.sync_all()?;
         }
         Ok(markers)
     }
@@ -4327,62 +4319,64 @@ mod tests {
 
     #[test]
     fn external_blob_spill_keeps_large_values_out_of_lmdb() -> Result<(), StoreError> {
-        let temp = TempDir::new().unwrap();
-        let external_dir = temp.path().join("external");
-        let store = LmdbBlobStore::with_map_size_and_settings(
-            temp.path().join("blobs"),
-            16 * 1024 * 1024,
-            EnvFlags::empty(),
-            |_| {
-                Some(ExternalBlobConfig {
-                    base_path: external_dir.clone(),
-                    min_bytes: 8,
-                    sync: false,
-                    pack_target_bytes: None,
-                    #[cfg(unix)]
-                    pinned_root: None,
-                })
-            },
-        )?;
+        for sync in [false, true] {
+            let temp = TempDir::new().unwrap();
+            let external_dir = temp.path().join("external");
+            let store = LmdbBlobStore::with_map_size_and_settings(
+                temp.path().join("blobs"),
+                16 * 1024 * 1024,
+                EnvFlags::empty(),
+                |_| {
+                    Some(ExternalBlobConfig {
+                        base_path: external_dir.clone(),
+                        min_bytes: 8,
+                        sync,
+                        pack_target_bytes: None,
+                        #[cfg(unix)]
+                        pinned_root: None,
+                    })
+                },
+            )?;
 
-        let small = b"tiny";
-        let small_hash = sha256(small);
-        assert!(store.put_sync(small_hash, small)?);
+            let small = b"tiny";
+            let small_hash = sha256(small);
+            assert!(store.put_sync(small_hash, small)?);
 
-        let large = b"large external blob payload";
-        let large_hash = sha256(large);
-        assert!(store.put_sync(large_hash, large)?);
+            let large = b"large external blob payload";
+            let large_hash = sha256(large);
+            assert!(store.put_sync(large_hash, large)?);
 
-        assert_eq!(store.get_sync(&small_hash)?, Some(small.to_vec()));
-        assert_eq!(store.get_sync(&large_hash)?, Some(large.to_vec()));
-        assert_eq!(
-            store.get_range_sync(&large_hash, 6, 13)?,
-            Some(b"external".to_vec())
-        );
+            assert_eq!(store.get_sync(&small_hash)?, Some(small.to_vec()));
+            assert_eq!(store.get_sync(&large_hash)?, Some(large.to_vec()));
+            assert_eq!(
+                store.get_range_sync(&large_hash, 6, 13)?,
+                Some(b"external".to_vec())
+            );
 
-        let rtxn = store.env.read_txn().map_err(map_heed_error)?;
-        let inline_value = store
-            .blobs
-            .get(&rtxn, &small_hash)
-            .map_err(map_heed_error)?
-            .expect("small inline value");
-        assert_eq!(inline_value, small);
-        let external_value = store
-            .blobs
-            .get(&rtxn, &large_hash)
-            .map_err(map_heed_error)?
-            .expect("large marker value");
-        assert!(store.is_external_blob_ref(&large_hash, external_value));
-        drop(rtxn);
+            let rtxn = store.env.read_txn().map_err(map_heed_error)?;
+            let inline_value = store
+                .blobs
+                .get(&rtxn, &small_hash)
+                .map_err(map_heed_error)?
+                .expect("small inline value");
+            assert_eq!(inline_value, small);
+            let external_value = store
+                .blobs
+                .get(&rtxn, &large_hash)
+                .map_err(map_heed_error)?
+                .expect("large marker value");
+            assert!(store.is_external_blob_ref(&large_hash, external_value));
+            drop(rtxn);
 
-        let external_path = store.external_blob_path(&large_hash).unwrap();
-        assert_eq!(std::fs::read(&external_path)?, large);
-        let stats = store.stats()?;
-        assert_eq!(stats.count, 2);
-        assert_eq!(stats.total_bytes, (small.len() + large.len()) as u64);
+            let external_path = store.external_blob_path(&large_hash).unwrap();
+            assert_eq!(std::fs::read(&external_path)?, large);
+            let stats = store.stats()?;
+            assert_eq!(stats.count, 2);
+            assert_eq!(stats.total_bytes, (small.len() + large.len()) as u64);
 
-        assert!(store.delete_sync(&large_hash)?);
-        assert!(!external_path.exists());
+            assert!(store.delete_sync(&large_hash)?);
+            assert!(!external_path.exists());
+        }
         Ok(())
     }
 
@@ -5410,11 +5404,12 @@ mod tests {
         let hash = sha256(b"shared environment lifecycle");
         first.put_sync(hash, b"shared environment lifecycle")?;
         let second = LmdbBlobStore::new(&path)?;
-        let canonical = std::fs::canonicalize(&path)?;
+        // Heed normalizes Windows verbatim paths before using them as cache keys.
+        let environment_path = second.env.path().to_path_buf();
 
         drop(first);
         assert!(
-            heed::env_closing_event(&canonical).is_some(),
+            heed::env_closing_event(&environment_path).is_some(),
             "the environment must remain open while another managed store owns it"
         );
         assert_eq!(
@@ -5424,7 +5419,7 @@ mod tests {
 
         drop(second);
         assert!(
-            heed::env_closing_event(&canonical).is_none(),
+            heed::env_closing_event(&environment_path).is_none(),
             "the last managed store must remove Heed's cached environment"
         );
         Ok(())

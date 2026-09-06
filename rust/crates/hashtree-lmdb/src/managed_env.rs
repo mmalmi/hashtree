@@ -1,7 +1,7 @@
 use hashtree_core::lmdb_runtime::{
     acquire_lmdb_write_permit, with_lmdb_lock_acquisition, LmdbWritePermit,
 };
-use heed::{Env, EnvOpenOptions, PinnedLmdbIdentity, RoTxn, RwTxn};
+use heed::{Env, EnvFlags, EnvOpenOptions, PinnedLmdbIdentity, RoTxn, RwTxn};
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
@@ -24,6 +24,25 @@ pub(crate) struct ManagedEnv {
 }
 
 impl ManagedEnv {
+    pub(crate) fn read_only_options(path: &Path) -> Result<EnvOpenOptions, heed::Error> {
+        let mut options = EnvOpenOptions::new();
+        unsafe { options.flags(EnvFlags::READ_ONLY) };
+        #[cfg(windows)]
+        {
+            // Windows LMDB maps only the physical file for MDB_RDONLY, not
+            // the larger capacity in its metadata. Bound its page checks to
+            // that mapping so later growth returns MapResized. Reopen the
+            // reader after growth; never remap while transactions may exist.
+            let bytes = std::fs::metadata(path.join("data.mdb"))?.len();
+            let size = usize::try_from(bytes)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            options.map_size(size);
+        }
+        #[cfg(not(windows))]
+        let _ = path;
+        Ok(options)
+    }
+
     /// Open and register an environment as one atomic managed operation.
     ///
     /// # Safety

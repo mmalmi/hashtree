@@ -1,6 +1,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(unix)]
 use std::fs::OpenOptions;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
@@ -791,6 +792,7 @@ fn publish_or_validate_service_file(
     Ok(())
 }
 
+#[cfg(unix)]
 fn read_exact_service_file(path: &Path, service_gid: u32, label: &str) -> Result<Vec<u8>> {
     let mut file = OpenOptions::new()
         .read(true)
@@ -802,7 +804,6 @@ fn read_exact_service_file(path: &Path, service_gid: u32, label: &str) -> Result
         .with_context(|| format!("inspect open {label}"))?;
     let named =
         std::fs::symlink_metadata(path).with_context(|| format!("inspect named {label}"))?;
-    #[cfg(unix)]
     if !before.file_type().is_file()
         || before.dev() != named.dev()
         || before.ino() != named.ino()
@@ -821,7 +822,6 @@ fn read_exact_service_file(path: &Path, service_gid: u32, label: &str) -> Result
     let after = file
         .metadata()
         .with_context(|| format!("reinspect open {label}"))?;
-    #[cfg(unix)]
     if before.dev() != after.dev()
         || before.ino() != after.ino()
         || before.len() != after.len()
@@ -832,6 +832,11 @@ fn read_exact_service_file(path: &Path, service_gid: u32, label: &str) -> Result
         bail!("{label} changed while read or lacks its terminal newline");
     }
     Ok(bytes)
+}
+
+#[cfg(not(unix))]
+fn read_exact_service_file(_path: &Path, _service_gid: u32, _label: &str) -> Result<Vec<u8>> {
+    bail!("terminal publication is supported only on Unix")
 }
 
 fn validate_published_cursor(

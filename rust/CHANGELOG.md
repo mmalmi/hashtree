@@ -7,8 +7,11 @@
 ### Fixed
 
 - Restore Windows builds of the LMDB-backed store, CLI, and Git helper by
-  excluding Unix-only pinned-directory operations on Windows. Normal external
-  blob and pack handling keeps its existing behavior.
+  excluding Unix-only pinned-directory and terminal-publication operations.
+- Publish synchronized external blobs and packs with a Windows write-through
+  move, avoiding unsupported directory flushing.
+- Prevent Windows read-only storage crashes after another process grows the
+  catalog. Readers report `MapResized` and can be reopened safely.
 - Publish the storage fix as `hashtree-lmdb` 0.2.88 and update the exact storage
   dependency in `git-remote-htree` 0.2.87 and the CLI.
 
@@ -16,6 +19,8 @@
 
 - Run Windows storage tests and compile the release CLI, Cashu helper, and Git
   helper in ordinary CI, so platform errors are caught before release tagging.
+- Synchronize the background-worker test with completed work and verify the
+  committed location, removing its setup race and short timing assumption.
 - Includes the protocol-compatible cleanup, migration improvements, and complete
   Git mirror recovery documented in 0.2.138 below.
 
