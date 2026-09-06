@@ -113,9 +113,11 @@ struct ExternalBlobConfig {
     min_bytes: usize,
     sync: bool,
     pack_target_bytes: Option<usize>,
+    #[cfg(unix)]
     pinned_root: Option<Arc<PinnedExternalRoot>>,
 }
 
+#[cfg(unix)]
 #[derive(Debug)]
 struct PinnedExternalRoot {
     directory: File,
@@ -164,6 +166,7 @@ impl ExternalBlobConfig {
             min_bytes,
             sync,
             pack_target_bytes,
+            #[cfg(unix)]
             pinned_root: None,
         })
     }
@@ -187,6 +190,7 @@ impl From<ExternalBlobOptions> for ExternalBlobConfig {
             min_bytes: options.min_bytes,
             sync: options.sync,
             pack_target_bytes: options.pack_target_bytes,
+            #[cfg(unix)]
             pinned_root: None,
         }
     }
@@ -217,6 +221,7 @@ impl ExternalBlobConfig {
     }
 
     fn open_relative(&self, relative: &Path) -> Result<File, StoreError> {
+        #[cfg(unix)]
         if let Some(root) = &self.pinned_root {
             return root.open_regular(relative);
         }
@@ -632,7 +637,9 @@ impl SourceBlobRead {
 #[derive(Debug, Clone)]
 struct ExternalSourceFile {
     path: PathBuf,
+    #[cfg(unix)]
     relative: PathBuf,
+    #[cfg(unix)]
     pinned_root: Option<Arc<PinnedExternalRoot>>,
 }
 
@@ -640,17 +647,19 @@ impl ExternalSourceFile {
     fn new(config: &ExternalBlobConfig, relative: PathBuf) -> Self {
         Self {
             path: config.base_path.join(&relative),
+            #[cfg(unix)]
             relative,
+            #[cfg(unix)]
             pinned_root: config.pinned_root.clone(),
         }
     }
 
     fn open(&self) -> Result<File, StoreError> {
+        #[cfg(unix)]
         if let Some(root) = &self.pinned_root {
-            root.open_regular(&self.relative)
-        } else {
-            File::open(&self.path).map_err(StoreError::Io)
+            return root.open_regular(&self.relative);
         }
+        File::open(&self.path).map_err(StoreError::Io)
     }
 }
 
@@ -2816,6 +2825,7 @@ impl LmdbBlobStore {
         chunk_bytes: usize,
         config: &ExternalBlobConfig,
     ) -> Result<bool, StoreError> {
+        #[cfg(unix)]
         if config.pinned_root.is_some() {
             return Err(StoreError::Other(
                 "streaming member relocation is disabled while external paths are authority-pinned"
@@ -3604,6 +3614,7 @@ impl LmdbBlobStore {
         data: &[u8],
         config: &ExternalBlobConfig,
     ) -> Result<(), StoreError> {
+        #[cfg(unix)]
         if let Some(root) = &config.pinned_root {
             return root.write_blob(
                 &ExternalBlobConfig::relative_blob_path(hash),
@@ -3684,6 +3695,7 @@ impl LmdbBlobStore {
         }
 
         let pack_name = Self::external_pack_name(&entries[0].1);
+        #[cfg(unix)]
         if let Some(root) = &config.pinned_root {
             let relative = ExternalBlobConfig::relative_pack_path(&pack_name);
             return root.create_file(&relative, config.sync, |file| {
@@ -3884,6 +3896,7 @@ impl LmdbBlobStore {
 
     fn remove_external_blob_file(&self, path: Option<PathBuf>) {
         if let Some(path) = path {
+            #[cfg(unix)]
             if let Some(config) = &self.external_blobs {
                 if let Some(root) = &config.pinned_root {
                     if let Ok(relative) = path.strip_prefix(&config.base_path) {
@@ -4326,6 +4339,7 @@ mod tests {
                     min_bytes: 8,
                     sync: false,
                     pack_target_bytes: None,
+                    #[cfg(unix)]
                     pinned_root: None,
                 })
             },
@@ -4386,6 +4400,7 @@ mod tests {
                     min_bytes: 8,
                     sync: true,
                     pack_target_bytes: Some(1024 * 1024),
+                    #[cfg(unix)]
                     pinned_root: None,
                 })
             },
@@ -4471,6 +4486,7 @@ mod tests {
                     min_bytes: 8,
                     sync: true,
                     pack_target_bytes: Some(1024 * 1024),
+                    #[cfg(unix)]
                     pinned_root: None,
                 })
             },
@@ -4670,6 +4686,7 @@ mod tests {
                     min_bytes: 16,
                     sync: true,
                     pack_target_bytes: None,
+                    #[cfg(unix)]
                     pinned_root: None,
                 })
             },
