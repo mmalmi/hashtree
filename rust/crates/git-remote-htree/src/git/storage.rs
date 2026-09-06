@@ -36,7 +36,7 @@ use super::{Error, Result};
 
 /// Box type for async recursion
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
-const GIT_TREE_CHUNK_SIZE: usize = 64 * 1024;
+pub(crate) const GIT_TREE_CHUNK_SIZE: usize = 64 * 1024;
 
 struct BaseObjectSources<'a, S: Store> {
     objects: &'a HashMap<String, Vec<u8>>,

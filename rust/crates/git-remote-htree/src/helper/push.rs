@@ -3,13 +3,14 @@ use super::storage_support::{build_repo_viewer_url, get_hashtree_data_dir};
 use super::{fetch_progress_interval, AncestorCheck, PushSpec, RemoteHelper};
 use crate::git::progress::RepoTreeBuildProgress;
 use crate::git::refs::Ref;
+use crate::git::storage::GIT_TREE_CHUNK_SIZE;
 use crate::nostr_client::{
     resolve_identity, BlossomResult, PullRequestStateFilter, RepoAnnouncementOptions,
 };
 use crate::runtime::{block_on_result, new_multi_thread_runtime};
 use anyhow::{bail, Context, Result};
 use flate2::{write::ZlibEncoder, Compression};
-use hashtree_core::{HashTree, LinkType, Store, DEFAULT_CHUNK_SIZE};
+use hashtree_core::{HashTree, LinkType, Store};
 use nostr_sdk::prelude::{PublicKey, ToBech32};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -106,9 +107,9 @@ impl UploadQueueItem {
         match self.link_type {
             None | Some(LinkType::File | LinkType::Dir | LinkType::Fanout) => true,
             // Size 0 is ambiguous in older trees that may not have recorded sizes.
-            // Positive-size Blob links at or below the default chunk size are
-            // definite leaves for git-remote's default hashtree writer.
-            Some(LinkType::Blob) => self.size == 0 || self.size > DEFAULT_CHUNK_SIZE as u64,
+            // GitStorage uses smaller chunks than the core default. Its larger
+            // Blob entries are file roots whose descendants must be uploaded.
+            Some(LinkType::Blob) => self.size == 0 || self.size > GIT_TREE_CHUNK_SIZE as u64,
         }
     }
 }

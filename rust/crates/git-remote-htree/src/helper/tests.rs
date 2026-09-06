@@ -24,6 +24,7 @@ mod closure_validation;
 mod hydration;
 mod local_rebuild;
 mod pack_fallback;
+mod upload;
 
 const TEST_PUBKEY: &str = "4523be58d395b1b196a9b8c82b038b6895cb02b683d0c253a955068dba1facd0";
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -3414,55 +3415,6 @@ fn test_queue_links_for_diff_upload_prunes_known_subtrees() {
         discovered.load(std::sync::atomic::Ordering::Relaxed),
         1,
         "only the new child should count as discovered work"
-    );
-}
-
-#[test]
-fn test_upload_queue_item_decode_policy_skips_only_definite_leaf_blobs() {
-    let small_blob = super::push::UploadQueueItem {
-        hash: [1u8; 32],
-        key: Some([2u8; 32]),
-        link_type: Some(LinkType::Blob),
-        size: 128,
-    };
-    assert!(
-        !small_blob.needs_tree_decode(),
-        "positive-size single-chunk Blob links are definite leaves"
-    );
-
-    let zero_size_blob = super::push::UploadQueueItem {
-        size: 0,
-        ..small_blob
-    };
-    assert!(
-        zero_size_blob.needs_tree_decode(),
-        "zero-size Blob links remain legacy-ambiguous"
-    );
-
-    let large_blob = super::push::UploadQueueItem {
-        size: (hashtree_core::DEFAULT_CHUNK_SIZE as u64) + 1,
-        ..small_blob
-    };
-    assert!(
-        large_blob.needs_tree_decode(),
-        "large Blob links may be legacy chunked-file roots"
-    );
-
-    let dir = super::push::UploadQueueItem {
-        link_type: Some(LinkType::Dir),
-        size: 0,
-        ..small_blob
-    };
-    assert!(dir.needs_tree_decode(), "directory links must be traversed");
-
-    let root = super::push::UploadQueueItem {
-        link_type: None,
-        size: 0,
-        ..small_blob
-    };
-    assert!(
-        root.needs_tree_decode(),
-        "root type is unknown at queue time"
     );
 }
 

@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.2.140 - 2026-09-06
+
+### Fixed
+
+- Upload every chunk of Git objects split by the 64 KiB Git storage writer.
+  The uploader previously used the generic 2 MiB chunk limit to identify
+  leaves, which could leave child chunks unavailable to fresh clones.
+- Preserve raw file bytes that resemble encoded tree nodes during CLI uploads,
+  while still validating structural nodes and traversing shared chunks.
+- Report failed blob uploads as command failures instead of successful pushes.
+- Publish the Git upload fix as `git-remote-htree` 0.2.88 and update the CLI's
+  exact dependency. Storage remains on the verified `hashtree-lmdb` 0.2.88.
+
+### Changed
+
+- Cover chunked loose Git objects through the production storage and upload
+  paths in regression tests.
+- Includes the Windows fixes from 0.2.139 and protocol-compatible cleanup and
+  migration improvements from 0.2.138. See the
+  [full changelog](https://github.com/mmalmi/hashtree/blob/v0.2.140/rust/CHANGELOG.md).
+
 ## 0.2.139 - 2026-09-06
 
 ### Fixed

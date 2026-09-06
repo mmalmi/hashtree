@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::config::ensure_keys_string;
 use crate::fetch::{FetchConfig, Fetcher};
 use crate::HashtreeStore;
-use hashtree_core::{to_hex, Cid, HashTree, HashTreeConfig, Link};
+use hashtree_core::{to_hex, Cid, HashTree, HashTreeConfig, Link, LinkType, Store, TreeNode};
 
 const BLOSSOM_PUSH_CONCURRENCY: usize = 16;
 const BLOSSOM_PUSH_PROGRESS_EVERY: usize = 512;
@@ -61,34 +61,64 @@ async fn ensure_local_blob_for_push(
     anyhow::bail!("missing local blob while pushing DAG: {}", cid);
 }
 
+async fn node_for_push<S: Store>(
+    tree: &HashTree<S>,
+    cid: &Cid,
+    blob_size: Option<u64>,
+) -> Result<Option<TreeNode>> {
+    if let Some(size) = blob_size {
+        if let Some(data) = tree.get_blob(&cid.hash).await? {
+            // Match the core file reader: a Blob's declared size describes its
+            // plaintext leaf, regardless of the writer's chunk size. Authenticate
+            // keyed bytes before treating tree-shaped file contents as a leaf.
+            let plaintext_size = match cid.key.as_ref() {
+                Some(key) => hashtree_core::crypto::decrypt_chk(&data, key)
+                    .ok()
+                    .map(|plaintext| plaintext.len() as u64),
+                None => Some(data.len() as u64),
+            };
+            if plaintext_size == Some(size) {
+                return Ok(None);
+            }
+        }
+    }
+
+    tree.get_node(cid)
+        .await
+        .map_err(|err| anyhow::anyhow!("Failed to inspect {cid}: {err}"))
+}
+
 pub(crate) async fn collect_cids_for_push(
     store: &HashtreeStore,
     root_cid: Cid,
     fetcher: Option<&Fetcher>,
 ) -> Result<Vec<Cid>> {
     let mut cids_to_push = Vec::new();
-    let mut visited: HashSet<[u8; 32]> = HashSet::new();
-    let mut queue = vec![root_cid];
+    // A shared CID can be both literal file bytes and a structural node.
+    // Traverse each interpretation, but upload each block only once.
+    let mut visited = HashSet::new();
+    let mut collected = HashSet::new();
+    let mut queue = vec![(root_cid, None)];
     let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
 
-    while let Some(cid) = queue.pop() {
-        if !visited.insert(cid.hash) {
+    while let Some((cid, blob_size)) = queue.pop() {
+        if !visited.insert((cid.hash, blob_size)) {
             continue;
         }
 
         ensure_local_blob_for_push(store, fetcher, &cid).await?;
-        cids_to_push.push(cid.clone());
+        if collected.insert(cid.hash) {
+            cids_to_push.push(cid.clone());
+        }
 
-        let node = tree
-            .get_node(&cid)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to inspect {}: {}", cid, e))?;
+        let node = node_for_push(&tree, &cid, blob_size).await?;
 
         if let Some(node) = node {
             for link in &node.links {
-                if !visited.contains(&link.hash) {
-                    queue.push(child_cid(&cid, link));
-                }
+                queue.push((
+                    child_cid(&cid, link),
+                    (link.link_type == LinkType::Blob).then_some(link.size),
+                ));
             }
         }
     }
@@ -119,31 +149,31 @@ pub(crate) async fn collect_incremental_cids_for_push(
     fetcher: Option<&Fetcher>,
 ) -> Result<Vec<Cid>> {
     let mut cids_to_push = Vec::new();
-    let mut visited_new: HashSet<[u8; 32]> = HashSet::new();
-    let mut queue = vec![(root_cid, Some(previous_root_cid))];
+    let mut visited_new = HashSet::new();
+    let mut collected = HashSet::new();
+    let mut queue = vec![(root_cid, Some(previous_root_cid), None)];
     let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
 
-    while let Some((cid, old_cid)) = queue.pop() {
+    while let Some((cid, old_cid, blob_size)) = queue.pop() {
         if old_cid.as_ref().is_some_and(|old| old.hash == cid.hash) {
             continue;
         }
-        if !visited_new.insert(cid.hash) {
+        if !visited_new.insert((cid.hash, blob_size)) {
             continue;
         }
 
         ensure_local_blob_for_push(store, fetcher, &cid).await?;
-        cids_to_push.push(cid.clone());
+        if collected.insert(cid.hash) {
+            cids_to_push.push(cid.clone());
+        }
 
-        let node = tree
-            .get_node(&cid)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to inspect {}: {}", cid, e))?;
+        let node = node_for_push(&tree, &cid, blob_size).await?;
         let Some(node) = node else {
             continue;
         };
 
         let old_node = match old_cid.as_ref() {
-            Some(old_cid) => match tree.get_node(old_cid).await {
+            Some(old_cid) => match node_for_push(&tree, old_cid, blob_size).await {
                 Ok(old_node) => old_node,
                 Err(err) => {
                     tracing::warn!(
@@ -162,6 +192,10 @@ pub(crate) async fn collect_incremental_cids_for_push(
             let old_child = old_node
                 .as_ref()
                 .and_then(|old_node| matching_old_child(&old_node.links, index, link))
+                .filter(|old_link| {
+                    (old_link.link_type == LinkType::Blob).then_some(old_link.size)
+                        == (link.link_type == LinkType::Blob).then_some(link.size)
+                })
                 .map(|old_link| child_cid(old_cid.as_ref().expect("old node has cid"), old_link));
 
             if old_child
@@ -170,7 +204,11 @@ pub(crate) async fn collect_incremental_cids_for_push(
             {
                 continue;
             }
-            queue.push((child, old_child));
+            queue.push((
+                child,
+                old_child,
+                (link.link_type == LinkType::Blob).then_some(link.size),
+            ));
         }
     }
 
@@ -183,7 +221,7 @@ async fn upload_cids_with_client(
     client: hashtree_blossom::BlossomClient,
     cids_to_push: Vec<Cid>,
     force_upload: bool,
-) -> Result<(usize, usize, usize, Option<String>)> {
+) -> Result<(usize, usize)> {
     let total = cids_to_push.len();
     let mut total_uploaded = 0usize;
     let mut total_skipped = 0usize;
@@ -240,7 +278,19 @@ async fn upload_cids_with_client(
         }
     }
 
-    Ok((total_uploaded, total_skipped, total_errors, last_error))
+    if total_errors > 0 {
+        let detail = last_error
+            .as_deref()
+            .map(|err| format!(" (last error: {err})"))
+            .unwrap_or_default();
+        anyhow::bail!(
+            "failed to upload {} blob(s) to configured file servers{}",
+            total_errors,
+            detail
+        );
+    }
+
+    Ok((total_uploaded, total_skipped))
 }
 
 /// Push content to Blossom servers.
@@ -282,16 +332,10 @@ pub async fn push_to_blossom(
     };
 
     println!("Found {} blocks to push", cids_to_push.len());
-    let (uploaded, skipped, errors, last_error) =
+    let (uploaded, skipped) =
         upload_cids_with_client(store, Some(fetcher), client, cids_to_push, force_upload).await?;
 
-    println!(
-        "\nUploaded: {}, Skipped: {}, Errors: {}",
-        uploaded, skipped, errors
-    );
-    if let Some(last_error) = last_error {
-        eprintln!("Last error: {last_error}");
-    }
+    println!("\nUploaded: {uploaded}, Skipped: {skipped}, Errors: 0");
     println!("Done!");
     Ok(())
 }
@@ -361,21 +405,7 @@ pub async fn background_blossom_push_incremental_with_store(
     } else {
         BlossomClient::new(keys).with_write_servers(servers.to_vec())
     };
-    let (_total_uploaded, _total_skipped, total_errors, last_error) =
-        upload_cids_with_client(store, Some(fetcher), client, cids_to_push, false).await?;
-
-    if total_errors > 0 {
-        let detail = last_error
-            .as_deref()
-            .map(|err| format!(" (last error: {err})"))
-            .unwrap_or_default();
-        anyhow::bail!(
-            "failed to upload {} blob(s) to configured file servers{}",
-            total_errors,
-            detail
-        );
-    }
-
+    upload_cids_with_client(store, Some(fetcher), client, cids_to_push, false).await?;
     Ok(())
 }
 
@@ -386,6 +416,327 @@ mod tests {
     use futures::executor::block_on as sync_block_on;
     use hashtree_core::{DirEntry, HashTree, HashTreeConfig, LinkType};
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn push_collectors_accept_tree_shaped_raw_blobs() {
+        let tmp = tempdir().expect("tempdir");
+        let store = HashtreeStore::with_options(tmp.path(), None, 32 * 1024 * 1024).expect("store");
+        let payload = [0x82, 0xa1, b'l', 0x90, 0xa1, b't', 0x40];
+
+        for encrypted in [false, true] {
+            let mut config = HashTreeConfig::new(store.store_arc());
+            if !encrypted {
+                config = config.public();
+            }
+            let tree = HashTree::new(config);
+            let old_root = tree.put_directory(vec![]).await.expect("old root");
+            let (blob, size) = tree.put(&payload).await.expect("raw blob");
+            let root = tree
+                .put_directory(vec![
+                    DirEntry::from_cid("raw.msgpack", &blob).with_size(size)
+                ])
+                .await
+                .expect("root");
+
+            for previous in [None, Some(old_root)] {
+                let cids = match previous {
+                    Some(previous) => {
+                        collect_incremental_cids_for_push(&store, root.clone(), previous, None)
+                            .await
+                    }
+                    None => collect_cids_for_push(&store, root.clone(), None).await,
+                }
+                .expect("raw bytes must not be decoded as a structural node");
+                let hashes = cids
+                    .iter()
+                    .map(|cid| cid.hash)
+                    .collect::<std::collections::HashSet<_>>();
+                assert_eq!(
+                    hashes,
+                    std::collections::HashSet::from([root.hash, blob.hash])
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn push_collectors_walk_mixed_chunk_sizes_and_reject_missing_chunks() {
+        let tmp = tempdir().expect("tempdir");
+        let store = HashtreeStore::with_options(tmp.path(), None, 32 * 1024 * 1024).expect("store");
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+        let old_root = tree.put_directory(vec![]).await.expect("old root");
+        let mut entries = Vec::new();
+        let mut required_hashes = std::collections::HashSet::new();
+        let mut missing_chunk = None;
+
+        for chunk_size in [64 * 1024, hashtree_core::DEFAULT_CHUNK_SIZE] {
+            let chunk_tree = HashTree::new(
+                HashTreeConfig::new(store.store_arc())
+                    .with_chunk_size(chunk_size)
+                    .with_max_links(2),
+            );
+            let data = [
+                vec![1; chunk_size],
+                vec![2; chunk_size],
+                vec![3; chunk_size],
+                vec![4; 7],
+            ]
+            .concat();
+            let (file, size) = chunk_tree.put(&data).await.expect("chunked file");
+            required_hashes.insert(file.hash);
+            for chunk in data.chunks(chunk_size) {
+                let (leaf, _) = chunk_tree.put(chunk).await.expect("leaf");
+                required_hashes.insert(leaf.hash);
+                missing_chunk.get_or_insert(leaf.hash);
+            }
+            entries.push(DirEntry::from_cid(chunk_size.to_string(), &file).with_size(size));
+        }
+        let root = tree.put_directory(entries).await.expect("mixed root");
+        required_hashes.insert(root.hash);
+
+        for previous in [None, Some(old_root.clone())] {
+            let cids = match previous {
+                Some(previous) => {
+                    collect_incremental_cids_for_push(&store, root.clone(), previous, None).await
+                }
+                None => collect_cids_for_push(&store, root.clone(), None).await,
+            }
+            .expect("all chunk sizes must be traversed");
+            let hashes = cids
+                .iter()
+                .map(|cid| cid.hash)
+                .collect::<std::collections::HashSet<_>>();
+            assert!(required_hashes.is_subset(&hashes));
+        }
+
+        store
+            .router()
+            .delete_local_only(&missing_chunk.expect("leaf"))
+            .expect("delete chunk");
+        for previous in [None, Some(old_root)] {
+            let result = match previous {
+                Some(previous) => {
+                    collect_incremental_cids_for_push(&store, root.clone(), previous, None).await
+                }
+                None => collect_cids_for_push(&store, root.clone(), None).await,
+            };
+            assert!(result
+                .expect_err("missing chunk must fail")
+                .to_string()
+                .contains("missing local blob"));
+        }
+    }
+
+    #[tokio::test]
+    async fn push_collectors_reject_invalid_structural_nodes() {
+        let tmp = tempdir().expect("tempdir");
+        let store = HashtreeStore::with_options(tmp.path(), None, 32 * 1024 * 1024).expect("store");
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+        let old_root = tree.put_directory(vec![]).await.expect("old root");
+        let (invalid, size) = tree
+            .put(&[0x82, 0xa1, b'l', 0x90, 0xa1, b't', 0x40])
+            .await
+            .expect("invalid node");
+
+        for kind in [LinkType::Dir, LinkType::File, LinkType::Fanout] {
+            let root = tree
+                .put_directory(vec![DirEntry::from_cid("invalid", &invalid)
+                    .with_size(size)
+                    .with_link_type(kind)])
+                .await
+                .expect("root");
+            for previous in [None, Some(old_root.clone())] {
+                let result = match previous {
+                    Some(previous) => {
+                        collect_incremental_cids_for_push(&store, root.clone(), previous, None)
+                            .await
+                    }
+                    None => collect_cids_for_push(&store, root.clone(), None).await,
+                };
+                assert!(result
+                    .expect_err("invalid structural node must fail")
+                    .to_string()
+                    .contains("Invalid node type: 64"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn push_collectors_expand_nodes_also_referenced_as_raw_blobs() {
+        let tmp = tempdir().expect("tempdir");
+        let store = HashtreeStore::with_options(tmp.path(), None, 32 * 1024 * 1024).expect("store");
+        for encrypted in [false, true] {
+            let mut config = HashTreeConfig::new(store.store_arc());
+            if !encrypted {
+                config = config.public();
+            }
+            let chunk_tree = HashTree::new(HashTreeConfig {
+                chunk_size: 4,
+                encrypted,
+                ..HashTreeConfig::new(store.store_arc())
+            });
+            let tree = HashTree::new(config);
+            let (file, size) = chunk_tree.put(b"multiple chunks").await.expect("file");
+            let file_node = tree
+                .get_node(&file)
+                .await
+                .expect("file node")
+                .expect("node");
+            let encoded = tree
+                .get_blob(&file.hash)
+                .await
+                .expect("encoded file")
+                .expect("bytes");
+            let encoded = match file.key.as_ref() {
+                Some(key) => {
+                    hashtree_core::crypto::decrypt_chk(&encoded, key).expect("decrypt file")
+                }
+                None => encoded,
+            };
+            let (raw, raw_size) = tree.put(&encoded).await.expect("raw encoded node");
+            assert_eq!(file, raw, "both interpretations must share the same CID");
+            let old_root = tree.put_directory(vec![]).await.expect("old root");
+            let raw_only_root = tree
+                .put_directory(vec![
+                    DirEntry::from_cid("a-file", &raw).with_size(raw_size),
+                    DirEntry::from_cid("z-raw", &raw).with_size(raw_size),
+                ])
+                .await
+                .expect("raw-only root");
+            let root = tree
+                .put_directory(vec![
+                    DirEntry::from_cid("a-file", &file)
+                        .with_size(size)
+                        .with_link_type(LinkType::File),
+                    DirEntry::from_cid("z-raw", &raw).with_size(raw_size),
+                ])
+                .await
+                .expect("root");
+            let mut expected = std::collections::HashSet::from([root.hash, file.hash]);
+            expected.extend(file_node.links.iter().map(|link| link.hash));
+
+            for previous in [None, Some(old_root), Some(raw_only_root)] {
+                let cids = match previous {
+                    Some(previous) => {
+                        collect_incremental_cids_for_push(&store, root.clone(), previous, None)
+                            .await
+                    }
+                    None => collect_cids_for_push(&store, root.clone(), None).await,
+                }
+                .expect("structural reference must still expand after raw reference");
+                let hashes = cids
+                    .iter()
+                    .map(|cid| cid.hash)
+                    .collect::<std::collections::HashSet<_>>();
+                assert_eq!(hashes, expected);
+                assert_eq!(
+                    cids.len(),
+                    hashes.len(),
+                    "upload each shared block only once"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn incremental_push_does_not_prune_children_of_old_raw_blobs() {
+        let tmp = tempdir().expect("tempdir");
+        let store = HashtreeStore::with_options(tmp.path(), None, 32 * 1024 * 1024).expect("store");
+        for encrypted in [false, true] {
+            let config = || HashTreeConfig {
+                encrypted,
+                ..HashTreeConfig::new(store.store_arc())
+            };
+            let tree = HashTree::new(config());
+            let chunk_tree = HashTree::new(config().with_chunk_size(4));
+            let (shared, _) = chunk_tree.put(b"abcd").await.expect("shared leaf");
+            let (file, _) = chunk_tree.put(b"abcdabcd").await.expect("file node");
+            let encoded = tree
+                .get_blob(&file.hash)
+                .await
+                .expect("encoded node")
+                .expect("bytes");
+            let encoded = match file.key.as_ref() {
+                Some(key) => {
+                    hashtree_core::crypto::decrypt_chk(&encoded, key).expect("decrypt node")
+                }
+                None => encoded,
+            };
+            let (raw, size) = tree.put(&encoded).await.expect("literal node bytes");
+            let old_root = tree
+                .put_directory(vec![DirEntry::from_cid("file", &raw).with_size(size)])
+                .await
+                .expect("old root");
+            let old_cids = collect_cids_for_push(&store, old_root.clone(), None)
+                .await
+                .expect("raw-only closure");
+            assert!(!old_cids.iter().any(|cid| cid.hash == shared.hash));
+
+            let mut data = vec![b'x'; size as usize];
+            data[..4].copy_from_slice(b"abcd");
+            let (new_file, new_size) = chunk_tree.put(&data).await.expect("new chunked file");
+            assert_eq!(new_size, size);
+            assert_ne!(new_file.hash, raw.hash);
+            let new_root = tree
+                .put_directory(vec![
+                    DirEntry::from_cid("file", &new_file).with_size(new_size)
+                ])
+                .await
+                .expect("new root");
+            let cids = collect_incremental_cids_for_push(&store, new_root, old_root, None)
+                .await
+                .expect("changed closure");
+            assert!(
+                cids.iter().any(|cid| cid.hash == shared.hash),
+                "old raw bytes provide no descendant coverage"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_http_uploads_return_an_error() {
+        let tmp = tempdir().expect("tempdir");
+        let store = std::sync::Arc::new(
+            HashtreeStore::with_options(tmp.path(), None, 32 * 1024 * 1024).expect("store"),
+        );
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+        let (cid, _) = tree.put(b"upload rejection fixture").await.expect("blob");
+        let requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let observed_requests = requests.clone();
+        let app = axum::Router::new().route(
+            "/upload",
+            axum::routing::put(move |body: bytes::Bytes| async move {
+                assert!(!body.is_empty());
+                observed_requests.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                axum::http::StatusCode::BAD_REQUEST
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.expect("serve") });
+        let client = hashtree_blossom::BlossomClient::new_empty(nostr::Keys::generate())
+            .with_write_servers(vec![format!("http://{address}")]);
+
+        for force_upload in [false, true] {
+            let result = super::upload_cids_with_client(
+                store.clone(),
+                None,
+                client.clone(),
+                vec![cid.clone()],
+                force_upload,
+            )
+            .await;
+            assert!(result
+                .expect_err("failed uploads must not report success")
+                .to_string()
+                .contains("failed to upload 1 blob(s)"));
+        }
+        assert_eq!(requests.load(std::sync::atomic::Ordering::Relaxed), 2);
+        server.abort();
+        let _ = server.await;
+    }
 
     #[tokio::test]
     async fn collect_cids_for_push_fails_on_missing_descendant_blob() {
