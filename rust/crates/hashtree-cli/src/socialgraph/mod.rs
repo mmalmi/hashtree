@@ -10,6 +10,8 @@ pub use local_lists::{
     LocalListFileState, LocalListSyncOutcome,
 };
 
+#[cfg(windows)]
+mod durable_file;
 mod index_buckets;
 
 use index_buckets::{
@@ -17,14 +19,11 @@ use index_buckets::{
 };
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fs::{File, OpenOptions};
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
-
-#[cfg(unix)]
-use std::os::fd::AsRawFd;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -920,10 +919,7 @@ struct ProfileRootPairTransactionGuard {
 
 impl Drop for ProfileRootPairTransactionGuard {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        unsafe {
-            libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
-        }
+        let _ = self.file.unlock();
     }
 }
 
@@ -1069,18 +1065,14 @@ fn try_open_and_lock_profile_root_pair_file(
         )
     })?;
 
-    #[cfg(unix)]
-    {
-        let operation = match mode {
-            ProfileRootPairLockMode::Shared => libc::LOCK_SH | libc::LOCK_NB,
-            ProfileRootPairLockMode::Exclusive => libc::LOCK_EX | libc::LOCK_NB,
-        };
-        let result = unsafe { libc::flock(file.as_raw_fd(), operation) };
-        if result != 0 {
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                return Ok(None);
-            }
+    let result = match mode {
+        ProfileRootPairLockMode::Shared => file.try_lock_shared(),
+        ProfileRootPairLockMode::Exclusive => file.try_lock(),
+    };
+    match result {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Ok(None),
+        Err(TryLockError::Error(error)) => {
             return Err(error).with_context(|| {
                 format!(
                     "lock profile root-pair transaction ({:?}) at {}",
@@ -1089,13 +1081,6 @@ fn try_open_and_lock_profile_root_pair_file(
                 )
             });
         }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = mode;
-        anyhow::bail!(
-            "profile root-pair transactions require an operating-system advisory file lock"
-        );
     }
 
     Ok(Some(file))
@@ -3691,6 +3676,7 @@ fn write_root_file_durable(path: &Path, root: Option<&Cid>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(not(windows))]
 fn fsync_parent(path: &Path) -> Result<()> {
     let parent = path
         .parent()
@@ -3723,12 +3709,24 @@ fn replace_file_durable(path: &Path, bytes: &[u8], label: &str) -> Result<()> {
     file.sync_all()
         .with_context(|| format!("fsync pending {} {}", label, pending.display()))?;
     drop(file);
-    std::fs::rename(&pending, path)
+    #[cfg(windows)]
+    durable_file::rename(&pending, path)
         .with_context(|| format!("replace {} {}", label, path.display()))?;
-    fsync_parent(path)
+    #[cfg(not(windows))]
+    {
+        std::fs::rename(&pending, path)
+            .with_context(|| format!("replace {} {}", label, path.display()))?;
+        fsync_parent(path)?;
+    }
+    Ok(())
 }
 
 fn remove_file_durable(path: &Path) -> Result<()> {
+    #[cfg(windows)]
+    {
+        durable_file::remove(path).with_context(|| format!("remove {}", path.display()))
+    }
+    #[cfg(not(windows))]
     match std::fs::remove_file(path) {
         Ok(()) => fsync_parent(path),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -4231,5 +4229,7 @@ fn page_size_bytes() -> usize {
     page_size::get_granularity()
 }
 
+#[cfg(test)]
+mod profile_lock_tests;
 #[cfg(test)]
 mod tests;

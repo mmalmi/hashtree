@@ -175,9 +175,16 @@ jobs:
       - name: Test LMDB storage on Windows
         run: cargo nextest run --locked -p hashtree-lmdb --lib --no-fail-fast
 
-      - name: Check release binaries on Windows
+      - name: Test profile transaction locks on Windows
+        run: cargo nextest run --locked -p hashtree-cli --lib -E 'test(socialgraph::profile_lock_tests::)' --no-fail-fast
+
+      - name: Build release binaries on Windows
         if: ${{ !cancelled() && steps.rust_toolchain.conclusion == 'success' }}
-        run: cargo check --locked --bins -p git-remote-htree -p hashtree-cashu-cli -p hashtree-cli --features hashtree-cli/fips-webrtc
+        run: cargo build --locked --bins -p git-remote-htree -p hashtree-cashu-cli -p hashtree-cli --features hashtree-cli/fips-webrtc
+
+      - name: Smoke Windows CLI startup
+        shell: pwsh
+        run: ./scripts/smoke_release_webrtc_windows.ps1 -BinaryPath ./target/debug/htree.exe
 
   rust-fuse-smoke:
     name: Rust FUSE Smoke

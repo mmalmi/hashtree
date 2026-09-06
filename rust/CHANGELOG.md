@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.2.141 - 2026-09-06
+
+### Fixed
+
+- Start the Windows CLI with real operating-system file locks for social-graph
+  transactions. Shared readers and exclusive writers retain cross-process
+  exclusion, and locks are released when their owner closes or exits.
+- Persist Windows profile metadata with write-through renames and durable
+  removal of transaction markers, avoiding unsupported directory flushing.
+
+### Changed
+
+- Exercise profile-lock contention and actual CLI startup in ordinary Windows
+  CI, sharing the startup check with packaged release verification.
+- Includes the complete Git uploads and error reporting fixes from 0.2.140.
+  See the [full changelog](https://github.com/mmalmi/hashtree/blob/v0.2.141/rust/CHANGELOG.md).
+
 ## 0.2.140 - 2026-09-06
 
 ### Fixed

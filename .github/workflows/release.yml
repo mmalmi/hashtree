@@ -377,24 +377,7 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $smoke = Join-Path $env:RUNNER_TEMP "hashtree-webrtc-smoke"
-          $config = Join-Path $smoke "config"
-          $data = Join-Path $smoke "data"
-          New-Item -ItemType Directory -Force -Path $smoke, $config, $data | Out-Null
-          Expand-Archive -Path "dist/release-artifacts/hashtree-${{ matrix.target }}.zip" -DestinationPath $smoke
-          $env:HTREE_CONFIG_DIR = $config
-          $env:RUST_LOG = "fips_core::transport::webrtc=info,fips_core::node::lifecycle::runtime=info"
-          $output = (& (Join-Path $smoke "hashtree/htree.exe") --data-dir $data start --addr 127.0.0.1:0 --relays "" 2>&1 | Out-String)
-          Write-Output $output
-          if ($output -notmatch "WebRTC transport started") {
-            throw "packaged htree did not start its FIPS WebRTC transport"
-          }
-          if ($output -match "built without the webrtc feature") {
-            throw "packaged htree lacks the required FIPS WebRTC feature"
-          }
-          # The empty-relay fixture intentionally exits after transport startup;
-          # the assertions above are the artifact contract for this smoke.
-          $global:LASTEXITCODE = 0
+          ./scripts/smoke_release_webrtc_windows.ps1 -ArchivePath "dist/release-artifacts/hashtree-${{ matrix.target }}.zip"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
