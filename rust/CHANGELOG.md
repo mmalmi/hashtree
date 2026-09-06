@@ -11,11 +11,15 @@
   exclusion, and locks are released when their owner closes or exits.
 - Persist Windows profile metadata with write-through renames and durable
   removal of transaction markers, avoiding unsupported directory flushing.
+- Avoid startup stack overflows by deferring large command groups and running
+  only the selected command's async work. Commands, options and protocol remain
+  unchanged.
 
 ### Changed
 
 - Exercise profile-lock contention and actual CLI startup in ordinary Windows
   CI, sharing the startup check with packaged release verification.
+- Add a bounded startup regression that also runs with a 1 MiB stack on Unix.
 - Includes the complete Git uploads and error reporting fixes from 0.2.140.
   See the [full changelog](https://github.com/mmalmi/hashtree/blob/v0.2.141/rust/CHANGELOG.md).
 

@@ -11,6 +11,7 @@ use super::daemonize::{
 use super::daemonize::{
     daemon_state_file_path, read_daemon_launch_state, write_daemon_launch_state, DaemonLaunchState,
 };
+use super::deferred_subcommand::DeferredSubcommand;
 use super::lists::{
     build_mute_list_event, load_mute_entries, update_hex_list_file,
     update_mute_list_file_with_status, MuteEntry, MuteUpdate,
@@ -179,7 +180,7 @@ fn test_nostr_index_query_args() {
     let Commands::NostrIndex { command } = cli.command else {
         panic!("expected nostr-index command");
     };
-    let command = *command;
+    let command = *command.0;
     let NostrIndexCommands::Query {
         root,
         filter,
@@ -216,7 +217,7 @@ fn test_nostr_index_import_args() {
     let Commands::NostrIndex { command } = cli.command else {
         panic!("expected nostr-index command");
     };
-    let command = *command;
+    let command = *command.0;
     let NostrIndexCommands::Import {
         root,
         events_file,
@@ -307,7 +308,7 @@ fn test_nostr_bulk_projection_audit_requires_all_trust_pins_and_output() {
     let Commands::NostrIndex { command } = cli.command else {
         panic!("expected nostr-index command");
     };
-    let command = *command;
+    let command = *command.0;
     let NostrIndexCommands::AuditBulkProjection {
         staging_data_dir,
         expected_state_sha256,
@@ -419,7 +420,7 @@ fn test_nostr_bulk_tranche_build_requires_state_pin_and_parses_bound() {
         expected_state_sha256,
         max_indexes,
         out,
-    } = *command
+    } = *command.0
     else {
         panic!("expected build-bulk-tranche command");
     };
@@ -538,7 +539,7 @@ fn test_nostr_bulk_profile_repair_requires_all_authority_pins() {
         required_profile_pubkeys,
         btree_order,
         out,
-    } = *command
+    } = *command.0
     else {
         panic!("expected repair-bulk-projection-profiles command");
     };
@@ -653,7 +654,7 @@ fn test_nostr_bulk_event_blob_repair_requires_all_authority_pins() {
         page_size,
         apply,
         out,
-    } = *command
+    } = *command.0
     else {
         panic!("expected repair-bulk-projection-event-blobs command");
     };
@@ -699,7 +700,7 @@ fn test_storage_pool_add_and_migration_args() {
     ])
     .unwrap();
     let Commands::Storage {
-        command: StorageCommands::Pool { command },
+        command: DeferredSubcommand(StorageCommands::Pool { command }),
     } = cli.command
     else {
         panic!("expected storage pool command");
@@ -737,7 +738,7 @@ fn test_storage_pool_add_and_migration_args() {
     ])
     .unwrap();
     let Commands::Storage {
-        command: StorageCommands::Pool { command },
+        command: DeferredSubcommand(StorageCommands::Pool { command }),
     } = cli.command
     else {
         panic!("expected storage pool command");
@@ -772,7 +773,7 @@ fn test_storage_pool_add_and_migration_args() {
         "controlled Pool migration must not launch the generic background updater"
     );
     let Commands::Storage {
-        command: StorageCommands::Pool { command },
+        command: DeferredSubcommand(StorageCommands::Pool { command }),
     } = cli.command
     else {
         panic!("expected storage pool command");
@@ -920,7 +921,7 @@ fn test_storage_pool_add_and_migration_args() {
         "root Pool migration controller must not launch the generic background updater"
     );
     let Commands::Storage {
-        command: StorageCommands::Pool { command },
+        command: DeferredSubcommand(StorageCommands::Pool { command }),
     } = controller.command
     else {
         panic!("expected storage pool controller command");
@@ -949,7 +950,7 @@ fn test_storage_pool_delete_protection_args_require_exact_identities() {
     ])
     .expect("parse delete protection acquisition");
     let Commands::Storage {
-        command: StorageCommands::Pool { command },
+        command: DeferredSubcommand(StorageCommands::Pool { command }),
     } = cli.command
     else {
         panic!("expected storage pool command");
@@ -975,7 +976,7 @@ fn test_storage_pool_delete_protection_args_require_exact_identities() {
     ])
     .expect("parse exact delete protection release");
     let Commands::Storage {
-        command: StorageCommands::Pool { command },
+        command: DeferredSubcommand(StorageCommands::Pool { command }),
     } = cli.command
     else {
         panic!("expected storage pool command");
@@ -1892,7 +1893,7 @@ fn test_cli_parses_socialgraph_index_command() {
 
     match cli.command {
         Commands::Socialgraph {
-            command: SocialGraphCommands::Index { options },
+            command: DeferredSubcommand(SocialGraphCommands::Index { options }),
         } => {
             let SocialGraphIndexArgs {
                 warm_secs,
@@ -1990,7 +1991,7 @@ fn test_cli_parses_bulk_staged_projection() {
 
     match cli.command {
         Commands::Socialgraph {
-            command: SocialGraphCommands::Index { options },
+            command: DeferredSubcommand(SocialGraphCommands::Index { options }),
         } => {
             assert!(options.project_staged);
             assert!(options.bulk_project_staged);
@@ -2013,7 +2014,7 @@ fn test_cli_parses_bulk_staged_projection() {
     ]);
     match following.command {
         Commands::Socialgraph {
-            command: SocialGraphCommands::Index { options },
+            command: DeferredSubcommand(SocialGraphCommands::Index { options }),
         } => {
             assert!(options.bulk_project_staged);
             assert!(options.projection_follow);
@@ -2061,7 +2062,7 @@ fn test_cli_parses_socialgraph_rebuild_profile_index_command() {
 
     match cli.command {
         Commands::Socialgraph {
-            command: SocialGraphCommands::RebuildProfileIndex,
+            command: DeferredSubcommand(SocialGraphCommands::RebuildProfileIndex),
         } => {}
         _ => panic!("expected socialgraph rebuild-profile-index command"),
     }
@@ -2073,7 +2074,7 @@ fn test_cli_parses_socialgraph_publish_profile_indexes_command() {
 
     match cli.command {
         Commands::Socialgraph {
-            command: SocialGraphCommands::PublishProfileIndexes,
+            command: DeferredSubcommand(SocialGraphCommands::PublishProfileIndexes),
         } => {}
         _ => panic!("expected socialgraph publish-profile-indexes command"),
     }
@@ -2101,14 +2102,14 @@ fn test_cli_parses_socialgraph_warm_command() {
     match cli.command {
         Commands::Socialgraph {
             command:
-                SocialGraphCommands::Warm {
+                DeferredSubcommand(SocialGraphCommands::Warm {
                     secs,
                     crawl_depth,
                     full_graph_recrawl,
                     relays,
                     author_batch_size,
                     concurrent_batches,
-                },
+                }),
         } => {
             assert_eq!(secs, 90);
             assert_eq!(crawl_depth, Some(4));
@@ -2127,7 +2128,7 @@ fn test_cli_parses_socialgraph_stats_command() {
 
     match cli.command {
         Commands::Socialgraph {
-            command: SocialGraphCommands::Stats,
+            command: DeferredSubcommand(SocialGraphCommands::Stats),
         } => {}
         _ => panic!("expected socialgraph stats command"),
     }

@@ -4,6 +4,7 @@ pub(crate) mod blossom;
 pub(crate) mod cashu_delegate;
 pub(crate) mod content;
 pub(crate) mod daemonize;
+mod deferred_subcommand;
 pub(crate) mod lists;
 #[cfg(feature = "fuse")]
 pub(crate) mod mount;

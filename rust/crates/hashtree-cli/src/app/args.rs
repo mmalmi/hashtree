@@ -1,3 +1,4 @@
+use super::deferred_subcommand::DeferredSubcommand;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use git_remote_htree::nostr_client::PullRequestStateFilter;
 use std::path::PathBuf;
@@ -318,7 +319,7 @@ pub(crate) enum Commands {
     /// Manage storage limits and eviction
     Storage {
         #[command(subcommand)]
-        command: StorageCommands,
+        command: DeferredSubcommand<StorageCommands>,
     },
 
     /// Mount a hashtree via FUSE
@@ -471,7 +472,7 @@ pub(crate) enum Commands {
     /// Query local hashtree-backed Nostr event indexes
     NostrIndex {
         #[command(subcommand)]
-        command: Box<NostrIndexCommands>,
+        command: DeferredSubcommand<Box<NostrIndexCommands>>,
     },
 
     /// Follow a user (adds to your contact list)
@@ -510,7 +511,7 @@ pub(crate) enum Commands {
     /// Social graph utilities
     Socialgraph {
         #[command(subcommand)]
-        command: SocialGraphCommands,
+        command: DeferredSubcommand<SocialGraphCommands>,
     },
 
     // ── Wallet ──────────────────────────────────────────────

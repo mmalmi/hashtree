@@ -29,6 +29,7 @@ use super::args::{
 use super::blossom::push_to_blossom;
 use super::cashu_delegate::run_cashu_helper;
 use super::daemonize::{format_daemon_status, reload_daemon, spawn_daemon, stop_daemon};
+use super::deferred_subcommand::DeferredSubcommand;
 use super::lists::{follow_user, list_following, list_muted, mute_user, update_profile};
 #[cfg(feature = "fuse")]
 use super::mount::{mount_fuse, MountFuseOptions};
@@ -321,21 +322,21 @@ pub(crate) fn should_spawn_background_update(cli: &Cli) -> bool {
         &cli.command,
         Commands::NostrIndex { command }
             if matches!(
-                command.as_ref(),
+                command.0.as_ref(),
                 NostrIndexCommands::RepairBulkProjectionProfiles { .. }
                     | NostrIndexCommands::RepairBulkProjectionEventBlobs { .. }
             )
     ) && !matches!(
         &cli.command,
         Commands::Storage {
-            command: StorageCommands::Pool {
+            command: DeferredSubcommand(StorageCommands::Pool {
                 command: PoolCommands::MigrateLmdb { .. } | PoolCommands::LaunchMigrateLmdbV3(_),
-            },
+            }),
         }
     )
 }
 
-pub(crate) async fn run() -> Result<()> {
+pub(crate) fn run() -> Result<futures::future::LocalBoxFuture<'static, Result<()>>> {
     // Install rustls crypto provider (required for TLS connections)
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -365,6 +366,26 @@ pub(crate) async fn run() -> Result<()> {
         super::update::spawn_detached_bg_check(&data_dir);
     }
 
+    // Parse before constructing the selected command future to keep those stack
+    // frames separate.
+    Ok(run_command(cli, data_dir))
+}
+
+// Give each selected command its own poll frame, so daemon startup does not
+// reserve stack storage for every inactive command.
+macro_rules! command_future {
+    ($body:expr) => {
+        Box::pin(async move {
+            $body;
+            Ok(())
+        })
+    };
+}
+
+fn run_command(
+    cli: Cli,
+    data_dir: PathBuf,
+) -> futures::future::LocalBoxFuture<'static, Result<()>> {
     match cli.command {
         Commands::Start {
             addr,
@@ -373,7 +394,7 @@ pub(crate) async fn run() -> Result<()> {
             daemon,
             log_file,
             pid_file,
-        } => {
+        } => command_future!({
             if daemon && std::env::var_os("HTREE_DAEMONIZED").is_none() {
                 spawn_daemon(
                     addr.as_deref(),
@@ -809,7 +830,7 @@ pub(crate) async fn run() -> Result<()> {
             if let Some(controller) = background_services_controller {
                 controller.shutdown().await;
             }
-        }
+        }),
         #[cfg(feature = "fuse")]
         Commands::Mount {
             target,
@@ -819,7 +840,7 @@ pub(crate) async fn run() -> Result<()> {
             private,
             relays,
             allow_other,
-        } => {
+        } => command_future!({
             let current_dir = std::env::current_dir()?;
             reject_local_mount_target(&target, &current_dir)
                 .context("Failed to validate mount target")?;
@@ -878,10 +899,10 @@ pub(crate) async fn run() -> Result<()> {
                 },
             )
             .await?;
-        }
-        Commands::Mounts { json } => {
+        }),
+        Commands::Mounts { json } => command_future!({
             print_active_mounts(&data_dir, json)?;
-        }
+        }),
         Commands::Add {
             path,
             only_hash,
@@ -890,7 +911,7 @@ pub(crate) async fn run() -> Result<()> {
             publish,
             chunk_size,
             local,
-        } => {
+        } => command_future!({
             run_add(
                 data_dir.clone(),
                 path,
@@ -904,11 +925,11 @@ pub(crate) async fn run() -> Result<()> {
                 },
             )
             .await?
-        }
-        Commands::Pwa { command } => match command {
+        }),
+        Commands::Pwa { command } => command_future!(match command {
             PwaCommands::Export { url, json } => run_export(data_dir.clone(), url, json).await?,
-        },
-        Commands::Load { cid: cid_input } => {
+        }),
+        Commands::Load { cid: cid_input } => command_future!({
             let resolved = resolve_cid_input(&cid_input).await?;
             let store = Arc::new(HashtreeStore::new(&data_dir)?);
             let fetcher = Fetcher::new(FetchConfig::default());
@@ -932,11 +953,11 @@ pub(crate) async fn run() -> Result<()> {
                     format_cid_for_display(&target_cid)
                 );
             }
-        }
+        }),
         Commands::Get {
             cid: cid_input,
             output,
-        } => {
+        } => command_future!({
             use hashtree_core::{to_hex, Cid};
 
             // Resolve to Cid (raw bytes, no hex conversion needed for nhash)
@@ -1002,8 +1023,8 @@ pub(crate) async fn run() -> Result<()> {
                 store.write_file_by_cid(&target_cid, &out_path)?;
                 println!("{} -> {}", hash_hex, out_path.display());
             }
-        }
-        Commands::Cat { cid: cid_input } => {
+        }),
+        Commands::Cat { cid: cid_input } => command_future!({
             use std::io::Write;
 
             // Resolve npub/repo or htree:// URLs to CID
@@ -1015,8 +1036,8 @@ pub(crate) async fn run() -> Result<()> {
             let mut stdout = std::io::stdout().lock();
             store.write_file_by_cid_to_writer(&target_cid, &mut stdout)?;
             stdout.flush()?;
-        }
-        Commands::Pins => {
+        }),
+        Commands::Pins => command_future!({
             let store = HashtreeStore::new(&data_dir)?;
             let pins = store.list_pins_with_names()?;
             if pins.is_empty() {
@@ -1034,16 +1055,16 @@ pub(crate) async fn run() -> Result<()> {
                     );
                 }
             }
-        }
-        Commands::Pin { cid: cid_input } => {
+        }),
+        Commands::Pin { cid: cid_input } => command_future!({
             ensure_supported_pin_target(&cid_input)?;
             let resolved = resolve_cid_input_for_pin(&cid_input, &data_dir).await?;
             let store = Arc::new(HashtreeStore::new(&data_dir)?);
             let fetcher = Fetcher::new(FetchConfig::default());
             let pinned = pin_input_target(&store, &fetcher, &cid_input, &resolved).await?;
             println!("Pinned: {}", format_cid_for_display(&pinned));
-        }
-        Commands::Unpin { cid: cid_input } => {
+        }),
+        Commands::Unpin { cid: cid_input } => command_future!({
             ensure_supported_pin_target(&cid_input)?;
             let store = HashtreeStore::new(&data_dir)?;
             if let Some(hash) = stored_published_pin_hash(&store, &cid_input)? {
@@ -1063,8 +1084,8 @@ pub(crate) async fn run() -> Result<()> {
                 }
                 println!("Unpinned: {}", format_cid_for_display(&target));
             }
-        }
-        Commands::Mirror { command } => match command {
+        }),
+        Commands::Mirror { command } => command_future!(match command {
             MirrorCommands::Add { npub } => {
                 parse_npub(&npub).context("Invalid npub")?;
                 let store = HashtreeStore::new(&data_dir)?;
@@ -1095,8 +1116,8 @@ pub(crate) async fn run() -> Result<()> {
                     }
                 }
             }
-        },
-        Commands::NostrIndex { command } => match *command {
+        }),
+        Commands::NostrIndex { command } => command_future!(match *command.0 {
             NostrIndexCommands::Import {
                 root,
                 events_file,
@@ -1383,8 +1404,8 @@ pub(crate) async fn run() -> Result<()> {
                 .await?;
                 println!("{}", serde_json::to_string_pretty(&output)?);
             }
-        },
-        Commands::Info { cid: cid_input } => {
+        }),
+        Commands::Info { cid: cid_input } => command_future!({
             // Resolve npub/repo or htree:// URLs to CID
             let resolved = resolve_cid_input(&cid_input).await?;
             let store = Arc::new(HashtreeStore::new(&data_dir)?);
@@ -1396,8 +1417,8 @@ pub(crate) async fn run() -> Result<()> {
             if !print_info_for_cid(&store, &target_cid).await? {
                 println!("Hash not found: {}", format_cid_for_display(&target_cid));
             }
-        }
-        Commands::Stats { addr } => {
+        }),
+        Commands::Stats { addr } => command_future!({
             let store = HashtreeStore::new(&data_dir)?;
             let stats = store.get_storage_stats()?;
             println!("Storage Statistics:");
@@ -1408,8 +1429,8 @@ pub(crate) async fn run() -> Result<()> {
             if let Some(status) = fetch_daemon_status_quietly(&addr).await {
                 print_network_stats(&status);
             }
-        }
-        Commands::Status { addr } => {
+        }),
+        Commands::Status { addr } => command_future!({
             let url = format!("http://{}/api/status", addr);
             let client = reqwest::Client::builder()
                 .timeout(Duration::from_secs(3))
@@ -1435,14 +1456,14 @@ pub(crate) async fn run() -> Result<()> {
                     eprintln!("Start with: htree start");
                 }
             }
-        }
-        Commands::Stop { pid_file } => {
+        }),
+        Commands::Stop { pid_file } => command_future!({
             stop_daemon(pid_file.as_ref())?;
-        }
-        Commands::Reload { pid_file } => {
+        }),
+        Commands::Reload { pid_file } => command_future!({
             reload_daemon(pid_file.as_ref())?;
-        }
-        Commands::Gc => {
+        }),
+        Commands::Gc => command_future!({
             let store = HashtreeStore::new(&data_dir)?;
             println!("Running garbage collection...");
             let gc_stats = store.gc()?;
@@ -1452,8 +1473,8 @@ pub(crate) async fn run() -> Result<()> {
                 gc_stats.freed_bytes,
                 gc_stats.freed_bytes as f64 / 1024.0
             );
-        }
-        Commands::User { identity } => {
+        }),
+        Commands::User { identity } => command_future!({
             use hashtree_cli::config::get_keys_path;
             use nostr::nips::nip19::FromBech32;
             use std::fs;
@@ -1493,12 +1514,12 @@ pub(crate) async fn run() -> Result<()> {
                     println!("{}", npub);
                 }
             }
-        }
+        }),
         Commands::Publish {
             ref_name,
             hash,
             key,
-        } => {
+        } => command_future!({
             use hashtree_core::{from_hex, key_from_hex, Cid};
 
             // Load config for relay list
@@ -1565,8 +1586,8 @@ pub(crate) async fn run() -> Result<()> {
 
             // Clean up
             let _ = resolver.stop().await;
-        }
-        Commands::Release { command } => match command {
+        }),
+        Commands::Release { command } => command_future!(match command {
             ReleaseCommands::Publish {
                 tree_name,
                 version_path,
@@ -1602,7 +1623,7 @@ pub(crate) async fn run() -> Result<()> {
                     );
                 }
             }
-        },
+        }),
         Commands::Install {
             reference,
             to,
@@ -1615,7 +1636,7 @@ pub(crate) async fn run() -> Result<()> {
             executable,
             archive_entry,
             only_if_newer,
-        } => {
+        } => command_future!({
             super::update::run_install(
                 &data_dir,
                 reference,
@@ -1631,32 +1652,32 @@ pub(crate) async fn run() -> Result<()> {
                 only_if_newer,
             )
             .await?;
-        }
-        Commands::Update { check, force } => {
+        }),
+        Commands::Update { check, force } => command_future!({
             super::update::run_self_update(&data_dir, check, force).await?;
-        }
-        Commands::BgCheck => {
+        }),
+        Commands::BgCheck => command_future!({
             super::update::run_bg_check(&data_dir).await?;
-        }
-        Commands::Follow { npub } => {
+        }),
+        Commands::Follow { npub } => command_future!({
             follow_user(&data_dir, &npub, true).await?;
-        }
-        Commands::Unfollow { npub } => {
+        }),
+        Commands::Unfollow { npub } => command_future!({
             follow_user(&data_dir, &npub, false).await?;
-        }
-        Commands::Mute { npub, reason } => {
+        }),
+        Commands::Mute { npub, reason } => command_future!({
             mute_user(&data_dir, &npub, reason.as_deref(), true).await?;
-        }
-        Commands::Unmute { npub } => {
+        }),
+        Commands::Unmute { npub } => command_future!({
             mute_user(&data_dir, &npub, None, false).await?;
-        }
-        Commands::Following => {
+        }),
+        Commands::Following => command_future!({
             list_following(&data_dir).await?;
-        }
-        Commands::Muted => {
+        }),
+        Commands::Muted => command_future!({
             list_muted(&data_dir).await?;
-        }
-        Commands::Socialgraph { command } => match command {
+        }),
+        Commands::Socialgraph { command } => command_future!(match command.0 {
             SocialGraphCommands::Filter {
                 max_distance,
                 overmute_threshold,
@@ -1793,33 +1814,33 @@ pub(crate) async fn run() -> Result<()> {
                 )
                 .await?;
             }
-        },
+        }),
         Commands::Profile {
             name,
             about,
             picture,
-        } => {
+        } => command_future!({
             update_profile(name, about, picture).await?;
-        }
+        }),
         Commands::Push {
             cid: cid_input,
             server,
             force,
             shallow,
-        } => {
+        } => command_future!({
             // Resolve npub/repo or htree:// URLs to CID
             let resolved = resolve_cid_input(&cid_input).await?;
             let cid = resolved.cid.to_string();
             push_to_blossom(&data_dir, &cid, server, force, shallow).await?;
-        }
-        Commands::Storage { command } => {
+        }),
+        Commands::Storage { command } => command_future!({
             // The migration launcher is an inert rendezvous until its
             // invocation-bound request has been durably acknowledged. In
             // particular, do not call Config::load here: it creates a default
             // config file when one is absent. A controlled migration must
             // therefore name its data directory explicitly and dispatch
             // before any config read/create path.
-            let command = match command {
+            let command = match command.0 {
                 StorageCommands::Pool {
                     command: PoolCommands::LaunchMigrateLmdbV3(arguments),
                 } => {
@@ -2271,14 +2292,14 @@ pub(crate) async fn run() -> Result<()> {
                     run_pool_command(&data_dir, command)?;
                 }
             }
-        }
-        Commands::Peer { addr } => {
+        }),
+        Commands::Peer { addr } => command_future!({
             list_peers(&addr).await?;
-        }
-        Commands::Cashu { command } => {
+        }),
+        Commands::Cashu { command } => command_future!({
             run_cashu_helper(&data_dir, &command)?;
-        }
-        Commands::Pr { command } => match command {
+        }),
+        Commands::Pr { command } => command_future!(match command {
             PrCommands::Create {
                 repo,
                 title,
@@ -2300,13 +2321,11 @@ pub(crate) async fn run() -> Result<()> {
             PrCommands::List { repo, state } => {
                 super::pr::list_prs(repo.as_deref(), state).await?;
             }
-        },
-        Commands::Repos { owner } => {
+        }),
+        Commands::Repos { owner } => command_future!({
             super::repos::list_repos(owner.as_deref()).await?;
-        }
+        }),
     }
-
-    Ok(())
 }
 
 fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
