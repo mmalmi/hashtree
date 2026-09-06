@@ -3227,7 +3227,7 @@ dependencies = [
 
 [[package]]
 name = "git-remote-htree"
-version = "0.2.86"
+version = "0.2.87"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3565,7 +3565,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.138"
+version = "0.2.139"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3795,7 +3795,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-lmdb"
-version = "0.2.87"
+version = "0.2.88"
 dependencies = [
  "async-trait",
  "hashtree-core",

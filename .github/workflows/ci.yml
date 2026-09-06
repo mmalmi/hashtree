@@ -142,6 +142,38 @@ jobs:
       - name: Run default-feature Rust gate
         run: bash ../scripts/release-gate.sh --lane rust
 
+  windows-storage:
+    name: Windows Storage
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/
+          key: ${{ runner.os }}-cargo-windows-storage-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-windows-storage-
+            ${{ runner.os }}-x86_64-pc-windows-msvc-cargo-
+
+      - name: Test LMDB storage on Windows
+        run: cargo test --locked -p hashtree-lmdb --lib
+
+      - name: Check release binaries on Windows
+        run: cargo check --locked --bins -p git-remote-htree -p hashtree-cashu-cli -p hashtree-cli --features hashtree-cli/fips-webrtc
+
   rust-fuse-smoke:
     name: Rust FUSE Smoke
     runs-on: ubuntu-latest

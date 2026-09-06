@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+## 0.2.139 - 2026-09-06
+
+### Fixed
+
+- Restore Windows builds of the LMDB-backed store, CLI, and Git helper by
+  excluding Unix-only pinned-directory operations on Windows. Normal external
+  blob and pack handling keeps its existing behavior.
+- Publish the storage fix as `hashtree-lmdb` 0.2.88 and update the exact storage
+  dependency in `git-remote-htree` 0.2.87 and the CLI.
+
+### Changed
+
+- Run Windows storage tests and compile the release CLI, Cashu helper, and Git
+  helper in ordinary CI, so platform errors are caught before release tagging.
+- Includes the protocol-compatible cleanup, migration improvements, and complete
+  Git mirror recovery documented in 0.2.138 below.
+
 ## 0.2.138 - 2026-09-06
 
 ### Added

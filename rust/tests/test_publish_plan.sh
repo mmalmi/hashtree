@@ -7,10 +7,10 @@ PUBLISH_SCRIPT="${RUST_DIR}/scripts/publish.sh"
 
 PLAN_OUTPUT="$("${PUBLISH_SCRIPT}" --plan)"
 
-grep -F 'hashtree-lmdb = { version = "=0.2.87", path = "crates/hashtree-lmdb" }' \
+lmdb_version="$(awk -F '"' '/^version = / { print $2; exit }' "${RUST_DIR}/crates/hashtree-lmdb/Cargo.toml")"
+: "${lmdb_version:?missing hashtree-lmdb package version}"
+grep -F "hashtree-lmdb = { version = \"=${lmdb_version}\", path = \"crates/hashtree-lmdb\" }" \
     "${RUST_DIR}/Cargo.toml" >/dev/null
-grep -F 'version = "0.2.87"' \
-    "${RUST_DIR}/crates/hashtree-lmdb/Cargo.toml" >/dev/null
 git_remote_version="$(awk -F '"' '/^version = / { print $2; exit }' "${RUST_DIR}/crates/git-remote-htree/Cargo.toml")"
 : "${git_remote_version:?missing git-remote-htree package version}"
 grep -F "git-remote-htree = { version = \"=${git_remote_version}\", path = \"../git-remote-htree\" }" \
