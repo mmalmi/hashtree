@@ -153,7 +153,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Setup Rust toolchain
+        id: rust_toolchain
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -169,9 +173,10 @@ jobs:
             ${{ runner.os }}-x86_64-pc-windows-msvc-cargo-
 
       - name: Test LMDB storage on Windows
-        run: cargo test --locked -p hashtree-lmdb --lib
+        run: cargo nextest run --locked -p hashtree-lmdb --lib --no-fail-fast
 
       - name: Check release binaries on Windows
+        if: ${{ !cancelled() && steps.rust_toolchain.conclusion == 'success' }}
         run: cargo check --locked --bins -p git-remote-htree -p hashtree-cashu-cli -p hashtree-cli --features hashtree-cli/fips-webrtc
 
   rust-fuse-smoke:
