@@ -2,6 +2,28 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-09-07 - Reuse Verified Source CI During Release
+
+[Source CI run 34151612943](https://github.com/mmalmi/hashtree/actions/runs/34151612943)
+and [release run 34152908294](https://github.com/mmalmi/hashtree/actions/runs/34152908294)
+tested the same commit. The release repeated six source lanes (static,
+TypeScript, Rust, peripheral Rust, FIPS, and Pool migration systemd); those gates
+added about 15m02 before artifact builds could begin. TypeScript CI runs the same
+install, unit test, FIPS package verification (including build/dist checks), and
+lint commands as its release gate. The other five lanes invoke the same gate
+script in both workflows.
+
+The release workflow now reuses successful push CI only for the exact release
+commit, repository, CI workflow, and an expected CI branch, with all nine required
+CI jobs successful in the same attempt. Missing or invalid evidence runs the
+existing gates. Build checkouts stay pinned to that commit, and actual Unix and
+Windows release-package startup checks still run on every artifact build.
+
+This prospectively removes the repeated source testing and its prebuild wait;
+no faster compilation or new end-to-end release timing has been measured.
+Focused selector fixtures and selection against the completed source run verify
+the evidence check without repeating the full suites.
+
 ## 2026-06-17 - Upload Benchmark Fresh Seed Controls
 
 Question: can the upload benchmark avoid confusing fresh-write tests with

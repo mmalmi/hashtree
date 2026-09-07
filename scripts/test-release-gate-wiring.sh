@@ -12,6 +12,7 @@ reject() {
 }
 
 bash rust/tests/test_publish_plan.sh
+node --test rust/scripts/release_ci_evidence.test.mjs
 
 # A clean checkout must resolve every non-workspace Rust dependency without
 # sibling repositories mounted beside hashtree.

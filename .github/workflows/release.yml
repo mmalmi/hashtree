@@ -12,26 +12,75 @@ env:
   RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
 jobs:
+  source-ci:
+    name: Source CI Evidence
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+      reuse: ${{ steps.evidence.outputs.reuse }}
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ github.event.inputs.tag }}
+
+      - name: Resolve release commit
+        id: commit
+        run: echo "sha=$(git rev-parse 'HEAD^{commit}')" >> "${GITHUB_OUTPUT}"
+
+      - name: Check successful source CI
+        id: evidence
+        uses: actions/github-script@v7
+        env:
+          RELEASE_SHA: ${{ steps.commit.outputs.sha }}
+        with:
+          script: |
+            core.setOutput('reuse', 'false');
+            try {
+              const { findReusableCiRun } = await import(`${process.env.GITHUB_WORKSPACE}/rust/scripts/release_ci_evidence.mjs`);
+              const run = await findReusableCiRun({
+                github,
+                repository: `${context.repo.owner}/${context.repo.repo}`,
+                sha: process.env.RELEASE_SHA,
+              });
+              if (run) {
+                core.setOutput('reuse', 'true');
+                core.notice(`Reusing successful source CI: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${run.id} (attempt ${run.run_attempt})`);
+              } else {
+                core.notice('No complete matching source CI evidence; running all release source gates.');
+              }
+            } catch (error) {
+              core.setOutput('reuse', 'false');
+              core.warning(`Source CI evidence unavailable; running all release source gates: ${error.message}`);
+            }
+
   gate-static:
+    needs: source-ci
+    if: needs.source-ci.outputs.reuse != 'true'
     name: Static Release Gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ needs.source-ci.outputs.sha }}
 
       - name: Run static release gate
         run: bash scripts/release-gate.sh --lane static
 
   gate-typescript:
+    needs: source-ci
+    if: needs.source-ci.outputs.reuse != 'true'
     name: TypeScript Release Gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ needs.source-ci.outputs.sha }}
 
       - name: Install FIPS transport system dependencies
         run: |
@@ -71,13 +120,15 @@ jobs:
         run: bash scripts/release-gate.sh --lane typescript
 
   gate-rust:
+    needs: source-ci
+    if: needs.source-ci.outputs.reuse != 'true'
     name: Rust Release Gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ needs.source-ci.outputs.sha }}
 
       - name: Reclaim runner disk space
         run: |
@@ -119,13 +170,15 @@ jobs:
         run: bash scripts/release-gate.sh --lane rust
 
   gate-rust-peripheral:
+    needs: source-ci
+    if: needs.source-ci.outputs.reuse != 'true'
     name: Peripheral Rust Release Gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ needs.source-ci.outputs.sha }}
 
       - name: Reclaim runner disk space
         run: |
@@ -169,13 +222,15 @@ jobs:
         run: bash scripts/release-gate.sh --lane rust-peripheral
 
   gate-fips:
+    needs: source-ci
+    if: needs.source-ci.outputs.reuse != 'true'
     name: FIPS WebRTC Release Gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ needs.source-ci.outputs.sha }}
 
       - name: Reclaim runner disk space
         run: |
@@ -214,13 +269,15 @@ jobs:
         run: bash scripts/release-gate.sh --lane fips
 
   pool-migration-systemd:
+    needs: source-ci
+    if: needs.source-ci.outputs.reuse != 'true'
     name: Pool Migration Systemd Release Gate
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag }}
+          ref: ${{ needs.source-ci.outputs.sha }}
 
       - name: Install Linux system dependencies
         run: |
@@ -251,7 +308,15 @@ jobs:
 
   build:
     name: Build ${{ matrix.target }}
+    # Skipped source gates are allowed only with complete CI evidence.
+    if: >-
+      ${{ always() && !cancelled() && needs['source-ci'].result == 'success' &&
+          (needs['source-ci'].outputs.reuse == 'true' ||
+           (needs['gate-static'].result == 'success' && needs['gate-typescript'].result == 'success' &&
+            needs['gate-rust'].result == 'success' && needs['gate-rust-peripheral'].result == 'success' &&
+            needs['gate-fips'].result == 'success' && needs['pool-migration-systemd'].result == 'success')) }}
     needs:
+      - source-ci
       - gate-static
       - gate-typescript
       - gate-rust
@@ -285,7 +350,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.source-ci.outputs.sha }}
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -388,7 +453,9 @@ jobs:
 
   release:
     name: Create Release
+    if: ${{ !cancelled() && needs.source-ci.result == 'success' && needs.build.result == 'success' }}
     needs:
+      - source-ci
       - build
     runs-on: ubuntu-latest
     permissions:
@@ -397,7 +464,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
+          ref: ${{ needs.source-ci.outputs.sha }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -407,7 +474,11 @@ jobs:
       - name: Resolve release commit
         id: release_commit
         shell: bash
-        run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin "refs/tags/${RELEASE_TAG}"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$(git rev-parse HEAD)"
+          echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
