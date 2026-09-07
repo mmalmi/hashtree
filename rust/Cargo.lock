@@ -3220,7 +3220,7 @@ dependencies = [
 
 [[package]]
 name = "git-remote-htree"
-version = "0.2.88"
+version = "0.2.89"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3237,6 +3237,7 @@ dependencies = [
  "hex",
  "libc",
  "nostr",
+ "nostr-relay-pool",
  "nostr-sdk",
  "reqwest 0.12.28",
  "rustls",
@@ -3507,7 +3508,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-blossom"
-version = "0.2.82"
+version = "0.2.83"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3527,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cashu-cli"
-version = "0.2.82"
+version = "0.2.83"
 dependencies = [
  "anyhow",
  "clap",
@@ -3539,7 +3540,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.142"
+version = "0.2.143"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3580,6 +3581,7 @@ dependencies = [
  "nostr-pubsub",
  "nostr-pubsub-fips",
  "nostr-pubsub-relay",
+ "nostr-relay-pool",
  "nostr-sdk",
  "nostr-social-graph",
  "page_size",
@@ -3678,7 +3680,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-ffi"
-version = "0.2.82"
+version = "0.2.83"
 dependencies = [
  "axum",
  "futures",
@@ -3812,7 +3814,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr"
-version = "0.2.87"
+version = "0.2.88"
 dependencies = [
  "async-trait",
  "futures",
@@ -3823,6 +3825,7 @@ dependencies = [
  "libc",
  "negentropy",
  "nostr",
+ "nostr-relay-pool",
  "nostr-sdk",
  "nostr-social-graph",
  "rmp-serde",
@@ -3857,12 +3860,14 @@ dependencies = [
 
 [[package]]
 name = "hashtree-resolver"
-version = "0.2.83"
+version = "0.2.84"
 dependencies = [
  "async-trait",
  "futures",
  "hashtree-core",
  "hex",
+ "nostr",
+ "nostr-relay-pool",
  "nostr-sdk",
  "serde_json",
  "thiserror 1.0.69",
@@ -3872,7 +3877,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-s3"
-version = "0.2.82"
+version = "0.2.83"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -8088,7 +8093,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-hashtree-updater"
-version = "0.2.50"
+version = "0.2.51"
 dependencies = [
  "hashtree-blossom",
  "hashtree-core",

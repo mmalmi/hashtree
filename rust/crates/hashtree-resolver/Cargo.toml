@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-resolver"
-version = "0.2.83"
+version = "0.2.84"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -18,10 +18,12 @@ hex.workspace = true
 
 # Nostr resolver
 nostr-sdk = { workspace = true, optional = true }
+nostr = { workspace = true, optional = true }
+nostr-relay-pool = { workspace = true, optional = true }
 
 [features]
 default = []
-nostr = ["nostr-sdk"]
+nostr = ["dep:nostr-sdk", "dep:nostr", "dep:nostr-relay-pool"]
 
 [dev-dependencies]
 futures.workspace = true

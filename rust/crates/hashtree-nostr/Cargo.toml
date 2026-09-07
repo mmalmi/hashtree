@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-nostr"
-version = "0.2.87"
+version = "0.2.88"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -19,6 +19,8 @@ serde_json.workspace = true
 hex.workspace = true
 thiserror.workspace = true
 nostr-sdk.workspace = true
+nostr.workspace = true
+nostr-relay-pool.workspace = true
 nostr-social-graph.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
@@ -27,7 +29,6 @@ libc = "0.2"
 
 [dev-dependencies]
 async-trait.workspace = true
-nostr.workspace = true
 negentropy = "0.5"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tokio-tungstenite = "0.24"
