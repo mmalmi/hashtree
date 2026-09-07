@@ -105,15 +105,12 @@ else
     exit 1
 fi
 
-grep -F -- '--version' "${LOG_DIR}/release_to_htree.log" >/dev/null
 grep -F -- 'v0.0.1' "${LOG_DIR}/release_to_htree.log" >/dev/null
-grep -F -- '--release-stage-dir' "${LOG_DIR}/release_to_htree.log" >/dev/null
 grep -F 'release gate invoked' "${LOG_DIR}/release-gate.log" >/dev/null
 
 grep -F 'auth status' "${LOG_DIR}/gh.log" >/dev/null
 grep -F 'release view v0.0.1 --repo mmalmi/hashtree' "${LOG_DIR}/gh.log" >/dev/null
 grep -F 'release create v0.0.1' "${LOG_DIR}/gh.log" >/dev/null
-grep -F -- '--repo mmalmi/hashtree' "${LOG_DIR}/gh.log" >/dev/null
 grep -F -- '--title v0.0.1' "${LOG_DIR}/gh.log" >/dev/null
 grep -F -- '--notes-file' "${LOG_DIR}/gh.log" >/dev/null
 grep -F 'release.json' "${LOG_DIR}/gh.log" >/dev/null

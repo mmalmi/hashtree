@@ -83,6 +83,10 @@ grep -F -- "--target x86_64-unknown-linux-musl" "${LOG_DIR}/docker.log" >/dev/nu
 grep -F -- "--jobs \"\${CARGO_BUILD_JOBS:-4}\"" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "--locked" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "--features hashtree-cli/fips-webrtc" "${LOG_DIR}/docker.log" >/dev/null
+if grep -F -- 'hashtree-cli/fuse' "${LOG_DIR}/docker.log" >/dev/null; then
+    echo "release Docker build must not enable optional FUSE support" >&2
+    exit 1
+fi
 grep -F -- "apk add --no-cache build-base" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "mkdir -p /target-dir/release /target-dir/x86_64-unknown-linux-musl/release" "${LOG_DIR}/docker.log" >/dev/null
 

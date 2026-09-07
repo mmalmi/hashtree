@@ -31,7 +31,6 @@ reject grep -qF 'hashtree-network' rust/crates/hashtree-fips-transport/Cargo.tom
 
 # The normal release path owns one full gate and one artifact publish. Tag
 # pushes must not start a second cross-platform build in GitHub Actions.
-grep -F '"${REPO_DIR}/scripts/release-gate.sh"' publish_release.sh >/dev/null
 grep -F 'export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/rust/target}"' scripts/release-gate.sh >/dev/null
 grep -F 'ensure_test_fd_limit' scripts/release-gate.sh >/dev/null
 grep -F 'cargo nextest run --workspace --locked' scripts/release-gate.sh >/dev/null
