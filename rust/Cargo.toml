@@ -54,7 +54,8 @@ nostr-pubsub-fips = "0.4.17"
 nostr-pubsub-relay = "0.1.11"
 
 # AWS S3
-aws-sdk-s3 = "1"
+# Keep the modern HTTPS client without the deprecated `rustls` feature's legacy HTTP/TLS stack.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["sigv4a", "http-1x", "default-https-client", "rt-tokio"] }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 
 # Storage
@@ -67,7 +68,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
 
 # Nostr
-nostr = { version = "0.44", features = ["nip44"] }
+nostr = { version = "0.44.7", features = ["nip44"] }
 
 # Utilities
 anyhow = "1"

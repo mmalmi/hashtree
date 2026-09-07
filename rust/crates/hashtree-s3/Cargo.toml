@@ -12,8 +12,8 @@ description = "S3 storage backend for hashtree with non-blocking uploads"
 hashtree-core.workspace = true
 async-trait = "0.1"
 tokio = { version = "1", features = ["sync", "rt", "time"] }
-aws-sdk-s3 = "1"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3.workspace = true
+aws-config.workspace = true
 tracing = "0.1"
 thiserror = "1"
 
