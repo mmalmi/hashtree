@@ -414,11 +414,7 @@ pub fn selected_download_path(
 }
 
 pub fn write_downloaded_asset(destination: &Path, bytes: &[u8]) -> Result<(), UpdateError> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(destination, bytes)?;
-    Ok(())
+    crate::install::install_binary(destination, bytes, false)
 }
 
 #[must_use]

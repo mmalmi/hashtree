@@ -61,7 +61,8 @@ export async function verifyBlobData(
       `Blob route ${routeId} returned ${data.byteLength} bytes, exceeding the ${BLOB_MAX_BYTES}-byte limit`,
     );
   }
-  const stableData = data.slice();
+  // Buffer.slice() aliases memory, so construct a plain Uint8Array copy.
+  const stableData = new Uint8Array(data);
   if (toHex(await sha256(stableData)) !== toHex(expectedHash)) {
     throw new Error(`Blob route ${routeId} returned content with the wrong hash`);
   }

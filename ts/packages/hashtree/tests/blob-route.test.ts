@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { Buffer } from 'node:buffer';
 import {
   BLOB_DEFAULT_HTL,
   BLOB_MAX_BYTES,
@@ -69,5 +70,25 @@ describe('blob route contract', () => {
 
     await expect(corrupt.read(createBlobRequest(hash))).rejects.toThrow(/wrong hash|mismatched/i);
     await expect(oversized.read(createBlobRequest(hash))).rejects.toThrow(/exceed/i);
+  });
+
+  it('detaches verified bytes from mutable Node Buffer responses', async () => {
+    const remoteData = Buffer.from([1, 2, 3]);
+    const hash = await sha256(remoteData);
+    const route = new StoreBlobRoute('remote', {
+      put: async () => false,
+      get: async () => remoteData,
+      has: async () => true,
+      delete: async () => false,
+    });
+
+    const reply = await route.read(createBlobRequest(hash));
+    remoteData.fill(9);
+
+    expect(reply.type).toBe('data');
+    if (reply.type === 'data') {
+      expect(await sha256(reply.data)).toEqual(hash);
+      expect(reply.data).toEqual(new Uint8Array([1, 2, 3]));
+    }
   });
 });

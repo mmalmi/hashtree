@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-updater"
-version.workspace = true
+version = "0.2.83"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -30,6 +30,7 @@ semver.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
+tempfile.workspace = true
 # Used everywhere by the binary-archive install dispatcher; macOS app-bundle
 # also needs both, Linux appimage just needs flate2.
 flate2 = "1.0"
@@ -42,5 +43,4 @@ hashtree-resolver = { workspace = true, features = ["nostr"] }
 hashtree-sim = { path = "../hashtree-sim", features = ["nostr"] }
 nostr-sdk.workspace = true
 tar = "0.4"
-tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

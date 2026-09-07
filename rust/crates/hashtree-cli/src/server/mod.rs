@@ -1256,6 +1256,69 @@ mod tests {
         Ok((port, handle))
     }
 
+    #[tokio::test]
+    async fn multipart_upload_rejects_path_traversal_filenames() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db"))?);
+        let target = temp_dir.path().join("must-not-overwrite.txt");
+        std::fs::write(&target, b"original contents")?;
+        let (port, handle) = spawn_test_server(Arc::clone(&store)).await?;
+        let client = reqwest::Client::new();
+        let relative_target = format!(
+            "../{}/must-not-overwrite.txt",
+            temp_dir.path().file_name().unwrap().to_string_lossy()
+        );
+
+        for filename in [
+            target.to_string_lossy().as_ref(),
+            &relative_target,
+            r"..\must-not-overwrite.txt",
+            r"C:\must-not-overwrite.txt",
+            "nested/file.txt",
+            "trailing-slash/",
+            ".",
+            "..",
+            "",
+        ] {
+            let body = format!(
+                "--upload-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\nattacker contents\r\n--upload-boundary--\r\n"
+            );
+            let response = client
+                .post(format!("http://127.0.0.1:{port}/upload"))
+                .header(
+                    reqwest::header::CONTENT_TYPE,
+                    "multipart/form-data; boundary=upload-boundary",
+                )
+                .body(body)
+                .send()
+                .await?;
+
+            assert_eq!(
+                std::fs::read(&target)?,
+                b"original contents",
+                "multipart uploads must not overwrite files outside their temporary directory"
+            );
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+
+        let response = client
+            .post(format!("http://127.0.0.1:{port}/upload"))
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                "multipart/form-data; boundary=upload-boundary",
+            )
+            .body("--upload-boundary\r\nContent-Disposition: form-data; name=\"file\"; filename=\"safe.txt\"\r\nContent-Type: application/octet-stream\r\n\r\nvalid upload\r\n--upload-boundary--\r\n")
+            .send()
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let payload: serde_json::Value = response.json().await?;
+        let hash = from_hex(payload["cid"].as_str().expect("uploaded CID"))?;
+        assert_eq!(store.get_file(&hash)?, Some(b"valid upload".to_vec()));
+
+        handle.abort();
+        Ok(())
+    }
+
     async fn encrypted_test_directory(store: &HashtreeStore) -> Result<(Cid, Cid, Vec<u8>)> {
         let tree = HashTree::new(
             HashTreeConfig::new(store.store_arc())

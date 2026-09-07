@@ -1,8 +1,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest';
 import { FallbackStore } from '../src/store/fallback.js';
-import type { Hash, Store } from '../src/types.js';
-
-const HASH = Uint8Array.from({ length: 32 }, (_, i) => i) as Hash;
+import { sha256 } from '../src/hash.js';
+import type { Store } from '../src/types.js';
 
 function makePrimary(): Store {
   return {
@@ -19,12 +18,13 @@ describe('FallbackStore', () => {
   });
 
   it('returns the first successful fallback instead of waiting in fallback order', async () => {
+    const hash = await sha256(new Uint8Array([2]));
     vi.useFakeTimers();
 
     const primary = makePrimary();
     const slow = {
       get: vi.fn().mockImplementation(
-        () => new Promise<Uint8Array | null>((resolve) => setTimeout(() => resolve(new Uint8Array([1])), 200))
+        () => new Promise<Uint8Array | null>((resolve) => setTimeout(() => resolve(new Uint8Array([2])), 200))
       ),
     };
     const fast = {
@@ -39,14 +39,15 @@ describe('FallbackStore', () => {
       timeout: 500,
     });
 
-    const readPromise = store.get(HASH);
+    const readPromise = store.get(hash);
     await vi.advanceTimersByTimeAsync(50);
 
     await expect(readPromise).resolves.toEqual(new Uint8Array([2]));
-    expect(primary.put).toHaveBeenCalledWith(HASH, new Uint8Array([2]));
+    expect(primary.put).toHaveBeenCalledWith(hash, new Uint8Array([2]));
   });
 
   it('still caches late fallback data after the initial timeout result', async () => {
+    const hash = await sha256(new Uint8Array([9]));
     vi.useFakeTimers();
 
     const primary = makePrimary();
@@ -65,17 +66,20 @@ describe('FallbackStore', () => {
       timeout: 50,
     });
 
-    const readPromise = store.get(HASH);
+    const readPromise = store.get(hash);
     await vi.advanceTimersByTimeAsync(55);
     await expect(readPromise).resolves.toBeNull();
 
     await vi.advanceTimersByTimeAsync(100);
     await vi.runAllTicks();
 
-    expect(primary.put).toHaveBeenCalledWith(HASH, new Uint8Array([9]));
+    await vi.waitFor(() => {
+      expect(primary.put).toHaveBeenCalledWith(hash, new Uint8Array([9]));
+    });
   });
 
   it('coalesces concurrent fallback reads for the same hash', async () => {
+    const hash = await sha256(new Uint8Array([7]));
     vi.useFakeTimers();
 
     const primary = makePrimary();
@@ -91,8 +95,8 @@ describe('FallbackStore', () => {
       timeout: 500,
     });
 
-    const first = store.get(HASH);
-    const second = store.get(HASH);
+    const first = store.get(hash);
+    const second = store.get(hash);
 
     await vi.advanceTimersByTimeAsync(50);
 
@@ -100,6 +104,6 @@ describe('FallbackStore', () => {
     await expect(second).resolves.toEqual(new Uint8Array([7]));
     expect(fallback.get).toHaveBeenCalledTimes(1);
     expect(primary.put).toHaveBeenCalledTimes(1);
-    expect(primary.put).toHaveBeenCalledWith(HASH, new Uint8Array([7]));
+    expect(primary.put).toHaveBeenCalledWith(hash, new Uint8Array([7]));
   });
 });

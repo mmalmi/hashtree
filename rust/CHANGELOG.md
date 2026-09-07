@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.2.142 - 2026-09-07
+
+### Security
+
+- Reject multipart upload filenames containing paths before creating files,
+  preventing upload callers from overwriting files outside the staging directory.
+- Use exclusive temporary files for updater downloads and binary/AppImage
+  installation, preventing precreated symlinks from redirecting writes.
+- Isolate macOS app staging and backups, reject symlink app bundles, and quote
+  paths safely in elevated install commands. Preserve the original app if a
+  failed installation cannot roll back automatically.
+- Publish these installer fixes as `hashtree-updater` 0.2.83 and update the
+  CLI and Tauri updater plugin dependencies.
+
 ## 0.2.141 - 2026-09-06
 
 ### Fixed

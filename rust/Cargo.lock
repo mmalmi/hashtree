@@ -3565,7 +3565,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.141"
+version = "0.2.142"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3923,7 +3923,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-updater"
-version = "0.2.82"
+version = "0.2.83"
 dependencies = [
  "async-trait",
  "flate2",
@@ -8175,7 +8175,7 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin-hashtree-updater"
-version = "0.2.49"
+version = "0.2.50"
 dependencies = [
  "hashtree-blossom",
  "hashtree-core",

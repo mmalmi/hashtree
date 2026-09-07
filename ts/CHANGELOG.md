@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.7 - 2026-09-07
+
+### Security
+
+- Verify remote fallback blob hashes and size limits before returning data or
+  writing it to the local cache, including responses arriving after a timeout.
+  Corrupt responses no longer win against valid peers or poison later reads.
+- Copy Node.js buffers into independent byte arrays before verifying them,
+  preventing later mutations from changing already verified data.
+- Publish core 0.3.2 and update dependent runtime packages to use the fixed
+  core through the same immutable runtime bundle.
+
 ## TypeScript runtime 0.5.6 - 2026-09-05
 
 ### Added

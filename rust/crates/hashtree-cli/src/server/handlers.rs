@@ -1869,6 +1869,20 @@ pub async fn upload_file(
 
         if name == "file" {
             let file_name = field.file_name().unwrap_or("upload").to_string();
+            // A multipart filename is untrusted metadata. Only a single filename
+            // may be joined to the private staging directory; absolute paths,
+            // traversal, and directory components could overwrite local files.
+            if std::path::Path::new(&file_name)
+                .file_name()
+                .and_then(|name| name.to_str())
+                != Some(file_name.as_str())
+                || file_name.contains(['\\', '\0'])
+            {
+                return Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Body::from("Invalid upload filename"))
+                    .unwrap();
+            }
             let temp_file = temp_dir.path().join(&file_name);
 
             // Stream directly to disk instead of loading into memory

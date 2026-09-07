@@ -107,12 +107,11 @@ pub fn install_binary_archive(
 pub fn install_binary(path: &Path, bytes: &[u8], executable: bool) -> Result<(), UpdateError> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     std::fs::create_dir_all(parent)?;
-    let temp_path = temp_install_path(path);
-    std::fs::write(&temp_path, bytes)?;
+    let staged = stage_file(parent, bytes)?;
     if executable {
-        set_executable(&temp_path)?;
+        set_executable(staged.as_file())?;
     }
-    std::fs::rename(&temp_path, path)?;
+    staged.persist(path).map_err(|err| err.error)?;
     Ok(())
 }
 
@@ -131,60 +130,49 @@ pub fn install_app_bundle(destination: &Path, bytes: &[u8]) -> Result<(), Update
         .ok_or_else(|| UpdateError::Install("app bundle destination has no parent".to_string()))?;
     std::fs::create_dir_all(parent)?;
 
-    let staging = parent.join(format!(
-        ".{}.{}.staging",
-        destination
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("app"),
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&staging);
-    std::fs::create_dir_all(&staging)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".hashtree-update-")
+        .tempdir_in(parent)?;
+    let payload_dir = staging.path().join("payload");
+    std::fs::create_dir(&payload_dir)?;
 
     let cursor = Cursor::new(bytes);
     let gz = GzDecoder::new(cursor);
     let mut archive = tar::Archive::new(gz);
-    archive.unpack(&staging).map_err(|err| {
-        let _ = std::fs::remove_dir_all(&staging);
-        UpdateError::Install(format!("failed to unpack app bundle: {err}"))
-    })?;
+    archive
+        .unpack(&payload_dir)
+        .map_err(|err| UpdateError::Install(format!("failed to unpack app bundle: {err}")))?;
 
-    let new_app = find_app_dir(&staging).ok_or_else(|| {
-        let _ = std::fs::remove_dir_all(&staging);
-        UpdateError::Install("no .app directory found in archive".to_string())
-    })?;
+    let new_app = find_app_dir(&payload_dir)
+        .ok_or_else(|| UpdateError::Install("no .app directory found in archive".to_string()))?;
 
-    let backup = parent.join(format!(
-        ".{}.{}.backup",
-        destination
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("app"),
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&backup);
+    let backup = staging.path().join("previous.app");
 
     let backed_up = destination.exists();
     if backed_up {
         if let Err(err) = std::fs::rename(destination, &backup) {
             // Permission denied: ask the user via AppleScript with admin privs.
-            return swap_app_with_privs(&new_app, destination, &backup, &staging, err);
+            return swap_app_with_privs(&new_app, destination, err);
         }
     }
 
     if let Err(err) = std::fs::rename(&new_app, destination) {
         if backed_up {
-            let _ = std::fs::rename(&backup, destination);
+            if let Err(restore_err) = std::fs::rename(&backup, destination) {
+                // Keep the original bundle recoverable even when rollback fails.
+                let recovery_dir = staging.keep();
+                return Err(UpdateError::Install(format!(
+                    "failed to install new app bundle: {err}; failed to restore original: \
+                     {restore_err}; original bundle retained at {}",
+                    recovery_dir.join("previous.app").display()
+                )));
+            }
         }
-        let _ = std::fs::remove_dir_all(&staging);
         return Err(UpdateError::Install(format!(
             "failed to install new app bundle: {err}"
         )));
     }
 
-    let _ = std::fs::remove_dir_all(&backup);
-    let _ = std::fs::remove_dir_all(&staging);
     Ok(())
 }
 
@@ -199,12 +187,9 @@ pub fn install_app_bundle(_destination: &Path, _bytes: &[u8]) -> Result<(), Upda
 fn swap_app_with_privs(
     new_app: &Path,
     destination: &Path,
-    _backup: &Path,
-    staging: &Path,
     original: std::io::Error,
 ) -> Result<(), UpdateError> {
     if original.kind() != std::io::ErrorKind::PermissionDenied {
-        let _ = std::fs::remove_dir_all(staging);
         return Err(UpdateError::Install(format!(
             "failed to back up existing app bundle: {original}"
         )));
@@ -215,23 +200,32 @@ fn swap_app_with_privs(
     let src = new_app
         .to_str()
         .ok_or_else(|| UpdateError::Install("non-utf8 staging path".to_string()))?;
+    let command = app_swap_shell_command(src, dst);
     let script = format!(
-        "do shell script \"rm -rf '{dst}' && mv -f '{src}' '{dst}'\" with administrator privileges",
-        dst = dst.replace('\\', "\\\\").replace('"', "\\\""),
-        src = src.replace('\\', "\\\\").replace('"', "\\\""),
+        "do shell script \"{}\" with administrator privileges",
+        command.replace('\\', "\\\\").replace('"', "\\\""),
     );
     let status = std::process::Command::new("osascript")
         .arg("-e")
         .arg(&script)
         .status()
         .map_err(|err| UpdateError::Install(format!("failed to launch osascript: {err}")))?;
-    let _ = std::fs::remove_dir_all(staging);
     if !status.success() {
         return Err(UpdateError::Install(format!(
             "elevated install failed (exit status {status})"
         )));
     }
     Ok(())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn app_swap_shell_command(src: &str, dst: &str) -> String {
+    // Paths pass through both AppleScript and the shell. Quote for the shell
+    // first; the caller separately escapes the resulting AppleScript string.
+    let quote = |path: &str| format!("'{}'", path.replace('\'', "'\\''"));
+    let src = quote(src);
+    let dst = quote(dst);
+    format!("/bin/rm -rf -- {dst} && /bin/mv -f -- {src} {dst}")
 }
 
 #[cfg(target_os = "macos")]
@@ -241,7 +235,7 @@ fn find_app_dir(root: &Path) -> Option<PathBuf> {
         let entries = std::fs::read_dir(&dir).ok()?;
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            if entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
                 if path.extension().and_then(|s| s.to_str()) == Some("app") {
                     return Some(path);
                 }
@@ -278,12 +272,11 @@ pub fn install_appimage(destination: &Path, bytes: &[u8]) -> Result<(), UpdateEr
         .map(|m| m.permissions().mode())
         .unwrap_or(0o755);
 
-    let temp_path = temp_install_path(destination);
-    std::fs::write(&temp_path, &payload)?;
-    let mut perms = std::fs::metadata(&temp_path)?.permissions();
+    let staged = stage_file(parent, &payload)?;
+    let mut perms = staged.as_file().metadata()?.permissions();
     perms.set_mode(mode | 0o111);
-    std::fs::set_permissions(&temp_path, perms)?;
-    std::fs::rename(&temp_path, destination)?;
+    staged.as_file().set_permissions(perms)?;
+    staged.persist(destination).map_err(|err| err.error)?;
     Ok(())
 }
 
@@ -304,26 +297,71 @@ pub fn install_file(
     install_binary(path.as_ref(), bytes, executable)
 }
 
-fn temp_install_path(path: &Path) -> PathBuf {
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("update");
-    let temp_name = format!(".{file_name}.{}.tmp", std::process::id());
-    path.with_file_name(temp_name)
+fn stage_file(parent: &Path, bytes: &[u8]) -> Result<tempfile::NamedTempFile, UpdateError> {
+    use std::io::Write;
+
+    // Exclusive creation prevents a pre-existing file or symlink from being
+    // followed. Keep the file open for writes and permission changes.
+    let mut staged = tempfile::Builder::new()
+        .prefix(".hashtree-update-")
+        .tempfile_in(parent)?;
+    staged.write_all(bytes)?;
+    Ok(staged)
 }
 
 #[cfg(unix)]
-fn set_executable(path: &Path) -> Result<(), UpdateError> {
+fn set_executable(file: &std::fs::File) -> Result<(), UpdateError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let mut permissions = std::fs::metadata(path)?.permissions();
+    let mut permissions = file.metadata()?.permissions();
     permissions.set_mode(0o755);
-    std::fs::set_permissions(path, permissions)?;
+    file.set_permissions(permissions)?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_executable(_path: &Path) -> Result<(), UpdateError> {
+fn set_executable(_file: &std::fs::File) -> Result<(), UpdateError> {
     Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::app_swap_shell_command;
+
+    #[test]
+    fn elevated_app_swap_treats_paths_as_data() {
+        for source_is_hostile in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let hostile_name = "App'; touch injected; #.app";
+            let (src_name, dst_name) = if source_is_hostile {
+                (hostile_name, "Installed.app")
+            } else {
+                ("Staged.app", hostile_name)
+            };
+            let src = temp.path().join(src_name);
+            let dst = temp.path().join(dst_name);
+            std::fs::create_dir(&src).unwrap();
+            std::fs::write(src.join("payload"), b"new app").unwrap();
+            std::fs::create_dir(&dst).unwrap();
+            std::fs::write(dst.join("payload"), b"old app").unwrap();
+
+            // Exercise the exact shell command used by the privileged fallback,
+            // without requesting administrator access in a test.
+            let status = std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    &app_swap_shell_command(src.to_str().unwrap(), dst.to_str().unwrap()),
+                ])
+                .current_dir(temp.path())
+                .status()
+                .unwrap();
+
+            assert!(
+                !temp.path().join("injected").exists(),
+                "path executed shell code"
+            );
+            assert!(status.success());
+            assert_eq!(std::fs::read(dst.join("payload")).unwrap(), b"new app");
+        }
+    }
 }

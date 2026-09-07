@@ -8,6 +8,7 @@
  */
 
 import { toHex, type Store, type Hash } from '../types.js';
+import { verifyBlobData } from '../blob-route.js';
 
 /** Minimal interface for read-only fallback sources */
 export interface ReadableStore {
@@ -102,13 +103,13 @@ export class FallbackStore implements Store {
   private async loadFromFallbacks(hash: Hash): Promise<Uint8Array | null> {
     const pendingFetches = this.fallbacks.map((store) => {
       const fetchPromise = store.get(hash)
-        .then((lateData) => {
-          if (lateData) {
-            this.primary.put(hash, lateData).catch(() => {
-              // Ignore cache errors for late data
-            });
-          }
-          return lateData;
+        .then(async (lateData) => {
+          if (!lateData) return null;
+          const verifiedData = await verifyBlobData(hash, lateData, 'fallback');
+          this.primary.put(hash, verifiedData).catch(() => {
+            // Ignore cache errors for late data
+          });
+          return verifiedData;
         })
         .catch(() => null);
       const timeoutPromise = new Promise<Uint8Array | null>((resolve) =>
