@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+## 0.2.143 - 2026-09-08
+
+### Security
+
+- Update Nostr event validation and encrypted payload parsing dependencies,
+  including protection against forged relay events and resource exhaustion.
+- Require patched Nostr versions in published Cargo manifests so existing
+  consumer lockfiles cannot retain vulnerable SDK dependencies.
+- Update the HTTP/2 stack to bound queued empty DATA frames and remove the
+  deprecated HTTP/TLS dependency stack from optional S3 support.
+- Rebuild the CLI, Cashu helper and Git remote helper with the patched lockfile.
+
 ## 0.2.142 - 2026-09-07
 
 ### Security

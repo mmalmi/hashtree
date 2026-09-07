@@ -5,6 +5,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rust_dir="$(cd "${script_dir}/.." && pwd)"
 git_remote_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/crates/git-remote-htree/Cargo.toml")"
 : "${git_remote_version:?missing git-remote-htree package version}"
+blossom_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/crates/hashtree-blossom/Cargo.toml")"
+: "${blossom_version:?missing hashtree-blossom package version}"
 lmdb_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/crates/hashtree-lmdb/Cargo.toml")"
 : "${lmdb_version:?missing hashtree-lmdb package version}"
 
@@ -76,6 +78,7 @@ CARGO_TARGET_DIR="$package_target" cargo package \
     -p hashtree-nostr-social-graph-heed \
     -p hashtree-core \
     -p hashtree-lmdb \
+    -p hashtree-blossom \
     -p git-remote-htree
 
 package_dir="$downstream_dir/packages"
@@ -86,6 +89,7 @@ for archive in \
     hashtree-nostr-social-graph-heed-0.1.3-hashtree.2.crate \
     hashtree-core-0.2.89.crate \
     "hashtree-lmdb-${lmdb_version}.crate" \
+    "hashtree-blossom-${blossom_version}.crate" \
     "git-remote-htree-${git_remote_version}.crate"
 do
     test -f "$package_target/package/$archive"
@@ -107,6 +111,7 @@ nostr-social-graph-heed = { package = "hashtree-nostr-social-graph-heed", path =
 git-remote-htree = { path = "${package_dir}/git-remote-htree-${git_remote_version}" }
 
 [patch.crates-io]
+hashtree-blossom = { path = "${package_dir}/hashtree-blossom-${blossom_version}" }
 hashtree-core = { path = "${package_dir}/hashtree-core-0.2.89" }
 hashtree-heed = { path = "${package_dir}/hashtree-heed-0.20.5-hashtree.1" }
 hashtree-lmdb = { path = "${package_dir}/hashtree-lmdb-${lmdb_version}" }
@@ -150,6 +155,7 @@ for extracted_package in \
     "$package_dir/hashtree-nostr-social-graph-heed-0.1.3-hashtree.2" \
     "$package_dir/hashtree-core-0.2.89" \
     "$package_dir/hashtree-lmdb-${lmdb_version}" \
+    "$package_dir/hashtree-blossom-${blossom_version}" \
     "$package_dir/git-remote-htree-${git_remote_version}"
 do
     grep -F "($extracted_package)" "$downstream_tree" >/dev/null
