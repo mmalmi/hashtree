@@ -3838,7 +3838,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr-pubsub"
-version = "0.2.83"
+version = "0.2.84"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3902,7 +3902,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-updater"
-version = "0.2.83"
+version = "0.2.84"
 dependencies = [
  "async-trait",
  "flate2",
