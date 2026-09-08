@@ -4,15 +4,127 @@ use std::time::Duration;
 
 use fips_core::config::{RoutingMode, TransportInstances};
 use fips_core::{Config, FipsEndpoint, UdpConfig};
-use hashtree_core::{BlobReply, BlobRequest, BlobRoute, MemoryStore, Store};
+use hashtree_core::{BlobReply, BlobRequest, BlobRoute, BlobRouteContext, MemoryStore, Store};
 use hashtree_fips_transport::{
-    FipsBlobRoute, TcpBlobTransport, TcpBlobTransportConfig, TCP_BLOB_CAPABILITY,
-    TCP_BLOB_SERVICE_PORT,
+    FipsBlobRoute, TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT, TcpBlobTransport,
+    TcpBlobTransportConfig,
 };
 use sha2::{Digest, Sha256};
 use tokio::time::timeout;
 
 const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(10);
+
+#[tokio::test]
+async fn retrying_hash_reaches_provider_beyond_attempt_window_despite_other_reads() {
+    let rendezvous = rendezvous_addr();
+    let consumer_endpoint = endpoint(rendezvous, "retry-consumer").await;
+    let data = b"only the fifth authorized provider has this verified blob".to_vec();
+    let hash = Sha256::digest(&data).into();
+    let mut providers = Vec::new();
+    let mut endpoints = Vec::new();
+    for index in 0..5 {
+        let provider_endpoint = endpoint(rendezvous, &format!("retry-provider-{index}")).await;
+        let store = Arc::new(MemoryStore::new());
+        if index == 4 {
+            store.put(hash, data.clone()).await.unwrap();
+        }
+        providers.push(
+            TcpBlobTransport::bind_advertised_with_config(
+                provider_endpoint.clone(),
+                store,
+                TcpBlobTransportConfig::default(),
+                100,
+            )
+            .await
+            .unwrap(),
+        );
+        endpoints.push(provider_endpoint);
+    }
+    let consumer_store = Arc::new(MemoryStore::new());
+    let consumer_transport = Arc::new(
+        TcpBlobTransport::bind_client_with_config(
+            consumer_endpoint.clone(),
+            consumer_store.clone(),
+            TcpBlobTransportConfig::default(),
+        )
+        .await
+        .unwrap(),
+    );
+    for provider_endpoint in &endpoints {
+        wait_for_provider(&consumer_endpoint, provider_endpoint.npub()).await;
+    }
+    // Explicit order makes the excluded holder deterministic; discovery is
+    // covered separately and must not accidentally put it in the first four.
+    let peers = endpoints
+        .iter()
+        .map(|endpoint| fips_core::PeerIdentity::from_npub(endpoint.npub()).unwrap())
+        .collect();
+    let route = FipsBlobRoute::explicit(consumer_transport.clone(), peers, 4).unwrap();
+    let context = || BlobRouteContext {
+        deadline: std::time::Instant::now() + Duration::from_secs(5),
+        attempt_budget: 4,
+    };
+    let first = route
+        .route_with_context(BlobRequest { hash, htl: 0 }, context())
+        .await;
+    let initially_cached = consumer_store.get(&hash).await.unwrap();
+    let mut intervening = Vec::new();
+    // A single global cursor advances a complete cycle after these four
+    // other hashes and would omit the same holder on the target's retry.
+    for index in 0..4 {
+        let other_hash = Sha256::digest(format!("unrelated missing blob {index}")).into();
+        intervening.push(
+            route
+                .route_with_context(
+                    BlobRequest {
+                        hash: other_hash,
+                        htl: 0,
+                    },
+                    context(),
+                )
+                .await,
+        );
+    }
+    let retried = route
+        .route_with_context(BlobRequest { hash, htl: 0 }, context())
+        .await;
+
+    // Preserve teardown even for the deliberately failing pre-fix result.
+    drop(route);
+    // First-valid completion aborts losing hedges. Give their canceled futures
+    // a chance to drop their transport references before consuming the actor.
+    let consumer_transport = timeout(CONVERGENCE_TIMEOUT, async {
+        let mut transport = consumer_transport;
+        loop {
+            match Arc::try_unwrap(transport) {
+                Ok(transport) => break transport,
+                Err(pending) => transport = pending,
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("canceled provider hedges retained the client transport");
+    consumer_transport.shutdown().await.unwrap();
+    for provider in providers {
+        provider.shutdown().await.unwrap();
+    }
+    consumer_endpoint.shutdown().await.unwrap();
+    for provider_endpoint in endpoints {
+        provider_endpoint.shutdown().await.unwrap();
+    }
+
+    assert!(
+        first.is_err(),
+        "untried providers were reported as a complete miss"
+    );
+    assert_eq!(initially_cached, None);
+    assert!(
+        intervening.iter().all(Result::is_err),
+        "an incomplete search must not become a miss"
+    );
+    assert_eq!(retried.unwrap(), BlobReply::Data(data.clone()));
+}
 
 #[tokio::test]
 async fn discovered_provider_death_and_replacement_recover_on_one_composite_route() {

@@ -1,18 +1,19 @@
-use std::collections::HashSet;
-use std::sync::{Arc, RwLock, Weak};
+use std::collections::{HashSet, VecDeque};
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use async_trait::async_trait;
 use fips_core::discovery::local::rank_capability_providers;
 use fips_core::{FipsEndpoint, PeerIdentity};
-use hashtree_core::{BlobReply, BlobRequest, BlobRoute, BlobRouteContext, Store, StoreError};
+use hashtree_core::{BlobReply, BlobRequest, BlobRoute, BlobRouteContext, Hash, Store, StoreError};
 use thiserror::Error;
 use tokio::task::JoinSet;
 use tokio::time::Duration;
 
 use crate::tcp_blob::MAX_OUTBOUND_GETS;
-use crate::{TcpBlobTransport, TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT};
+use crate::{TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT, TcpBlobTransport};
 
 const PROVIDER_HEDGE_DELAY: Duration = Duration::from_millis(100);
+const MAX_RETAINED_RETRY_WINDOWS: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum FipsBlobRouteError {
@@ -24,14 +25,18 @@ pub enum FipsBlobRouteError {
 
 /// One opaque BlobRoute whose sole responsibility is selecting a bounded set
 /// of FIPS peers. Discovery-ranked providers and explicit peers are
-/// deduplicated, interleaved, truncated to the attempt budget, and raced with
-/// first valid data winning. FIPS continues to own all transport addresses,
-/// reachability, and replacement; no outer route selects these peers again.
+/// deduplicated and interleaved before a bounded window is raced with first
+/// valid data winning. Retries of a retained hash advance through a stable
+/// candidate set independently of other hashes. The least recently used hash
+/// is evicted at the retention bound; its next search starts at the first
+/// window again. FIPS continues to own all transport addresses, reachability,
+/// and replacement; no outer route selects these peers again.
 pub struct FipsBlobRoute<S: Store + ?Sized + 'static> {
     discovery: Option<Arc<FipsEndpoint>>,
     explicit: RwLock<Vec<PeerIdentity>>,
     transport: Weak<TcpBlobTransport<S>>,
     max_provider_attempts: usize,
+    retry_windows: Mutex<VecDeque<(Hash, usize)>>,
 }
 
 impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
@@ -46,6 +51,7 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
             explicit: RwLock::new(peers),
             transport: Arc::downgrade(&transport),
             max_provider_attempts,
+            retry_windows: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -60,6 +66,7 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
             explicit: RwLock::new(Vec::new()),
             transport: Arc::downgrade(&transport),
             max_provider_attempts,
+            retry_windows: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -79,6 +86,7 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
             explicit: RwLock::new(peers),
             transport: Arc::downgrade(&transport),
             max_provider_attempts,
+            retry_windows: Mutex::new(VecDeque::new()),
         })
     }
 
@@ -89,10 +97,12 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = peers;
     }
 
+    /// Snapshot the first bounded window without advancing any hash's retry.
     pub fn provider_ids(&self) -> Result<Vec<String>, StoreError> {
         Ok(self
-            .provider_peers()?
+            .provider_candidates()?
             .into_iter()
+            .take(self.max_provider_attempts)
             .map(|peer| peer.npub())
             .collect())
     }
@@ -107,18 +117,46 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
             .collect())
     }
 
-    fn provider_peers(&self) -> Result<Vec<PeerIdentity>, StoreError> {
+    fn provider_candidates(&self) -> Result<Vec<PeerIdentity>, StoreError> {
         let discovered = self.discovered_provider_peers()?;
         let explicit = self
             .explicit
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        Ok(select_provider_peers(
-            discovered,
-            explicit,
-            self.max_provider_attempts,
-        ))
+        Ok(ordered_provider_peers(discovered, explicit))
+    }
+
+    fn provider_attempts(
+        &self,
+        hash: Hash,
+        attempt_budget: usize,
+    ) -> Result<(Vec<PeerIdentity>, usize), StoreError> {
+        let mut peers = self.provider_candidates()?;
+        let count = peers.len();
+        let attempts = self.max_provider_attempts.min(attempt_budget).min(count);
+        if attempts > 0 && attempts < count {
+            // Reserve progress before awaiting: concurrent searches for this
+            // hash cannot all reserve the same window. No peer identities are
+            // retained, so every search observes the current discovery/ACL.
+            let mut windows = self
+                .retry_windows
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let start = windows
+                .iter()
+                .position(|(key, _)| *key == hash)
+                .and_then(|position| windows.remove(position))
+                .map_or(0, |(_, next)| next % count);
+            if windows.len() == MAX_RETAINED_RETRY_WINDOWS {
+                windows.pop_front();
+            }
+            windows.push_back((hash, (start + attempts) % count));
+            drop(windows);
+            peers.rotate_left(start);
+        }
+        peers.truncate(attempts);
+        Ok((peers, count - attempts))
     }
 
     fn discovered_provider_peers(&self) -> Result<Vec<PeerIdentity>, StoreError> {
@@ -147,12 +185,10 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
         request: BlobRequest,
         context: Option<BlobRouteContext>,
     ) -> Result<BlobReply, StoreError> {
-        let mut peers = self.provider_peers()?;
-        if let Some(context) = context {
-            peers.truncate(context.attempt_budget);
-        }
+        let budget = context.map_or(self.max_provider_attempts, |context| context.attempt_budget);
+        let (peers, untried) = self.provider_attempts(request.hash, budget)?;
         if peers.is_empty() {
-            return Ok(BlobReply::NoResult);
+            return completed_misses(untried);
         }
         let transport = self
             .transport
@@ -208,7 +244,7 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
             Some(error) => Err(StoreError::Other(format!(
                 "FIPS blob provider set was incomplete: {error}"
             ))),
-            None => Ok(BlobReply::NoResult),
+            None => completed_misses(untried),
         }
     }
 }
@@ -240,10 +276,19 @@ fn validate_attempts(max_provider_attempts: usize) -> Result<(), FipsBlobRouteEr
     Ok(())
 }
 
-fn select_provider_peers(
+fn completed_misses(untried: usize) -> Result<BlobReply, StoreError> {
+    if untried == 0 {
+        Ok(BlobReply::NoResult)
+    } else {
+        Err(StoreError::Other(format!(
+            "FIPS blob provider search was incomplete: {untried} providers remain outside this retry window"
+        )))
+    }
+}
+
+fn ordered_provider_peers(
     mut discovered: Vec<PeerIdentity>,
     mut explicit: Vec<PeerIdentity>,
-    limit: usize,
 ) -> Vec<PeerIdentity> {
     let mut discovered_ids = HashSet::new();
     discovered.retain(|peer| discovered_ids.insert(peer.npub()));
@@ -253,7 +298,7 @@ fn select_provider_peers(
         !discovered_ids.contains(&npub) && explicit_ids.insert(npub)
     });
 
-    let mut selected = Vec::with_capacity(limit);
+    let mut selected = Vec::with_capacity(discovered.len() + explicit.len());
     let mut discovered = discovered.into_iter();
     let mut explicit = explicit.into_iter();
     loop {
@@ -261,16 +306,10 @@ fn select_provider_peers(
         if let Some(peer) = discovered.next() {
             selected.push(peer);
             added = true;
-            if selected.len() == limit {
-                break;
-            }
         }
         if let Some(peer) = explicit.next() {
             selected.push(peer);
             added = true;
-            if selected.len() == limit {
-                break;
-            }
         }
         if !added {
             break;
@@ -295,6 +334,7 @@ mod tests {
             explicit: RwLock::new(vec![first, first, second, third]),
             transport: Weak::new(),
             max_provider_attempts: 2,
+            retry_windows: Mutex::new(VecDeque::new()),
         };
 
         assert_eq!(
@@ -308,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn preserved_bounded_rank_and_interleave_has_one_owner_per_peer() {
+    fn preserved_rank_and_interleave_has_one_owner_per_peer() {
         let discovered = (0..4)
             .map(|_| PeerIdentity::from_npub(&Identity::generate().npub()).unwrap())
             .collect::<Vec<_>>();
@@ -317,12 +357,119 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(
-            select_provider_peers(discovered.clone(), explicit.clone(), 4),
-            vec![discovered[0], explicit[0], discovered[1], explicit[1]],
+            ordered_provider_peers(discovered.clone(), explicit.clone()),
+            vec![
+                discovered[0],
+                explicit[0],
+                discovered[1],
+                explicit[1],
+                discovered[2],
+                discovered[3]
+            ],
         );
         assert_eq!(
-            select_provider_peers(discovered.clone(), vec![discovered[0], explicit[0]], 2,),
-            vec![discovered[0], explicit[0]],
+            ordered_provider_peers(discovered.clone(), vec![discovered[0], explicit[0]]),
+            vec![
+                discovered[0],
+                explicit[0],
+                discovered[1],
+                discovered[2],
+                discovered[3]
+            ],
         );
+    }
+
+    #[test]
+    fn retry_windows_respect_context_and_refresh_peers_without_introspection_side_effects() {
+        let peers = test_peers(5);
+        let route = test_route(peers.clone());
+        let hash = [0x11; 32];
+        assert_eq!(
+            route.provider_attempts(hash, 1).unwrap(),
+            (vec![peers[0]], 4)
+        );
+        for byte in 0x20..0x24 {
+            assert_eq!(
+                route.provider_attempts([byte; 32], 4).unwrap(),
+                (peers[..4].to_vec(), 1),
+            );
+        }
+        assert_eq!(
+            route.provider_ids().unwrap(),
+            peers[..4]
+                .iter()
+                .map(PeerIdentity::npub)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(route.provider_attempts(hash, 0).unwrap(), (Vec::new(), 5));
+        assert_eq!(
+            route.provider_attempts(hash, 1).unwrap(),
+            (vec![peers[1]], 4)
+        );
+        assert_eq!(
+            route.provider_attempts(hash, usize::MAX).unwrap(),
+            (vec![peers[2], peers[3], peers[4], peers[0]], 1),
+            "context cannot increase the constructor's four-attempt bound",
+        );
+
+        route.set_explicit_peers(vec![peers[4], peers[2], peers[4]]);
+        assert_eq!(
+            route.provider_attempts(hash, 4).unwrap(),
+            (vec![peers[4], peers[2]], 0),
+            "retry state must never retain a removed provider identity",
+        );
+    }
+
+    #[test]
+    fn least_recently_used_retry_is_evicted_without_unbounded_hash_state() {
+        let peers = test_peers(5);
+        let route = test_route(peers.clone());
+        let hash = |index: usize| {
+            let mut hash = [0; 32];
+            hash[..8].copy_from_slice(&(index as u64).to_le_bytes());
+            hash
+        };
+        for index in 0..=MAX_RETAINED_RETRY_WINDOWS {
+            assert_eq!(
+                route.provider_attempts(hash(index), 4).unwrap(),
+                (peers[..4].to_vec(), 1),
+            );
+        }
+        assert_eq!(
+            route.retry_windows.lock().unwrap().len(),
+            MAX_RETAINED_RETRY_WINDOWS
+        );
+        assert_eq!(
+            route
+                .provider_attempts(hash(MAX_RETAINED_RETRY_WINDOWS), 1)
+                .unwrap(),
+            (vec![peers[4]], 4),
+            "a retained hash keeps progress despite other searches",
+        );
+        assert_eq!(
+            route.provider_attempts(hash(0), 1).unwrap(),
+            (vec![peers[0]], 4),
+            "an evicted hash starts at the first window",
+        );
+        assert_eq!(
+            route.retry_windows.lock().unwrap().len(),
+            MAX_RETAINED_RETRY_WINDOWS
+        );
+    }
+
+    fn test_peers(count: usize) -> Vec<PeerIdentity> {
+        (0..count)
+            .map(|_| PeerIdentity::from_npub(&Identity::generate().npub()).unwrap())
+            .collect()
+    }
+
+    fn test_route(peers: Vec<PeerIdentity>) -> FipsBlobRoute<MemoryStore> {
+        FipsBlobRoute {
+            discovery: None,
+            explicit: RwLock::new(peers),
+            transport: Weak::new(),
+            max_provider_attempts: 4,
+            retry_windows: Mutex::new(VecDeque::new()),
+        }
     }
 }
