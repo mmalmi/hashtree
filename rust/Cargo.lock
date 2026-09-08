@@ -2709,6 +2709,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "env_logger"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cd405aab171cb85d6735e5c8d9db038c17d3ca007a4d2c25f337935c3d90580"
+dependencies = [
+ "humantime",
+ "is-terminal",
+ "log",
+ "regex",
+ "termcolor",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2913,19 +2926,6 @@ name = "fs_extra"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
-
-[[package]]
-name = "fuser"
-version = "0.14.0"
-dependencies = [
- "libc",
- "log",
- "memchr",
- "page_size",
- "pkg-config",
- "smallvec",
- "zerocopy 0.7.35",
-]
 
 [[package]]
 name = "futures"
@@ -3552,7 +3552,6 @@ dependencies = [
  "cashu-service",
  "clap",
  "dirs 5.0.1",
- "fuser",
  "futures",
  "git-remote-htree",
  "hashtree-blossom",
@@ -3561,6 +3560,7 @@ dependencies = [
  "hashtree-fips-transport",
  "hashtree-fs",
  "hashtree-fuse",
+ "hashtree-fuser",
  "hashtree-heed",
  "hashtree-index",
  "hashtree-lmdb",
@@ -3731,13 +3731,32 @@ dependencies = [
 name = "hashtree-fuse"
 version = "0.2.82"
 dependencies = [
- "fuser",
  "futures",
  "hashtree-core",
+ "hashtree-fuser",
  "libc",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "hashtree-fuser"
+version = "0.14.0-hashtree.1"
+dependencies = [
+ "bincode",
+ "clap",
+ "env_logger",
+ "libc",
+ "log",
+ "memchr",
+ "nix 0.27.1",
+ "page_size",
+ "pkg-config",
+ "serde",
+ "smallvec",
+ "tempfile",
+ "zerocopy 0.7.35",
 ]
 
 [[package]]
@@ -4107,6 +4126,12 @@ name = "httpdate"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
+
+[[package]]
+name = "humantime"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135b12329e5e3ce057a9f972339ea52bc954fe1e9358ef27f95e89716fbc5424"
 
 [[package]]
 name = "hybrid-array"
@@ -5105,6 +5130,17 @@ dependencies = [
  "libc",
  "memoffset 0.7.1",
  "pin-utils",
+]
+
+[[package]]
+name = "nix"
+version = "0.27.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2eb04e9c688eff1c89d72b407f168cf79bb9e867a9d3323ed6c01519eb9cc053"
+dependencies = [
+ "bitflags 2.13.0",
+ "cfg-if",
+ "libc",
 ]
 
 [[package]]
@@ -8230,6 +8266,15 @@ checksum = "c4790fc369d5a530f4b544b094e31388b9b3a37c0f4652ade4505945f5660d24"
 dependencies = [
  "new_debug_unreachable",
  "utf-8",
+]
+
+[[package]]
+name = "termcolor"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
+dependencies = [
+ "winapi-util",
 ]
 
 [[package]]

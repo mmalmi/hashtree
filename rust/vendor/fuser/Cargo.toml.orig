@@ -1,12 +1,12 @@
 [package]
-name = "fuser"
+name = "hashtree-fuser"
 edition = "2018"
-version = "0.14.0"
+version = "0.14.0-hashtree.1"
 authors = ["Christopher Berner <christopherberner@gmail.com>"]
-description = "Filesystem in Userspace (FUSE) for Rust"
-documentation = "https://docs.rs/fuser"
+description = "Hashtree fork of fuser with libfuse3 session safety and checked timestamps"
+documentation = "https://docs.rs/hashtree-fuser"
 homepage = "https://github.com/cberner/fuser"
-repository = "https://github.com/cberner/fuser"
+repository = "https://github.com/mmalmi/hashtree"
 readme = "README.md"
 keywords = ["fuse", "filesystem", "system", "bindings"]
 categories = ["external-ffi-bindings", "api-bindings", "filesystem", "os::unix-apis"]
@@ -63,6 +63,9 @@ abi-7-28 = ["abi-7-27"]
 abi-7-29 = ["abi-7-28"]
 abi-7-30 = ["abi-7-29"]
 abi-7-31 = ["abi-7-30"]
+
+[lib]
+name = "fuser"
 
 [[example]]
 name = "poll"

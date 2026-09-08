@@ -11,13 +11,13 @@
 
 [package]
 edition = "2018"
-name = "fuser"
-version = "0.14.0"
+name = "hashtree-fuser"
+version = "0.14.0-hashtree.1"
 authors = ["Christopher Berner <christopherberner@gmail.com>"]
 build = "build.rs"
-description = "Filesystem in Userspace (FUSE) for Rust"
+description = "Hashtree fork of fuser with libfuse3 session safety and checked timestamps"
 homepage = "https://github.com/cberner/fuser"
-documentation = "https://docs.rs/fuser"
+documentation = "https://docs.rs/hashtree-fuser"
 readme = "README.md"
 keywords = [
     "fuse",
@@ -32,7 +32,10 @@ categories = [
     "os::unix-apis",
 ]
 license = "MIT"
-repository = "https://github.com/cberner/fuser"
+repository = "https://github.com/mmalmi/hashtree"
+
+[lib]
+name = "fuser"
 
 [[example]]
 name = "poll"

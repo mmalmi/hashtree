@@ -19,7 +19,9 @@ default = []
 fuse = ["dep:fuser", "dep:libc"]
 
 [dependencies.fuser]
-version = "0.14"
+package = "hashtree-fuser"
+version = "=0.14.0-hashtree.1"
+path = "../../vendor/fuser"
 optional = true
 features = ["abi-7-12", "abi-7-18"]
 

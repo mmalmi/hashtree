@@ -92,7 +92,7 @@ secp256k1 = { version = "0.29", features = ["global-context"] }
 lru.workspace = true
 libc = "0.2"
 page_size = "0.6"
-fuser = { version = "0.14", optional = true }
+fuser = { package = "hashtree-fuser", version = "=0.14.0-hashtree.1", path = "../../vendor/fuser", optional = true }
 uuid.workspace = true
 
 # CLI
