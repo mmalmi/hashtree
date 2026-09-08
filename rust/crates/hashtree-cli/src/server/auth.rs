@@ -85,7 +85,8 @@ impl<K: Eq + Hash, V: Clone> TimedLruCache<K, V> {
                 return Some(entry.value.clone());
             }
         }
-        self.cache.pop(key);
+        // Detach the entry before its key is dropped, which may unwind.
+        self.cache.pop_entry(key);
         None
     }
 
@@ -103,6 +104,10 @@ impl<K: Eq + Hash, V: Clone> TimedLruCache<K, V> {
 pub fn new_lookup_cache<K: Eq + Hash, V: Clone>() -> TimedLruCache<K, V> {
     TimedLruCache::new(LOOKUP_CACHE_CAPACITY)
 }
+
+#[cfg(test)]
+#[path = "auth_cache_tests.rs"]
+mod cache_tests;
 
 #[derive(Debug, Clone)]
 pub struct CachedResolvedPathEntry {
