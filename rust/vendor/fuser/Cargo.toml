@@ -13,6 +13,7 @@
 edition = "2018"
 name = "hashtree-fuser"
 version = "0.14.0-hashtree.1"
+exclude = ["Cargo.toml.orig", ".cargo_vcs_info.json"]
 authors = ["Christopher Berner <christopherberner@gmail.com>"]
 build = "build.rs"
 description = "Hashtree fork of fuser with libfuse3 session safety and checked timestamps"
