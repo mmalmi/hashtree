@@ -2,6 +2,30 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-09-08 - Bounded Blob Provider Retry Fairness
+
+A real TCP/FIPS fixture placed the requested bytes only on a fifth provider.
+The old selector retried the same first four providers, even after four
+unrelated blob reads, and returned a miss again. The corrected selector keeps
+an independent retry offset for each retained hash and returns the verified
+bytes on the next request. A search with untried candidates now reports an
+incomplete result instead of a confirmed miss.
+
+The per-request limit remains four providers and can be reduced by the caller's
+attempt budget. Retry state retains at most 256 hashes with least-recently-used
+eviction; an evicted hash starts at the first window again. Fairness applies
+while the hash remains retained and the candidate set is stable. Discovery
+ranking and deduplication still precede selection, and peer configuration is
+read afresh without retaining revoked identities. Transport deadlines, hedging
+and cancellation remain unchanged.
+
+The actual failing retry assertion was reproduced before the correction.
+Two real provider integration tests, 20 unit tests and strict all-target Clippy
+checks passed afterward. Intermediate fixture teardown and cache-expectation
+failures were corrected and excluded from the passing result. This establishes
+bounded retry coverage, not a CPU or saturation improvement, and does not prove
+the cause of a separately observed multi-peer missing-child timeout.
+
 ## 2026-09-07 - Reuse Verified Source CI During Release
 
 [Source CI run 34151612943](https://github.com/mmalmi/hashtree/actions/runs/34151612943)

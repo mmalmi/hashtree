@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-embedded-ffi"
-version.workspace = true
+version = "0.2.83"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,4 +13,4 @@ crate-type = ["cdylib"]
 name = "hashtree_embedded_ffi"
 
 [dependencies]
-hashtree-embedded = { version = "0.2.82", path = "../hashtree-embedded" }
+hashtree-embedded = { version = "0.2.88", path = "../hashtree-embedded" }

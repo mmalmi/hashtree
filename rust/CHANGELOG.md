@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## 0.2.144 - 2026-09-08
+
+### Fixed
+
+- Retry different FIPS blob providers for each requested hash, so a holder
+  beyond the first bounded provider group can be reached on later reads.
+- Report incomplete provider searches separately from confirmed misses when
+  candidates remain outside the current attempt window.
+- Require the corrected adapter in the CLI, Cashu helper, embedded runtime and
+  embedded C ABI packages, including consumers with older dependency locks.
+
 ## 0.2.143 - 2026-09-08
 
 ### Security

@@ -3528,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cashu-cli"
-version = "0.2.83"
+version = "0.2.84"
 dependencies = [
  "anyhow",
  "clap",
@@ -3540,7 +3540,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.143"
+version = "0.2.144"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded"
-version = "0.2.87"
+version = "0.2.88"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3673,7 +3673,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded-ffi"
-version = "0.2.82"
+version = "0.2.83"
 dependencies = [
  "hashtree-embedded",
 ]
@@ -3696,7 +3696,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.4.14"
+version = "0.4.15"
 dependencies = [
  "async-trait",
  "hashtree-core",
