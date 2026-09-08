@@ -2,6 +2,28 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-09-08 - Timed Cache Expiry and FUSE Callback Safety
+
+The public generic timed cache accepts caller-defined key types. A deterministic
+regression stored an expired key whose destructor panics once, caught that panic,
+then exercised ordinary lookups, insertions and capacity eviction. Before the
+correction, a later eviction failed inside the LRU library because its list was
+left inconsistent. Returning an owned entry with `pop_entry` detaches the entry
+before either key or value is dropped. The same regression passed afterward,
+along with strict Clippy checks for the changed CLI library and formatting.
+Normal daemon string and hash keys do not have panicking destructors; this
+establishes the exposed generic API's panic-safety defect, not a demonstrated
+remote-input exploit.
+
+The optional FUSE path passed a null operations pointer and zero size to
+libfuse3. The compatible carrier supplies a fully initialized callback table
+using upstream PR #390 and retains the existing checked timestamp conversion
+and API. With libfuse3 selected, 48 carrier library tests,
+18 FUSE feature tests and the CLI's FUSE feature compilation passed. Those
+focused checks did not mount a filesystem. The retained carrier mount test and
+CLI mount smoke run together in the existing privileged release gate; the
+ordinary unprivileged workspace test lane excludes that carrier.
+
 ## 2026-09-08 - Bounded Blob Provider Retry Fairness
 
 A real TCP/FIPS fixture placed the requested bytes only on a fifth provider.

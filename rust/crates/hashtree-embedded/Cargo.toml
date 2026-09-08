@@ -10,7 +10,7 @@ description = "Embedded Hashtree daemon runtime for native hosts"
 
 [dependencies]
 anyhow.workspace = true
-hashtree-cli = { version = "0.2.144", path = "../hashtree-cli", default-features = false, features = ["lmdb", "fips-webrtc"] }
+hashtree-cli = { version = "0.2.145", path = "../hashtree-cli", default-features = false, features = ["lmdb", "fips-webrtc"] }
 hashtree-core.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

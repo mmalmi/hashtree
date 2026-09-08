@@ -18,6 +18,6 @@ if grep -F 'SHA256SUMS' rust/scripts/write_release_bootstrap_installer.sh >/dev/
     exit 1
 fi
 grep -F -- '--device /dev/fuse' rust/scripts/run_fuse_smoke_in_docker.sh >/dev/null
-grep -F 'cargo test -p hashtree-cli --features fuse --test fuse_mount_smoke -- --nocapture' rust/scripts/run_fuse_smoke_in_docker.sh >/dev/null
+grep -F 'cargo test --locked -p hashtree-cli --features fuse --test fuse_mount_smoke -- --nocapture' rust/scripts/run_fuse_smoke_in_docker.sh >/dev/null
 
 echo "Rust binary feature wiring checks passed."

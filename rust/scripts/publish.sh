@@ -37,6 +37,7 @@ FAILED_CRATES=()
 
 STAGE_0_SYS_CRATES=(
     "hashtree-lmdb-master-sys"
+    "hashtree-fuser"
 )
 
 STAGE_0_HEED_CRATES=(

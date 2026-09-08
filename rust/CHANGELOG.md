@@ -2,7 +2,24 @@
 
 ## Unreleased
 
-## 0.2.144 - 2026-09-08
+## 0.2.145 - 2026-09-08
+
+### Security
+
+- Remove expired cache entries before dropping their keys, so a custom key's
+  panicking destructor cannot leave the public timed cache's LRU links invalid.
+- Initialize the complete libfuse3 callback table before creating a mount
+  session. The corrected compatible carrier preserves checked timestamp
+  handling and is required by the published optional FUSE packages.
+- Require the corrected CLI in the Cashu helper and embedded runtime packages.
+
+### Fixed
+
+- Include the bounded FIPS provider retry fairness and incomplete-search
+  reporting prepared for 0.2.144. Untried providers remain eligible on later
+  reads of the same retained hash.
+
+## 0.2.144 - 2026-09-08 (superseded before CLI publication)
 
 ### Fixed
 

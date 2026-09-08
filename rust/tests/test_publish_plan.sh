@@ -30,6 +30,18 @@ grep -F 'fips-tcp-endpoint = { package = "nvpn-fips-tcp-endpoint", version = "=0
 grep -F 'hashtree-core = { version = "0.2.86", path = "../hashtree-core" }' \
     "${RUST_DIR}/crates/hashtree-fips-transport/Cargo.toml" >/dev/null
 
+fuser_version="$(awk -F '"' '/^version = / { print $2; exit }' "${RUST_DIR}/vendor/fuser/Cargo.toml")"
+: "${fuser_version:?missing hashtree-fuser package version}"
+grep -F 'name = "hashtree-fuser"' "${RUST_DIR}/vendor/fuser/Cargo.toml" >/dev/null
+grep -F "fuser = { package = \"hashtree-fuser\", version = \"=${fuser_version}\", path = \"../../vendor/fuser\", optional = true }" \
+    "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" >/dev/null
+grep -F 'package = "hashtree-fuser"' "${RUST_DIR}/crates/fuse/Cargo.toml" >/dev/null
+grep -F "version = \"=${fuser_version}\"" "${RUST_DIR}/crates/fuse/Cargo.toml" >/dev/null
+fuse_version="$(awk -F '"' '/^version = / { print $2; exit }' "${RUST_DIR}/crates/fuse/Cargo.toml")"
+: "${fuse_version:?missing hashtree-fuse package version}"
+grep -F "hashtree-fuse = { version = \"${fuse_version}\", path = \"../fuse\", optional = true, features = [\"fuse\"] }" \
+    "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" >/dev/null
+
 fake_bin="$(mktemp -d "${TMPDIR:-/tmp}/hashtree-publish-test.XXXXXX")"
 trap 'rm -rf "${fake_bin}"' EXIT
 printf '%s\n' '#!/bin/sh' 'echo "crate version already exists" >&2' 'exit 1' \
@@ -61,6 +73,7 @@ plan_line() {
 }
 
 fuse_line="$(plan_line hashtree-fuse)"
+fuser_line="$(plan_line hashtree-fuser)"
 core_line="$(plan_line hashtree-core)"
 collection_line="$(plan_line hashtree-collection)"
 nostr_line="$(plan_line hashtree-nostr)"
@@ -75,7 +88,7 @@ heed_line="$(plan_line hashtree-heed)"
 social_graph_heed_line="$(plan_line hashtree-nostr-social-graph-heed)"
 lmdb_line="$(plan_line hashtree-lmdb)"
 
-if [ -z "$fuse_line" ] || [ -z "$core_line" ] || [ -z "$collection_line" ] || \
+if [ -z "$fuser_line" ] || [ -z "$fuse_line" ] || [ -z "$core_line" ] || [ -z "$collection_line" ] || \
     [ -z "$nostr_line" ] || [ -z "$transport_line" ] || \
     [ -z "$nostr_pubsub_line" ] || [ -z "$cli_line" ] || \
     [ -z "$cashu_cli_line" ] || [ -z "$embedded_line" ] || \
@@ -110,6 +123,11 @@ fi
 
 if [ "$fuse_line" -ge "$cli_line" ]; then
     echo "hashtree-fuse must be published before hashtree-cli" >&2
+    exit 1
+fi
+
+if [ "$fuser_line" -ge "$fuse_line" ]; then
+    echo "the corrected FUSE carrier must be published before hashtree-fuse" >&2
     exit 1
 fi
 

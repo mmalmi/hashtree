@@ -90,6 +90,7 @@ run_static_gate() {
   bash "$repo_root/rust/tests/test_build_release_artifacts.sh" || return $?
   bash "$repo_root/rust/tests/test_build_release_invocation.sh" || return $?
   bash "$repo_root/rust/tests/test_build_release_docker_invocation.sh" || return $?
+  bash "$repo_root/rust/tests/test_fuse_smoke_docker_invocation.sh" || return $?
   bash "$repo_root/rust/tests/test_release_webrtc_smoke.sh" || return $?
   bash "$repo_root/packaging/systemd/tests/test_pool_migration_service.sh" || return $?
   node --test "$repo_root/rust/tests/test_build_windows_vm_artifacts.mjs" || return $?
@@ -147,6 +148,7 @@ run_rust_gate() {
     cargo fmt --all --check || exit $?
     if [[ "$mode" == "fast" ]]; then
       cargo nextest run --workspace --locked \
+        --exclude hashtree-fuser \
         --exclude hashtree-embedded \
         --exclude hashtree-embedded-ffi \
         --exclude hashtree-s3 \
@@ -157,6 +159,7 @@ run_rust_gate() {
     else
       ensure_test_fd_limit || exit $?
       cargo nextest run --workspace --locked \
+        --exclude hashtree-fuser \
         --exclude hashtree-embedded \
         --exclude hashtree-embedded-ffi \
         --exclude hashtree-s3 \

@@ -45,6 +45,10 @@ grep -F -- '-- --ignored --test-threads=1' scripts/release-gate.sh >/dev/null
 grep -F -- '--exclude hashtree-embedded-ffi' scripts/release-gate.sh >/dev/null
 grep -F -- '--exclude tauri-plugin-hashtree-updater' scripts/release-gate.sh >/dev/null
 grep -F -- '--test-threads 4' scripts/release-gate.sh >/dev/null
+# The carrier's retained integration test mounts a real filesystem. Its unit
+# and mount tests belong to the existing privileged FUSE lane.
+[ "$(grep -Fc -- '--exclude hashtree-fuser' scripts/release-gate.sh)" -eq 2 ]
+grep -F 'cargo test --locked -p hashtree-fuser --lib --test integration_tests' rust/scripts/run_fuse_smoke_in_docker.sh >/dev/null
 grep -F 'taiki-e/install-action@nextest' .github/workflows/ci.yml >/dev/null
 grep -F 'rev-parse "${VERSION}^{commit}"' publish_release.sh >/dev/null
 reject grep -qF "tags:" .github/workflows/release.yml
