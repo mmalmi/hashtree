@@ -1,3 +1,9 @@
+# Hashtree fuser compatibility fork
+
+This package preserves fuser 0.14's API and Hashtree's checked timestamp handling for mounted Finder writes. It backports upstream [PR #390](https://github.com/cberner/fuser/pull/390), which initializes the libfuse3 operations table before creating a session (RUSTSEC-2021-0154). The Rust library name remains `fuser`; the published package is `hashtree-fuser`.
+
+The original upstream documentation follows.
+
 # FUSE (Filesystem in Userspace) for Rust
 
 ![CI](https://github.com/cberner/fuser/actions/workflows/ci.yml/badge.svg)
