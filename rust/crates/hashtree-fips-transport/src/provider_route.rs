@@ -10,7 +10,7 @@ use tokio::task::JoinSet;
 use tokio::time::Duration;
 
 use crate::tcp_blob::MAX_OUTBOUND_GETS;
-use crate::{TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT, TcpBlobTransport};
+use crate::{TcpBlobTransport, TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT};
 
 const PROVIDER_HEDGE_DELAY: Duration = Duration::from_millis(100);
 const MAX_RETAINED_RETRY_WINDOWS: usize = 256;

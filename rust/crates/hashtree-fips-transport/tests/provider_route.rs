@@ -6,8 +6,8 @@ use fips_core::config::{RoutingMode, TransportInstances};
 use fips_core::{Config, FipsEndpoint, UdpConfig};
 use hashtree_core::{BlobReply, BlobRequest, BlobRoute, BlobRouteContext, MemoryStore, Store};
 use hashtree_fips_transport::{
-    FipsBlobRoute, TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT, TcpBlobTransport,
-    TcpBlobTransportConfig,
+    FipsBlobRoute, TcpBlobTransport, TcpBlobTransportConfig, TCP_BLOB_CAPABILITY,
+    TCP_BLOB_SERVICE_PORT,
 };
 use sha2::{Digest, Sha256};
 use tokio::time::timeout;
