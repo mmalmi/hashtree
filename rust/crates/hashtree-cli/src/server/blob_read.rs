@@ -107,7 +107,7 @@ enum BlobIoClass {
 }
 
 #[derive(Debug)]
-pub(super) enum BlobIoTaskError {
+pub(crate) enum BlobIoTaskError {
     Busy(&'static str),
     TimedOut(&'static str),
     Join(tokio::task::JoinError),
@@ -380,7 +380,7 @@ where
     admission().run_metadata_read(task).await
 }
 
-pub(super) async fn run_blob_read<F, T>(task: F) -> Result<T, BlobIoTaskError>
+pub(crate) async fn run_blob_read<F, T>(task: F) -> Result<T, BlobIoTaskError>
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,

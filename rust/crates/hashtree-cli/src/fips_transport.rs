@@ -3,6 +3,10 @@
 //! This starts `fips_core::FipsEndpoint` inside the htree process; it does not
 //! depend on or talk to an external FIPS daemon.
 
+mod blob_resolver;
+pub(crate) use blob_resolver::read_daemon_blob;
+use blob_resolver::{BlockingStoreRoute, DaemonInboundBlobRoute};
+
 use crate::config::{Config, NostrEventTransport};
 #[cfg(feature = "experimental-decentralized-pubsub")]
 use crate::nostr_relay::NostrRelay;
@@ -182,7 +186,9 @@ async fn bind_daemon_blob_resolver(
 ) -> Result<(Arc<DaemonBlobResolver>, Arc<DaemonBlobTransport>)> {
     let mut routes = vec![BlobRouteEntry::new(
         "configured-store",
-        Arc::new(StoreBlobRoute::new(store.clone())),
+        Arc::new(BlockingStoreRoute(Arc::new(StoreBlobRoute::new(
+            store.clone(),
+        )))),
     )];
     let resolver = Arc::new(
         BlobRouter::new(
@@ -199,7 +205,7 @@ async fn bind_daemon_blob_resolver(
     // Advertise the same resolver used by in-process daemon reads. The FIPS
     // route added below owns only a weak transport reference, so routing an
     // inbound request through this resolver does not create an Arc cycle.
-    let inbound_route: Arc<dyn BlobRoute> = resolver.clone();
+    let inbound_route: Arc<dyn BlobRoute> = Arc::new(DaemonInboundBlobRoute(resolver.clone()));
     let transport = Arc::new(
         TcpBlobTransport::bind_advertised_route_with_config(
             endpoint.native_endpoint.clone(),
@@ -862,7 +868,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let provider_store = Arc::new(HashtreeStore::new(temp.path().join("provider")).unwrap());
         let upstream_store = Arc::new(hashtree_core::MemoryStore::new());
-        let data = b"served through the daemon's configured FIPS peer".to_vec();
+        let data = vec![47; 4096];
+        let wire_exchange_bytes =
+            data.len() + hashtree_core::BLOB_REQUEST_BYTES + hashtree_core::BLOB_REPLY_HEADER_BYTES;
         let hash = Sha256::digest(&data).into();
         upstream_store.put(hash, data.clone()).await.unwrap();
         let upstream_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -972,13 +980,27 @@ mod tests {
                 .route(hashtree_core::BlobRequest { hash, htl: 2 })
                 .await
                 .unwrap(),
-            hashtree_core::BlobReply::Data(data),
+            hashtree_core::BlobReply::Data(data.clone()),
         );
         assert_eq!(
             upstream_requests.lock().unwrap().as_slice(),
             &[hashtree_core::BlobRequest { hash, htl: 0 }],
             "three Hashtree nodes must observe the two-to-one-to-zero forwarding budget while each FIPS carrier preserves its request",
         );
+
+        assert_eq!(
+            observer_route
+                .route(hashtree_core::BlobRequest { hash, htl: 2 })
+                .await
+                .unwrap(),
+            hashtree_core::BlobReply::Data(data),
+        );
+        assert_eq!(
+            upstream_requests.lock().unwrap().len(),
+            1,
+            "the intermediate daemon must serve its verified cache before forwarding again"
+        );
+        println!("daemon warm read: cold_blob_wire_bytes={} warm_blob_wire_bytes={} upstream_repeat_bytes=0", 2 * wire_exchange_bytes, wire_exchange_bytes);
 
         drop(observer_route);
         drop(observer_transport);

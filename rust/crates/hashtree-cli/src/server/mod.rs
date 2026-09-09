@@ -1,5 +1,6 @@
 mod auth;
 mod blob_read;
+pub(crate) use blob_read::run_blob_read;
 pub mod blossom;
 mod handlers;
 mod ingest_filter;

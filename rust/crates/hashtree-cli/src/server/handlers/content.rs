@@ -1,5 +1,5 @@
 use super::*;
-use crate::fips_transport::DaemonBlobResolver;
+use crate::fips_transport::{read_daemon_blob, DaemonBlobResolver};
 use crate::server::blob_read::{
     run_blob_metadata_read, run_blob_read, run_blob_write, BlobIoTaskError, BLOB_READ_BUSY,
 };
@@ -1141,12 +1141,13 @@ pub(super) async fn query_fips_peers(
     let hash: [u8; 32] = hash
         .try_into()
         .map_err(|_| "FIPS blob hash has the wrong length".to_string())?;
-    match hashtree_core::BlobRoute::route(
+    match read_daemon_blob(
         resolver.as_ref(),
         hashtree_core::BlobRequest {
             hash,
             htl: hashtree_core::BLOB_DEFAULT_HTL,
         },
+        None,
     )
     .await
     {

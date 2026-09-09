@@ -2860,3 +2860,50 @@ Real carrier validation at the baseline revision also passed:
 The updated routing suite has 20 passing tests. The shared-forward state keeps
 its existing 1,024-entry bound and cycle suppression. The fix also merges the
 tracked and untracked forwarding execution branches to keep one dispatch path.
+
+
+### 2026-09-09: Prefer the daemon store without blocking mesh hedges
+
+Follow-up to the preceding topology measurement: the CLI now supplies its
+existing configured-store preference on both incoming FIPS blob requests and
+in-process FIPS reads. This is an application policy using the router's existing
+preferred-route argument; the generic router's opaque route/cache policy and
+public resolver type remain unchanged. The browser worker already uses the
+same approach to prefer IndexedDB.
+
+A real three-node FIPS regression retrieves a 4 KiB blob through an intermediate
+daemon, then repeats the read. Before the change, the intermediate fetched the
+blob upstream again despite caching it. The updated regression confirms one
+upstream retrieval across both reads, while HTL 2→1→0 and exhaustion behavior
+remain intact.
+
+| Warm-read measurement | Before | After |
+| --- | ---: | ---: |
+| Mesh links traversed by repeat read | 2 | 1 |
+| Blob-wire bytes per repeat read | 8,278 | 4,139 |
+| Repeat traffic on intermediate-to-source link | 4,139 | 0 |
+
+Blob-wire bytes are derived from observed request counts and the shared codec's
+36-byte request, 7-byte reply header and 4,096-byte payload. FIPS/TCP/underlay
+framing and retransmissions are excluded. The caller in this test is deliberately
+a raw peer route, so it still contacts the intermediate on every read.
+
+The configured store may synchronously read disk or fall back to S3. Running
+that preferred read inline would prevent Tokio from polling hedge/deadline
+timers. The private CLI adapter therefore reuses the server's existing bounded
+blocking-read queue. A single-thread runtime regression blocks the store while
+a healthy alternate route wins after the configured 5 ms hedge; completion
+must stay below the generous 500 ms test bound. A second test confirms an
+incoming 20 ms deadline remains an error, not a false miss.
+
+A started blocking read can outlive the caller, just as existing server reads
+can. The reused queue keeps its permits until the closure ends, so cancellation
+cannot admit unlimited replacement disk/S3 work. Existing queue-admission and
+error/no-result integration tests also pass. No public API or second queue was
+added, and no generic cache-first behavior was introduced.
+
+Validation: 23 CLI tests matching `fips` and all four storage admission/queue
+tests passed; the production CLI library passes strict Clippy with dependency
+linting excluded. Strict all-target lint remains blocked by unrelated existing
+vendored-Heed, storage-test and pool-migration warnings; those were left outside
+this routing change.
