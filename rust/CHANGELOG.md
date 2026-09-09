@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+## 0.2.146 - 2026-09-09
+
+### Fixed
+
+- Allow explicitly configured Nostr service identities to exchange events
+  through FIPS routers that do not run pubsub. Configure `nostr.fips_pubsub_peers`;
+  social follows and physical transit connections do not imply service support.
+- Recover coalesced mesh reads when the shared upstream request is cancelled,
+  retaining each waiting reader's deadline.
+- Prefer cached daemon blobs while preserving remote hedges for slow stores.
+  Repeated reads in the three-node FIPS regression use half the blob-protocol
+  bytes by serving from the intermediate cache.
+- Require FIPS 0.4.77 to reject future-dated signed peer ratings, and adopt the
+  pubsub adapter's peer replacement, subscription recovery, and routed-peer fixes.
+
+### Tests
+
+- Cover hop-budget exhaustion, cyclic paths, invalid providers, intermediate
+  caches after provider departure, and cancellation recovery across mesh readers.
+
 ## 0.2.145 - 2026-09-08
 
 ### Security

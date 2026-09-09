@@ -140,6 +140,7 @@ pub async fn start_daemon_fips_transport(
     let pubsub_client = if daemon_fips_pubsub_required(config) {
         let options = FipsPubsubClientOptions {
             query_timeout: request_timeout,
+            routed_peers: config.nostr.fips_pubsub_peers.clone(),
             max_frame_bytes: config
                 .nostr
                 .decentralized_pubsub_max_event_bytes
@@ -604,11 +605,14 @@ mod tests {
 
     #[cfg(feature = "experimental-decentralized-pubsub")]
     #[tokio::test]
-    async fn one_native_endpoint_serves_roots_and_trusted_decentralized_events() {
+    async fn one_native_endpoint_routes_roots_and_trusted_events_through_transit() {
         let scope = format!("htree-native-pubsub-{}", uuid::Uuid::new_v4());
         let daemon_addr = reserve_udp_addr();
         let rendezvous_addr = reserve_udp_addr();
         let (remote_endpoint, remote_addr) = udp_endpoint(&scope).await;
+        // This node only routes FIPS datagrams: it has no pubsub client,
+        // matching subscription, Nostr cache, or application authorization.
+        let (transit_endpoint, transit_addr) = udp_endpoint(&scope).await;
         let daemon_keys = nostr::Keys::generate();
         let trusted_keys = nostr::Keys::generate();
         let untrusted_keys = nostr::Keys::generate();
@@ -628,14 +632,17 @@ mod tests {
         config.server.fips_local_rendezvous_addr = Some(rendezvous_addr);
         config.server.enable_fips_udp = true;
         config.server.enable_fips_webrtc = false;
+        config.server.enable_fips_lan_discovery = false;
+        config.server.fips_websocket_seed_urls = Some(Vec::new());
         config.server.fips_request_timeout_ms = 2_000;
         config.server.fips_peers = vec![crate::config::ConfiguredFipsPeer {
-            npub: remote_endpoint.local_peer_id.clone(),
-            udp_addresses: vec![remote_addr],
+            npub: transit_endpoint.local_peer_id.clone(),
+            udp_addresses: vec![transit_addr.clone()],
         }];
         config.nostr.enabled = true;
         config.nostr.event_transport = NostrEventTransport::FipsLocalOnly;
         config.nostr.decentralized_pubsub = true;
+        config.nostr.fips_pubsub_peers = vec![remote_endpoint.local_peer_id.clone()];
 
         let cache = new_daemon_nostr_cache(store.store_arc());
         let daemon = start_daemon_fips_transport(&config, &daemon_keys, store, Vec::new())
@@ -657,9 +664,24 @@ mod tests {
         set_fips_peer_configs(
             remote_endpoint.native_endpoint.as_ref(),
             vec![FipsPeerConfig {
-                npub: daemon.endpoint_npub.clone(),
-                udp_addresses: vec![daemon_addr],
+                npub: transit_endpoint.local_peer_id.clone(),
+                udp_addresses: vec![transit_addr],
             }],
+        )
+        .await
+        .unwrap();
+        set_fips_peer_configs(
+            transit_endpoint.native_endpoint.as_ref(),
+            vec![
+                FipsPeerConfig {
+                    npub: daemon.endpoint_npub.clone(),
+                    udp_addresses: vec![daemon_addr],
+                },
+                FipsPeerConfig {
+                    npub: remote_endpoint.local_peer_id.clone(),
+                    udp_addresses: vec![remote_addr],
+                },
+            ],
         )
         .await
         .unwrap();
@@ -668,6 +690,7 @@ mod tests {
                 remote_endpoint.native_endpoint.clone(),
                 FipsPubsubClientOptions {
                     query_timeout: Duration::from_secs(2),
+                    routed_peers: vec![daemon.endpoint_npub.clone()],
                     ..Default::default()
                 },
             )
@@ -675,8 +698,8 @@ mod tests {
             .unwrap(),
         );
 
-        wait_for_native_peer(&daemon.endpoint, &remote_endpoint.local_peer_id).await;
-        wait_for_peer(&remote_endpoint, &daemon.endpoint_npub).await;
+        wait_for_native_peer(&daemon.endpoint, &transit_endpoint.local_peer_id).await;
+        wait_for_peer(&remote_endpoint, &transit_endpoint.local_peer_id).await;
         timeout(Duration::from_secs(5), async {
             while remote_client.peer_subscription_count().unwrap() == 0 {
                 tokio::time::sleep(Duration::from_millis(20)).await;
@@ -772,9 +795,25 @@ mod tests {
             .expect("outbound relay publication");
         assert_eq!(delivered.event.as_event().id, outbound.id);
 
+        assert!(!daemon
+            .endpoint
+            .peers()
+            .await
+            .unwrap()
+            .iter()
+            .any(|peer| { peer.npub == remote_endpoint.local_peer_id && peer.connected }));
+        assert!(!remote_endpoint
+            .native_endpoint
+            .peers()
+            .await
+            .unwrap()
+            .iter()
+            .any(|peer| { peer.npub == daemon.endpoint_npub && peer.connected }));
+
         decentralized.shutdown();
         daemon.shutdown().await;
         remote_endpoint.native_endpoint.shutdown().await.unwrap();
+        transit_endpoint.native_endpoint.shutdown().await.unwrap();
     }
 
     #[tokio::test]

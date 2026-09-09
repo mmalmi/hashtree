@@ -136,7 +136,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -147,7 +147,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2469,7 +2469,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users 0.5.2",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2745,7 +2745,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3540,7 +3540,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.145"
+version = "0.2.146"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded"
-version = "0.2.88"
+version = "0.2.89"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3696,7 +3696,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.4.15"
+version = "0.4.16"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -4474,7 +4474,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4995,7 +4995,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5263,9 +5263,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.4.19"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d215c655ca2695b66f89ee7f8e579169b5a32b232e2ed8d23b6d16610a2c3987"
+checksum = "2bf7432e9f4fb073e75dee6286a7c0b6eb8c4730c6153c3571cb99e5d1723614"
 dependencies = [
  "async-trait",
  "nostr",
@@ -5373,7 +5373,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5456,9 +5456,9 @@ dependencies = [
 
 [[package]]
 name = "nvpn-fips-core"
-version = "0.4.76"
+version = "0.4.77"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f0c82256c52e2dba27747cb366273b7a66dabdee06648486625d81da883ef98"
+checksum = "0820eb0d71709c4d6e5d4876f1a49acbad3252625c3eea8cf95aff7972aeb971"
 dependencies = [
  "base64 0.22.1",
  "bluer",
@@ -5522,9 +5522,9 @@ checksum = "511e85644bc05a28503a09a1fe150a6fcc736aab0d67fab2784bf4a531ab332d"
 
 [[package]]
 name = "nvpn-fips-tcp-endpoint"
-version = "0.2.12"
+version = "0.2.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36d78cbd17d72b2fee7c55f5b247cb5d09d0a536f0b4d653efee2e30e69a50ae"
+checksum = "6d0a46125815fb1ff837092ce690995039e039831c1ab3149cbc61179ca913f0"
 dependencies = [
  "nvpn-fips-core",
  "nvpn-fips-tcp",
@@ -6964,7 +6964,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7663,7 +7663,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "52d1cfed4120b4d927bf7c0f86d2087a4a7d6027c906d9f9d525a80573b9be51"
 dependencies = [
  "libc",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8255,7 +8255,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.59.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8809,7 +8809,7 @@ dependencies = [
  "png 0.18.1",
  "serde",
  "thiserror 2.0.18",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9745,7 +9745,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

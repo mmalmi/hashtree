@@ -356,6 +356,11 @@ pub struct NostrConfig {
     /// the experimental-decentralized-pubsub feature.
     #[serde(default, alias = "relayless_pubsub")]
     pub decentralized_pubsub: bool,
+    /// Known Nostr pubsub service identities reachable through the FIPS mesh.
+    /// These may be routed peers; physical transit peers and social follows do
+    /// not imply pubsub support. The adapter validates and bounds this roster.
+    #[serde(default)]
+    pub fips_pubsub_peers: Vec<String>,
     /// Maximum encoded Nostr event frame accepted on decentralized pubsub.
     /// Values above the authenticated FIPS datagram limit are clamped.
     #[serde(default = "default_nostr_decentralized_pubsub_max_event_bytes")]
@@ -781,6 +786,7 @@ impl Default for NostrConfig {
             archive_history_follow_distance: default_nostr_archive_history_follow_distance(),
             archive_history_max_relay_pages: default_nostr_archive_history_max_relay_pages(),
             decentralized_pubsub: false,
+            fips_pubsub_peers: Vec::new(),
             decentralized_pubsub_max_event_bytes:
                 default_nostr_decentralized_pubsub_max_event_bytes(),
         }
@@ -1443,6 +1449,7 @@ chunk_target_bytes = 65536
         let default_nostr = NostrConfig::default();
         assert!(!default_nostr.decentralized_pubsub);
         assert!(!default_nostr.decentralized_pubsub_enabled());
+        assert!(default_nostr.fips_pubsub_peers.is_empty());
 
         let enabled: NostrConfig = toml::from_str("decentralized_pubsub = true")
             .expect("parse decentralized pubsub nostr config");
@@ -1473,10 +1480,12 @@ decentralized_pubsub = true
             r#"
 decentralized_pubsub = true
 decentralized_pubsub_max_event_bytes = 4096
+fips_pubsub_peers = ["known-service-identity"]
 "#,
         )
         .expect("parse tuned decentralized pubsub config");
         assert_eq!(tuned.decentralized_pubsub_max_event_bytes, 4096);
+        assert_eq!(tuned.fips_pubsub_peers, ["known-service-identity"]);
     }
 
     #[test]
