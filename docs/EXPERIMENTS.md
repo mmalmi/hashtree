@@ -2794,3 +2794,69 @@ Setup:
 The median fell about 15%, with all generated cases and assertions retained.
 Individual runs varied with local load; the durable improvement is eliminating
 1,792 unnecessary runtime creations and their worker threads per suite run.
+
+
+### 2026-09-09: Mesh reader recovery and bounded multihop probes
+
+Question: can Hashtree reads survive independent reader cancellation, exhausted
+hop budgets, corrupt providers, cycles and provider departure using the current
+production routing path?
+
+The retired `hashtree-sim` mesh simulator is no longer production-relevant.
+These probes compose the real `BlobRouter`, `MeshForwardingRoute`, `MemoryStore`
+and blob wire codec. Only the carrier is simulated. Counts exclude FIPS/TCP and
+underlay overhead; these are deterministic routing checks, not WAN throughput
+or latency benchmarks.
+
+Cancellation regression: one stalled mesh request owned the shared read while
+16 independent readers joined it. Cancelling the owner formerly failed all 16
+readers. After the fix one remaining reader takes over; the rest share it.
+The replacement uses the original request's HTL and each reader's own deadline.
+An additional regression verifies that an owner's earlier deadline can expire
+without shortening a later reader's search. Ordinary results and failures stay
+shared; no detached work is created.
+
+| Cancellation result | Before | After |
+| --- | ---: | ---: |
+| Remaining readers receiving verified 4 KiB payload | 0 / 16 | 16 / 16 |
+| Carrier attempts, including the cancelled first attempt | 1 | 2 |
+
+Directed-chain probes verify exact HTL decrement and stop one hop short without
+contacting the provider. All five sufficient-budget reads succeeded; all five
+insufficient-budget reads returned explicit no-result without reaching it.
+Every intermediate cache contained the verified payload. With the original
+provider removed, an HTL-0 local read still succeeded without carrier traffic.
+
+| Mesh hops | Cold blob-wire bytes | Ordinary warm-read bytes | Cached HTL-0 read bytes |
+| --- | ---: | ---: | ---: |
+| 1 | 4,139 | 4,139 | 0 |
+| 2 | 8,278 | 8,278 | 0 |
+| 4 | 16,556 | 16,556 | 0 |
+| 8 | 33,112 | 33,112 | 0 |
+| 10 | 41,390 | 41,390 | 0 |
+
+A cyclic diamond tried a corrupt first provider, suppressed the cycle, and
+retrieved correct content in four carrier attempts and 12,460 blob-wire bytes.
+After removal of the original provider and requester cache, a surviving
+intermediate cache served the next read in one hop and 4,139 bytes. Corrupted
+content never entered the requester or intermediate cache.
+
+The warm-read measurement exposes an unresolved optimization: the generic
+router writes its cache but reads it only through the application's ordinary
+routes. After a mesh success, adaptive ranking can put that route above the
+previously missing local route, so a warm read repeats all network hops. The
+router deliberately treats routes and stores as opaque, including cache stores
+that may themselves have remote policies; a follow-up should make applications'
+local-read preference explicit rather than infer locality from a route name.
+
+Real carrier validation at the baseline revision also passed:
+- 22 `hashtree-fips-transport` tests, including concurrent >1 MiB transfer,
+  corrupt-content rejection, provider hedging, provider death/replacement and
+  stream cancellation.
+- The CLI daemon's real three-node FIPS test observes HTL 2→1→0 and rejects
+  exhausted forwarding. Its local test execution took 0.23 s, excluding build;
+  this is test duration, not a measured WAN latency.
+
+The updated routing suite has 20 passing tests. The shared-forward state keeps
+its existing 1,024-entry bound and cycle suppression. The fix also merges the
+tracked and untracked forwarding execution branches to keep one dispatch path.

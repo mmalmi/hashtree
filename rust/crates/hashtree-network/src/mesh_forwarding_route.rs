@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use hashtree_core::{BlobReply, BlobRequest, BlobRoute, BlobRouteContext, Hash, StoreError};
@@ -9,19 +10,22 @@ use tokio::sync::watch;
 
 const MAX_TRACKED_MESH_FORWARDS: usize = 1_024;
 
-type SharedRouteResult = Result<BlobReply, String>;
+#[derive(Clone)]
+enum ForwardResult {
+    Complete(Result<BlobReply, String>),
+    Retry,
+}
 
 struct ActiveForward {
     htl: u8,
     attempt_budget: Option<usize>,
-    result: watch::Sender<Option<SharedRouteResult>>,
+    result: watch::Sender<Option<ForwardResult>>,
 }
 
 enum ForwardOwnership {
-    Owner(ForwardOwnerGuard),
+    Forward(Option<ForwardOwnerGuard>),
     Wait(Arc<ActiveForward>),
     SuppressCycle,
-    Untracked,
 }
 
 struct ForwardOwnerGuard {
@@ -29,16 +33,24 @@ struct ForwardOwnerGuard {
     hash: Hash,
     forward: Arc<ActiveForward>,
     completed: bool,
+    deadline: Option<Instant>,
 }
 
 impl ForwardOwnerGuard {
     fn complete(mut self, result: &Result<BlobReply, StoreError>) {
         let shared = match result {
-            Ok(reply) => Ok(reply.clone()),
-            Err(error) => Err(error.to_string()),
+            Ok(reply) => ForwardResult::Complete(Ok(reply.clone())),
+            Err(_)
+                if self
+                    .deadline
+                    .is_some_and(|deadline| deadline <= Instant::now()) =>
+            {
+                ForwardResult::Retry
+            }
+            Err(error) => ForwardResult::Complete(Err(error.to_string())),
         };
-        self.forward.result.send_replace(Some(shared));
         self.remove();
+        self.forward.result.send_replace(Some(shared));
         self.completed = true;
     }
 
@@ -61,10 +73,8 @@ impl Drop for ForwardOwnerGuard {
         if self.completed {
             return;
         }
-        self.forward.result.send_replace(Some(Err(
-            "mesh forwarding owner was cancelled before completion".to_string(),
-        )));
         self.remove();
+        self.forward.result.send_replace(Some(ForwardResult::Retry));
     }
 }
 
@@ -112,7 +122,7 @@ impl MeshForwardingRoute {
             }
         }
         if active.len() >= MAX_TRACKED_MESH_FORWARDS && !active.contains_key(&request.hash) {
-            return ForwardOwnership::Untracked;
+            return ForwardOwnership::Forward(None);
         }
         let (result, _) = watch::channel(None);
         let forward = Arc::new(ActiveForward {
@@ -121,23 +131,29 @@ impl MeshForwardingRoute {
             result,
         });
         active.insert(request.hash, forward.clone());
-        ForwardOwnership::Owner(ForwardOwnerGuard {
+        ForwardOwnership::Forward(Some(ForwardOwnerGuard {
             active: self.active.clone(),
             hash: request.hash,
             forward,
             completed: false,
-        })
+            deadline: context.map(|context| context.deadline),
+        }))
     }
 
     async fn wait_for_forward(
         forward: Arc<ActiveForward>,
         context: Option<BlobRouteContext>,
-    ) -> Result<BlobReply, StoreError> {
+    ) -> Result<Option<BlobReply>, StoreError> {
         let mut result = forward.result.subscribe();
         let wait = async {
             loop {
                 if let Some(result) = result.borrow().clone() {
-                    return result.map_err(StoreError::Other);
+                    return match result {
+                        ForwardResult::Retry => Ok(None),
+                        ForwardResult::Complete(result) => {
+                            result.map(Some).map_err(StoreError::Other)
+                        }
+                    };
                 }
                 result.changed().await.map_err(|_| {
                     StoreError::Other("mesh forwarding owner closed without a result".to_string())
@@ -165,20 +181,31 @@ impl MeshForwardingRoute {
         let Some(forwarded) = Self::forwarded_request(request) else {
             return Ok(BlobReply::NoResult);
         };
-        match self.claim_forward(request, context) {
-            ForwardOwnership::SuppressCycle => Ok(BlobReply::NoResult),
-            ForwardOwnership::Wait(forward) => Self::wait_for_forward(forward, context).await,
-            ForwardOwnership::Untracked => match context {
-                Some(context) => self.inner.route_with_context(forwarded, context).await,
-                None => self.inner.route(forwarded).await,
-            },
-            ForwardOwnership::Owner(owner) => {
-                let result = match context {
-                    Some(context) => self.inner.route_with_context(forwarded, context).await,
-                    None => self.inner.route(forwarded).await,
-                };
-                owner.complete(&result);
-                result
+        loop {
+            if context.is_some_and(|context| context.deadline <= Instant::now()) {
+                return Err(StoreError::Other(
+                    "mesh forwarding deadline expired".to_string(),
+                ));
+            }
+            match self.claim_forward(request, context) {
+                ForwardOwnership::SuppressCycle => return Ok(BlobReply::NoResult),
+                ForwardOwnership::Wait(forward) => {
+                    if let Some(reply) = Self::wait_for_forward(forward, context).await? {
+                        return Ok(reply);
+                    }
+                    // Cancellation or an earlier owner's deadline belongs to that
+                    // reader. Let one remaining reader take over the shared work.
+                }
+                ForwardOwnership::Forward(owner) => {
+                    let result = match context {
+                        Some(context) => self.inner.route_with_context(forwarded, context).await,
+                        None => self.inner.route(forwarded).await,
+                    };
+                    if let Some(owner) = owner {
+                        owner.complete(&result);
+                    }
+                    return result;
+                }
             }
         }
     }
