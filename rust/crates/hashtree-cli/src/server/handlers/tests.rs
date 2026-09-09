@@ -758,6 +758,9 @@ async fn daemon_status_reports_truthful_native_fips_connection_state() {
         json["fips"]["peer_statuses"][0]["transport_addr"],
         right_addr
     );
+    for counter in ["bytes_sent", "bytes_recv", "packets_sent", "packets_recv"] {
+        assert!(json["fips"]["peer_statuses"][0][counter].as_u64().is_some());
+    }
 
     left.native_endpoint.shutdown().await.unwrap();
     right.native_endpoint.shutdown().await.unwrap();

@@ -1,0 +1,49 @@
+name: Verify Published Install
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Immutable release tag (v0.2.146)'
+        required: true
+      source:
+        description: 'Exact 40-character release source commit'
+        required: true
+      release_url:
+        description: 'Canonical HTTPS version directory containing release.json'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: Published install (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install and verify published bytes
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_SOURCE: ${{ inputs.source }}
+          RELEASE_URL: ${{ inputs.release_url }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$RELEASE_SOURCE"
+          python rust/scripts/verify_published_install.py \
+            --tag "$RELEASE_TAG" --commit "$RELEASE_SOURCE" \
+            --base-url "$RELEASE_URL" --output receipt.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: published-install-${{ matrix.os }}
+          path: receipt.json

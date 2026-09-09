@@ -106,6 +106,7 @@ That installs `htree`, `htree-cashu`, and `git-remote-htree`. After tapping, `br
 
 - Building decentralized apps and data models on hashtree: follow [`ts/GETTING_STARTED.md`](ts/GETTING_STARTED.md)
 - CLI + daemon + git remote: follow [`rust/README.md`](rust/README.md)
+- Relayless blob and Nostr paths: see [ad hoc mesh configuration](docs/ADHOC_MESH.md)
 - JS SDK packages: follow [`ts/README.md`](ts/README.md)
 - Portable web + Iris Browser app runtime: use [`@hashtree/worker`](https://www.npmjs.com/package/@hashtree/worker) from [`ts/packages/hashtree-worker`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/ts/packages/hashtree-worker), with host/runtime details in [`iris-browser`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-browser)
 - Native desktop shell: follow [`iris-browser`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-browser)

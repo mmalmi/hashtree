@@ -22,7 +22,7 @@ fips_pubsub_peers = ["<service-peer-npub>"]
 
 Configure each endpoint with the other's service identity. The pubsub adapter
 validates identities and bounds the roster using its existing peer capacity.
-An empty list retains discovery through directly connected service peers.
+An empty list retains the adapter's existing behavior with directly connected peers.
 Reloading the daemon applies roster changes.
 
 The service roster does not create a physical connection by itself. Establish

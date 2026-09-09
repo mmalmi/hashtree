@@ -68,6 +68,10 @@ pub(super) async fn daemon_status(
                     "connected": peer.connected,
                     "transport_type": peer.transport_type,
                     "transport_addr": peer.transport_addr,
+                    "bytes_sent": peer.bytes_sent,
+                    "bytes_recv": peer.bytes_recv,
+                    "packets_sent": peer.packets_sent,
+                    "packets_recv": peer.packets_recv,
                 })
             })
             .collect::<Vec<_>>();

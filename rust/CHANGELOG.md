@@ -14,8 +14,11 @@
 - Prefer cached daemon blobs while preserving remote hedges for slow stores.
   Repeated reads in the three-node FIPS regression use half the blob-protocol
   bytes by serving from the intermediate cache.
-- Require FIPS 0.4.77 to reject future-dated signed peer ratings, and adopt the
-  pubsub adapter's peer replacement, subscription recovery, and routed-peer fixes.
+- Require FIPS 0.4.78 and TCP/FIPS 0.2.2 so retained routes and bursts of small
+  writes recover after transit outages, while rejecting future-dated peer ratings.
+- Restore evicted pubsub payloads on explicit retries and isolate malformed
+  peer streams without discarding healthy peers' frames.
+- Expose FIPS peer byte and packet counters in daemon status for mesh monitoring.
 
 ### Tests
 
