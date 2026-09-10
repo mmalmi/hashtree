@@ -20,15 +20,15 @@ def receipt(revision=SHA):
     return {"schema_version": 1, "status": "passed", "release_gate": True,
             "lab_revision": guard.LAB_REV, "lab_worktree_clean": True, "products": {
                 "hashtree": {"source": "https://github.com/mmalmi/hashtree", "rev": revision, "sha256": "b" * 64},
-                "chat": {"source": "https://github.com/irislib/iris-chat-rs", "rev": "a4cafb1bb382593c9886d0a4314cf80292ef7850", "sha256": "b" * 64},
-                "drive": {"source": "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-drive", "rev": "05751a828f2a20b3ed46d09569e6cf35ac4c537d", "sha256": "b" * 64}},
+                "chat": {"source": "https://github.com/irislib/iris-chat-rs", "rev": "2270f5778fecf1e2eea7d47a4c382aacad63d551", "sha256": "b" * 64},
+                "drive": {"source": "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-drive", "rev": "7cb74966ddaecf90fb91b8f36a44ecc4bbda7b02", "sha256": "b" * 64}},
             "metrics": {"idle": [{"seconds": 65, "cpu_required": True, "cpu_budget_percent": 5,
                         "wire_budget_bytes_per_second": 4096, "cpu_percent": [0, 0.5, 5],
                         "combined_bytes_per_second": 3000} for _ in range(2)]}}
 
 
 class MeshReleaseTests(unittest.TestCase):
-    def test_exact_candidate_and_default_companions_pass(self):
+    def test_exact_candidate_and_configured_companions_pass(self):
         guard.check(receipt(), SHA)
 
     def test_stale_candidate_lab_and_companions_fail(self):
@@ -86,6 +86,8 @@ class MeshReleaseTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release.yml").read_text()
         self.assertIn(f"product-lab.yml@{guard.LAB_REV}", workflow)
         self.assertIn("htree_rev: ${{ needs.source-ci.outputs.sha }}", workflow)
+        self.assertIn("chat_rev: 2270f5778fecf1e2eea7d47a4c382aacad63d551", workflow)
+        self.assertIn("drive_rev: 7cb74966ddaecf90fb91b8f36a44ecc4bbda7b02", workflow)
         release = workflow.split("\n  release:\n", 1)[1]
         self.assertIn("needs.mesh-resource.result == 'success'", release)
         self.assertIn("      - mesh-resource\n", release.split("    runs-on:", 1)[0])

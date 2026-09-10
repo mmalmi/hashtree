@@ -3528,7 +3528,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cashu-cli"
-version = "0.2.85"
+version = "0.2.86"
 dependencies = [
  "anyhow",
  "clap",
@@ -3540,7 +3540,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.147"
+version = "0.2.148"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3673,7 +3673,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded-ffi"
-version = "0.2.84"
+version = "0.2.85"
 dependencies = [
  "hashtree-embedded",
 ]
@@ -3696,7 +3696,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.4.18"
+version = "0.4.19"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -5263,9 +5263,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.5.3"
+version = "0.5.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cc240383948fe47300dc1e0f0ea064491142f46c436001c86707e96e00026536"
+checksum = "7554d14b5a8d2d9317c25706afa8b20ac786108112e052959d72797fd4496f5f"
 dependencies = [
  "async-trait",
  "nostr",
@@ -5456,9 +5456,9 @@ dependencies = [
 
 [[package]]
 name = "nvpn-fips-core"
-version = "0.4.79"
+version = "0.4.81"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "917b9bb27f5ec44bbda837a2d94e174cec70815274bee1d64f317fbd3019430a"
+checksum = "70ecf9f062a22bee37163b1db2b01bb72683f0984f05a98215b5704de5923016"
 dependencies = [
  "base64 0.22.1",
  "bluer",
@@ -5522,9 +5522,9 @@ checksum = "7d5078996e38a6e568e2783b93601dc55eb96bb3df0fa1c4307cdab80b85ab97"
 
 [[package]]
 name = "nvpn-fips-tcp-endpoint"
-version = "0.2.15"
+version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5b402be9e8d7cc6b0b694ca885e2aa3f731abec50a6ff50638def75b06315de"
+checksum = "57b56ce6b754bb4157d204543467b2eecd167d86df7c80d78950652d2630e76a"
 dependencies = [
  "nvpn-fips-core",
  "nvpn-fips-tcp",

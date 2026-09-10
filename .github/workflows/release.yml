@@ -64,6 +64,8 @@ jobs:
     with:
       lab_rev: cec9501659b9cf08f9600e3f14987cad6ca1e7d3
       htree_rev: ${{ needs.source-ci.outputs.sha }}
+      chat_rev: 2270f5778fecf1e2eea7d47a4c382aacad63d551
+      drive_rev: 7cb74966ddaecf90fb91b8f36a44ecc4bbda7b02
 
   gate-static:
     needs: source-ci

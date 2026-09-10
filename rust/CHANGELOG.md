@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+## 0.2.148 - 2026-09-10
+
+### Changed
+
+- Limit repeated pubsub service connection attempts to one every three seconds
+  while keeping initial attempts and established connections immediate. Retain
+  queued-event recovery, fresh trust decisions, and existing state limits.
+- Adopt FIPS 0.4.81 and the matching TCP and pubsub adapters to size crypto work
+  buffers for active batches and avoid copied peer-identity metadata keys.
+- Require the corrected CLI from the Cashu helper and embedded runtime packages,
+  and require the matching embedded runtime from the C ABI package.
+
+### Recovery
+
+- Reuse bounded coordinate discovery when cached peer coordinates are cleared,
+  so retained sessions can rekey after verified coordinates return.
+- Query deadlines are unchanged. A one-shot query with a deadline shorter than
+  the service retry interval can finish before a recovering service reconnects;
+  retained subscriptions continue recovering. Hashtree's default FIPS query
+  timeout remains 5,500 ms.
+
 ## 0.2.147 - 2026-09-10
 
 ### Changed

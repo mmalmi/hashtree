@@ -14,8 +14,8 @@ LAB_REV = "cec9501659b9cf08f9600e3f14987cad6ca1e7d3"
 def check(receipt, revision):
     expected = {
         "hashtree": {"source": "https://github.com/mmalmi/hashtree", "rev": revision},
-        "chat": {"source": "https://github.com/irislib/iris-chat-rs", "rev": "a4cafb1bb382593c9886d0a4314cf80292ef7850"},
-        "drive": {"source": "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-drive", "rev": "05751a828f2a20b3ed46d09569e6cf35ac4c537d"},
+        "chat": {"source": "https://github.com/irislib/iris-chat-rs", "rev": "2270f5778fecf1e2eea7d47a4c382aacad63d551"},
+        "drive": {"source": "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-drive", "rev": "7cb74966ddaecf90fb91b8f36a44ecc4bbda7b02"},
     }
     if not (re.fullmatch(r"[0-9a-f]{40}", revision) and type(receipt.get("schema_version")) is int and receipt["schema_version"] == 1
             and receipt.get("status") == "passed" and receipt.get("lab_revision") == LAB_REV

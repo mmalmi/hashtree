@@ -2,6 +2,58 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-09-10 - Unavailable Pubsub Services and Idle Allocation
+
+An Android application using the shared mesh libraries kept authenticated links
+connected while some remote pubsub services were unavailable. Repeated service
+connection attempts caused unnecessary background work. The adapter now admits
+an initial attempt immediately, spaces repeated service attempts by three seconds,
+and keeps established traffic immediate. Queued events and retained subscriptions
+continue recovering. Peer policy is still evaluated afresh; this scheduling state
+is not a trust penalty or a long-lived authorization cache.
+
+The same failing application profile was retained for successive comparisons,
+with matching configuration, identity, endpoint and two connected peers. The
+normal sampler kept its 90-second warmup, 60-second measurement and 5% average
+CPU limit. Approximate results from the successive candidates were:
+
+| Candidate | Average CPU | Result |
+| --- | ---: | --- |
+| Original shared libraries | 14.51% | Above limit |
+| One-second service retry | 5.95% | Above limit |
+| Three-second retry and authorization short-circuit | 5.44% | Above limit |
+| Combined retry, authorization and allocation changes | 4.9444% | Within limit |
+
+The final window contained 11 intervals spanning about 60.47 seconds; the raw
+mean was 4.94440784794%, with 9.98% peak and about 0.056 percentage point of margin.
+The counters were contiguous and independently recomputed. This is one passing
+window with little headroom, using the application's test shell and optimized
+Rust, not a Hashtree CLI measurement, a shipping-artifact gate, or a battery-life
+result. No individual CPU saving is attributed to a component change. Every
+final shipping executable still needs its ordinary release and resource gates.
+
+Separate production-path tests on the development host measured item-vector
+reservation, excluding packet buffers and allocator overhead: singleton crypto
+runs fell from 101,376 bytes to 792 bytes; a full 128-item run remained 101,376
+bytes. A nine-packet continuation grew to 16 items, or 12,672 bytes. Real crypto
+results, sequence counters and plaintext checks passed with the bounded sizing.
+These byte counts describe that host's layout, not a measured Android allocation
+size. Borrowing peer-link metadata keys removes copied strings while preserving
+selected order, duplicate-link metadata and fresh policy changes.
+
+The shared EventBus default query deadline is 500 ms, shorter than repeated
+service-attempt spacing. Hashtree's production query path defaults to 5,500 ms;
+custom shorter deadlines or recovery near the deadline can still yield a partial
+or empty response needing a later request. Existing retained subscriptions cover
+ongoing delivery. Neither query deadlines nor the CPU/bandwidth budgets were
+relaxed to obtain the result.
+
+The final dependency plan also includes a later FIPS rekey correction: when
+cached peer coordinates have been cleared, rekeying requests coordinates through
+the existing bounded discovery path and resumes after verified coordinates return.
+The Android CPU comparison above predates that correction; it does not measure
+its CPU effect or replace the final shipping runtime's required resource gates.
+
 ## 2026-09-08 - Timed Cache Expiry and FUSE Callback Safety
 
 The public generic timed cache accepts caller-defined key types. A deterministic
