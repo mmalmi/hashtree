@@ -22,9 +22,9 @@ def receipt(revision=SHA):
                 "hashtree": {"source": "https://github.com/mmalmi/hashtree", "rev": revision, "sha256": "b" * 64},
                 "chat": {"source": "https://github.com/irislib/iris-chat-rs", "rev": "a4cafb1bb382593c9886d0a4314cf80292ef7850", "sha256": "b" * 64},
                 "drive": {"source": "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-drive", "rev": "05751a828f2a20b3ed46d09569e6cf35ac4c537d", "sha256": "b" * 64}},
-            "metrics": {"idle": [{"cpu_required": True, "cpu_budget_percent": 5,
+            "metrics": {"idle": [{"seconds": 65, "cpu_required": True, "cpu_budget_percent": 5,
                         "wire_budget_bytes_per_second": 4096, "cpu_percent": [0, 0.5, 5],
-                        "combined_bytes_per_second": 3000}] * 2}}
+                        "combined_bytes_per_second": 3000} for _ in range(2)]}}
 
 
 class MeshReleaseTests(unittest.TestCase):
@@ -52,6 +52,24 @@ class MeshReleaseTests(unittest.TestCase):
             candidate["metrics"]["idle"][0][key] = value
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 guard.check(candidate, SHA)
+
+    def test_each_idle_window_must_cover_maintenance(self):
+        for index in range(2):
+            for seconds in [None, False, "65", 0, 15, 64.999, float("nan"), float("inf"), -float("inf")]:
+                candidate = receipt()
+                candidate["metrics"]["idle"][index]["seconds"] = seconds
+                with self.subTest(index=index, seconds=seconds), self.assertRaises(ValueError):
+                    guard.check(candidate, SHA)
+            candidate = receipt()
+            del candidate["metrics"]["idle"][index]["seconds"]
+            with self.subTest(index=index, missing_seconds=True), self.assertRaises(ValueError):
+                guard.check(candidate, SHA)
+
+    def test_longer_idle_windows_pass(self):
+        candidate = receipt()
+        candidate["metrics"]["idle"][0]["seconds"] = 65.5
+        candidate["metrics"]["idle"][1]["seconds"] = 120
+        guard.check(candidate, SHA)
 
     def test_cli_missing_or_malformed_receipt_fails(self):
         with tempfile.TemporaryDirectory() as directory:

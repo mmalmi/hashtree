@@ -8,7 +8,7 @@ import re
 import sys
 
 
-LAB_REV = "c6035a6343c569d480f407d7f47fc755cb825b64"
+LAB_REV = "cec9501659b9cf08f9600e3f14987cad6ca1e7d3"
 
 
 def check(receipt, revision):
@@ -27,12 +27,14 @@ def check(receipt, revision):
             raise ValueError(f"Mesh gate receipt does not match the {name} release source")
     samples = receipt["metrics"]["idle"]
     if len(samples) != 2 or any(sample.get("cpu_required") is not True
+            or type(sample.get("seconds")) not in (int, float)
+            or not math.isfinite(sample["seconds"]) or sample["seconds"] < 65
             or sample.get("cpu_budget_percent") != 5 or sample.get("wire_budget_bytes_per_second") != 4096
             or len(sample["cpu_percent"]) != 3
             or any(type(cpu) not in (int, float) or not math.isfinite(cpu) or not 0 <= cpu <= 5 for cpu in sample["cpu_percent"])
             or type(sample["combined_bytes_per_second"]) not in (int, float)
             or not 0 <= sample["combined_bytes_per_second"] < 4096 for sample in samples):
-        raise ValueError("Mesh gate receipt is missing passing CPU or bandwidth measurements")
+        raise ValueError("Mesh gate receipt requires passing CPU and bandwidth measurements over idle windows of at least 65 seconds")
 
 
 if __name__ == "__main__":

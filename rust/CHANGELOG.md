@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+## 0.2.147 - 2026-09-10
+
+### Changed
+
+- Use local connection observations in the daemon's FIPS pubsub peer policy.
+  Optional `nostr.fips_trusted_raters` accepts npub or hex identities for signed
+  machine ratings, defaults to empty, and does not infer trust from follows.
+  The shared client owns bounded rating exchange and its shutdown lifecycle.
+- Adopt FIPS 0.4.79 to stop session measurement reports from sustaining more
+  reports after traffic settles, while retaining connection metrics and recovery.
+- Require a passing resource measurement from the exact Hashtree release
+  candidate before publishing, including idle CPU and wire-traffic budgets
+  measured across the 60-second maintenance interval.
+
+### Fixed
+
+- Stop and join mesh client and event bridge tasks during daemon shutdown, even
+  when an embedded caller or upgraded WebSocket retains the shared provider.
+
+### Tests
+
+- Retain an embedded controller, live WebSocket, and subscription across repeated
+  shutdown; verify subscription closure, rejected new work, and stopped mesh ticks.
+- Exercise configured raters through the daemon startup path, reject invalid
+  identities, and retain root/event delivery through an uninterested transit peer.
+
 ## 0.2.146 - 2026-09-09
 
 ### Fixed

@@ -462,7 +462,7 @@ impl EmbeddedDaemonController {
         self.server_controller.shutdown().await;
         #[cfg(feature = "experimental-decentralized-pubsub")]
         if let Some(handle) = self.nostr_pubsub_handle.as_ref() {
-            handle.shutdown();
+            handle.shutdown().await;
         }
         if let Some(handle) = self.fips_handle.as_ref() {
             handle.shutdown().await;
@@ -797,6 +797,104 @@ mod tests {
         embedded_nostr_enabled_after_relay_override, EmbeddedBackgroundServicesController,
     };
     use crate::config::Config;
+
+    #[tokio::test]
+    async fn retained_embedded_controller_and_websocket_stop_mesh_tasks() {
+        use futures::{SinkExt, StreamExt};
+        use nostr_pubsub::{EventBus, EventSource, Filter, VerifiedEvent};
+        use std::sync::Arc;
+        use std::time::Duration;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let temp = tempfile::tempdir().unwrap();
+        let data_dir = temp.path().join("data");
+        let mut config = Config::default();
+        config.storage.data_dir = data_dir.to_string_lossy().into_owned();
+        config.server.enable_auth = false;
+        config.server.fips_discovery_scope =
+            format!("htree-retained-shutdown-{}", uuid::Uuid::new_v4());
+        config.server.fips_relays = Some(Vec::new());
+        config.server.fips_websocket_seed_urls = Some(Vec::new());
+        config.server.enable_fips_udp = false;
+        config.server.enable_fips_webrtc = false;
+        config.server.enable_fips_lan_discovery = false;
+        let rendezvous = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        config.server.fips_local_rendezvous_addr =
+            Some(rendezvous.local_addr().unwrap().to_string());
+        drop(rendezvous);
+        config.nostr.event_transport = crate::config::NostrEventTransport::FipsLocalOnly;
+        config.nostr.relays.clear();
+        config.nostr.bootstrap_follows.clear();
+        config.nostr.social_graph_crawl_depth = 0;
+        config.nostr.decentralized_pubsub = cfg!(feature = "experimental-decentralized-pubsub");
+        config.sync.enabled = false;
+        let info = super::start_embedded(super::EmbeddedDaemonOptions {
+            config,
+            data_dir,
+            config_dir: Some(temp.path().join("config")),
+            bind_address: "127.0.0.1:0".to_owned(),
+            relays: None,
+            initial_tree_roots: Vec::new(),
+            extra_routes: None,
+            cors: None,
+        })
+        .await
+        .unwrap();
+        let controller = Arc::clone(&info.daemon_controller);
+        let client = Arc::clone(
+            controller
+                .fips_handle
+                .as_ref()
+                .unwrap()
+                .pubsub_client
+                .as_ref()
+                .unwrap(),
+        );
+        assert_eq!(client.active_subscription_count().unwrap(), 2);
+        let mut subscription = client.subscribe(vec![Filter::new()]).await.unwrap();
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}/ws/", info.port))
+                .await
+                .unwrap();
+        socket.send(Message::Ping(vec![1])).await.unwrap();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(2), socket.next())
+                .await
+                .unwrap(),
+            Some(Ok(Message::Pong(_)))
+        ));
+
+        // Both the caller and the upgraded WebSocket retain the mesh provider.
+        // Shutdown must join its tasks without waiting for those owners to drop.
+        tokio::time::timeout(Duration::from_secs(5), controller.shutdown())
+            .await
+            .unwrap();
+        assert_eq!(client.active_subscription_count().unwrap(), 0);
+        // Events queued before shutdown may still drain from a closed channel.
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while subscription.recv().await.is_some() {}
+        })
+        .await
+        .expect("the retained subscription must close after queued events drain");
+        assert!(client.subscribe(vec![Filter::new()]).await.is_err());
+        let event = nostr::EventBuilder::text_note("after shutdown")
+            .sign_with_keys(&nostr::Keys::generate())
+            .unwrap();
+        assert!(client
+            .publish(
+                VerifiedEvent::try_from(event).unwrap(),
+                EventSource::local_index("retained-shutdown-test"),
+            )
+            .await
+            .is_err());
+        let stopped_polls = client.delivery_snapshot().tcp_poll_turns;
+        tokio::time::sleep(Duration::from_millis(650)).await;
+        assert_eq!(client.delivery_snapshot().tcp_poll_turns, stopped_polls);
+        tokio::time::timeout(Duration::from_secs(1), controller.shutdown())
+            .await
+            .unwrap();
+        socket.close(None).await.unwrap();
+    }
 
     #[test]
     fn mirror_publish_relays_orders_known_root_publish_relays_first() {

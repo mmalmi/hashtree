@@ -18,12 +18,21 @@ the remote service's actual `npub`:
 event_transport = "fips-local-only"
 relays = []
 fips_pubsub_peers = ["<service-peer-npub>"]
+fips_trusted_raters = []
 ```
 
 Configure each endpoint with the other's service identity. The pubsub adapter
 validates identities and bounds the roster using its existing peer capacity.
 An empty list retains the adapter's existing behavior with directly connected peers.
 Reloading the daemon applies roster changes.
+
+The daemon uses local connection observations to guide peer selection. To also
+use signed machine ratings from identities you trust, add their `npub` or hex
+public keys to `nostr.fips_trusted_raters`. This list defaults to empty and is
+independent of social follows and the pubsub service roster. A rater supplies a
+general prior about a peer; direct observations of the connection still apply.
+The shared pubsub client manages bounded rating exchange and stops it when the
+client shuts down. Reload the daemon after changing the list.
 
 The service roster does not create a physical connection by itself. Establish
 a path using LAN discovery, local rendezvous, existing peers, or explicit UDP

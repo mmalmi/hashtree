@@ -820,7 +820,7 @@ fn run_command(
 
             #[cfg(feature = "experimental-decentralized-pubsub")]
             if let Some(ref handle) = nostr_pubsub_handle {
-                handle.shutdown();
+                handle.shutdown().await;
             }
 
             if let Some(ref fips_handle) = fips_handle {

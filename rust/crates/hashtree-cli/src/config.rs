@@ -361,6 +361,10 @@ pub struct NostrConfig {
     /// not imply pubsub support. The adapter validates and bounds this roster.
     #[serde(default)]
     pub fips_pubsub_peers: Vec<String>,
+    /// Optional npub or hex identities whose signed machine ratings guide
+    /// FIPS peer selection alongside local observations. Empty by default.
+    #[serde(default)]
+    pub fips_trusted_raters: Vec<String>,
     /// Maximum encoded Nostr event frame accepted on decentralized pubsub.
     /// Values above the authenticated FIPS datagram limit are clamped.
     #[serde(default = "default_nostr_decentralized_pubsub_max_event_bytes")]
@@ -787,6 +791,7 @@ impl Default for NostrConfig {
             archive_history_max_relay_pages: default_nostr_archive_history_max_relay_pages(),
             decentralized_pubsub: false,
             fips_pubsub_peers: Vec::new(),
+            fips_trusted_raters: Vec::new(),
             decentralized_pubsub_max_event_bytes:
                 default_nostr_decentralized_pubsub_max_event_bytes(),
         }
@@ -1442,6 +1447,30 @@ chunk_target_bytes = 65536
         };
 
         assert!(nostr.active_relays().is_empty());
+    }
+
+    #[test]
+    fn fips_trusted_raters_are_optional_and_preserved_as_configured() {
+        let defaults = toml::Value::try_from(NostrConfig::default()).unwrap();
+        assert_eq!(
+            defaults
+                .get("fips_trusted_raters")
+                .and_then(toml::Value::as_array),
+            Some(&Vec::new()),
+            "external raters must be explicit and default to an empty list"
+        );
+        let keys = nostr::Keys::generate();
+        let hex = keys.public_key().to_hex();
+        let npub = nostr::nips::nip19::ToBech32::to_bech32(&keys.public_key()).unwrap();
+        let config: NostrConfig =
+            toml::from_str(&format!("fips_trusted_raters = [\"{hex}\", \"{npub}\"]")).unwrap();
+        let encoded = toml::Value::try_from(config).unwrap();
+        assert_eq!(
+            encoded
+                .get("fips_trusted_raters")
+                .and_then(toml::Value::as_array),
+            Some(&vec![toml::Value::String(hex), toml::Value::String(npub)])
+        );
     }
 
     #[test]

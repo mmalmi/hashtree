@@ -30,7 +30,7 @@ use nostr_pubsub::{
     PubsubPolicy, RouterLiveSource, RouterPublishSource, RouterQuerySource, SourcePolicyContext,
     SourceRoute,
 };
-use nostr_pubsub_fips::{FipsPubsubClient, FipsPubsubClientOptions};
+use nostr_pubsub_fips::{FipsPubsubClient, FipsPubsubClientOptions, FipsPubsubPolicyOptions};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -61,6 +61,9 @@ impl DaemonFipsHandle {
         if let Ok(mut transport) = self.blob_transport.lock() {
             transport.take();
         }
+        if let Some(client) = &self.pubsub_client {
+            client.shutdown_shared().await;
+        }
         if let Err(err) = self.endpoint.shutdown().await {
             tracing::warn!("failed to stop embedded FIPS endpoint: {err}");
         }
@@ -69,18 +72,23 @@ impl DaemonFipsHandle {
 
 #[cfg(feature = "experimental-decentralized-pubsub")]
 pub struct DaemonNostrPubsubHandle {
-    _client: Arc<FipsPubsubClient>,
     relay: Arc<NostrRelay>,
-    ingest_task: JoinHandle<()>,
-    outbound_task: JoinHandle<()>,
+    tasks: tokio::sync::Mutex<Option<[JoinHandle<()>; 2]>>,
 }
 
 #[cfg(feature = "experimental-decentralized-pubsub")]
 impl DaemonNostrPubsubHandle {
-    pub fn shutdown(&self) {
+    pub async fn shutdown(&self) {
+        let mut tasks = self.tasks.lock().await;
         self.relay.set_decentralized_pubsub_sender(None);
-        self.ingest_task.abort();
-        self.outbound_task.abort();
+        if let Some(tasks) = tasks.take() {
+            for task in &tasks {
+                task.abort();
+            }
+            for task in tasks {
+                let _ = task.await;
+            }
+        }
     }
 }
 
@@ -147,10 +155,19 @@ pub async fn start_daemon_fips_transport(
                 .min(nostr_pubsub_fips::FIPS_NOSTR_PUBSUB_MAX_FRAME_BYTES),
             ..Default::default()
         };
+        let mut policy = FipsPubsubPolicyOptions::default();
+        policy
+            .reputation
+            .trusted_raters
+            .extend(config.nostr.fips_trusted_raters.iter().cloned());
         Some(Arc::new(
-            FipsPubsubClient::start(endpoint.native_endpoint.clone(), options)
-                .await
-                .context("Failed to start FIPS Nostr pubsub provider")?,
+            FipsPubsubClient::start_with_reputation(
+                endpoint.native_endpoint.clone(),
+                options,
+                policy,
+            )
+            .await
+            .context("Failed to start FIPS Nostr pubsub provider")?,
         ))
     } else {
         None
@@ -364,13 +381,11 @@ pub async fn start_daemon_nostr_pubsub(
         Arc::clone(&relay),
         Arc::clone(&cache),
     );
-    let outbound_task = spawn_daemon_nostr_pubsub_outbound(Arc::clone(&client), outbound_rx, cache);
+    let outbound_task = spawn_daemon_nostr_pubsub_outbound(client, outbound_rx, cache);
 
     Ok(Some(Arc::new(DaemonNostrPubsubHandle {
-        _client: client,
         relay,
-        ingest_task,
-        outbound_task,
+        tasks: tokio::sync::Mutex::new(Some([ingest_task, outbound_task])),
     })))
 }
 
@@ -603,6 +618,36 @@ mod tests {
         assert!(error.to_string().contains("requires"));
     }
 
+    #[tokio::test]
+    async fn daemon_rejects_invalid_configured_machine_rater() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(HashtreeStore::new(temp.path().join("blobs")).unwrap());
+        let mut config = Config::default();
+        config.server.fips_discovery_scope =
+            format!("htree-invalid-rater-{}", uuid::Uuid::new_v4());
+        config.server.fips_relays = Some(Vec::new());
+        config.server.fips_websocket_seed_urls = Some(Vec::new());
+        config.server.enable_fips_udp = false;
+        config.server.enable_fips_webrtc = false;
+        config.server.enable_fips_lan_discovery = false;
+        config.server.fips_local_rendezvous_addr =
+            Some(reserve_local_rendezvous_addr().to_string());
+        config.nostr = toml::from_str(
+            r#"event_transport = "fips-local-only"
+fips_trusted_raters = ["invalid-key"]"#,
+        )
+        .unwrap();
+        let result =
+            start_daemon_fips_transport(&config, &nostr::Keys::generate(), store, Vec::new()).await;
+        if let Ok(Some(daemon)) = &result {
+            daemon.shutdown().await;
+        }
+        let error = result
+            .err()
+            .expect("invalid configured machine raters must fail startup");
+        assert!(format!("{error:#}").contains("trusted peer reputation rater"));
+    }
+
     #[cfg(feature = "experimental-decentralized-pubsub")]
     #[tokio::test]
     async fn one_native_endpoint_routes_roots_and_trusted_events_through_transit() {
@@ -639,6 +684,12 @@ mod tests {
             npub: transit_endpoint.local_peer_id.clone(),
             udp_addresses: vec![transit_addr.clone()],
         }];
+        config.nostr = toml::from_str(&format!(
+            "fips_trusted_raters = [\"{}\", \"{}\"]",
+            trusted_keys.public_key().to_hex(),
+            outbound_keys.public_key().to_bech32().unwrap()
+        ))
+        .unwrap();
         config.nostr.enabled = true;
         config.nostr.event_transport = NostrEventTransport::FipsLocalOnly;
         config.nostr.decentralized_pubsub = true;
@@ -649,6 +700,16 @@ mod tests {
             .await
             .unwrap()
             .expect("daemon FIPS endpoint");
+        assert_eq!(
+            daemon
+                .pubsub_client
+                .as_ref()
+                .unwrap()
+                .active_subscription_count()
+                .unwrap(),
+            2,
+            "the daemon must own discovery and one bounded peer reputation subscription"
+        );
         let provider =
             start_daemon_nostr_provider(&config, Some(&daemon), Some(Arc::clone(&cache)))
                 .await
@@ -810,7 +871,7 @@ mod tests {
             .iter()
             .any(|peer| { peer.npub == daemon.endpoint_npub && peer.connected }));
 
-        decentralized.shutdown();
+        decentralized.shutdown().await;
         daemon.shutdown().await;
         remote_endpoint.native_endpoint.shutdown().await.unwrap();
         transit_endpoint.native_endpoint.shutdown().await.unwrap();
