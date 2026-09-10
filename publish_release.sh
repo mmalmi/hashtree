@@ -174,6 +174,8 @@ if ! git -C "$REPO_DIR" diff --quiet || ! git -C "$REPO_DIR" diff --cached --qui
     exit 1
 fi
 
+python3 "${REPO_DIR}/scripts/check-mesh-release.py" "$HEAD_COMMIT"
+
 if [ -z "$RELEASE_STAGE_DIR" ]; then
     RELEASE_STAGE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/hashtree-release-stage-XXXXXX")"
     TEMP_DIRS+=("$RELEASE_STAGE_DIR")

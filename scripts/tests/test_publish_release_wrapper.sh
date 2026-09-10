@@ -18,6 +18,7 @@ BIN_DIR="${TMP_DIR}/bin"
 mkdir -p "${TEST_REPO}/rust/scripts" "${TEST_REPO}/scripts" "${LOG_DIR}" "${BIN_DIR}"
 
 cp "$PUBLISH_SCRIPT" "${TEST_REPO}/publish_release.sh"
+cp "${ROOT_DIR}/scripts/check-mesh-release.py" "${TEST_REPO}/scripts/check-mesh-release.py"
 chmod +x "${TEST_REPO}/publish_release.sh"
 
 cat >"${TEST_REPO}/rust/scripts/release_to_htree.sh" <<'EOF'
@@ -97,6 +98,27 @@ git -C "${TEST_REPO}" config user.name "Release Test"
 git -C "${TEST_REPO}" add .
 git -C "${TEST_REPO}" commit -m "release fixture" >/dev/null
 git -C "${TEST_REPO}" tag v0.0.1
+
+receipt_path="${TMP_DIR}/mesh-receipt.json"
+python3 "${ROOT_DIR}/scripts/tests/test_mesh_release.py" --fixture "$(git -C "${TEST_REPO}" rev-parse HEAD)" >"$receipt_path"
+export IRIS_STACK_GATE_RECEIPT="$receipt_path"
+
+# A stale or missing mesh receipt must stop before either publication channel.
+for bad_receipt in missing stale; do
+    if [ "$bad_receipt" = missing ]; then
+        candidate_receipt="${TMP_DIR}/missing.json"
+    else
+        candidate_receipt="${TMP_DIR}/stale.json"
+        python3 "${ROOT_DIR}/scripts/tests/test_mesh_release.py" --fixture aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa >"$candidate_receipt"
+    fi
+    if IRIS_STACK_GATE_RECEIPT="$candidate_receipt" TEST_LOG_DIR="${LOG_DIR}" PATH="${BIN_DIR}:$PATH" \
+        "${TEST_REPO}/publish_release.sh" --version v0.0.1 >"${TMP_DIR}/stdout.txt" 2>"${TMP_DIR}/stderr.txt"; then
+        echo "Publication accepted a $bad_receipt mesh receipt" >&2
+        exit 1
+    fi
+    [ ! -e "${LOG_DIR}/release_to_htree.log" ]
+    [ ! -e "${LOG_DIR}/gh.log" ]
+done
 
 if TEST_LOG_DIR="${LOG_DIR}" PATH="${BIN_DIR}:$PATH" "${TEST_REPO}/publish_release.sh" --version v0.0.1 >"${TMP_DIR}/stdout.txt" 2>"${TMP_DIR}/stderr.txt"; then
     :

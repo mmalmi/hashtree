@@ -57,6 +57,14 @@ jobs:
               core.warning(`Source CI evidence unavailable; running all release source gates: ${error.message}`);
             }
 
+  mesh-resource:
+    name: Relayless recovery and resource budgets
+    needs: source-ci
+    uses: irislib/iris-stack/.github/workflows/product-lab.yml@c6035a6343c569d480f407d7f47fc755cb825b64
+    with:
+      lab_rev: c6035a6343c569d480f407d7f47fc755cb825b64
+      htree_rev: ${{ needs.source-ci.outputs.sha }}
+
   gate-static:
     needs: source-ci
     if: needs.source-ci.outputs.reuse != 'true'
@@ -453,10 +461,11 @@ jobs:
 
   release:
     name: Create Release
-    if: ${{ !cancelled() && needs.source-ci.result == 'success' && needs.build.result == 'success' }}
+    if: ${{ !cancelled() && needs.source-ci.result == 'success' && needs.build.result == 'success' && needs.mesh-resource.result == 'success' }}
     needs:
       - source-ci
       - build
+      - mesh-resource
     runs-on: ubuntu-latest
     permissions:
       contents: write

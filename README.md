@@ -71,6 +71,7 @@ That installs `htree`, `htree-cashu`, and `git-remote-htree`. After tapping, `br
 ### Packaging status
 
 - `./publish_release.sh --version v<version>` is the primary release entrypoint. It requires a clean checkout at that exact tag, runs the full release gate once, publishes the hashtree release, updates the Homebrew tap when the full macOS/Linux CLI set is present, and updates GitHub with the same staged files.
+- Local publication also requires `IRIS_STACK_GATE_RECEIPT`, the successful [pinned Iris Stack process-gate receipt](https://github.com/irislib/iris-stack/blob/c6035a6343c569d480f407d7f47fc755cb825b64/docs/integration-lab.md) for this exact public Hashtree commit (`IRIS_STACK_HTREE_REV`). The receipt must match the lab and companion product pins and include both CPU and bandwidth samples. The hosted release workflow runs this gate itself before publishing artifacts; the local publisher reuses its matching receipt.
 - `scripts/release-gate.sh --fast` keeps the same TypeScript and release-wiring checks while compiling (but not executing) Rust tests during iteration; omit `--fast` for the pre-publish gate. Rust lanes require [`cargo-nextest`](https://nexte.st/).
 - The full gate runs static and TypeScript work beside the default Rust suite, limits service-heavy integration concurrency, and shards dependency-heavy peripheral and FIPS WebRTC packages into independent lanes.
 - CLI release artifacts are assembled under `rust/dist/` by `rust/scripts/release_to_htree.sh`, which `./publish_release.sh` wraps.
