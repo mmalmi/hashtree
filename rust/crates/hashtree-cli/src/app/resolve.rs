@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use hashtree_cli::config::parse_npub;
+use hashtree_cli::config::{parse_npub, Config};
 use hashtree_cli::storage::CachedRoot;
 use hashtree_cli::{
     HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver, RootResolver,
@@ -7,6 +7,7 @@ use hashtree_cli::{
 use hashtree_core::Cid;
 use hashtree_updater::UpdateRef;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// Resolved CID with optional path.
 pub(crate) struct ResolvedCid {
@@ -35,6 +36,31 @@ pub(crate) fn parse_published_target(input: &str) -> Option<UpdateRef> {
 /// Returns the resolved Cid (raw bytes) and optional path within the tree.
 pub(crate) async fn resolve_cid_input(input: &str) -> Result<ResolvedCid> {
     resolve_cid_input_with_opts(input, &ResolveOptions::default()).await
+}
+
+pub(crate) async fn resolve_get_input(input: &str) -> Result<ResolvedCid> {
+    // Immutable inputs return before configuration or network access is needed.
+    let Some(target) = parse_published_target(input) else {
+        return resolve_cid_input(input).await;
+    };
+    let key = target.resolver_key();
+    eprintln!("Resolving {}...", key);
+    let resolver = NostrRootResolver::new(NostrResolverConfig {
+        relays: Config::load()?.nostr.active_relays(),
+        ..Default::default()
+    })
+    .await
+    .context("Failed to create nostr resolver")?;
+    let resolved = resolver.resolve_open(&key, Duration::from_secs(10)).await;
+    // Stop the owned connection on both success and resolution failure.
+    let stopped = resolver.stop().await;
+    let cid = resolved?;
+    stopped?;
+    eprintln!("Resolved to: {}", hashtree_core::to_hex(&cid.hash));
+    Ok(ResolvedCid {
+        cid,
+        path: target.path,
+    })
 }
 
 pub(crate) async fn resolve_cid_input_with_opts(

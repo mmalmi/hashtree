@@ -961,7 +961,7 @@ fn run_command(
             use hashtree_core::{to_hex, Cid};
 
             // Resolve to Cid (raw bytes, no hex conversion needed for nhash)
-            let resolved = resolve_cid_input(&cid_input).await?;
+            let resolved = super::resolve::resolve_get_input(&cid_input).await?;
             let cid = resolved.cid.clone();
 
             let store = Arc::new(HashtreeStore::new(&data_dir)?);

@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+## 0.2.149 - 2026-09-10
+
+### Fixed
+
+- Make `get` use configured active Nostr relays and keep mutable-root
+  subscriptions open after an empty EOSE. Observe signed roots for a bounded
+  ten-second window and select the newest valid root for the exact author and
+  tree, including deterministic event-ID ordering for equal timestamps.
+- Report a timeout when that mutable-root window stays quiet. Immutable CID
+  reads remain immediate and work with Nostr disabled.
+- Preserve existing Homebrew tap history when publishing updates, and remove
+  transient fetch metadata from the published repository snapshot.
+
+### Tests
+
+- Exercise the actual CLI with delayed relay responses, invalid and unrelated
+  signed roots, timeout cleanup, and immutable reads. Reuse one resolver for
+  repeated roots and require its subscriptions to be removed after each call.
+
 ## 0.2.148 - 2026-09-10
 
 ### Changed

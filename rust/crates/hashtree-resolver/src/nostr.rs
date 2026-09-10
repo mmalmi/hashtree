@@ -26,6 +26,8 @@ use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use tokio::task::JoinSet;
 
+mod open;
+
 use hashtree_core::{decrypt, xor_keys};
 
 pub const HASHTREE_KIND: u16 = 30064;
@@ -1896,6 +1898,48 @@ mod tests {
                 "resolve missed the soft deadline: {:?}",
                 started.elapsed()
             );
+        });
+    }
+
+    #[test]
+    fn test_open_resolve_reobserves_root_and_removes_each_subscription() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let keys = Keys::generate();
+            let hash = "c94a1b5bde1d7a32b96df53086a27f4385a631e1e39a5aac97589d20c49c5022";
+            let relay = TestRelay::with_events(vec![build_hashtree_event(
+                &keys,
+                "tap.git",
+                1_774_517_172,
+                hash,
+                "",
+            )]);
+            let resolver = NostrRootResolver::new(NostrResolverConfig {
+                relays: vec![relay.url()],
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+            let key = format!("{}/tap.git", keys.public_key().to_bech32().unwrap());
+            // The second lookup must observe the relay response even though the
+            // SDK has already seen this exact event on the first subscription.
+            for _ in 0..2 {
+                assert_eq!(
+                    resolver
+                        .resolve_open(&key, Duration::from_secs(1))
+                        .await
+                        .unwrap(),
+                    Cid {
+                        hash: from_hex(hash).unwrap(),
+                        key: None
+                    }
+                );
+                assert!(resolver.client.subscriptions().await.is_empty());
+            }
+            resolver.stop().await.unwrap();
         });
     }
 
