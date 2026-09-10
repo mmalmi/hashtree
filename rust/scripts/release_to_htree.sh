@@ -12,7 +12,7 @@ Options:
   --version <version>                 Release version label, for example: v0.2.3
   --version-path <path>              Published path inside the release tree (default: <version>)
   --tree-name <name>                 Mutable release tree name (default: releases/<repo>)
-  --homebrew-tap-repo <name>         Homebrew tap repo name (default: homebrew-<repo>)
+  --homebrew-tap-repo <name>         Existing Homebrew tap name (default: homebrew-<repo>)
   --skip-homebrew-tap                Skip updating the Homebrew tap
   --skip-post-publish-install-checks Skip live install smoke checks after publish
   --cargo-publish                    Publish Rust crates to crates.io after releasing artifacts

@@ -5,7 +5,8 @@ usage() {
     cat <<'EOF'
 Usage: packaging/homebrew/publish_tap.sh --version <version> --release-base-url <url> --assets-dir <dir> [options]
 
-Generate a Homebrew tap repository and publish it.
+Update a Homebrew tap repository without replacing its history, then publish it.
+The htree destination must already be provisioned; see packaging/homebrew/README.md.
 
 Required options:
   --version <version>              Release version, for example: v0.2.15
@@ -176,6 +177,7 @@ if [ ! -d "$ASSETS_DIR" ]; then
 fi
 
 require_command git
+require_command tar
 require_command "$CREATE_TAP_SCRIPT"
 
 repo_name="$(infer_repo_name "$REPO_DIR")"
@@ -196,35 +198,86 @@ bare_repo="${tmp_dir}/tap.git"
 work_repo="${tmp_dir}/work"
 trap 'rm -rf "$tmp_dir"' EXIT
 
+generated_repo="${tmp_dir}/generated.git"
 "${CREATE_TAP_SCRIPT}" \
     "${CREATE_TAP_ARGS[@]}" \
-    --output-dir "${bare_repo}" >/dev/null
-
-git clone "${bare_repo}" "${work_repo}" >/dev/null
+    --output-dir "${generated_repo}" >/dev/null
 
 gateway_url=""
 canonical_url=""
 if [[ "$PUSH_URL" == htree://* ]]; then
     require_command htree
-
+    publisher_npub="$(htree user | awk 'NR == 1 { print $1 }')"
+    if [ -z "$publisher_npub" ]; then
+        echo "Cannot identify the tap publisher" >&2
+        exit 1
+    fi
+    authority="${PUSH_URL#htree://}"
+    authority="${authority%%/*}"
+    if [[ "$authority" != self && "$authority" != "$publisher_npub" ]]; then
+        echo "Tap destination must belong to the current publisher" >&2
+        exit 1
+    fi
     publish_name="$(htree_publish_name_from_url "$PUSH_URL")"
-    (
-        cd "${REPO_DIR}"
-        htree add "${bare_repo}" --publish "${publish_name}" >/dev/null
-    )
-    refresh_gateway_tap_root_cache "$publish_name"
-
+    source_url="htree://${publisher_npub}/${publish_name}"
+    # This tree is a bare Git directory, not git-remote-htree's .git layout.
+    # A lookup or download failure must never be treated as a new tap.
+    htree get "$source_url" --output "$bare_repo" >/dev/null
     canonical_url="htree://self/${publish_name}"
     if [ -n "$NPUB" ]; then
         gateway_url="https://upload.iris.to/${NPUB}/${publish_name}"
     fi
 else
+    git clone --mirror "$PUSH_URL" "$bare_repo" >/dev/null
+fi
+
+test "$(git --git-dir="$bare_repo" rev-parse --is-bare-repository)" = true
+git --git-dir="$bare_repo" fsck --full --strict >/dev/null
+git --git-dir="$bare_repo" for-each-ref --format='%(objectname) %(refname)' >"${tmp_dir}/prior-refs"
+if [ -s "${tmp_dir}/prior-refs" ]; then
+    # Do not silently replace an unexpected branch layout with an orphan master.
+    git --git-dir="$bare_repo" rev-parse --verify refs/heads/master >/dev/null
+    test "$(git --git-dir="$bare_repo" symbolic-ref HEAD)" = refs/heads/master
+else
+    git --git-dir="$bare_repo" symbolic-ref HEAD refs/heads/master
+fi
+git clone "$bare_repo" "$work_repo" >/dev/null
+# Overlay only generated formula/alias files, retaining other tap content.
+git --git-dir="$generated_repo" archive master | tar -x -C "$work_repo"
+if [ "$CREATE_ALIAS" -eq 0 ] && [ -L "${work_repo}/Aliases/${ALIAS_NAME}" ] && \
+    [ "$(readlink "${work_repo}/Aliases/${ALIAS_NAME}")" = "../Formula/${FORMULA_NAME}.rb" ]; then
+    rm "${work_repo}/Aliases/${ALIAS_NAME}"
+fi
+git -C "$work_repo" add -A
+if git -C "$work_repo" diff --cached --quiet; then
+    echo "Homebrew tap already matches ${VERSION}; nothing to publish."
+    exit 0
+else
+    git -C "$work_repo" -c user.name='Codex' -c user.email='codex@example.com' \
+        commit -m "Update ${FORMULA_NAME} to ${VERSION}" >/dev/null
+    git -C "$work_repo" push origin master >/dev/null
+fi
+git --git-dir="$bare_repo" fsck --full --strict >/dev/null
+git --git-dir="$bare_repo" update-server-info
+
+if [[ "$PUSH_URL" == htree://* ]]; then
+    # Fail if another publisher changed any ref while this update was prepared.
+    latest_repo="${tmp_dir}/latest.git"
+    htree get "$source_url" --output "$latest_repo" >/dev/null
+    git --git-dir="$latest_repo" fsck --full --strict >/dev/null
+    git --git-dir="$latest_repo" for-each-ref --format='%(objectname) %(refname)' >"${tmp_dir}/latest-refs"
+    cmp "${tmp_dir}/prior-refs" "${tmp_dir}/latest-refs"
+    cmp "${bare_repo}/HEAD" "${latest_repo}/HEAD"
+    while IFS= read -r remote; do
+        git --git-dir="$bare_repo" config --remove-section "remote.$remote"
+    done < <(git --git-dir="$bare_repo" remote)
     (
-        cd "${work_repo}"
-        git remote remove origin
-        git remote add origin "${PUSH_URL}"
-        git push --force origin master >/dev/null
+        cd "${REPO_DIR}"
+        htree add "${bare_repo}" --publish "${publish_name}" >/dev/null
     )
+    refresh_gateway_tap_root_cache "$publish_name"
+else
+    git --git-dir="$bare_repo" push "$PUSH_URL" master >/dev/null
 fi
 
 echo "Published Homebrew tap."

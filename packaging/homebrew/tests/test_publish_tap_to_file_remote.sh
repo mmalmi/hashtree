@@ -100,4 +100,39 @@ if grep -F "${DEST_REPO}" "$STDOUT_FILE" >/dev/null; then
     exit 1
 fi
 
+first="$(git -C "$CLONE_DIR" rev-parse HEAD)"
+git -C "$DEST_REPO" update-ref refs/tags/prior-release "$first"
+retained="$(echo retained | git -C "$DEST_REPO" -c user.name=Test -c user.email=test@example.invalid commit-tree "$first^{tree}")"
+git -C "$DEST_REPO" update-ref refs/heads/retained "$retained"
+printf 'Retain custom tap content\n' >"${CLONE_DIR}/README.md"
+git -C "$CLONE_DIR" add README.md
+git -C "$CLONE_DIR" -c user.name=Test -c user.email=test@example.invalid commit -m 'Add custom tap content' >/dev/null
+git -C "$CLONE_DIR" push origin master >/dev/null
+"${PUBLISH_TAP_SCRIPT}" \
+    --version v0.0.2 --release-base-url "http://127.0.0.1:${PORT}/assets" \
+    --assets-dir "$ASSETS_DIR" --push-url "$DEST_REPO" \
+    --tap-repo homebrew-htree-test --npub npub1test >"$STDOUT_FILE"
+git -C "$CLONE_DIR" fetch origin >/dev/null
+git -C "$CLONE_DIR" merge --ff-only origin/master >/dev/null
+git -C "$CLONE_DIR" merge-base --is-ancestor "$first" HEAD
+test "$(git -C "$CLONE_DIR" rev-list --count HEAD)" = 3
+test "$(git -C "$DEST_REPO" rev-parse refs/tags/prior-release)" = "$first"
+test "$(git -C "$DEST_REPO" rev-parse refs/heads/retained)" = "$retained"
+git -C "$DEST_REPO" fsck --full --strict >/dev/null
+grep -F 'version "0.0.2"' "${CLONE_DIR}/Formula/htree.rb" >/dev/null
+grep -Fx "Retain custom tap content" "${CLONE_DIR}/README.md" >/dev/null
+second="$(git -C "$DEST_REPO" rev-parse master)"
+"${PUBLISH_TAP_SCRIPT}" \
+    --version v0.0.2 --release-base-url "http://127.0.0.1:${PORT}/assets" \
+    --assets-dir "$ASSETS_DIR" --push-url "$DEST_REPO" \
+    --tap-repo homebrew-htree-test --npub npub1test >/dev/null
+test "$(git -C "$DEST_REPO" rev-parse master)" = "$second"
+if "${PUBLISH_TAP_SCRIPT}" \
+    --version v0.0.3 --release-base-url "http://127.0.0.1:${PORT}/assets" \
+    --assets-dir "$ASSETS_DIR" --push-url "${TMP_DIR}/missing.git" \
+    --tap-repo homebrew-htree-test --npub npub1test >/dev/null 2>&1; then
+    echo "Missing/inaccessible destination must fail closed" >&2
+    exit 1
+fi
+test ! -e "${TMP_DIR}/missing.git"
 echo "test_publish_tap_to_file_remote.sh passed"

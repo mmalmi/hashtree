@@ -91,12 +91,32 @@ packaging/homebrew/publish_tap.sh \
   --assets-dir rust/dist/hashtree-v<version>
 ```
 
-By default it publishes the generated bare repo to `htree://self/homebrew-hashtree.git`,
-creating or replacing that tap without needing a pre-existing GitHub repository
-or manually managed tap checkout.
+By default it downloads the existing bare tap from its publisher identity, updates
+the formula on top of its current `master`, and publishes it back to
+`htree://self/homebrew-hashtree.git`. Other files, branches, tags, and Git history
+are retained, so existing Homebrew installations can fast-forward. An unchanged
+formula does not publish another snapshot. Failed history reads stop the release;
+they never create a replacement repository.
 
-`rust/scripts/release_to_htree.sh` calls this automatically when the release
-directory contains the full macOS/Linux archive set needed by the formula. Add
+For a new tap, provision it once with the existing creator and publisher:
+
+```bash
+packaging/homebrew/create_tap.sh \
+  --version v<version> \
+  --release-base-url https://upload.iris.to/<npub>/releases%2Fhashtree/v<version>/assets \
+  --assets-dir rust/dist/hashtree-v<version> \
+  --output-dir dist/homebrew-hashtree.git
+htree add dist/homebrew-hashtree.git --publish homebrew-hashtree.git
+```
+
+Use that explicit provisioning step only for a new tap. For later releases use
+`publish_tap.sh`; a missing lookup cannot establish that no earlier publication
+exists. Ordinary Git destinations may instead start as initialized empty bare
+repositories, which the updater clones successfully before its first push.
+
+`rust/scripts/release_to_htree.sh` calls the updater automatically when the release
+directory contains the full macOS/Linux archive set needed by the formula; the tap
+must already be provisioned. Add
 `--cargo-publish` there if you also want the same command to publish the Rust
 crates to crates.io.
 
@@ -115,4 +135,8 @@ To verify the publish helper against a local git remote:
 
 ```bash
 packaging/homebrew/tests/test_publish_tap_to_file_remote.sh
+packaging/homebrew/tests/test_publish_tap_to_htree_publish.sh
 ```
+
+These fixtures publish two releases, update an existing clone with a fast-forward,
+check retained refs and objects, and reject history-read failures without publishing.
