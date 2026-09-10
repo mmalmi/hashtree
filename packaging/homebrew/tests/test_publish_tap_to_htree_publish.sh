@@ -134,6 +134,7 @@ retained="$(echo retained | git --git-dir="$PUBLISHED" -c user.name=Test -c user
 git --git-dir="$PUBLISHED" update-ref refs/heads/retained "$retained"
 git --git-dir="$PUBLISHED" update-ref refs/remotes/archive/retained "$retained"
 git --git-dir="$PUBLISHED" config remote.archive.url "${TMP_DIR}/private-archive.git"
+printf '%s\t\t%s\n' "$retained" "${TMP_DIR}/private-archive.git" >"${PUBLISHED}/FETCH_HEAD"
 git clone "$PUBLISHED" "${TMP_DIR}/installed" >/dev/null
 PATH="${TMP_DIR}/bin:$PATH" "$PUBLISH_TAP_SCRIPT" \
     --version v0.0.2 --assets-dir "$ASSETS_DIR" \
@@ -147,6 +148,7 @@ test "$(git --git-dir="$PUBLISHED" rev-parse refs/tags/prior-release)" = "$first
 test "$(git --git-dir="$PUBLISHED" rev-parse refs/heads/retained)" = "$retained"
 test "$(git --git-dir="$PUBLISHED" rev-parse refs/remotes/archive/retained)" = "$retained"
 test -z "$(git --git-dir="$PUBLISHED" remote)"
+test ! -e "${PUBLISHED}/FETCH_HEAD"
 git --git-dir="$PUBLISHED" fsck --full --strict >/dev/null
 grep -F 'version "0.0.2"' "${TMP_DIR}/installed/Formula/htree.rb" >/dev/null
 second="$(git --git-dir="$PUBLISHED" rev-parse master)"
@@ -159,6 +161,7 @@ test "$(grep -c '^htree:add ' "$LOG_FILE")" = "$adds_before"
 test "$(git --git-dir="$PUBLISHED" rev-parse refs/heads/retained)" = "$retained"
 test "$(git --git-dir="$PUBLISHED" rev-parse refs/remotes/archive/retained)" = "$retained"
 test -z "$(git --git-dir="$PUBLISHED" remote)"
+test ! -e "${PUBLISHED}/FETCH_HEAD"
 if PATH="${TMP_DIR}/bin:$PATH" HTREE_TEST_FAIL_GET=1 "$PUBLISH_TAP_SCRIPT" \
     --version v0.0.3 --assets-dir "$ASSETS_DIR" \
     --release-base-url https://example.invalid/releases/v0.0.3/assets \

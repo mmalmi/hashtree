@@ -271,6 +271,7 @@ if [[ "$PUSH_URL" == htree://* ]]; then
     while IFS= read -r remote; do
         git --git-dir="$bare_repo" config --remove-section "remote.$remote"
     done < <(git --git-dir="$bare_repo" remote)
+    rm -f -- "${bare_repo}/FETCH_HEAD"
     (
         cd "${REPO_DIR}"
         htree add "${bare_repo}" --publish "${publish_name}" >/dev/null
