@@ -13,6 +13,7 @@ pub use local_lists::{
 #[cfg(windows)]
 mod durable_file;
 mod index_buckets;
+mod profile_file_lock;
 
 use index_buckets::{
     dedupe_events, latest_metadata_events_by_pubkey, EventIndexBucket, ProfileIndexBucket,
@@ -919,7 +920,7 @@ struct ProfileRootPairTransactionGuard {
 
 impl Drop for ProfileRootPairTransactionGuard {
     fn drop(&mut self) {
-        let _ = self.file.unlock();
+        let _ = profile_file_lock::unlock(&self.file);
     }
 }
 
@@ -1065,10 +1066,7 @@ fn try_open_and_lock_profile_root_pair_file(
         )
     })?;
 
-    let result = match mode {
-        ProfileRootPairLockMode::Shared => file.try_lock_shared(),
-        ProfileRootPairLockMode::Exclusive => file.try_lock(),
-    };
+    let result = profile_file_lock::try_lock(&file, mode);
     match result {
         Ok(()) => {}
         Err(TryLockError::WouldBlock) => return Ok(None),

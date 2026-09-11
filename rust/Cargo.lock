@@ -3540,7 +3540,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.149"
+version = "0.2.150"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3657,7 +3657,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded"
-version = "0.2.91"
+version = "0.2.92"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

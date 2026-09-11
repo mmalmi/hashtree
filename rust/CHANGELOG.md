@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.2.150 - 2026-09-11
+
+### Fixed
+
+- Initialize the embedded social graph on Android toolchains whose standard
+  library does not support file locking. Use native shared/exclusive file locks
+  for profile transactions, retaining contention deadlines and explicit guard
+  release; errors still prevent an unlocked transaction.
+- Require this CLI fix from `hashtree-embedded` 0.2.92.
+
+### Tests
+
+- Keep a duplicated file descriptor open after dropping the real transaction
+  guard, and require a new writer to acquire the released OS lock. Existing
+  process-contention, graph-startup, durable-reopen and deadline tests remain.
+
 ## 0.2.149 - 2026-09-10
 
 ### Fixed

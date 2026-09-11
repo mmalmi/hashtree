@@ -153,6 +153,40 @@ fn process_exit_releases_root_pair_lock() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn guard_drop_unlocks_with_a_retained_file_descriptor() {
+    for mode in [
+        ProfileRootPairLockMode::Shared,
+        ProfileRootPairLockMode::Exclusive,
+    ] {
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("profile.lock");
+        let contents = b"preserved lock file contents";
+        std::fs::write(&path, contents).unwrap();
+        let guard = acquire_profile_root_pair_lock(&path, mode, true).unwrap();
+        let retained = guard.file.try_clone().unwrap();
+        assert!(try_open_and_lock_profile_root_pair_file(
+            &path,
+            ProfileRootPairLockMode::Exclusive,
+            true,
+        )
+        .unwrap()
+        .is_none());
+        drop(guard);
+        let contender = try_open_and_lock_profile_root_pair_file(
+            &path,
+            ProfileRootPairLockMode::Exclusive,
+            true,
+        )
+        .unwrap()
+        .expect("guard Drop must unlock before the last descriptor closes");
+        assert_eq!(std::fs::read(&path).unwrap(), contents);
+        drop(contender);
+        drop(retained);
+    }
+}
+
 #[test]
 fn missing_read_only_root_pair_lock_fails_closed() {
     let temp = TempDir::new().unwrap();
