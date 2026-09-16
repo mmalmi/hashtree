@@ -187,6 +187,53 @@ describe('NostrEventStore', () => {
     }, { limit: 1 })).resolves.toEqual([matching]);
   });
 
+  it('reads tagged reactions without scanning unrelated posts or reactions', async () => {
+    const backing = new MemoryStore();
+    const writer = new NostrEventStore(backing);
+    const target = 'a'.repeat(64);
+    const matching = await makeEvent({ kind: 7, created_at: 1, tags: [['e', target]] });
+    let root = await writer.add(null, matching);
+    for (let i = 0; i < 64; i++) {
+      root = await writer.add(root, await makeEvent({
+        kind: i % 2 ? 7 : 1, created_at: i + 2, tags: [['e', 'b'.repeat(64)]],
+      }));
+    }
+    let reads = 0;
+    const reader = new NostrEventStore({
+      get: async hash => { reads++; return backing.get(hash); },
+      put: backing.put.bind(backing), has: backing.has.bind(backing), delete: backing.delete.bind(backing),
+    });
+    for (const query of [
+      { kinds: [1, 7], tags: { e: target } },
+      { authors: [matching.pubkey], kinds: [7], tags: { e: target } },
+    ]) {
+      reads = 0;
+      expect(await reader.query(root, query, { limit: 600, strict: true })).toEqual([matching]);
+      expect(reads).toBeLessThan(20);
+    }
+  });
+
+  it('bounds a many-author feed by its page size instead of reading a page per author', async () => {
+    const backing = new MemoryStore();
+    const writer = new NostrEventStore(backing);
+    const authors = Array.from({ length: 24 }, (_, i) => (i + 1).toString(16).padStart(64, '0'));
+    const events = await Promise.all(authors.flatMap((pubkey, i) =>
+      Array.from({ length: 4 }, (_, j) => makeEvent({ pubkey, kind: 1, created_at: i * 4 + j })),
+    ));
+    const unrelated = await Promise.all(Array.from({ length: 32 }, (_, i) =>
+      makeEvent({ pubkey: 'f'.repeat(64), created_at: 1000 + i }),
+    ));
+    const root = await writer.build(null, [...events, ...unrelated]);
+    let reads = 0;
+    const reader = new NostrEventStore({
+      get: async hash => { reads++; return backing.get(hash); },
+      put: backing.put.bind(backing), has: backing.has.bind(backing), delete: backing.delete.bind(backing),
+    });
+    const result = await reader.query(root, { authors, kinds: [1, 6] }, { limit: 8, since: 10, until: 1100, strict: true });
+    expect(result).toEqual(events.sort((a, b) => b.created_at - a.created_at).slice(0, 8));
+    expect(reads).toBeLessThan(30);
+  });
+
   it('streams planned queries for direct per-author lookups', async () => {
     const store = new NostrEventStore(new MemoryStore());
     const author = 'f'.repeat(64);

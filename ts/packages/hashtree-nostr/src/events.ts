@@ -169,9 +169,35 @@ function matchesNostrEventQuery(event: StoredNostrEvent, query: NormalizedNostrE
   return true;
 }
 
-function selectNostrEventQueryPlan(query: NormalizedNostrEventQuery): NostrEventQueryPlan {
+function selectNostrEventQueryPlan(
+  query: NormalizedNostrEventQuery,
+  manifest: NostrEventManifest | null,
+  bounded: boolean,
+): NostrEventQueryPlan {
   if (query.ids.length > 0) {
     return { type: 'ids', prefixes: [] };
+  }
+
+  if (query.tags.size === 1 && manifest?.byTag) {
+    const firstTag = query.tags.entries().next().value;
+    if (firstTag) {
+      const [tagName, tagValues] = firstTag;
+      return {
+        type: 'index',
+        indexName: MANIFEST_BY_TAG,
+        prefixes: tagValues.map((tagValue) => tagPrefix(tagName, tagValue)),
+      };
+    }
+  }
+
+  // A bounded page across many authors should stop at the global page limit.
+  // The author-bearing index can reject unrelated events before reading blobs.
+  if (bounded && manifest?.byKindTimeAuthor && query.authors.length >= 12 && query.kinds.length > 0) {
+    return {
+      type: 'index',
+      indexName: MANIFEST_BY_KIND_TIME_AUTHOR,
+      prefixes: query.kinds.map((kind) => `${padKind(kind)}:`),
+    };
   }
 
   if (query.authors.length > 0) {
@@ -197,18 +223,6 @@ function selectNostrEventQueryPlan(query: NormalizedNostrEventQuery): NostrEvent
       indexName: MANIFEST_BY_KIND_TIME,
       prefixes: query.kinds.map((kind) => `${padKind(kind)}:`),
     };
-  }
-
-  if (query.tags.size === 1) {
-    const firstTag = query.tags.entries().next().value;
-    if (firstTag) {
-      const [tagName, tagValues] = firstTag;
-      return {
-        type: 'index',
-        indexName: MANIFEST_BY_TAG,
-        prefixes: tagValues.map((tagValue) => tagPrefix(tagName, tagValue)),
-      };
-    }
   }
 
   return {
@@ -443,13 +457,14 @@ export class NostrEventStore {
     options: ListEventsOptions = {},
   ): Promise<StoredNostrEvent[]> {
     const normalizedQuery = normalizeNostrEventQuery(query);
-    const plan = selectNostrEventQueryPlan(normalizedQuery);
+    const manifest = normalizedQuery.ids.length ? null : await this.getManifest(root);
+    const plan = selectNostrEventQueryPlan(normalizedQuery, manifest, options.limit !== undefined);
 
     if (plan.type === 'ids') {
       return this.queryByIds(root, normalizedQuery, options);
     }
 
-    const source = this.collectionSourceFromManifest(await this.getManifest(root));
+    const source = this.collectionSourceFromManifest(manifest!);
     const groups = await Promise.all(
       plan.prefixes.map((prefix) => this.collectEvents(
         source,
@@ -469,7 +484,8 @@ export class NostrEventStore {
     options: ListEventsOptions = {},
   ): AsyncGenerator<StoredNostrEvent> {
     const normalizedQuery = normalizeNostrEventQuery(query);
-    const plan = selectNostrEventQueryPlan(normalizedQuery);
+    const manifest = normalizedQuery.ids.length ? null : await this.getManifest(root);
+    const plan = selectNostrEventQueryPlan(normalizedQuery, manifest, options.limit !== undefined);
 
     if (plan.type === 'ids' || plan.prefixes.length !== 1) {
       for (const event of await this.query(root, query, options)) {
@@ -479,7 +495,7 @@ export class NostrEventStore {
     }
 
     yield* this.streamEvents(
-      this.collectionSourceFromManifest(await this.getManifest(root)),
+      this.collectionSourceFromManifest(manifest!),
       plan.indexName!,
       plan.prefixes[0] ?? '',
       options,
@@ -644,31 +660,9 @@ export class NostrEventStore {
     query: NormalizedNostrEventQuery = EMPTY_NOSTR_EVENT_QUERY,
   ): Promise<StoredNostrEvent[]> {
     const events: StoredNostrEvent[] = [];
-    const entries = indexName === MANIFEST_BY_ID
-      ? source.streamQueryById({ prefix })
-      : source.streamQueryIndex(indexName, { prefix });
-
-    for await (const { key, cid: eventCid } of entries) {
-      const createdAt = createdAtFromIndexKey(key);
-      if (options.until !== undefined && createdAt > options.until) {
-        continue;
-      }
-      if (options.since !== undefined && createdAt < options.since) {
-        break;
-      }
-      const event = await this.tryReadStoredEvent(eventCid, options.strict);
-      if (!event) {
-        continue;
-      }
-      if (!matchesNostrEventQuery(event, query)) {
-        continue;
-      }
+    for await (const event of this.streamEvents(source, indexName, prefix, options, query)) {
       events.push(event);
-      if (options.limit !== undefined && events.length >= options.limit) {
-        break;
-      }
     }
-
     return events;
   }
 
@@ -685,7 +679,8 @@ export class NostrEventStore {
     let emitted = 0;
 
     for await (const { key, cid: eventCid } of iterator) {
-      const createdAt = createdAtFromIndexKey(key);
+      const parts = indexName === MANIFEST_BY_KIND_TIME_AUTHOR ? key.split(':') : null;
+      const createdAt = createdAtFromIndexKey(parts ? `${parts[1]}:${parts[3]}` : key);
       if (options.until !== undefined && createdAt > options.until) {
         continue;
       }
@@ -693,6 +688,9 @@ export class NostrEventStore {
         break;
       }
 
+      if (parts && query.authors.length > 0 && !query.authors.includes(parts[2]!)) {
+        continue;
+      }
       const event = await this.tryReadStoredEvent(eventCid, options.strict);
       if (!event) {
         continue;
