@@ -12,9 +12,13 @@ available memory; this was a bounded cache experiment, not an out-of-memory fix.
 
 Keeping those bounds and explicitly selecting 1,024-event commits improved five
 consecutive full batches to about 24 events/second, versus about 12 events/second
-in the preceding small-batch sample. Superseded index nodes fell from about 34 to
-29 per event, reducing copy-on-write and cleanup work. These are live workload
-observations, not an isolated benchmark or a universal recommended batch size.
+in the preceding small-batch sample. A subsequent 127-second full batch brought
+the six-batch average to about 18 events/second. Superseded index nodes fell from
+about 34 to 29 per event. Process I/O counters aligned to the slow full batch's
+checkpoint boundaries measured 3.24 MiB written per event, versus approximately
+3.8 MiB/event in the small-batch sampling window; the latter was not aligned to
+exact checkpoint boundaries. These are live workload observations, not an
+isolated benchmark or a universal recommended batch size.
 The native binary, B-tree order, update concurrency and durability settings were
 unchanged. Projection resumed its durable offset, remained below the 10 GiB hard
 limit without OOMs, and the independent recent-post publisher kept succeeding.
