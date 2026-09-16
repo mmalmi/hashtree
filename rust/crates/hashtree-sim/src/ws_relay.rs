@@ -22,41 +22,41 @@ use tokio::sync::{broadcast, mpsc, RwLock};
 
 /// Nostr event structure (simplified for testing)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NostrEvent {
-    pub id: String,
-    pub pubkey: String,
-    pub created_at: u64,
-    pub kind: u32,
-    pub tags: Vec<Vec<String>>,
-    pub content: String,
-    pub sig: String,
+struct NostrEvent {
+    id: String,
+    pubkey: String,
+    created_at: u64,
+    kind: u32,
+    tags: Vec<Vec<String>>,
+    content: String,
+    sig: String,
 }
 
 /// Subscription filter
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct NostrFilter {
+struct NostrFilter {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub ids: Option<Vec<String>>,
+    ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub authors: Option<Vec<String>>,
+    authors: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub kinds: Option<Vec<u32>>,
+    kinds: Option<Vec<u32>>,
     #[serde(rename = "#p", skip_serializing_if = "Option::is_none")]
-    pub p_tags: Option<Vec<String>>,
+    p_tags: Option<Vec<String>>,
     #[serde(rename = "#d", skip_serializing_if = "Option::is_none")]
-    pub d_tags: Option<Vec<String>>,
+    d_tags: Option<Vec<String>>,
     #[serde(rename = "#l", skip_serializing_if = "Option::is_none")]
-    pub l_tags: Option<Vec<String>>,
+    l_tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub since: Option<u64>,
+    since: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub until: Option<u64>,
+    until: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
+    limit: Option<usize>,
 }
 
 impl NostrFilter {
-    pub fn matches(&self, event: &NostrEvent) -> bool {
+    fn matches(&self, event: &NostrEvent) -> bool {
         if let Some(ref ids) = self.ids {
             if !ids.contains(&event.id) {
                 return false;
@@ -197,16 +197,6 @@ impl WsRelay {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(()).await;
         }
-    }
-
-    /// Get event count (for testing)
-    pub async fn event_count(&self) -> usize {
-        self.state.events.read().await.len()
-    }
-
-    /// Clear all events
-    pub async fn clear(&self) {
-        self.state.events.write().await.clear();
     }
 }
 

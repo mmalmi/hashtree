@@ -40,7 +40,7 @@ tar = "0.4"
 async-trait.workspace = true
 flate2 = "1.0"
 hashtree-resolver = { workspace = true, features = ["nostr"] }
-hashtree-sim = { path = "../hashtree-sim", features = ["nostr"] }
+hashtree-sim = { path = "../hashtree-sim" }
 nostr-sdk.workspace = true
 tar = "0.4"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

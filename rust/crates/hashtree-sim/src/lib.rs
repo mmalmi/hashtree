@@ -2,4 +2,4 @@
 
 mod ws_relay;
 
-pub use ws_relay::{NostrEvent, NostrFilter, WsRelay};
+pub use ws_relay::WsRelay;
