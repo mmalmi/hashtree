@@ -2,6 +2,28 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-09-16 - Archive Projection Batch Size and Disk Work
+
+A live incremental Nostr archive projection was doing substantial copy-on-write
+index work with 256-event commits. The process had a 4 GiB memory-high threshold,
+a 6 GiB maximum, and swap disabled. Raising only the thresholds to 8/10 GiB did
+not improve throughput in a three-minute sample. The host had over 45 GiB of
+available memory; this was a bounded cache experiment, not an out-of-memory fix.
+
+Keeping those bounds and explicitly selecting 1,024-event commits improved five
+consecutive full batches to about 24 events/second, versus about 12 events/second
+in the preceding small-batch sample. Superseded index nodes fell from about 34 to
+29 per event, reducing copy-on-write and cleanup work. These are live workload
+observations, not an isolated benchmark or a universal recommended batch size.
+The native binary, B-tree order, update concurrency and durability settings were
+unchanged. Projection resumed its durable offset, remained below the 10 GiB hard
+limit without OOMs, and the independent recent-post publisher kept succeeding.
+
+The launcher retains its 256-event default and permits an explicit maximum of
+1,024. Its argument/resume checks passed, as did six native event-store tests for
+bounded commits, recovery and resumed projection equivalence. No Rust change
+was necessary for this deployment.
+
 ## 2026-09-10 - Unavailable Pubsub Services and Idle Allocation
 
 An Android application using the shared mesh libraries kept authenticated links
