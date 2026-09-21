@@ -2,6 +2,19 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-09-21 - Complete Tree Traversal and Store Reads
+
+A deterministic TypeScript core regression walks a directory with two links to
+the same empty file using the real in-memory store. Reusing the bytes already
+loaded by `walkBlocks` reduces encrypted traversal from two store reads per
+unique block to one, matching plaintext traversal. This measures read calls,
+not wall-clock throughput. Legacy plaintext nodes carrying an encryption key
+still traverse their encrypted children.
+
+Missing roots and descendants now throw instead of silently producing a partial
+walk. Restoring either block makes the same traversal succeed. The seven focused
+cases, all 374 core tests, and the TypeScript package build passed.
+
 ## 2026-09-16 - Archive Projection Batch Size and Disk Work
 
 A live incremental Nostr archive projection was doing substantial copy-on-write

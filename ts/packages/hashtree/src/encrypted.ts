@@ -61,7 +61,7 @@ async function loadRootNodeOrBlob(
   return decryptRootNodeOrBlob(encryptedData, key);
 }
 
-async function decryptRootNodeOrBlob(
+export async function decryptRootNodeOrBlob(
   encryptedData: Uint8Array,
   key: EncryptionKey
 ): Promise<Uint8Array> {

@@ -24,6 +24,7 @@ import {
   putDirectoryEncrypted,
   listDirectoryEncrypted,
   getTreeNodeEncrypted,
+  decryptRootNodeOrBlob,
   type EncryptedDirEntry,
 } from './encrypted.js';
 import * as editEncrypted from './tree/editEncrypted.js';
@@ -353,6 +354,7 @@ export class HashTree {
    * Iterate over all raw blocks in a merkle tree
    * Yields each block's hash and data, traversing encrypted nodes correctly
    * Useful for syncing to remote stores (e.g., Blossom push)
+   * Throws if any referenced block is missing, so partial trees cannot look complete.
    */
   async *walkBlocks(id: CID): AsyncGenerator<{ hash: Hash; data: Uint8Array }> {
     const visited = new Set<string>();
@@ -367,24 +369,14 @@ export class HashTree {
       visited.add(hex);
 
       const data = await store.get(hash);
-      if (!data) return;
+      if (!data) throw new Error(`Missing block: ${hex}`);
 
       yield { hash, data };
 
-      // Handle encrypted vs unencrypted tree nodes
-      if (key) {
-        const decrypted = await getTreeNodeEncrypted(store, hash, key);
-        if (decrypted) {
-          for (const link of decrypted.links) {
-            yield* traverse(store, link.hash, link.key);
-          }
-        }
-      } else {
-        const node = tryDecodeTreeNode(data);
-        if (node) {
-          for (const link of node.links) {
-            yield* traverse(store, link.hash, link.key);
-          }
+      const node = tryDecodeTreeNode(key ? await decryptRootNodeOrBlob(data, key) : data);
+      if (node) {
+        for (const link of node.links) {
+          yield* traverse(store, link.hash, link.key);
         }
       }
     };
