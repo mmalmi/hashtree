@@ -110,6 +110,33 @@ impl From<ReaderError> for HashTreeError {
     }
 }
 
+fn decrypt_cid_root_bytes(cid: &Cid, data: Vec<u8>) -> Result<Vec<u8>, HashTreeError> {
+    let Some(key) = &cid.key else {
+        return Ok(data);
+    };
+
+    match decrypt_chk(&data, key) {
+        // Successful authentication is authoritative, even if ciphertext happens
+        // to resemble a tree. Historical plaintext trees may still carry a key.
+        Ok(decrypted) => Ok(decrypted),
+        Err(_) if is_tree_node(&data) => Ok(data),
+        Err(error) => Err(HashTreeError::Decryption(error.to_string())),
+    }
+}
+
+/// Decode already-loaded CID bytes without reading storage again.
+/// The caller remains responsible for verifying the stored content hash.
+pub fn decode_tree_node_by_cid(
+    cid: &Cid,
+    data: Vec<u8>,
+) -> Result<Option<TreeNode>, HashTreeError> {
+    let decrypted = decrypt_cid_root_bytes(cid, data)?;
+    if !is_tree_node(&decrypted) {
+        return Ok(None);
+    }
+    Ok(Some(decode_tree_node(&decrypted)?))
+}
+
 /// HashTree - unified create, read, and edit merkle tree operations
 pub struct HashTree<S: Store> {
     store: Arc<S>,
@@ -766,13 +793,7 @@ impl<S: Store> HashTree<S> {
 
     /// Get and decode a tree node through its CID, decrypting it when needed.
     pub async fn get_tree_node_by_cid(&self, cid: &Cid) -> Result<Option<TreeNode>, HashTreeError> {
-        let Some(data) = self.get_cid_root_bytes(cid).await? else {
-            return Ok(None);
-        };
-        if !is_tree_node(&data) {
-            return Ok(None);
-        }
-        Ok(Some(decode_tree_node(&data)?))
+        self.get_node(cid).await
     }
 
     async fn get_cid_root_bytes(&self, cid: &Cid) -> Result<Option<Vec<u8>>, HashTreeError> {
@@ -786,40 +807,16 @@ impl<S: Store> HashTree<S> {
             None => return Ok(None),
         };
 
-        let Some(key) = &cid.key else {
-            return Ok(Some(data));
-        };
-
-        let raw_is_tree = is_tree_node(&data);
-        match decrypt_chk(&data, key) {
-            // AES-GCM authentication makes a successful decryption
-            // authoritative. Ciphertext can coincidentally deserialize into
-            // the loose tree shape; preferring that shape here makes valid
-            // encrypted blobs fail with a bogus node type.
-            Ok(decrypted) => Ok(Some(decrypted)),
-            Err(err) => {
-                if raw_is_tree {
-                    Ok(Some(data))
-                } else {
-                    Err(HashTreeError::Decryption(err.to_string()))
-                }
-            }
-        }
+        decrypt_cid_root_bytes(cid, data).map(Some)
     }
 
     /// Get and decode a tree node using Cid (with decryption if key present)
     pub async fn get_node(&self, cid: &Cid) -> Result<Option<TreeNode>, HashTreeError> {
-        let decrypted = match self.get_cid_root_bytes(cid).await? {
+        let data = match self.get_blob(&cid.hash).await? {
             Some(d) => d,
             None => return Ok(None),
         };
-
-        if !is_tree_node(&decrypted) {
-            return Ok(None);
-        }
-
-        let node = decode_tree_node(&decrypted)?;
-        Ok(Some(node))
+        decode_tree_node_by_cid(cid, data)
     }
 
     /// Get directory node, handling historical byte-chunked directory data.

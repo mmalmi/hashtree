@@ -66,7 +66,10 @@ pub use blob_route::{
 };
 
 // Main API - unified HashTree
-pub use hashtree::{verify_tree as hashtree_verify_tree, HashTree, HashTreeConfig, HashTreeError};
+pub use hashtree::{
+    decode_tree_node_by_cid, verify_tree as hashtree_verify_tree, HashTree, HashTreeConfig,
+    HashTreeError,
+};
 
 // Constants
 pub use builder::{BEP52_CHUNK_SIZE, DEFAULT_CHUNK_SIZE, DEFAULT_MAX_LINKS};

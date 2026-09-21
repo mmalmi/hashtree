@@ -7,6 +7,8 @@ mod ingest_filter;
 mod mime;
 mod nostr_query;
 mod peer_status;
+#[cfg(all(test, feature = "lmdb"))]
+mod pin_tree_tests;
 mod request_paths;
 mod status_metrics;
 mod ui;
@@ -1245,7 +1247,7 @@ mod tests {
         Ok((port, handle))
     }
 
-    async fn spawn_test_server_with_auth(
+    pub(super) async fn spawn_test_server_with_auth(
         store: Arc<HashtreeStore>,
     ) -> Result<(u16, tokio::task::JoinHandle<Result<()>>)> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;

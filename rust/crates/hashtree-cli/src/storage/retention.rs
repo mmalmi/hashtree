@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use futures::executor::block_on as sync_block_on;
 use hashtree_core::store::Store;
-use hashtree_core::{to_hex, types::Hash, Cid, HashTree, HashTreeConfig, HashTreeError, LinkType};
+use hashtree_core::{
+    decode_tree_node_by_cid, sha256, to_hex, types::Hash, Cid, HashTree, HashTreeConfig, LinkType,
+};
 use serde::de::{self, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
@@ -1459,21 +1461,22 @@ impl HashtreeStore {
                 });
             }
 
+            let missing = || {
+                if cid.hash == root.hash {
+                    PinTreeError::MissingRoot {
+                        hash: to_hex(&cid.hash),
+                    }
+                } else {
+                    PinTreeError::MissingDescendant {
+                        hash: to_hex(&cid.hash),
+                    }
+                }
+            };
             let size = self
                 .router
                 .blob_size_sync(&cid.hash)
                 .map_err(|error| PinTreeError::Storage(error.to_string()))?
-                .ok_or_else(|| {
-                    if cid.hash == root.hash {
-                        PinTreeError::MissingRoot {
-                            hash: to_hex(&cid.hash),
-                        }
-                    } else {
-                        PinTreeError::MissingDescendant {
-                            hash: to_hex(&cid.hash),
-                        }
-                    }
-                })?;
+                .ok_or_else(missing)?;
             if hashes.insert(cid.hash) {
                 stored_size = stored_size
                     .checked_add(size)
@@ -1483,17 +1486,29 @@ impl HashtreeStore {
                     })?;
             }
 
+            // Catalog metadata can outlive a missing or damaged member payload.
+            // Read every visited block, including raw leaves, and decode the same
+            // buffer so validating a tree node never doubles its physical reads.
+            let data = tree
+                .get_blob(&cid.hash)
+                .await
+                .map_err(|error| PinTreeError::Storage(error.to_string()))?
+                .ok_or_else(missing)?;
+            if data.len() as u64 != size || sha256(&data) != cid.hash {
+                return Err(PinTreeError::InvalidDag {
+                    hash: to_hex(&cid.hash),
+                    message: "stored payload does not match its size or content hash".to_string(),
+                });
+            }
             if !follow_tree {
                 continue;
             }
 
-            let node = tree.get_node(&cid).await.map_err(|error| match error {
-                HashTreeError::Store(message) => PinTreeError::Storage(message),
-                error => PinTreeError::InvalidDag {
+            let node =
+                decode_tree_node_by_cid(&cid, data).map_err(|error| PinTreeError::InvalidDag {
                     hash: to_hex(&cid.hash),
                     message: error.to_string(),
-                },
-            })?;
+                })?;
             let Some(node) = node else {
                 if require_tree {
                     return Err(PinTreeError::InvalidDag {
