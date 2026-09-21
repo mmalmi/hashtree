@@ -53,9 +53,15 @@ about every possible manifest size.
 
 ## Implementation Boundary
 
-This model does not prove that MessagePack is canonical in general. It is not.
-It proves the Hashtree/BUD-16 profile is deterministic for valid directory
-manifests.
+This model does not prove that MessagePack is canonical in general. It checks
+the modeled ordering rules for the bounded directory manifests above. Numeric
+byte encodings, recursive metadata, Unicode ordering, and host-language object
+enumeration are outside this model and require executable conformance tests.
+
+The shared `rust/crates/hashtree-core/tests/canonical-directory.json` fixture
+pins bytes and a hash for recursive metadata, numeric-looking keys, Unicode
+keys, integral floats, negative zero, and a 64-bit integer. Both the Rust
+`canonical_codec.rs` and TypeScript `canonical-codec.test.ts` tests consume it.
 
 The Rust and TypeScript encoders now sort `Dir` node links before encoding, so
 direct codec callers get canonical directory bytes too. `File` node links are

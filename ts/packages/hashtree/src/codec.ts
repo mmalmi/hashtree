@@ -6,7 +6,7 @@
  *
  * **Determinism:** We ensure deterministic output by:
  * 1. Using fixed field order in the encoded map
- * 2. Sorting metadata keys alphabetically before encoding
+ * 2. Recursively sorting metadata keys by UTF-8 bytes and normalizing numbers
  * 3. Sorting directory links by BUD-16 name order before encoding
  *
  * File-node link order is preserved because chunk order is semantic.
@@ -16,6 +16,7 @@ import { encode, decode } from '@msgpack/msgpack';
 import { TreeNode, Link, LinkType, Hash } from './types.js';
 import { sha256 } from './hash.js';
 import { compareNames } from './compare.js';
+import { assertUnicode, canonicalMetadata, canonicalNumber, decodedIntegers } from './canonical.js';
 
 /**
  * Internal MessagePack representation of a link
@@ -27,7 +28,7 @@ interface LinkMsgpack {
   /** name (optional) */
   n?: string;
   /** size (required) */
-  s: number;
+  s: number | bigint;
   /** CHK decryption key (optional) */
   k?: Uint8Array;
   /** type - 0=Blob, 1=File, 2=Dir, 3=Fanout */
@@ -44,17 +45,6 @@ interface TreeNodeMsgpack {
   t: number;
   /** links */
   l: LinkMsgpack[];
-}
-
-/**
- * Sort object keys alphabetically for deterministic encoding
- */
-function sortObjectKeys<T extends Record<string, unknown>>(obj: T): T {
-  const sorted: Record<string, unknown> = {};
-  for (const key of Object.keys(obj).sort()) {
-    sorted[key] = obj[key];
-  }
-  return sorted as T;
 }
 
 function linksForEncoding(node: TreeNode): Link[] {
@@ -90,14 +80,18 @@ export function encodeTreeNode(node: TreeNode): Uint8Array {
   // TreeNode fields in alphabetical order: l, t
   const msgpack: TreeNodeMsgpack = {
     l: links.map(link => {
+      if (!Number.isSafeInteger(link.size) || link.size < 0) {
+        throw new Error('Link size must be an exact nonnegative safe integer');
+      }
+      if (link.name !== undefined) assertUnicode(link.name);
       // Link fields in alphabetical order: h, k?, m?, n?, s, t
       // Build object with all fields in order, undefined values are omitted by msgpack
       const l: LinkMsgpack = {
         h: link.hash,
         k: link.key,
-        m: link.meta !== undefined ? sortObjectKeys(link.meta) : undefined,
+        m: link.meta !== undefined ? canonicalMetadata(link.meta) : undefined,
         n: link.name,
-        s: link.size,
+        s: canonicalNumber(link.size),
         t: link.type,
       } as LinkMsgpack;
       // Remove undefined fields to match skip_serializing_if behavior
@@ -109,7 +103,7 @@ export function encodeTreeNode(node: TreeNode): Uint8Array {
     t: node.type,
   };
 
-  return encode(msgpack);
+  return encode(msgpack, { useBigInt64: true });
 }
 
 /**
@@ -119,7 +113,7 @@ export function encodeTreeNode(node: TreeNode): Uint8Array {
 export function tryDecodeTreeNode(data: Uint8Array): TreeNode | null {
   let msgpack: unknown;
   try {
-    msgpack = decode(data) as TreeNodeMsgpack;
+    msgpack = decodedIntegers(decode(data, { useBigInt64: true }));
   } catch {
     return null;
   }
@@ -144,6 +138,9 @@ export function tryDecodeTreeNode(data: Uint8Array): TreeNode | null {
       const linkType = linkValue.t ?? LinkType.Blob;
       if (!isKnownLinkType(linkType)) {
         throw new Error(`Invalid link type: ${String(linkType)}`);
+      }
+      if (typeof linkValue.s === 'bigint') {
+        throw new Error('Link size exceeds the supported exact integer range');
       }
       const link: Link = {
         hash: linkValue.h as Uint8Array,

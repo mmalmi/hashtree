@@ -42,6 +42,7 @@
 
 pub mod blob_route;
 pub mod builder;
+mod canonical;
 pub mod codec;
 pub mod crypto;
 pub mod diff;

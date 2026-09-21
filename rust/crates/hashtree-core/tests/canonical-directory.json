@@ -1,0 +1,19 @@
+{
+  "metadata": {
+    "values": [
+      1.5,
+      -0.0,
+      4294967296
+    ],
+    "nested": {
+      "𐀀": "astral",
+      "": "bmp",
+      "2": -0.0,
+      "10": 1.0
+    },
+    "2": 2,
+    "10": 10
+  },
+  "msgpack": "82a16c9185a168c420ababababababababababababababababababababababababababababababababa16d84a231300aa13202a66e657374656484a2313001a13200a3ee8080a3626d70a4f0908080a661737472616ca676616c75657393cb3ff800000000000000cf0000000100000000a16ea178a17300a17400a17402",
+  "sha256": "029eaba56751e683172fe5f87875745fdb6eb3581cb9ea10eb1af6a518e630c9"
+}

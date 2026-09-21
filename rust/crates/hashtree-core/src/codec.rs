@@ -3,10 +3,10 @@
 //! Blobs are stored raw (not wrapped) for efficiency.
 //! Tree nodes are MessagePack-encoded.
 //!
-//! **Determinism:** Unlike CBOR, MessagePack doesn't have a built-in canonical encoding.
+//! **Determinism:** Hashtree defines its own deterministic MessagePack profile.
 //! We ensure deterministic output by:
 //! 1. Using fixed struct field order (Rust declaration order via serde)
-//! 2. Converting HashMap metadata to BTreeMap before encoding (sorted keys)
+//! 2. Recursively sorting metadata maps and normalizing numeric encodings
 //! 3. Sorting directory links by BUD-16 name order before encoding
 //!
 //! File-node link order is preserved because chunk order is semantic.
@@ -60,7 +60,10 @@ struct WireLink {
     )]
     k: Option<Vec<u8>>,
     /// Metadata (optional) - uses BTreeMap for deterministic key ordering
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::canonical::serialize_metadata"
+    )]
     m: Option<BTreeMap<String, serde_json::Value>>,
     /// Name (optional)
     #[serde(skip_serializing_if = "Option::is_none")]

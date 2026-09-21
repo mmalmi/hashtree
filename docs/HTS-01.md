@@ -57,9 +57,29 @@ Determinism rules:
 2. Node map fields MUST be encoded in `l`, then `t` order.
 3. Link map fields MUST be encoded in `h`, optional `k`, optional `m`, optional
    `n`, `s`, then `t` order.
-4. Metadata map keys MUST be sorted by UTF-8 bytes before encoding.
+4. Metadata map keys MUST be sorted by UTF-8 bytes recursively, including maps
+   within arrays. Numeric-looking keys remain strings; host object enumeration
+   order MUST NOT override their byte order.
 5. Dir-node links MUST be sorted by entry-name UTF-8 bytes before encoding.
 6. File-node link order is semantic chunk order and MUST be preserved.
+7. Metadata integral numbers within the MessagePack integer range MUST use the
+   shortest integer encoding, regardless of their host numeric type. Negative
+   zero encodes as integer zero. Other finite numbers use float64. Nonnegative
+   integers use the unsigned format family. Integer values MUST remain exact.
+8. Metadata permits null, booleans, valid UTF-8 strings, numbers, arrays, and
+   string-keyed maps. Unsupported values MUST be rejected. Strings are not
+   Unicode-normalized, and unpaired surrogates MUST be rejected.
+9. Length headers MUST be shortest. Optional fields are omitted when absent;
+   absent metadata and an explicitly empty metadata map remain distinct.
+
+These are writer requirements. Legacy blobs retain their original hashes;
+hash verification uses stored bytes, never a decoded and re-encoded value.
+Canonical re-encoding of legacy metadata can change the manifest and ancestor
+hashes. The TypeScript codec returns `bigint` for metadata integers outside the
+safe `number` range and rejects link sizes it cannot represent exactly.
+It also rejects the metadata key `__proto__`, which its MessagePack decoder
+reserves, rather than emitting a manifest it cannot read. This is a library
+limitation, not a reserved key in the BUD-16 data model.
 
 Decoding rules:
 
