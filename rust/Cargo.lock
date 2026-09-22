@@ -3921,7 +3921,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-updater"
-version = "0.2.85"
+version = "0.2.86"
 dependencies = [
  "async-trait",
  "flate2",

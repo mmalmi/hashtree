@@ -1,5 +1,9 @@
 # hashtree-updater
 
+Release versions accept SemVer and calendar tags (`YYYY.M.D` or `YYYY.M.D.N`).
+Same-day calendar revisions compare numerically: `.10` follows `.2`, and both
+follow the base date. A later date follows every revision of the previous day.
+
 Rust helpers for app updates published through hashtree.
 
 Apps bake a release reference such as:

@@ -327,6 +327,34 @@ fn is_safe_relative_path(path: &str) -> bool {
             .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
 }
 
-pub(crate) fn parse_version(version: &str) -> Result<Version, semver::Error> {
-    Version::parse(version.trim().strip_prefix('v').unwrap_or(version.trim()))
+/// A calendar release can add a numeric same-day revision (`YYYY.M.D.N`).
+/// Keep that revision separate: SemVer build metadata does not provide the
+/// required ordering, and a prerelease would sort *before* the day's base tag.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ReleaseVersion(Version, u64);
+
+pub(crate) fn parse_version(version: &str) -> Result<ReleaseVersion, semver::Error> {
+    let version = version.trim().strip_prefix('v').unwrap_or(version.trim());
+    match Version::parse(version) {
+        Ok(base) => Ok(ReleaseVersion(base, 0)),
+        Err(error) => {
+            if let Some((base, revision)) = version.rsplit_once('.') {
+                if let Ok(base) = Version::parse(base) {
+                    if (2000..=9999).contains(&base.major)
+                        && (1..=12).contains(&base.minor)
+                        && (1..=31).contains(&base.patch)
+                        && base.pre.is_empty()
+                        && base.build.is_empty()
+                        && !revision.starts_with('0')
+                        && revision.bytes().all(|byte| byte.is_ascii_digit())
+                    {
+                        if let Ok(revision) = revision.parse::<u64>() {
+                            return Ok(ReleaseVersion(base, revision));
+                        }
+                    }
+                }
+            }
+            Err(error)
+        }
+    }
 }
