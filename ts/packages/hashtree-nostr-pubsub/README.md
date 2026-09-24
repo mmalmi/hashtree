@@ -4,6 +4,16 @@ One Hashtree-backed `NostrEventReader` for a `nostr-pubsub` router. A reader can
 query several immutable Nostr event-index roots without registering one router
 adapter per root.
 
+## Install
+
+```bash
+npm install @hashtree/core @hashtree/nostr-pubsub nostr-tools
+```
+
+[Getting started](https://github.com/mmalmi/hashtree/blob/master/ts/GETTING_STARTED.md) · [API reference](https://github.com/mmalmi/hashtree/blob/master/ts/API.md)
+
+## Usage
+
 The class structurally implements the `nostr-pubsub` 0.4 reader contract without
 a package dependency in either direction. Both packages share `nostr-tools`
 event/filter shapes, so the reader can be passed directly to the router while

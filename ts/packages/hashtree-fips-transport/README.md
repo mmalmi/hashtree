@@ -2,6 +2,8 @@
 
 Hashtree blob exchange over reliable TCP/FIPS streams.
 
+[Getting started](https://github.com/mmalmi/hashtree/blob/master/ts/GETTING_STARTED.md) · [API reference](https://github.com/mmalmi/hashtree/blob/master/ts/API.md)
+
 ## Install
 
 Install the FIPS peers from their immutable release archives alongside this
@@ -23,7 +25,7 @@ and moves authenticated datagrams between node identities. TCP/FIPS owns
 ordered byte delivery, flow control, and segment retransmission. Hashtree still
 owns hash verification, peer choice, one whole-session retry, and cache writes.
 The byte framing is documented in the
-[networking protocol](../../../docs/NETWORKING.md#blob-protocol-v1).
+[networking protocol](https://github.com/mmalmi/hashtree/blob/master/docs/NETWORKING.md#blob-protocol-v1).
 
 Browser providers join the shared FIPS discovery fabric by default:
 
