@@ -99,9 +99,9 @@ if PATH="$failure_bin:$PATH" \
 fi
 test -f "$failure_state"
 
-# CI keeps one dependency install and shards the ordinary and FIPS-enabled Rust
-# suites onto separate runners.
-[ "$(grep -c 'pnpm install --frozen-lockfile' .github/workflows/ci.yml)" -eq 1 ]
+# The TypeScript test and documentation jobs each install dependencies once.
+# Ordinary and FIPS-enabled Rust suites run on separate runners.
+[ "$(grep -c 'pnpm install --frozen-lockfile' .github/workflows/ci.yml)" -eq 2 ]
 reject grep -qF 'cargo test --workspace --tests' .github/workflows/ci.yml
 [ "$(grep -Fxc '        run: bash ../scripts/release-gate.sh --lane rust' .github/workflows/ci.yml)" -eq 1 ]
 [ "$(grep -Fxc '        run: bash ../scripts/release-gate.sh --lane rust-peripheral' .github/workflows/ci.yml)" -eq 1 ]
