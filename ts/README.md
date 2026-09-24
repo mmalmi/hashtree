@@ -126,7 +126,7 @@ pnpm docs:check         # Build packages, type-check and run guide examples
 The [API reference guide](API.md) explains offline browsing and CI artifacts.
 See [npm publishing](PUBLISHING.md) for the GitHub Actions release workflow.
 The SDK packages live here; app development lives in the sibling repositories
-listed in the [project overview](../README.md).
+listed in [related projects](../docs/README.md#related-projects).
 
 ## License
 

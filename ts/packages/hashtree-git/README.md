@@ -1,7 +1,7 @@
 # @hashtree/git
 
 Helpers for parsing repository URLs and reading root visibility from Nostr
-events. To clone/push repositories, install the [Rust Git remote helper](https://github.com/mmalmi/hashtree/blob/master/README.md#build-from-source).
+events. To clone/push repositories, install the [Rust Git remote helper](https://github.com/mmalmi/hashtree/blob/master/rust/README.md#build-from-source).
 
 ## Install
 

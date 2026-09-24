@@ -6,9 +6,74 @@ Part of the hashtree repository. See [../README.md](../README.md) for the projec
 
 Blossom-compatible storage with chunking and directory structure. Merkle roots can be published on Nostr to get mutable `npub/path` addresses.
 
+## Installation
+
+### Prebuilt binaries (macOS/Linux)
+
+Download the archive for your platform from the [release assets](https://github.com/mmalmi/hashtree/releases), extract it, and run `./install.sh`. Htree-published releases may also publish a top-level `install.sh` asset that downloads the matching platform archive from the same release root and delegates to the packaged installer.
+
+The installer places `htree`, `htree-cashu`, and `git-remote-htree` into `~/.local/bin` by default. Prebuilt release binaries omit optional FUSE mount support. Build from source with `cargo install hashtree-cli --no-default-features --features lmdb,fuse` if you need `htree mount`. For a system-wide install, pass a target directory, for example `./install.sh /usr/local/bin`.
+
+Windows note: the shell bootstrap is not supported there. Download the latest `hashtree-x86_64-pc-windows-msvc.zip` release asset, extract it, and add `htree.exe`, `htree-cashu.exe`, and `git-remote-htree.exe` to your PATH. The Windows release zip does not include FUSE mount support.
+
+### Build from source
+
+Install Rust first if needed:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+```
+
+```bash
+# Git helper only (enables git clone/pull/push for htree:// URLs)
+cargo install git-remote-htree
+
+# CLI + daemon (cargo defaults keep FUSE optional)
+cargo install hashtree-cli
+
+# CLI + daemon + git helper + Cashu helper
+cargo install hashtree-cli git-remote-htree hashtree-cashu-cli
+
+# Add FUSE mount support explicitly when you want it
+cargo install hashtree-cli --no-default-features --features lmdb,fuse
+```
+
+For cargo installs, `fuse` is opt-in. That keeps `cargo install hashtree-cli` working on machines that do not have platform FUSE headers/libs available.
+
+- Linux: install FUSE 3 development packages first, typically `pkg-config` plus `libfuse3-dev` (package names vary by distro).
+- macOS: install macFUSE before building with `--features lmdb,fuse`.
+- Prebuilt release tarballs and Homebrew packages omit FUSE mount support.
+- The Windows release zip does not include FUSE mount support.
+
+### Local install from this repo
+
+Run these commands from the repository root:
+
+```bash
+cargo install --path rust/crates/hashtree-cli
+cargo install --path rust/crates/git-remote-htree
+cargo install --path rust/crates/hashtree-cashu-cli
+
+# Local build with FUSE mount support
+cargo install --path rust/crates/hashtree-cli --no-default-features --features lmdb,fuse
+```
+
+### Homebrew
+
+```bash
+brew tap sirius/hashtree https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/homebrew-hashtree.git
+brew trust --tap sirius/hashtree
+brew install htree
+```
+
+That installs `htree`, `htree-cashu`, and `git-remote-htree`. After tapping, `brew install hashtree` also works via the alias.
+
+Linux package-manager installs beyond Homebrew (such as `apt`) are not shipped yet.
+
 ## Store & retrieve files
 ```bash
-# Install the CLI (see ../README.md#installation)
+# Install the CLI (see #installation)
 
 # Add file or dir
 htree add file.txt
@@ -21,7 +86,7 @@ htree get nhash1qqsw9hdps3pkyjm7nlg9783xazg4cnmuj8sp4wnddsa8lzku6qt457c9yzckwsv3
 ## Git on hashtree
 
 ```bash
-# Install the CLI + git helper (see ../README.md#installation)
+# Install the CLI + git helper (see #installation)
 
 # Clone a repo
 git clone htree://npub1dxs2pygtfxsah77yuncsmu3ttqr274qr56xz3gsvetxzq2vjfnxsy6knkn/hashtree/rust
@@ -219,11 +284,16 @@ htree follow npub1...                   # Follow user
 htree following                         # List followed users
 ```
 
+## Releases
+
+Run these commands from the repository root. CLI artifacts are staged under
+`rust/dist/` by `rust/scripts/release_to_htree.sh`.
+
 Publish a new binary release while keeping older versions in the same mutable tree:
 
 ```bash
-release="$(htree add dist/hashtree-v<version> | awk '/^  url:/ {print $2}')"
-scripts/publish_release.sh v<version> "$release" releases/hashtree
+release="$(htree add rust/dist/hashtree-v<version> | awk '/^  url:/ {print $2}')"
+rust/scripts/publish_release.sh v<version> "$release" releases/hashtree
 ```
 
 That stores the new release under `v<version>/`, repoints `latest/` at the same CID, and leaves older versions intact.
@@ -234,7 +304,9 @@ Publish the canonical repo release and mirror the same staged files to GitHub in
 ./publish_release.sh --version v<version>
 ```
 
-The checkout must be clean and `HEAD` must match the requested tag. The wrapper runs `../scripts/release-gate.sh`, then wraps `scripts/release_to_htree.sh`, reuses one staged release directory for both outputs, and keeps GitHub from drifting ahead of the hashtree/Homebrew publish path. Before bumping a Rust release version, add the matching `## <version> - YYYY-MM-DD` entry to [`rust/CHANGELOG.md`](CHANGELOG.md); staging now splices that entry into the published notes and fails if the version is missing.
+The checkout must be clean and `HEAD` must match the requested tag. The wrapper runs `scripts/release-gate.sh`, then wraps `rust/scripts/release_to_htree.sh`, reuses one staged release directory for both outputs, and keeps GitHub from drifting ahead of the hashtree/Homebrew publish path. Before bumping a Rust release version, add the matching `## <version> - YYYY-MM-DD` entry to [`rust/CHANGELOG.md`](CHANGELOG.md); staging now splices that entry into the published notes and fails if the version is missing.
+
+Local publication also requires `IRIS_STACK_GATE_RECEIPT`, the successful [pinned Iris Stack process-gate receipt](https://github.com/irislib/iris-stack/blob/c6035a6343c569d480f407d7f47fc755cb825b64/docs/integration-lab.md) for this exact public Hashtree commit (`IRIS_STACK_HTREE_REV`). The receipt must match the lab and companion product pins and include both CPU and bandwidth samples. The hosted release workflow runs this gate itself before publishing artifacts; the local publisher reuses its matching receipt.
 
 On macOS this builds the macOS CLI artifacts locally, builds the Linux musl CLI artifacts in target-native Alpine Docker containers, and auto-builds the Windows x64 CLI binaries from the configured Windows build host when available. Release builds resolve external Rust dependencies from the lockfile and do not copy sibling source repositories. You can still override the Windows input explicitly with `--windows-artifacts-dir <shared-dir>`, or skip the VM step with `--skip-windows-vm`.
 
@@ -269,6 +341,8 @@ If you also want the same command to publish the crates.io release, opt into the
 ```
 
 ## Development
+
+Run these commands from `rust/`:
 
 ```bash
 ../scripts/release-gate.sh     # Full pre-publish Rust, TypeScript, and wiring gate
