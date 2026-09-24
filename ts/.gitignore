@@ -1,4 +1,5 @@
 node_modules/
+docs/api/
 dist/
 !packages/hashtree-index/dist/
 !packages/hashtree-index/dist/**

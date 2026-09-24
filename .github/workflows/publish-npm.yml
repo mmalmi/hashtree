@@ -1,0 +1,88 @@
+name: Publish npm packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish new versions directly to npm (false previews archives only)
+        type: boolean
+        default: false
+      packages:
+        description: Comma-separated package names, or all (local dependencies included)
+        type: string
+        default: '@hashtree/core'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-publishing
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: ts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ts/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --global npm@12.0.2
+      - name: Install FIPS interoperability dependencies
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - run: pnpm install --frozen-lockfile
+      - name: Run the TypeScript release gate
+        run: bash ../scripts/release-gate.sh --lane typescript
+      - name: Build npm archives and verify their contents
+        run: pnpm run publish:packages:dry-run > npm-pack.log 2>&1 || { tail -100 npm-pack.log; exit 1; }
+      - name: Check examples and build API reference
+        run: node scripts/check-doc-examples.mjs && pnpm docs:api
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages
+          path: ts/dist-npm/
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: typescript-api-docs
+          path: ts/docs/api/
+          if-no-files-found: error
+
+  publish:
+    needs: verify
+    if: inputs.publish && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm install --global npm@12.0.2
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-packages
+          path: ts/dist-npm/
+      - name: Publish verified archives using OIDC
+        working-directory: ts
+        env:
+          NPM_PACKAGES: ${{ inputs.packages }}
+        run: node scripts/publish-npm.mjs --prepared --packages="$NPM_PACKAGES"

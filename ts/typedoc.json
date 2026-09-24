@@ -1,0 +1,22 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "Hashtree TypeScript API",
+  "entryPointStrategy": "packages",
+  "entryPoints": ["packages/*"],
+  "out": "docs/api",
+  "readme": "API.md",
+  "packageOptions": {
+    "readme": "none",
+    "excludePrivate": true,
+    "excludeInternal": true,
+    "excludeExternals": true,
+    "sourceLinkTemplate": "https://github.com/mmalmi/hashtree/blob/{gitRevision}/{path}#L{line}",
+    "validation": { "notExported": false }
+  },
+  "validation": { "notExported": false },
+  "treatWarningsAsErrors": true,
+  "navigationLinks": {
+    "Getting started": "https://github.com/mmalmi/hashtree/blob/master/ts/GETTING_STARTED.md",
+    "Source": "https://github.com/mmalmi/hashtree"
+  }
+}

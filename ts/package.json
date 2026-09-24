@@ -33,6 +33,10 @@
     }
   },
   "scripts": {
+    "docs:api": "typedoc",
+    "docs:check": "pnpm run build:packages && node scripts/check-doc-examples.mjs",
+    "build:packages": "node scripts/build-runtime.mjs",
+    "pack:npm": "node scripts/pack-npm.mjs",
     "build": "pnpm run build:hashtree",
     "build:hashtree": "pnpm --filter @hashtree/core build",
     "test": "node --test scripts/*.test.mjs && pnpm --filter @hashtree/core test",
@@ -62,6 +66,7 @@
     "eslint": "^10.7.0",
     "globals": "^17.7.0",
     "nostr-tools": "^2.18.2",
+    "typedoc": "0.28.20",
     "typescript": "^5.3.0",
     "ws": "^8.21.1"
   }

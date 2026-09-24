@@ -20,15 +20,15 @@ test('publish plan lists hashtree npm packages in dependency order', () => {
 
   assert.deepEqual(packages, [
     '@hashtree/core',
-    '@hashtree/fips-transport',
-    '@hashtree/merge',
-    '@hashtree/dexie',
-    '@hashtree/git',
     '@hashtree/index',
     '@hashtree/collection',
+    '@hashtree/dexie',
+    '@hashtree/git',
+    '@hashtree/merge',
     '@hashtree/mesh',
     '@hashtree/nostr',
     '@hashtree/nostr-pubsub',
     '@hashtree/worker',
+    '@hashtree/fips-transport',
   ]);
 });

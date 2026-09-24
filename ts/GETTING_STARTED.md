@@ -1,113 +1,194 @@
-# Getting Started For App Builders
+# Getting started with Hashtree
 
-This guide is for building decentralized apps on hashtree without sliding back into centralized "platform backend" habits.
+This guide goes from a local file to publisher-owned app data. Start with
+`@hashtree/core`; add persistent storage, networking, and mutable root discovery
+when you need them. See [installation](README.md#install) for the current package
+archives and [API reference](API.md) for complete signatures.
 
-Use hashtree as the app data substrate:
+Use a browser bundler such as Vite, or a modern Node.js runtime with Web Crypto
+and ES module support. The examples use top-level `await`. In Node, save compiled
+JavaScript as `.mjs` or set `"type": "module"` in your application's `package.json`.
+TypeScript declarations ship with every package.
 
-- `@hashtree/core` stores immutable blobs and directories.
-- `@hashtree/collection` turns app records into source-owned manifests plus derived indexes.
-- `@hashtree/nostr` resolves live mutable roots and gives you a raw Nostr event collection format with query helpers.
-- `@hashtree/worker` is the portable browser runtime when the app should run both in normal browsers and in Iris shells.
+## Store, read, and serialize a file
 
-## Mental Model
+```typescript
+import { HashTree, MemoryStore, nhashEncode, nhashDecode } from '@hashtree/core';
 
-Think in terms of many source-owned collections, not one global mutable database.
+const tree = new HashTree({ store: new MemoryStore() });
+const { cid } = await tree.putFile(new TextEncoder().encode('Hello, hashtree!'));
 
-- Each user, provider, host, driver, merchant, or publisher owns one or more roots.
-- Canonical writes live in those source roots.
-- Search, browse, ranking, trust, and local joins are derived indexes or local overlays.
-- Mutable discovery happens through Nostr-published roots.
-- Immutable content is still addressed directly by hash.
+// Save the whole CID, including the key, in a portable string.
+const identifier = nhashEncode(cid);
+const bytes = await tree.readFile(nhashDecode(identifier));
+if (!bytes) throw new Error('File is unavailable');
+console.log(new TextDecoder().decode(bytes)); // Hello, hashtree!
+```
 
-That same model works for feeds, catalogs, marketplaces, lodging listings, ride supply, job boards, booking inventories, and similar "platform-like" apps.
+A hash addresses stored bytes; it does not tell a reader where to find them.
+This example stores data only in memory. Another client needs access to the same
+blocks through persistent storage, Blossom, or a peer transport.
 
-## Recommended Stack
+Files are CHK-encrypted by default. The `nhash` above includes the decryption key,
+so treat it as a read capability. A hash alone cannot decrypt those bytes.
+For plaintext storage, pass `{ unencrypted: true }` to `putFile()`; removing a key
+from an encrypted CID does not turn the data into plaintext. CHK deduplicates
+identical content and reveals equality, so it does not hide predictable content
+from guessing attacks.
 
-For a typical app:
+## Directories and immutable edits
 
-1. Use `@hashtree/core` plus a local store (`MemoryStore`, Dexie, Blossom fallback, or worker runtime).
-2. Model each publisher-owned dataset as a `CollectionWriter`.
-3. Publish the collection root as a mutable Nostr root.
-4. Read remote collections through `CollectionSource` or `NostrEventStore`.
-5. Merge many sources locally instead of inventing a central query API.
+Each directory entry needs a `name`, the child's complete `cid`, its plaintext
+`size`, and a `type`. Use `LinkType.File` for files written with `putFile()`
+(including single-chunk files), and `LinkType.Dir` for directories.
 
-## Live Roots First
+```typescript
+import { HashTree, MemoryStore, LinkType } from '@hashtree/core';
 
-For mutable app data, resolve the live root from relays first.
+const tree = new HashTree({ store: new MemoryStore() });
+const file = await tree.putFile(new TextEncoder().encode('Hello'));
+const original = await tree.putDirectory([
+  { name: 'hello.txt', cid: file.cid, size: file.size, type: LinkType.File },
+]);
 
-- Use `createNostrRefResolver()` for `npub/tree/path` style roots.
-- Use `storeTreeEventSnapshot()` only for immutable permalinks, offline fallback, or signed historical captures.
-- Do not bundle a snapshot when the product needs the current live state.
+const resolved = await tree.resolvePath(original.cid, 'hello.txt');
+if (!resolved) throw new Error('Directory entry is missing');
+const bytes = await tree.readFile(resolved.cid);
+if (!bytes) throw new Error('File is unavailable');
+console.log(new TextDecoder().decode(bytes)); // Hello
 
-## Keep Query Logic In The Library
+const note = await tree.putFile(new TextEncoder().encode('A new note'));
+const updated = await tree.setEntry(
+  original.cid, [], 'note.txt', note.cid, note.size, LinkType.File,
+);
+console.log((await tree.listDirectory(original.cid)).length); // 1
+console.log((await tree.listDirectory(updated)).length); // 2
+```
 
-If your app needs Nostr-event indexes, use `NostrEventStore`.
+The empty path `[]` edits the root directory. For a nested directory, use path
+segments such as `['notes', '2026']`. Keep the returned root from `setEntry()`,
+`removeEntry()`, or `renameEntry()`; these operations never mutate old roots.
+Encrypting a directory does not re-encrypt its children, and an unencrypted
+directory can expose child keys stored in its entries.
 
-```ts
-import { MemoryStore } from '@hashtree/core';
-import { NostrEventStore } from '@hashtree/nostr';
+## Stream larger files
 
-const store = new MemoryStore();
-const events = new NostrEventStore(store);
+Use `createStream()` when bytes arrive incrementally and `readFileStream()` to
+consume them without assembling the entire file in memory. The small chunk size
+below makes chunking visible; the default is 2 MiB.
 
-const profileFeed = await events.query(rootCid, {
-  authors: pubkey,
-  kinds: [1],
-}, { limit: 50 });
+```typescript
+import { HashTree, MemoryStore } from '@hashtree/core';
 
-for await (const event of events.streamQuery(rootCid, {
-  authors: pubkey,
-  tags: { t: 'hashtree' },
-})) {
-  console.log(event.id, event.content);
+const tree = new HashTree({ store: new MemoryStore(), chunkSize: 4 });
+const writer = tree.createStream();
+await writer.append(new TextEncoder().encode('Hello, '));
+await writer.append(new TextEncoder().encode('streaming!'));
+const root = await writer.finalize(); // { hash, key, size }, usable as a CID
+
+const decoder = new TextDecoder();
+let text = '';
+for await (const chunk of tree.readFileStream(root)) {
+  text += decoder.decode(chunk, { stream: true });
+}
+text += decoder.decode();
+console.log(text); // Hello, streaming!
+writer.clear();
+```
+
+For a bounded in-memory read, use `readFile(cid, { maxBytes })`; exceeding the
+limit throws. For byte ranges, `readFileRange(cid, start, end)` uses an inclusive
+start and exclusive end.
+
+## Persist data in the browser
+
+Install `@hashtree/dexie` from the same runtime release as core. IndexedDB keeps
+blocks across page reloads; retain the CID or encoded `nhash` separately so your
+app knows which root to open.
+
+```typescript
+import { HashTree, nhashEncode } from '@hashtree/core';
+import { DexieStore } from '@hashtree/dexie';
+
+const store = new DexieStore('my-hashtree-app');
+try {
+  const tree = new HashTree({ store });
+  const { cid } = await tree.putFile(new TextEncoder().encode('Persistent data'));
+  const identifier = nhashEncode(cid); // Save this in your app's root metadata.
+  const bytes = await tree.readFile(cid);
+  if (!bytes) throw new Error('File is unavailable');
+  console.log(new TextDecoder().decode(bytes)); // Persistent data
+} finally {
+  store.close();
 }
 ```
 
-The point is that apps should not need their own `/api/nostr/query` layer just to scan a collection. Pick the best index in the library, then only do app-specific ranking in app code.
+For remote storage, configure `BlossomStore` with server URLs and a signer for
+uploads. A local write does not imply a successful remote upload. For browser
+apps that need caching, peer reads, and Iris shell integration, follow the
+[worker runtime guide](packages/hashtree-worker/README.md).
 
-## No Framework Requirement
+## Model app records as collections
 
-`@hashtree/nostr` does not require NDK.
+Install `@hashtree/collection` for records with stable IDs and derived indexes.
+The writer indexes CIDs; you store the original record bytes yourself. Each
+publisher owns a collection manifest, while readers can combine sources locally.
 
-- Pass raw subscribe/publish callbacks to `createNostrRefResolver()`.
-- Use `nostr-tools`, `window.nostr`, your own relay client, or a native bridge.
-- Keep the app dependency surface as small as the app actually needs.
+```typescript
+import { HashTree, MemoryStore } from '@hashtree/core';
+import { CollectionWriter, CollectionSource } from '@hashtree/collection';
 
-## Collection Pattern For Platform Apps
+const store = new MemoryStore();
+const tree = new HashTree({ store });
+const definition = {
+  sourceId: 'my-catalog',
+  getId: (item: { id: string; title: string }) => item.id,
+  searchIndexes: [{ name: 'title', text: (item: { title: string }) => item.title }],
+};
+const writer = new CollectionWriter(store, definition);
+const item = { id: 'book-1', title: 'Growing a garden' };
+const record = await tree.putFile(new TextEncoder().encode(JSON.stringify(item)));
+await writer.put(item, record.cid);
 
-`@hashtree/collection` is the generic app record/index layer.
+const source = new CollectionSource(store, writer.manifest(), definition);
+const found = await source.get('book-1');
+if (!found) throw new Error('Record is missing');
+const bytes = await tree.readFile(found);
+if (!bytes) throw new Error('Record is unavailable');
+console.log(JSON.parse(new TextDecoder().decode(bytes)).title); // Growing a garden
+console.log((await source.search('title', 'garden')).length); // 1
+```
 
-Good fits:
+When replacing records with derived indexes, pass the previous record to
+`writer.replace()` or `writer.put(..., { previous })` so stale index entries can
+be removed. Persist and publish the new manifest after writes. Schema defaults,
+normalization, and migrations are local conveniences; peers do not have to share
+one global schema. See the [collection guide](packages/hashtree-collection/README.md).
 
-- marketplace listings
-- apartment or room inventories
-- ride availability / driver state
-- booking offers and calendar slices
-- menus, products, or service catalogs
-- local trust or reputation projections
+## Publish and follow mutable roots
 
-Recommended split:
+Immutable CIDs never change. To give readers a stable name for the newest root,
+use `createNostrRefResolver()` from `@hashtree/nostr` with your relay client's
+subscribe/publish callbacks and signer. The resolver publishes kind `30064` root
+events and accepts legacy kind `30078` roots. NDK is optional.
 
-- Raw record: publisher-defined JSON/blob/event.
-- Collection `byId`: canonical owned records.
-- Key indexes: exact lookups and structured browse paths.
-- Search indexes: lightweight text discovery.
-- Local overlay: ranking, trust, dedupe, policy, and temporary UX state.
+Keep root subscriptions open so later updates can arrive. Use
+`storeTreeEventSnapshot()` for immutable permalinks or historical/offline captures,
+not as a replacement for discovering live state. For Nostr event datasets,
+`NostrEventStore.query()` and `streamQuery()` choose the relevant published index.
+See the [Nostr guide](packages/hashtree-nostr/README.md) for relay integration.
 
-## Pitfalls To Avoid
+## Handle unavailable data
 
-- Do not invent a central app API when the app can read hashtree roots and indexes directly.
-- Do not scan a global feed if a per-author or per-source index exists.
-- Do not assume one universal schema across the network.
-- Do not force all apps onto NDK or another large SDK if simple relay callbacks are enough.
-- Do not merge everyone into one canonical shared mutable root unless that is explicitly the product model.
+- Core file reads can return `null` when blocks are unavailable. Handle that
+  explicitly; a local miss does not establish absence across the network.
+- `listDirectory()` and `resolvePath()` wait for directory blocks. Pass an
+  `AbortSignal`, such as `AbortSignal.timeout(10_000)`, to bound an operation.
+- `resolvePath()` returns `null` when a name is absent from a loaded directory.
+  A timeout is an error, not a missing entry.
+- Mesh routes distinguish explicit misses from timeouts, corruption, and transport
+  failures. Handle rejections and cancellation separately from not-found results.
 
-## Minimal Publishing Flow
-
-For an app-owned source:
-
-1. Write records into a `CollectionWriter`.
-2. Publish the resulting root through your mutable Nostr root event.
-3. Let other apps resolve that root and query the published indexes directly.
-
-This keeps authorship, trust, portability, and caching aligned with the storage model instead of rebuilding a centralized backend behind the scenes.
+Run `pnpm docs:check` from `ts/` to type-check and execute the examples in this
+guide against the workspace packages. The IndexedDB example runs with
+`fake-indexeddb` in that Node-based check.

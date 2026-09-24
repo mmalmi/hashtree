@@ -1,204 +1,125 @@
-# hashtree/ts
+# Hashtree for TypeScript and JavaScript
 
-TypeScript/JavaScript implementation of hashtree. This repo now contains the SDK
-packages only; the Iris app workspaces live in sibling repos.
+Store files and directories by content hash, keep them encrypted by default, and
+read the same data from local storage, Blossom servers, or peers. The SDK is
+browser-first, uses ES modules, and includes TypeScript declarations. Core storage
+also works in modern Node.js with Web Crypto; no daemon or Nostr account is needed
+for local use.
 
-Part of the hashtree repository. See [../README.md](../README.md) for the project overview and [../rust/README.md](../rust/README.md) for the Rust CLI/daemon.
+- [Getting started](GETTING_STARTED.md): runnable examples, persistence, and app data.
+- [API reference](API.md): searchable documentation for all packages and public subpaths.
+- [Protocol](../docs/HTS-01.md): storage format and interoperability.
 
-If you are building apps on top of hashtree, start with [GETTING_STARTED.md](GETTING_STARTED.md).
+## Install
 
-Blossom-compatible storage with chunking and directory structure. Merkle roots can be published on Nostr to get mutable `npub/path` addresses.
-
-## Design
-
-- **SHA256** hashing via Web Crypto API
-- **MessagePack** encoding for tree nodes (deterministic)
-- **Dumb storage**: Works with any key-value store (hash → bytes). Unlike BitTorrent, no active merkle proof computation needed—just store and retrieve blobs by hash.
-- **2MB chunks** by default (optimized for blossom uploads)
-
-## Packages
-
-**npm packages:**
-- [`@hashtree/core`](https://www.npmjs.com/package/@hashtree/core) - Core merkle tree library ([source](packages/hashtree))
-- [`@hashtree/merge`](https://www.npmjs.com/package/@hashtree/merge) - Deterministic path-based overlay merge primitives ([source](packages/hashtree-merge))
-- [`@hashtree/mesh`](https://www.npmjs.com/package/@hashtree/mesh) - Adaptive read-only `BlobRouter` across opaque routes ([source](packages/hashtree-mesh))
-- [`@hashtree/nostr`](https://www.npmjs.com/package/@hashtree/nostr) - Nostr ref resolver, event collections, and signed root snapshots ([source](packages/hashtree-nostr))
-- [`@hashtree/fips-transport`](https://www.npmjs.com/package/@hashtree/fips-transport) - Hash-verified blobs over reliable TCP/FIPS streams ([source](packages/hashtree-fips-transport))
-- [`@hashtree/git`](https://www.npmjs.com/package/@hashtree/git) - Git/htree interoperability helpers ([source](packages/hashtree-git))
-- [`@hashtree/dexie`](https://www.npmjs.com/package/@hashtree/dexie) - IndexedDB/Dexie storage adapter ([source](packages/hashtree-dexie))
-- [`@hashtree/index`](https://www.npmjs.com/package/@hashtree/index) - B-Tree index structures ([source](packages/hashtree-index))
-- [`@hashtree/worker`](https://www.npmjs.com/package/@hashtree/worker) - Modular browser worker runtime, including the browser-side `tree-root` registry subpath export ([source](packages/hashtree-worker))
-
-The worker's optional NDK integrations are consumed from the independently
-released Iris Kit packages. Hashtree does not maintain another NDK fork.
-
-## Portable App Runtime
-
-[`@hashtree/worker`](https://www.npmjs.com/package/@hashtree/worker) is the
-app-facing runtime for sites that should work both in ordinary browsers and in
-[`iris-browser`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-browser).
-Browse the source at
-[`hashtree/ts/packages/hashtree-worker`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/ts/packages/hashtree-worker)
-and see the Iris host/runtime notes in
-[`iris-browser/apps/iris/README.md`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-browser/apps/iris/README.md).
-
-## Installation
+Install core `0.3.2` from the [TypeScript runtime 0.5.7 release](https://github.com/mmalmi/hashtree/releases/tag/hashtree-ts-runtime-v0.5.7):
 
 ```bash
 npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-core-0.3.2.tgz
 ```
 
-On npm 12+, add `--allow-remote=all` to `npm install` and `npm ci` commands that use these release archives.
+On npm 12+, add `--allow-remote=all` to `npm install` and `npm ci` commands
+that use these archives. The registry's `@hashtree/core` latest is still `0.1.7`;
+the release archive includes later integrity fixes. Use matching archives from
+the same runtime release for optional packages.
 
-The npm registry's `@hashtree/core` latest is still `0.1.7`. Use the release archive above for core `0.3.2`. Install optional packages from the matching archives in the [TypeScript runtime 0.5.7 release](https://github.com/mmalmi/hashtree/releases/tag/hashtree-ts-runtime-v0.5.7). See the [main installation guide](../README.md#typescript--javascript-library) for a minimal example.
-
-## Storage Backends
-
-The `Store` interface is just `get(hash) → bytes` and `put(hash, bytes)`. Implementations:
-
-- `MemoryStore` - In-memory (in `@hashtree/core`)
-- `BlossomStore` - Remote blossom server (in `@hashtree/core`)
-- `DexieStore` - IndexedDB via Dexie (in `@hashtree/dexie`)
-
-Writes always target the application-selected `Store`. Reads can adapt a store
-with `StoreBlobRoute` and combine it with opaque network routes in the read-only
-`BlobRouter` from `@hashtree/mesh`. A network implementation that owns several
-servers or peers remains one composite route; the outer router never selects
-its internal members. The worker's P2P composite uses the same router
-recursively over exact identities advertised by its configured provider; it
-does not fetch anonymously or infer routes from connected peers.
-
-`BlobRouter` bounds route attempts and concurrency, passes nested routes a
-deadline and attempt budget, and accepts the first centrally hash-verified
-reply. A route-local `NoResult` does not cancel other routes. Timeout,
-corruption, reset, and unreachable-provider results remain errors. Optional
-cache writes go only to the explicitly configured cache store.
-
-P2P remains a separate transport concern. `TcpBlobTransport` reads from exact
-authenticated FIPS providers and can sit behind one composite `BlobRoute`.
-
-## Usage
+## First file
 
 ```typescript
-import { MemoryStore, HashTree, toHex } from '@hashtree/core';
+import { HashTree, MemoryStore, nhashEncode } from '@hashtree/core';
 
-const store = new MemoryStore();
-const tree = new HashTree({ store });
+const tree = new HashTree({ store: new MemoryStore() });
+const { cid } = await tree.putFile(new TextEncoder().encode('Hello, hashtree!'));
+const bytes = await tree.readFile(cid);
+if (!bytes) throw new Error('File is unavailable');
+console.log(new TextDecoder().decode(bytes));
 
-// Store a file (auto-chunked, encrypted by default)
-const data = new TextEncoder().encode('Hello, World!');
-const { cid } = await tree.putFile(data);
-console.log('Hash:', toHex(cid.hash));
-
-// Read it back
-const content = await tree.readFile(cid);
-
-// Create a directory
-const { cid: dirCid } = await tree.putDirectory([
-  { name: 'hello.txt', ...cid },
-]);
-
-// List directory
-const entries = await tree.listDirectory(dirCid);
+// Includes the decryption key: anyone with this identifier can read the file
+// if they can retrieve its stored blocks.
+const permalink = nhashEncode(cid);
 ```
 
-## Encryption (CHK)
+`MemoryStore` lasts only for the life of the process or page. Storing a file there
+does not upload it anywhere. The [getting-started guide](GETTING_STARTED.md)
+continues with directories, immutable edits, streaming, and persistent storage.
 
-All data is encrypted by default using **Content Hash Key (CHK)** encryption:
+## Choose packages
 
-- Data is encrypted with AES-256-GCM using a key derived from the content hash (~2-3x overhead vs plain)
-- The encryption key is stored alongside the hash in the CID (`cid.key`)
-- Share the hash alone for public data, or hash+key for private data
-- Deduplication still works: identical content produces identical hashes
+Start with core and add the layers your application needs. The package READMEs
+provide integration examples; the [API reference](API.md) covers signatures.
 
-```typescript
-// Encrypted by default
-const { cid } = await tree.putFile(data);
-console.log('Hash:', toHex(cid.hash));
-console.log('Key:', toHex(cid.key));  // Share this for decryption
+| Package | Use it for |
+| --- | --- |
+| [@hashtree/core](packages/hashtree/README.md) | Files, directories, encryption, streaming, and memory/Blossom storage |
+| [@hashtree/dexie](packages/hashtree-dexie/README.md) | Persistent browser storage in IndexedDB |
+| [@hashtree/index](packages/hashtree-index/README.md) | B-tree indexes, text search, and ranked search |
+| [@hashtree/collection](packages/hashtree-collection/README.md) | Publisher-owned records and derived indexes |
+| [@hashtree/nostr](packages/hashtree-nostr/README.md) | Live mutable roots and indexed Nostr event collections |
+| [@hashtree/nostr-pubsub](packages/hashtree-nostr-pubsub/README.md) | Reading replicated Nostr events from blob stores |
+| [@hashtree/mesh](packages/hashtree-mesh/src/index.ts) | Adaptive, hash-verified reads across storage/network routes |
+| [@hashtree/fips-transport](packages/hashtree-fips-transport/README.md) | Reliable peer-to-peer blob transport |
+| [@hashtree/worker](packages/hashtree-worker/README.md) | Web Workers and apps that run in browsers and Iris shells |
+| [@hashtree/git](packages/hashtree-git/README.md) | Git/htree URL and interoperability helpers |
+| [@hashtree/merge](packages/hashtree-merge/README.md) | Deterministic path-based overlay merges |
 
-// Reading requires the key
-const content = await tree.readFile(cid);  // cid includes key
-```
+Nostr integration accepts your relay client's subscribe/publish callbacks and
+does not require NDK. The worker's optional NDK integrations use the separately
+released Iris Kit packages.
 
-## Tree Nodes
+## Content, keys, and roots
 
-Every stored item is either raw bytes or a tree node. Tree nodes are MessagePack-encoded with a `type` field:
+- A `CID` contains a 32-byte `hash` and, for encrypted content, a `key`.
+- `putFile()` chunks and encrypts data by default. Keep the whole CID to read it.
+- `nhashEncode(cid)` serializes both hash and key. Sharing it grants read access
+  to anyone who can obtain the blocks. Sharing only the hash does **not** decrypt
+  an encrypted file.
+- Use `putFile(data, { unencrypted: true })` only when you intend to store
+  plaintext. Directory encryption is selected independently of child encryption.
+- CHK encryption is deterministic, so identical content deduplicates. It does not
+  hide equality and does not protect predictable content against guessing.
+- Tree edits return a new root CID. Retain that root; existing roots keep their
+  original contents. Use a Nostr resolver to advertise a changing root under a
+  stable name.
 
-- `Blob` (0) - Raw data chunk (not a tree node, just bytes)
-- `File` (1) - Chunked file: links are unnamed, ordered by byte offset
-- `Dir` (2) - Directory: links have names, may point to files or subdirs
+## Storage and network behavior
 
-Wire format: `{t: LinkType, l: [{h: hash, s: size, n?: name, t: linkType, ...}]}`
+A `Store` implements `put`, `get`, `has`, and `delete`, with optional `watch` for
+newly available blocks. Implement the interface to add a storage backend.
+`BlossomStore` handles remote blob storage and accepts a signer for writes;
+`DexieStore` provides local browser persistence.
 
-## P2P Transport (FIPS)
+For adaptive network reads, use `StoreBlobRoute` and `BlobRouter` from
+`@hashtree/mesh`. Writes target the app-selected store. Routes return verified
+bytes or an explicit miss; timeout, cancellation, corruption, and transport
+failures remain errors. `FallbackStore` is a simpler best-effort cache adapter;
+its `null` result must not be treated as proof of network-wide absence.
 
-`@hashtree/fips-transport` carries blobs on reliable TCP/FIPS streams. FIPS
-owns identity, peer discovery, signaling, routing, and underlay transports;
-TCP/FIPS owns ordered delivery, flow control, and segment retransmission;
-Hashtree owns peer choice, bounded whole-session retry, hash verification, and
-cache writes. Browser providers join the shared `fips-overlay-v1` discovery
-fabric by default.
+Directory operations can wait for blocks to arrive. Pass an `AbortSignal` to
+`listDirectory()` and `resolvePath()` when your operation needs cancellation.
+A quiet subscription window is not evidence that mutable data does not exist.
 
-```typescript
-import {
-  TcpBlobTransport,
-  DEFAULT_FIPS_DISCOVERY_APP,
-} from '@hashtree/fips-transport';
-
-const transport = new TcpBlobTransport({
-  endpoint: fipsNode,
-  localStore,
-});
-
-console.log(DEFAULT_FIPS_DISCOVERY_APP); // fips-overlay-v1
-const data = await transport.get(hash, peerIds);
-await transport.close();
-```
-
-The protocol uses FIPS service port `39018`. A provider explicitly reports
-found or missing. `null` therefore means every attempted provider reported a
-miss; timeouts, resets, malformed responses, and mixed miss/failure results stay
-errors rather than becoming false absence. See the
-[networking protocol](../docs/NETWORKING.md#blob-protocol-v1) for the wire
-format.
-
-## Iris App Repos
-
-The extracted app workspaces now live alongside this repo:
-
-- [`iris-apps`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-apps) for portable Iris web apps and `iris-sites`
-- [`iris-browser`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-browser) for the native desktop shell
-- [`hashtree-cc`](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree-cc) for the landing page app
-
-## Web Viewer
-
-Browse content and git repos at [git.iris.to](https://git.iris.to), for example [hashtree/ts](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/ts).
-
-Apps can be loaded directly via `nhash` or `npub/path` URLs, bypassing web servers, DNS, SSL certificates, and CDNs entirely. Content is fetched from the P2P network and Blossom servers by hash, verified locally.
-
-## CI Integration
-
-[hashtree-ci](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree-ci) runs CI jobs for hashtree repos. Results are shown in the git UI - commit history displays pass/fail badges similar to GitHub Actions.
-
-Configure trusted runners in `.hashtree/ci.toml`:
-
-```toml
-[ci]
-[[ci.runners]]
-npub = "npub1..."
-name = "my-runner"
-```
+FIPS owns peer discovery, signaling, routing, and underlay transport;
+`TcpBlobTransport` owns Hashtree blob requests, verification, and cache writes.
+See the [network protocol](../docs/NETWORKING.md#blob-protocol-v1) and
+[worker guide](packages/hashtree-worker/README.md) for app integration.
 
 ## Development
 
-From `ts/`:
+From `ts/` in a repository checkout:
 
 ```bash
-pnpm install      # Install dependencies
-pnpm test         # Run tests
-pnpm run build    # Build
+pnpm install --frozen-lockfile
+pnpm run build           # Core library
+pnpm test               # Script and core tests
+pnpm run lint
+pnpm docs:api           # Generate docs/api/index.html
+pnpm docs:check         # Build packages, type-check and run guide examples
 ```
+
+The [API reference guide](API.md) explains offline browsing and CI artifacts.
+See [npm publishing](PUBLISHING.md) for the GitHub Actions release workflow.
+The SDK packages live here; app development lives in the sibling repositories
+listed in the [project overview](../README.md).
 
 ## License
 

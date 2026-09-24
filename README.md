@@ -32,7 +32,7 @@ if (bytes) console.log(new TextDecoder().decode(bytes));
 
 The library uses ES modules and includes TypeScript declarations. `MemoryStore` keeps data in memory; use `@hashtree/dexie` from the same release for browser persistence.
 
-See the [SDK overview and examples](ts/README.md), [core library README](ts/packages/hashtree/README.md), and [app-builder guide](ts/GETTING_STARTED.md).
+See the [SDK overview](ts/README.md), [getting-started examples](ts/GETTING_STARTED.md), and [TypeScript API reference](ts/API.md).
 
 ### Prebuilt binaries (macOS/Linux)
 

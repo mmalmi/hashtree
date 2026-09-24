@@ -4,7 +4,8 @@
  * Single class for creating, reading, and editing content-addressed merkle trees.
  *
  * All files are encrypted by default using CHK (Content Hash Key) encryption.
- * Use the "Public" variants (putFilePublic, readFilePublic) for unencrypted storage.
+ * Pass `{ unencrypted: true }` to write plaintext instead. Reads use the CID's key
+ * when present. Tree edits return a new root and preserve the previous tree.
  */
 
 import { Store, Hash, CID, TreeNode, LinkType, toHex, cid } from './types.js';
@@ -36,8 +37,11 @@ export const DEFAULT_CHUNK_SIZE = 2 * 1024 * 1024;
 export const DEFAULT_MAX_LINKS = 174;
 
 export interface HashTreeConfig {
+  /** Backend for content-addressed blocks. Writes do not imply remote replication. */
   store: Store;
+  /** Maximum plaintext bytes per file chunk. Defaults to 2 MiB. */
   chunkSize?: number;
+  /** Maximum links per tree node. Defaults to 174. */
   maxLinks?: number;
 }
 
@@ -50,10 +54,15 @@ export interface TreeEntry {
 }
 
 export interface DirEntry {
+  /** Child name within this directory. */
   name: string;
+  /** Complete child identifier, including its decryption key when encrypted. */
   cid: CID;
+  /** Plaintext content size in bytes. */
   size: number;
+  /** Use File for putFile results and Dir for child directories. */
   type: LinkType;
+  /** Optional application metadata stored with the entry. */
   meta?: Record<string, unknown>;
 }
 
@@ -90,10 +99,10 @@ export class HashTree {
   }
 
   /**
-   * Store a file
+   * Chunk and store a file, encrypted with a content-derived key by default.
    * @param data - File data to store
    * @param options - { unencrypted?: boolean } - if true, store without encryption
-   * @returns { cid, size }
+   * @returns The complete CID and plaintext byte length. Retain the CID's key.
    */
   async putFile(
     data: Uint8Array,
@@ -108,10 +117,13 @@ export class HashTree {
   }
 
   /**
-   * Store a directory
+   * Store a directory of child CIDs and metadata.
+   *
+   * Directory encryption is independent of child encryption. An unencrypted
+   * directory exposes any child keys included in its entries.
    * @param entries - Directory entries
    * @param options - { unencrypted?: boolean } - if true, store without encryption
-   * @returns { cid, size }
+   * @returns The directory CID and sum of child plaintext sizes.
    */
   async putDirectory(
     entries: DirEntry[],
@@ -180,7 +192,11 @@ export class HashTree {
   }
 
   /**
-   * Read a file
+   * Assemble and decrypt a file using its complete CID.
+   *
+   * @returns Plaintext bytes, or null when required content is unavailable.
+   * @throws If the configured byte limit is exceeded or a storage/decryption
+   * operation fails. A local miss does not prove absence from the network.
    */
   async readFile(id: CID, options: ReadOptions = {}): Promise<Uint8Array | null> {
     return this.get(id, options);
@@ -213,7 +229,8 @@ export class HashTree {
   }
 
   /**
-   * Read a range of bytes from a file
+   * Read plaintext bytes from inclusive `start` to exclusive `end`.
+   * Omit `end` to read through the end of the file.
    */
   async readFileRange(id: CID, start: number, end?: number): Promise<Uint8Array | null> {
     if (id.key) {

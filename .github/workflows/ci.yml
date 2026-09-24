@@ -51,6 +51,32 @@ jobs:
       - name: Run ESLint
         run: pnpm lint
 
+  typescript-docs:
+    name: TypeScript Documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: ts/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: ts/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - name: Verify documentation examples and build API reference
+        run: pnpm docs:check && pnpm docs:api
+      - uses: actions/upload-artifact@v4
+        with:
+          name: typescript-api-docs
+          path: ts/docs/api/
+          if-no-files-found: error
+
   release-wiring:
     name: Release Wiring
     runs-on: ubuntu-latest
