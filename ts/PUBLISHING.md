@@ -59,10 +59,10 @@ New versions use npm's `latest` tag. This workflow is for stable releases; use a
 separate prerelease policy before publishing versions that should not be latest.
 Registry scanning can delay availability after a successful publish.
 
-`@hashtree/nostr-pubsub` and `@hashtree/fips-transport` have not yet had their first
-npm publication. Before selecting either (or `all`) for an OIDC run, publish their
-verified archives once with an interactive npm login, then configure their trust
-settings above. The existing core package can use OIDC without that bootstrap.
+All 11 SDK package names have had their initial npm publication and are configured
+to trust this workflow, with direct publishing enabled. When adding a new package
+name, publish its verified archive once with an interactive npm login, then
+configure its trust settings above before selecting it for an OIDC run.
 
 ## Archive contents
 

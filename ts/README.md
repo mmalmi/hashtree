@@ -18,13 +18,13 @@ Install the current core library (`0.3.2`) directly from npm:
 npm install @hashtree/core
 ```
 
-Current `@hashtree/index`, `@hashtree/collection`, and `@hashtree/nostr`
-versions are also on npm and install their Hashtree
+Current `@hashtree/index`, `@hashtree/collection`, `@hashtree/nostr`, and
+`@hashtree/nostr-pubsub` versions are also on npm and install their Hashtree
 dependencies automatically. For `@hashtree/fips-transport`, follow its
 [installation instructions](packages/hashtree-fips-transport/README.md#install)
 to include the FIPS peers.
 
-For current dexie, git, merge, mesh, nostr-pubsub, and worker packages, use their immutable
+For current dexie, git, merge, mesh, and worker packages, use their immutable
 archives from the [TypeScript runtime 0.5.7 release](https://github.com/mmalmi/hashtree/releases/tag/hashtree-ts-runtime-v0.5.7);
 their npm registry versions are older. With npm 12+, add `--allow-remote=all`
 to `npm install` and `npm ci` commands that use release URL dependencies.
