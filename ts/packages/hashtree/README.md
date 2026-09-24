@@ -7,12 +7,11 @@ Core merkle tree library for content-addressed storage.
 ## Install
 
 ```bash
-npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-core-0.3.2.tgz
+npm install @hashtree/core
 ```
 
-On npm 12+, add `--allow-remote=all` to `npm install` and `npm ci` commands that use these release archives.
-
-The npm registry's `@hashtree/core` latest is still `0.1.7`. Use the release archive above for core `0.3.2`; matching optional packages are available in the [TypeScript runtime 0.5.7 release](https://github.com/mmalmi/hashtree/releases/tag/hashtree-ts-runtime-v0.5.7).
+Core `0.3.2` is available on npm. See the [SDK installation guide](https://github.com/mmalmi/hashtree/blob/master/ts/README.md#install)
+for optional packages and immutable release archives.
 
 ## Usage
 

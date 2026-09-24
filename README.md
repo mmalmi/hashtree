@@ -14,12 +14,11 @@ Content-addressed storage, git transport, and app runtime on Nostr. Merkle roots
 Install the current core library with npm; no repository checkout or Rust installation is needed:
 
 ```bash
-npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-core-0.3.2.tgz
+npm install @hashtree/core
 ```
 
-On npm 12+, add `--allow-remote=all` to `npm install` and `npm ci` commands that use these release archives ([npm configuration](https://docs.npmjs.com/cli/v12/using-npm/config/#allow-remote)).
-
-Use the release archive above: the npm registry's `@hashtree/core` latest is still `0.1.7`. The [TypeScript runtime 0.5.7 release](https://github.com/mmalmi/hashtree/releases/tag/hashtree-ts-runtime-v0.5.7) includes core `0.3.2` and matching optional packages.
+Core `0.3.2` is available on npm. See the [SDK installation guide](ts/README.md#install)
+for optional packages and immutable release archives.
 
 ```typescript
 import { HashTree, MemoryStore } from '@hashtree/core';
@@ -30,7 +29,7 @@ const bytes = await tree.readFile(cid);
 if (bytes) console.log(new TextDecoder().decode(bytes));
 ```
 
-The library uses ES modules and includes TypeScript declarations. `MemoryStore` keeps data in memory; use `@hashtree/dexie` from the same release for browser persistence.
+The library uses ES modules and includes TypeScript declarations. `MemoryStore` keeps data in memory; use `@hashtree/dexie` for browser persistence.
 
 See the [SDK overview](ts/README.md), [getting-started examples](ts/GETTING_STARTED.md), and [TypeScript API reference](ts/API.md).
 

@@ -2,8 +2,8 @@
 
 This guide goes from a local file to publisher-owned app data. Start with
 `@hashtree/core`; add persistent storage, networking, and mutable root discovery
-when you need them. See [installation](README.md#install) for the current package
-archives and [API reference](API.md) for complete signatures.
+when you need them. See [installation](README.md#install) for package installation
+and [API reference](API.md) for complete signatures.
 
 Use a browser bundler such as Vite, or a modern Node.js runtime with Web Crypto
 and ES module support. The examples use top-level `await`. In Node, save compiled
