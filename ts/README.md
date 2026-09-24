@@ -45,16 +45,12 @@ and see the Iris host/runtime notes in
 ## Installation
 
 ```bash
-npm install @hashtree/core
-# Optional:
-npm install @hashtree/merge  # Path-based overlay merge primitives
-npm install @hashtree/nostr  # Nostr resolver and event collections
-npm install @hashtree/fips-transport  # Reliable TCP/FIPS blob transport
-npm install @hashtree/dexie  # IndexedDB storage
-npm install @hashtree/index  # B-Tree indexes
-npm install @hashtree/mesh  # Adaptive read routing
-npm install @hashtree/worker  # Worker runtime + tree-root helpers
+npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-core-0.3.2.tgz
 ```
+
+On npm 12+, add `--allow-remote=all` to `npm install` and `npm ci` commands that use these release archives.
+
+The npm registry's `@hashtree/core` latest is still `0.1.7`. Use the release archive above for core `0.3.2`. Install optional packages from the matching archives in the [TypeScript runtime 0.5.7 release](https://github.com/mmalmi/hashtree/releases/tag/hashtree-ts-runtime-v0.5.7). See the [main installation guide](../README.md#typescript--javascript-library) for a minimal example.
 
 ## Storage Backends
 
