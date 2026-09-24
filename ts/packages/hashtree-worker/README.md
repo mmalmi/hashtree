@@ -7,23 +7,33 @@ Runs hashtree storage operations in a Web Worker to keep the main thread free. H
 ## Install
 
 ```bash
-npm install @hashtree/worker
+npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-worker-0.4.3.tgz
 ```
+
+The npm registry version is older than this runtime archive. With npm 12+, add
+`--allow-remote=all`. See [SDK installation](https://github.com/mmalmi/hashtree/blob/master/ts/README.md#install) and
+[API reference](https://github.com/mmalmi/hashtree/blob/master/ts/API.md).
 
 ## Usage
 
+With Vite, import the packaged worker entry using `?worker` (enable `vite/client`
+types in your app). This example stores a raw local blob; it does not upload it.
+
 ```typescript
 import { HashtreeWorkerClient } from '@hashtree/worker';
-import HashtreeWorker from './workers/hashtree.worker.ts?worker';
+import HashtreeWorker from '@hashtree/worker/entry?worker';
 
-const client = new HashtreeWorkerClient(HashtreeWorker, {
-  blossomServers: [{ url: 'https://upload.example', read: true, write: true }],
-});
+const client = new HashtreeWorkerClient(HashtreeWorker, { storeName: 'my-app' });
 await client.init();
-
-// Store and retrieve blobs
-const { hashHex } = await client.putBlob(data);
-const { data: blob } = await client.getBlob(hashHex);
+try {
+  const data = new TextEncoder().encode('Hello, worker!');
+  const { hashHex } = await client.putBlob(data, 'text/plain', false);
+  const { data: blob } = await client.getBlob(hashHex);
+  if (!blob) throw new Error('Blob is unavailable');
+  console.log(new TextDecoder().decode(blob));
+} finally {
+  await client.close();
+}
 ```
 
 ## Plain Worker + FIPS WebRTC
@@ -92,7 +102,7 @@ import {
   HashtreeWorkerClient,
   createHtreeRuntime,
 } from '@hashtree/worker';
-import HashtreeWorker from './workers/hashtree.worker.ts?worker';
+import HashtreeWorker from '@hashtree/worker/entry?worker';
 
 const DEFAULT_RELAYS = [
   'wss://relay.damus.io',
@@ -115,6 +125,8 @@ const workerClient = new HashtreeWorkerClient(HashtreeWorker, {
     storeName: 'my-app-worker',
   }),
 });
+
+await workerClient.init();
 
 const mediaUrl = runtime.urls.media('htree://nhash1example/video.mp4', {
   clientScoped: true,

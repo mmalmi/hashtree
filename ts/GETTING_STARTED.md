@@ -10,6 +10,9 @@ and ES module support. The examples use top-level `await`. In Node, save compile
 JavaScript as `.mjs` or set `"type": "module"` in your application's `package.json`.
 TypeScript declarations ship with every package.
 
+For the first example, save the code as `hello.mjs` (it is also valid JavaScript)
+and run `node hello.mjs` after `npm install @hashtree/core`. No build step is needed.
+
 ## Store, read, and serialize a file
 
 ```typescript
@@ -102,29 +105,40 @@ start and exclusive end.
 
 ## Persist data in the browser
 
-Install `@hashtree/dexie` from the same runtime release as core. IndexedDB keeps
+Install `@hashtree/dexie` using its [installation guide](packages/hashtree-dexie/README.md#install). IndexedDB keeps
 blocks across page reloads; retain the CID or encoded `nhash` separately so your
 app knows which root to open.
 
 ```typescript
-import { HashTree, nhashEncode } from '@hashtree/core';
+import { HashTree, nhashEncode, nhashDecode } from '@hashtree/core';
 import { DexieStore } from '@hashtree/dexie';
 
 const store = new DexieStore('my-hashtree-app');
+let identifier: string;
 try {
   const tree = new HashTree({ store });
   const { cid } = await tree.putFile(new TextEncoder().encode('Persistent data'));
-  const identifier = nhashEncode(cid); // Save this in your app's root metadata.
-  const bytes = await tree.readFile(cid);
-  if (!bytes) throw new Error('File is unavailable');
-  console.log(new TextDecoder().decode(bytes)); // Persistent data
+  identifier = nhashEncode(cid); // Persist separately, e.g. in localStorage.
 } finally {
   store.close();
 }
+
+// A new connection, as on the next page load. Supply the saved identifier.
+const reopened = new DexieStore('my-hashtree-app');
+try {
+  const tree = new HashTree({ store: reopened });
+  const bytes = await tree.readFile(nhashDecode(identifier));
+  if (!bytes) throw new Error('File is unavailable');
+  console.log(new TextDecoder().decode(bytes)); // Persistent data
+} finally {
+  reopened.close();
+}
 ```
 
-For remote storage, configure `BlossomStore` with server URLs and a signer for
-uploads. A local write does not imply a successful remote upload. For browser
+Browser storage can be cleared or evicted; persistence is local, not a backup.
+For signed remote uploads and reads from a fresh client, see the
+[Blossom recipe](packages/hashtree/README.md#remote-storage-with-blossom).
+A local write does not imply a successful remote upload. For browser
 apps that need caching, peer reads, and Iris shell integration, follow the
 [worker runtime guide](packages/hashtree-worker/README.md).
 
@@ -189,6 +203,7 @@ See the [Nostr guide](packages/hashtree-nostr/README.md) for relay integration.
 - Mesh routes distinguish explicit misses from timeouts, corruption, and transport
   failures. Handle rejections and cancellation separately from not-found results.
 
-Run `pnpm docs:check` from `ts/` to type-check and execute the examples in this
-guide against the workspace packages. The IndexedDB example runs with
-`fake-indexeddb` in that Node-based check.
+Run `pnpm docs:check` from `ts/` to type-check and execute this guide and the
+package recipes against the workspace packages.
+The check uses IndexedDB emulation and loopback HTTP/WebSocket servers; it does
+not upload to public servers or publish to public relays.

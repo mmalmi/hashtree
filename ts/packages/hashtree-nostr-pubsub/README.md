@@ -7,18 +7,51 @@ adapter per root.
 ## Install
 
 ```bash
-npm install @hashtree/core @hashtree/nostr-pubsub nostr-tools
+npm install @hashtree/core @hashtree/nostr @hashtree/nostr-pubsub nostr-tools
 ```
 
 [Getting started](https://github.com/mmalmi/hashtree/blob/master/ts/GETTING_STARTED.md) · [API reference](https://github.com/mmalmi/hashtree/blob/master/ts/API.md)
 
 ## Usage
 
+This local example builds an index, queries it through the adapter, and checks
+whether all requested partitions were available. It generates a throwaway key;
+apps should use their existing signer and persistent/remote block store.
+
+```typescript
+import { MemoryStore } from '@hashtree/core';
+import { NostrEventStore } from '@hashtree/nostr';
+import { HashtreeNostrEventReader } from '@hashtree/nostr-pubsub';
+import { finalizeEvent, generateSecretKey } from 'nostr-tools';
+
+const store = new MemoryStore();
+const event = finalizeEvent({
+  kind: 1, created_at: 1, tags: [], content: 'Indexed note',
+}, generateSecretKey());
+const root = await new NostrEventStore(store).add(null, event);
+const reader = new HashtreeNostrEventReader({ store, roots: root });
+const report = await reader.query([{ kinds: [1] }], {
+  limit: 20, signal: AbortSignal.timeout(5_000),
+});
+if (!report.complete) throw new Error('Some partitions are unavailable');
+console.log(report.events[0]?.event.content); // Indexed note
+```
+
+Create a reader with the new root when the publisher announces a new index, or
+use the root provider described below. A fixed CID is a snapshot; the reader
+does not discover mutable roots or relay events by itself.
+`@hashtree/nostr` is used above to build sample data; it is not needed as a direct
+app dependency when your app only reads existing roots.
+
+## Router integration and replicas
+
 The class structurally implements the `nostr-pubsub` 0.4 reader contract without
 a package dependency in either direction. Both packages share `nostr-tools`
 event/filter shapes, so the reader can be passed directly to the router while
 keeping Hashtree out of the router core's dependency graph. `nostr-tools` is a
 peer dependency so both packages use the same verified-event brand.
+
+For multiple roots, supply the CIDs discovered by your app:
 
 ```ts
 import { MemoryStore } from '@hashtree/core';

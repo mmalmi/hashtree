@@ -62,7 +62,7 @@ provide integration examples; the [API reference](API.md) covers signatures.
 | [@hashtree/collection](packages/hashtree-collection/README.md) | Publisher-owned records and derived indexes |
 | [@hashtree/nostr](packages/hashtree-nostr/README.md) | Live mutable roots and indexed Nostr event collections |
 | [@hashtree/nostr-pubsub](packages/hashtree-nostr-pubsub/README.md) | Reading replicated Nostr events from blob stores |
-| [@hashtree/mesh](packages/hashtree-mesh/src/index.ts) | Adaptive, hash-verified reads across storage/network routes |
+| [@hashtree/mesh](packages/hashtree-mesh/README.md) | Adaptive, hash-verified reads across storage/network routes |
 | [@hashtree/fips-transport](packages/hashtree-fips-transport/README.md) | Reliable peer-to-peer blob transport |
 | [@hashtree/worker](packages/hashtree-worker/README.md) | Web Workers and apps that run in browsers and Iris shells |
 | [@hashtree/git](packages/hashtree-git/README.md) | Git/htree URL and interoperability helpers |
@@ -94,8 +94,9 @@ newly available blocks. Implement the interface to add a storage backend.
 `BlossomStore` handles remote blob storage and accepts a signer for writes;
 `DexieStore` provides local browser persistence.
 
-For adaptive network reads, use `StoreBlobRoute` and `BlobRouter` from
-`@hashtree/mesh`. Writes target the app-selected store. Routes return verified
+For adaptive network reads, wrap stores with `StoreBlobRoute` from `@hashtree/core`
+and combine them with `BlobRouter` from `@hashtree/mesh` (see the
+[routing example](packages/hashtree-mesh/README.md)). Writes target the app-selected store. Routes return verified
 bytes or an explicit miss; timeout, cancellation, corruption, and transport
 failures remain errors. `FallbackStore` is a simpler best-effort cache adapter;
 its `null` result must not be treated as proof of network-wide absence.

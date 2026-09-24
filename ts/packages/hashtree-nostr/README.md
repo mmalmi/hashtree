@@ -1,184 +1,136 @@
 # @hashtree/nostr
 
-Nostr ref resolving, replaceable publish helpers, signed root snapshots, and
-event collections for hashtree.
-
-For app-builder guidance and common pitfalls, see [../../GETTING_STARTED.md](../../GETTING_STARTED.md).
-
-## Install
+Publish and follow mutable roots, store indexed Nostr events, and capture signed
+root snapshots. Blob storage/transport is separate; Nostr carries the pointer.
 
 ```bash
-npm install @hashtree/nostr
+npm install @hashtree/core @hashtree/nostr nostr-tools
 ```
 
-## Nostr Event Collections
+[Quickstart](https://github.com/mmalmi/hashtree/blob/master/ts/GETTING_STARTED.md) · [API reference](https://github.com/mmalmi/hashtree/blob/master/ts/API.md)
 
-Use `NostrEventStore` when your app wants a hashtree-native Nostr event collection instead of inventing its own query API.
+## Publish and follow a root
+
+This integration function uses `nostr-tools`' `SimplePool`. Supply your relay
+URLs, tree name, signer's hex pubkey, signing callback, an already-uploaded root,
+and a UI update callback. The signer may be a wallet; NDK is optional.
+
+```typescript
+import { type CID } from '@hashtree/core';
+import { createNostrRefResolver } from '@hashtree/nostr';
+import { SimplePool, nip19, type Event, type EventTemplate } from 'nostr-tools';
+
+export async function publishAndFollowRoot(
+  relays: string[],
+  treeName: string,
+  pubkey: string,
+  signEvent: (template: EventTemplate) => Promise<Event>,
+  root: CID,
+  onRoot: (root: CID | null) => void,
+): Promise<() => void> {
+  const pool = new SimplePool({ enableReconnect: true });
+  const resolver = createNostrRefResolver({
+    nip19,
+    getPubkey: () => pubkey,
+    subscribe: (filter, onEvent) => {
+      const subscription = pool.subscribeMany(relays, { ...filter }, { onevent: onEvent });
+      return () => subscription.close();
+    },
+    publish: async (template) => {
+      const signed = await signEvent({
+        ...template,
+        created_at: template.created_at ?? Math.floor(Date.now() / 1000),
+      });
+      await Promise.any(pool.publish(relays, signed)); // At least one relay accepted it.
+      return true;
+    },
+  });
+  const key = `${nip19.npubEncode(pubkey)}/${treeName}`;
+  const unsubscribe = resolver.subscribe(key, onRoot);
+  const close = () => { unsubscribe(); resolver.stop?.(); pool.destroy(); };
+  try {
+    const result = await resolver.publish!(key, root, { visibility: 'public' });
+    if (!result.success) throw new Error('Root publication failed');
+    return close; // Call when the view/app no longer follows this tree.
+  } catch (error) {
+    close();
+    throw error;
+  }
+}
+```
+
+For a read-only view, create the same resolver and call `subscribe()` with the
+publisher's `npub/treeName`; omit the publish call. `getPubkey` may return `null`
+and `publish` may be `async () => false` when your adapter cannot write. Keep
+subscriptions open after EOSE and during quiet periods; absence of an event is
+not a missing tree. Handle fetch failures in async UI callbacks yourself.
+`resolve(key)` is a one-shot lookup that can wait indefinitely; use a subscription
+with explicit cleanup for cancellable/live views.
+
+Upload **all blocks first**, then publish the root. The resolver updates its local
+cache optimistically; an `onRoot` callback is not proof of relay acceptance.
+Catch rejected signing/publishing requests and check `result.success`.
+Relay acceptance is also not evidence that the root's blobs are available.
+
+## Names and visibility
+
+The resolver key is `npub/treeName`; everything after the first slash belongs to
+the tree name. To read a file, first resolve that exact root name and then call
+`HashTree.resolvePath(root, 'path/to/file')` with the separate file path.
+
+New roots use kind **30064**, tags `d` (tree name), `l=hashtree`, and `hash`.
+Readers also accept legacy kind **30078**. Visibility controls key disclosure:
+
+| Visibility | Key handling |
+| --- | --- |
+| `public` (default) | Publishes the content key in a `key` tag; anyone can decrypt retrieved blocks |
+| `link-visible` | Publishes `encryptedKey` / `keyId`; keep the returned `result.linkKey` in the secret share URL |
+| `private` | Requires `visibility.encrypt` / `decrypt` callbacks for NIP-44 self-encryption |
+
+For link-visible readers, supply `visibility.getLinkKey`; supply NIP-44 callbacks
+to let the owner recover keys too. Visibility options need an encrypted root
+CID. Changing visibility cannot revoke keys or old roots already shared.
+For direct signed replaceable-event publishing, `createReplaceablePublishQueue()`
+coalesces bursts per coordinate; see its API before building your own queue.
+
+## Store and query events
+
+This standalone example creates a temporary signing identity for local demo data.
+Apps should use their existing signer and validate incoming event signatures.
 
 ```typescript
 import { MemoryStore } from '@hashtree/core';
 import { NostrEventStore } from '@hashtree/nostr';
+import { generateSecretKey, finalizeEvent } from 'nostr-tools';
 
-const store = new MemoryStore();
-const events = new NostrEventStore(store);
-
-const profileNotes = await events.query(rootCid, {
-  authors: pubkey,
-  kinds: [1],
-}, { limit: 50 });
-
-for await (const event of events.streamQuery(rootCid, {
-  authors: pubkey,
-  tags: { t: 'hashtree' },
-})) {
-  console.log(event.id, event.content);
+const event = finalizeEvent({
+  kind: 1, created_at: 1, tags: [['t', 'hashtree']], content: 'Hello from Nostr',
+}, generateSecretKey());
+const events = new NostrEventStore(new MemoryStore());
+const root = await events.add(null, event);
+const found = await events.query(root, { authors: event.pubkey, kinds: [1] }, { limit: 50 });
+console.log(found[0]?.content); // Hello from Nostr
+for await (const note of events.streamQuery(root, { tags: { t: 'hashtree' } })) {
+  console.log(note.content); // Hello from Nostr
 }
 ```
 
-`query()` and `streamQuery()` choose the best published index they can (`by-author`, `by-author-kind`, `by-kind`, `by-tag`, or recent) so app code does not need to hand-roll index selection.
+Retain the root returned by `add()` / `build()`. `query()` and `streamQuery()`
+select the available author/kind/tag/time index. Pass `{ strict: true }` to reject
+missing/unreadable selected event blobs instead of skipping them.
 
-## P2P Transport
+## Signed snapshots
 
-P2P blob fetching is provided by `@hashtree/fips-transport`. FIPS owns peer
-discovery, signaling, and FIPS WebRTC/UDP links; Hashtree carries verified mesh
-blob frames over the FIPS node endpoint.
+`storeTreeEventSnapshot(tree, nip19, signedRootEvent)` stores an immutable signed
+root event and returns its `snapshotCid`, `snapshotNhash`, and `rootCid` (or `null`
+for an unsuitable event). `readTreeEventSnapshot()` restores it;
+`buildTreeEventSnapshotPermalink({ snapshotNhash, path, linkKey })` makes a route.
+The snapshot does not copy the root's file blocks. Preserve/upload those too.
 
-## Nostr Ref Resolver
-
-Resolve `npub/treename` references to merkle root hashes via Nostr events.
-
-### Event Format
-
-Trees are published as **kind 30064** (parameterized replaceable with label). Readers also accept legacy **kind 30078** roots for compatibility:
-
-```
-npub1abc.../treename/path/to/file.ext
-      │        │           │
-      │        │           └── Path within merkle tree (client-side traversal)
-      │        └── d-tag value (tree identifier)
-      └── Author pubkey (bech32 → hex for event)
-```
-
-**Tags:**
-| Tag | Purpose |
-|-----|---------|
-| `d` | Tree name (replaceable event key) |
-| `l` | `"hashtree"` label for discovery |
-| `hash` | Merkle root SHA256 (64 hex chars) |
-| `key` | Decryption key (public trees) |
-| `encryptedKey` | XOR'd key (link-visible trees) |
-| `selfEncryptedKey` | NIP-44 encrypted (private/link-visible) |
-
-**Visibility:**
-- **Public**: plaintext `key` tag
-- **Link-visible**: `encryptedKey` + link key in share URL
-- **Private**: only `selfEncryptedKey` (owner access)
-
-### Usage
-
-```typescript
-import { createNostrRefResolver } from '@hashtree/nostr';
-
-const resolver = createNostrRefResolver({
-  subscribe: (filters, onEvent) => { /* your relay client subscribe callback */ },
-  publish: (event) => { /* your relay client publish callback */ },
-});
-
-const root = await resolver.resolve('npub1.../myfiles');
-```
-
-The resolver does not require NDK. Any raw relay client is fine as long as it can subscribe and publish signed events.
-
-### Coalescing Replaceable Publishes
-
-When app code signs replaceable events directly, publishing several updates inside one second can leave relays choosing by event id instead of the last UI state. `createReplaceablePublishQueue()` avoids app-side future timestamps by serializing publishes per replaceable coordinate and only sending the latest queued update in a one-second window.
-
-```typescript
-import {
-  createReplaceablePublishQueue,
-  HASHTREE_ROOT_KIND,
-  replaceableEventCoordinateFromTemplate,
-} from '@hashtree/nostr';
-
-const publishQueue = createReplaceablePublishQueue();
-
-await publishQueue.publish({
-  coordinate: replaceableEventCoordinateFromTemplate(pubkey, {
-    kind: HASHTREE_ROOT_KIND,
-    tags: [['d', treeName]],
-  }),
-  publish: async (createdAt) => {
-    const signed = await signEvent({
-      kind: HASHTREE_ROOT_KIND,
-      created_at: createdAt,
-      tags: [['d', treeName], ['hash', rootHash]],
-      content: '',
-    });
-    return publishSignedEvent(signed);
-  },
-});
-```
-
-## Signed Tree Snapshots
-
-For immutable permalinks, store a copy of the signed root event as a plain hashtree blob. The snapshot gives you one signed root even when relays do not answer, and you can still watch for newer events later.
-
-For live mutable app data, prefer resolving the current root from relays first. Snapshots are for permalinks, offline reuse, and signed historical captures, not for replacing a live source lookup.
-
-```typescript
-import {
-  storeTreeEventSnapshot,
-  readTreeEventSnapshot,
-  fetchLatestTreeEventSnapshot,
-  watchLatestTreeEventSnapshot,
-} from '@hashtree/nostr';
-import { HashTree } from '@hashtree/core';
-
-const hashTree = new HashTree({ store });
-
-const snapshot = await storeTreeEventSnapshot(hashTree, nip19, signedRootEvent);
-const sameSnapshot = snapshot
-  ? await readTreeEventSnapshot(hashTree, nip19, snapshot.snapshotCid)
-  : null;
-
-const latest = await fetchLatestTreeEventSnapshot(
-  { snapshotTarget: hashTree, nip19, fetchEvents },
-  'npub1...owner',
-  'videos/demo',
-);
-
-const stop = watchLatestTreeEventSnapshot(
-  { snapshotTarget: hashTree, nip19, fetchEvents, subscribeEvents },
-  'npub1...owner',
-  'videos/demo',
-  (nextSnapshot) => {
-    console.log(nextSnapshot.snapshotNhash, nextSnapshot.rootCid);
-  },
-);
-
-// later
-stop();
-```
-
-The library does not keep a global snapshot cache for you. It provides stateless helpers plus a live watcher; route caching and reuse policy stay with the app. Pass a `HashTree` when you already have one controlling write policy, or a raw `Store` when the default wrapper is enough.
-
-Snapshot routes use the signed snapshot blob `nhash` plus a path and optional link key:
-
-```typescript
-import {
-  buildTreeEventSnapshotPermalink,
-  parseTreeEventSnapshotPermalink,
-} from '@hashtree/nostr';
-
-const href = buildTreeEventSnapshotPermalink({
-  snapshotNhash: snapshot.snapshotNhash,
-  path: ['index.html'],
-  linkKey: 'abcd...optional 64-hex link key',
-});
-// nhash1.../index.html?snapshot=1&k=...
-
-const parsed = parseTreeEventSnapshotPermalink(`htree://${href}`);
-```
+Use snapshots for permalinks, history, or offline reuse. For live state, keep a
+root subscription open. `watchLatestTreeEventSnapshot()` combines relay discovery
+with snapshot storage and returns a cleanup function; the app owns cache policy.
+Peer blob fetching uses [FIPS transport](https://github.com/mmalmi/hashtree/blob/master/ts/packages/hashtree-fips-transport/README.md).
 
 ## License
 

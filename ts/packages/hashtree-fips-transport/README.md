@@ -36,6 +36,10 @@ fips-overlay-v1
 The adapter exposes one transport: `TcpBlobTransport`. It uses `@fips/tcp`
 service 39018 and verifies each blob hash before returning or caching data:
 
+The following integration snippet assumes `fipsNode` is an already-running
+`FipsDatagramEndpoint` and `peerId` is the remote FIPS identity. For browser apps,
+the managed provider below creates the node and discovery connection for you.
+
 ```ts
 import { MemoryStore, sha256 } from '@hashtree/core';
 import {
@@ -73,6 +77,14 @@ workerClient.setP2PProvider(provider);
 // Shut down the provider before discarding the worker client.
 await provider.stop();
 ```
+
+Here `deviceSecretKey` is a persistent 32-byte device secret (bytes or hex),
+`relays` is your relay URL list, `localStore` is the block cache, and `workerClient`
+is an initialized [Hashtree worker client](https://github.com/mmalmi/hashtree/blob/master/ts/packages/hashtree-worker/README.md).
+Keep the device secret private. Provider creation establishes discovery, not a
+guarantee that a peer with a particular blob is online; handle misses, failures,
+and reconnection in the app. Serving peers receive raw stored blobs; do not
+serve decrypted files through the blob interface.
 
 The discovery scope is configurable for isolated deployments, but applications
 should normally stay on `fips-overlay-v1` so they share the generic FIPS transit

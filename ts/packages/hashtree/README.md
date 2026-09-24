@@ -16,17 +16,18 @@ for optional packages and immutable release archives.
 ## Usage
 
 ```typescript
-import { HashTree, MemoryStore, toHex } from '@hashtree/core';
+import { HashTree, MemoryStore } from '@hashtree/core';
 
 const store = new MemoryStore();
 const tree = new HashTree({ store });
 
 // Store a file
 const { cid } = await tree.putFile(new TextEncoder().encode('Hello'));
-console.log(toHex(cid.hash));
 
 // Read it back
 const data = await tree.readFile(cid);
+if (!data) throw new Error('File is unavailable');
+console.log(new TextDecoder().decode(data)); // Hello
 ```
 
 Keep the whole CID: encrypted files need `cid.key` as well as `cid.hash`.
@@ -66,7 +67,54 @@ old roots readable. See the [tested guide](https://github.com/mmalmi/hashtree/bl
 - `BlossomStore` - Remote Blossom server
 - `FallbackStore` - Chain multiple stores
 
-See [@hashtree/dexie](https://npmjs.com/package/@hashtree/dexie) for IndexedDB and [@hashtree/fips-transport](https://npmjs.com/package/@hashtree/fips-transport) for P2P blob transport.
+See [Dexie](https://github.com/mmalmi/hashtree/blob/master/ts/packages/hashtree-dexie/README.md) for IndexedDB and
+[FIPS transport](https://github.com/mmalmi/hashtree/blob/master/ts/packages/hashtree-fips-transport/README.md) for peer blob transport.
+
+## Remote storage with Blossom
+
+Supply a server that accepts uploads and a Nostr signer (for example, your
+wallet's `signEvent` callback). This function writes directly to that server and
+returns a portable identifier. Plain server URL strings configure **reads only**;
+uploads need `write: true`. Browsers also need the server to allow CORS.
+
+```typescript
+import { BlossomStore, HashTree, nhashEncode, nhashDecode, type BlossomSigner } from '@hashtree/core';
+
+export async function uploadFile(url: string, signer: BlossomSigner, data: Uint8Array) {
+  const store = new BlossomStore({
+    servers: [{ url, read: true, write: true }],
+    signer,
+    getTimeoutMs: 10_000,
+    putTimeoutMs: 30_000,
+  });
+  const { cid } = await new HashTree({ store }).putFile(data);
+  return nhashEncode(cid);
+}
+
+// A separate client needs only a read endpoint and the complete identifier.
+export async function downloadFile(url: string, identifier: string, maxBytes = 8 * 1024 * 1024) {
+  const tree = new HashTree({
+    store: new BlossomStore({ servers: [url], getTimeoutMs: 10_000 }),
+  });
+  const bytes = await tree.readFile(nhashDecode(identifier), { maxBytes });
+  if (!bytes) throw new Error('File is unavailable');
+  return bytes;
+}
+```
+
+Await `uploadFile()` and verify a fresh-client read before announcing the root.
+The signer signs upload authorization, never the plaintext file; storage receives
+encrypted blocks. Nostr root publication is a separate operation. With multiple
+write servers, a successful upload does not promise a copy on every server;
+monitor `onUploadProgress` if your app requires a replication policy.
+
+To copy an existing local file or directory, iterate `localTree.walkBlocks(cid)`
+and await `remoteStore.put(block.hash, block.data)` for every block. Transfer the
+whole reachable tree, not just the root block. `Store.put()`'s boolean describes
+whether bytes were newly added; it is not a durability receipt. Always handle
+errors and verify the read path. A `404` can yield `null`; timeouts and server
+errors can reject. Servers see blob hashes and sizes, not logical filenames or
+decryption keys unless your app separately discloses them.
 
 ## License
 

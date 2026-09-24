@@ -1,192 +1,105 @@
 # @hashtree/collection
 
-Immutable content-addressed collections for hashtree.
-
-For app-builder guidance and common pitfalls, see [../../GETTING_STARTED.md](../../GETTING_STARTED.md).
-
-This package adds a small layer on top of `@hashtree/index`:
-
-- canonical `byId` roots
-- auto-updated key indexes
-- auto-updated search indexes
-- optional schema defaults, normalization, and migration hooks
-- published source manifests
-- federated search across many source manifests
-
-It is meant for decentralized app data such as personal catalogs, followed-user datasets, local merged views, and broader platform-style apps where many publishers own their own records.
-
-## Design
-
-This package is intended for decentralized data, so it does **not** assume one rigid global schema.
-
-The intended model is:
-
-- each publisher owns their own source
-- canonical data is source-owned and content-addressed
-- indexes are derived projections
-- federated search is multi-query over many sources
-- local schema rules are allowed, but global schema lockstep is not required
-
-In practice, that means a collection source should be thought of as:
-
-- raw item blobs
-- a canonical `byId` root
-- derived key/search indexes
-- a manifest that advertises those roots
-
-The current package focuses on the index and manifest layer. It does not try to be a full database.
-
-## Platform Apps
-
-This package is intended to be the generic data/index layer for apps that used to default to centralized "platform" backends.
-
-Examples:
-
-- marketplace listings
-- room or apartment inventories
-- ride availability and dispatch inputs
-- booking slots and service catalogs
-- jobs, offers, menus, and local reputation projections
-
-The decentralized pattern is:
-
-- each participant publishes their own source
-- canonical state stays source-owned
-- browse/search/trust are local derived views
-- federated query replaces the one global SQL table
-
-## Raw Data vs Projections
-
-For decentralized systems, the safest long-term split is:
-
-- raw item format:
-  publisher-defined and potentially app-specific
-- projection/index format:
-  small normalized fields used for search, browse, ranking, and lightweight display
-
-That split matters because clients may not understand every publisher's raw format, but they can still query published projections and indexes.
-
-This package currently gives you the projection/index side:
-
-- canonical `byId`
-- named key indexes
-- named search indexes
-- source manifests
-- federated search helpers
-
-It is compatible with a future codec/projection layer, where a source can declare an item format and clients can optionally decode richer item payloads when they know that format.
-
-## Published Metadata
-
-When a collection root is published as a hashtree directory, reserve
-`.collection-manifest.json` for collection-level metadata that peers can inspect
-without any local runtime hooks.
-
-Today that metadata is intentionally small:
-
-- `schemaVersion`
-- `publishedSchema.itemFormat`
-- `publishedSchema.projectionFormat`
-- optional `publishedSchema.schemaRef`
-
-The JSON shape is the same in TypeScript and Rust. Index names are expected to
-be meaningful enough on their own, so there is no extra per-index description
-layer by default.
-
-## Schema
-
-`CollectionDefinition.schema` is intentionally a **local convenience**, not a universal contract.
-
-Use it for:
-
-- filling defaults
-- normalization before indexing
-- validation for your own writes
-- migrating known legacy item shapes
-
-Do **not** assume every remote source on the network shares the same schema or predictable migration chain.
-
-For that reason, schema support in this package is intentionally small:
-
-- `defaults`
-- `normalize`
-- `validate`
-- `migrate`
-
-If a decentralized source uses an unknown raw item format, the source can still participate in federated search as long as it publishes compatible derived indexes.
-
-## Federated Query Model
-
-The intended default is:
-
-- query many source manifests in parallel
-- merge results locally
-- dedupe by logical id
-- optionally boost by trust or social distance
-
-This is usually better than physically merging everyone into one canonical shared mutable index.
-
-Physical merge can still be useful as a local cache or overlay, but correctness should come from source snapshots, not from endlessly accumulating merged roots.
-
-## Install
+Publisher-owned records with stable IDs, key indexes, and text search. Use this
+for app data; use `@hashtree/index` directly only when you need custom indexes.
 
 ```bash
-npm install @hashtree/collection
+npm install @hashtree/core @hashtree/collection
 ```
 
-## Usage
+[Quickstart](https://github.com/mmalmi/hashtree/blob/master/ts/GETTING_STARTED.md) · [API reference](https://github.com/mmalmi/hashtree/blob/master/ts/API.md)
+
+## Write, save, reopen, and update
+
+A writer indexes CIDs; your app encodes and stores the original records. Each
+manifest is an immutable snapshot of the index roots, serializable as JSON.
+This example uses memory; use a persistent or remote `Store` in an app.
 
 ```typescript
-import { MemoryStore } from '@hashtree/core';
-import { CollectionWriter, CollectionSource, federatedSearch } from '@hashtree/collection';
+import { HashTree, MemoryStore } from '@hashtree/core';
+import {
+  CollectionWriter, CollectionSource,
+  type CollectionDefinition, type CollectionManifest,
+} from '@hashtree/collection';
 
+type Book = { id: string; title: string };
+const definition: CollectionDefinition<Book> = {
+  sourceId: 'my-books',
+  getId: (book) => book.id,
+  searchIndexes: [{ name: 'title', text: (book) => book.title }],
+};
 const store = new MemoryStore();
+const tree = new HashTree({ store });
+const encode = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
+const writer = new CollectionWriter(store, definition);
+const original: Book = { id: 'book-1', title: 'Growing a garden' };
+const record = await tree.putFile(encode(original));
+await writer.put(original, record.cid);
 
-const songs = new CollectionWriter(store, {
-  sourceId: 'npub1.../audio',
-  schema: {
-    version: 2,
-    defaults: { tags: [] },
-    normalize: (song) => ({
-      ...song,
-      title: song.title.trim(),
-    }),
-  },
-  getId: (song) => song.id,
-  keyIndexes: [
-    { name: 'artist', keys: (song) => [`artist:${song.artist.toLowerCase()}`] },
-  ],
-  searchIndexes: [
-    { name: 'songs', prefix: 's:', text: (song) => [song.title, song.artist] },
-  ],
-});
+// Persist this complete manifest and retain its file CID (including the key).
+const saved = await tree.putFile(encode(writer.manifest()));
+const bytes = await tree.readFile(saved.cid);
+if (!bytes) throw new Error('Manifest is unavailable');
+const manifest: CollectionManifest = JSON.parse(new TextDecoder().decode(bytes));
+const before = new CollectionSource(store, manifest, definition);
+const reopened = new CollectionWriter(store, definition, manifest);
 
-await songs.put({ id: 'song-1', title: 'Starlight Echo', artist: 'Ada' }, someCid);
+const previousCid = await before.get('book-1');
+if (!previousCid) throw new Error('Record is missing');
+const previousBytes = await tree.readFile(previousCid);
+if (!previousBytes) throw new Error('Record is unavailable');
+const previous: Book = JSON.parse(new TextDecoder().decode(previousBytes));
+const updated: Book = { ...previous, title: 'Orchard handbook' };
+const replacement = await tree.putFile(encode(updated));
+await reopened.replace(updated, replacement.cid, previous);
 
-const source = new CollectionSource(store, songs.manifest());
-const results = await source.search('songs', 'starlight');
+const after = new CollectionSource(store, reopened.manifest(), definition);
+console.log((await before.search('title', 'garden')).length); // 1: old snapshot
+console.log((await after.search('title', 'garden')).length);  // 0: stale term removed
+console.log((await after.search('title', 'orchard')).length); // 1
+await reopened.delete(updated);
+console.log(await new CollectionSource(store, reopened.manifest()).count()); // 0
 ```
 
-## Notes
+Save the new `writer.manifest()` after each committed change and construct a new
+`CollectionSource` to read it. Serialize writes to a given writer. Independent
+writers starting from one manifest produce branches; your app must choose or
+merge them before announcing a new root.
 
-- `put(item, cid)` is safe for inserts and by-id-only collections.
-- `put(...)` requires `options.previous` when replacing an existing item in a collection with key/search indexes, so the library can remove stale derived entries deterministically.
-- `replace(item, cid, previous)` is the explicit helper for indexed updates.
-- `delete(item)` requires the indexed fields of the item being removed.
-- `count()` uses the manifest's published `itemCount` when available; use `exactCount()` if you explicitly need to walk the `byId` tree.
-- `reindex(entries)` is the explicit way to rebuild all derived roots after adding indexes or changing derivation rules. It accepts sync or async entry streams, but each entry still needs the canonical item snapshot plus its CID; roots alone are not enough.
-- If query-time normalization differs from the default keyword parser, define `searchIndexes[].terms(text, { parseKeywords })`.
-- When the reader still has the collection definition, pass it to `new CollectionSource(store, manifest, definition)` so `source.search(...)` reuses the same term expansion.
-- When the reader only has the manifest, pair `searchIndexes[].terms(...)` with `CollectionSource.searchTerms(...)` and app-side query parsing so indexing and querying stay in sync.
-- Schemas are intentionally small: use `defaults`, `normalize`, `validate`, and `migrate` instead of a large schema framework.
-- Federated search is multi-query first. You do not need to physically merge roots just to search across many sources.
+## Publish a complete source
 
-## Direction
+Persist the record blocks, `byIdRoot`, all index roots, and the manifest before
+announcing its CID through a [mutable root](https://github.com/mmalmi/hashtree/blob/master/ts/packages/hashtree-nostr/README.md).
+A manifest contains hex-encoded CID strings, not native tree links:
+`walkBlocks(manifestCid)` alone does **not** copy the referenced indexes or records.
+Using the same remote store for the tree and writer sends each write to that
+store. With local storage, replicate each referenced root and its descendants
+as well as the manifest. Preserve encryption keys; sharing a manifest grants
+access to its referenced data when readers can fetch the blocks.
 
-The likely next layer on top of this package is a codec/projection model:
+A directory representation can reserve `.collection-manifest.json` for
+`collectionManifestMetadataFromManifest()` metadata (`schemaVersion` and
+`publishedSchema`). That metadata is **not** the complete collection manifest.
 
-- source declares an `itemFormat`
-- clients optionally register adapters/codecs for known formats
-- search and browse can still work from published projections even when raw items are unknown
+## Query and schema rules
 
-That keeps the network open to many app-specific formats without giving up discoverability.
+- `source.get(id)` returns a record CID; `source.search(indexName, text)` returns
+  ranked links. Fetch and decode the record separately.
+- For key indexes, define `keyIndexes: [{ name, keys: (item) => [...] }]` and use
+  `queryIndex(name, { prefix, limit })`. Include the record ID in a key when
+  multiple records share a value, e.g. `artist:ada:song-1`.
+- Indexed updates need `replace(item, cid, previous)` or
+  `put(item, cid, { previous })`; deletion needs the previous indexed fields.
+- After changing index definitions, use `reindex(entries)` with each canonical
+  item and its CID. Existing roots alone cannot reconstruct changed projections.
+- `count()` / `exactCount()` count the by-ID tree. `countReported()` reads stored
+  subtree counts and may return `null` when no count is available.
+- `schema` defaults, normalization, validation, and migrations are local write
+  rules. Encode the same normalized item you index. Validate untrusted manifest
+  and record JSON in your application; TypeScript types are not runtime checks.
+- Custom `searchIndexes[].terms` must also be used when querying: pass the
+  definition to `CollectionSource`, or use `searchTerms()` with matching terms.
+- `federatedSearch(store, [{ manifest, boost }], indexName, query)` queries source
+  snapshots and combines hits by logical ID. Choose an ID namespace intentionally;
+  unrelated records with the same ID otherwise collapse. Sources need compatible
+  indexes and query normalization, not one universal raw-record schema.

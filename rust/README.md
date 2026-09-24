@@ -2,7 +2,7 @@
 
 Rust implementation of hashtree (CLI, daemon, git remote helper, and crates).
 
-Part of the hashtree repository. See [../README.md](../README.md) for the project overview and [../ts/README.md](../ts/README.md) for the TypeScript/web app.
+Part of the hashtree repository. See [../README.md](../README.md) for the project overview and [../ts/README.md](../ts/README.md) for the TypeScript SDK.
 
 Blossom-compatible storage with chunking and directory structure. Merkle roots can be published on Nostr to get mutable `npub/path` addresses.
 
@@ -44,29 +44,9 @@ View repos at git.iris.to, for example [hashtree/rust](https://git.iris.to/#/npu
 
 ## Usage
 
-```rust
-use hashtree::{HashTree, HashTreeConfig, MemoryStore};
-use std::sync::Arc;
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MemoryStore::new());
-    let tree = HashTree::new(HashTreeConfig::new(store));
-
-    // Store content (encrypted by default)
-    let cid = tree.put(b"Hello, World!").await?;
-    // cid contains hash + encryption key
-
-    // Read it back
-    let data = tree.get(&cid).await?;
-
-    // Public (unencrypted) content
-    let tree = HashTree::new(HashTreeConfig::new(store).public());
-    let cid = tree.put(b"Public content").await?;
-
-    Ok(())
-}
-```
+For the library, add `hashtree-core` and follow its
+[runnable example and API documentation](crates/hashtree-core/README.md).
+For command-line applications, see the CLI examples below.
 
 ## Tree Nodes
 

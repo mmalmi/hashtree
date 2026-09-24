@@ -272,13 +272,16 @@ export interface PublishResult {
  * - DNS: "example.com/treename"
  * - Local: "local/mydata"
  *
- * All methods wait indefinitely until data is available - caller should apply timeout if needed.
+ * Resolution and subscription lifetimes depend on the backend. Keep live
+ * subscriptions open until the caller explicitly unsubscribes.
  */
 export interface RefResolver {
   /**
    * Resolve a key to its current CID.
-   * Waits indefinitely until found - caller should apply timeout if needed.
-   * @returns CID (never null - waits until found)
+   * Some backends wait until data arrives. Use a subscription with explicit
+   * cleanup when the caller needs cancellation.
+   * @returns Current CID, or null when the backend rejects the key or has no result.
+   * A Nostr lookup with a valid key can wait indefinitely for a matching event.
    */
   resolve(key: string): Promise<CID | null>;
 

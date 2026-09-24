@@ -11,6 +11,15 @@ This is the core library that implements the merkle tree structure used by hasht
 
 ## Usage
 
+In a Rust application:
+
+```bash
+cargo add hashtree-core
+cargo add tokio --features macros,rt-multi-thread
+```
+
+Save this as `src/main.rs` and run `cargo run`:
+
 ```rust
 use hashtree_core::{HashTree, HashTreeConfig, store::MemoryStore};
 use std::sync::Arc;
@@ -21,14 +30,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let tree = HashTree::new(HashTreeConfig::new(store));
 
     // Store content (encrypted by default)
-    let cid = tree.put(b"Hello, World!").await?;
+    let (cid, _size) = tree.put(b"Hello, World!").await?;
 
     // Read it back
     let data = tree.get(&cid, None).await?;
+    let data = data.ok_or("File is unavailable")?;
+    println!("{}", String::from_utf8(data)?);
 
     Ok(())
 }
 ```
+
+Keep the complete `Cid` (hash and encryption key). `MemoryStore` lasts only for
+this process; readers need the same blocks and the key. For plaintext storage,
+construct the tree with `HashTreeConfig::new(store).public()` instead. Immutable
+edits return a new root; retain that root to read the updated tree.
+
+The complete API is generated from Rust signatures and examples. From `rust/`,
+run `cargo doc -p hashtree-core --no-deps --open`. See also the
+[TypeScript guide](../../../ts/GETTING_STARTED.md) for the shared data model and
+the [wire protocol](../../../docs/HTS-01.md) for interoperability.
 
 ## Tree Nodes
 
