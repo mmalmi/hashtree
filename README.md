@@ -1,8 +1,8 @@
 # hashtree
 
-Content-addressed storage for files, apps, and Git. Data is chunked and encrypted
-by default, fetched from Blossom servers or peers, and published under immutable
-hashes or mutable Nostr names.
+Content-addressed storage for files, apps, and Git, implemented in Rust and
+TypeScript. Data is chunked and encrypted by default, fetched from Blossom
+servers or peers, and published under immutable hashes or mutable Nostr names.
 
 [Hashtree source](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree) · [GitHub](https://github.com/mmalmi/hashtree)
 
@@ -25,13 +25,14 @@ if (bytes) console.log(new TextDecoder().decode(bytes));
 
 [Quickstart](ts/GETTING_STARTED.md) · [SDK packages](ts/README.md) · [API reference](ts/API.md)
 
-## CLI and Git
+## Rust library and CLI
 
 ```bash
-cargo install hashtree-cli git-remote-htree
+cargo add hashtree-core                       # Library for a Rust project
+cargo install hashtree-cli git-remote-htree    # CLI and Git helper
 ```
 
-[Downloads, Homebrew, and other installation options](rust/README.md#installation) · [CLI guide](rust/README.md)
+[Library example and API](rust/crates/hashtree-core/README.md) · [CLI guide](rust/README.md) · [Downloads and installation options](rust/README.md#installation)
 
 ## Documentation
 
