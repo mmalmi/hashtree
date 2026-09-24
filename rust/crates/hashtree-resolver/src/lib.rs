@@ -1,37 +1,11 @@
-//! Root resolver for hashtree - maps human-readable keys to merkle root hashes
+//! Mutable names for immutable Hashtree content identifiers.
 //!
-//! This crate provides the `RootResolver` trait and implementations for different
-//! backends (Nostr, DNS, HTTP, local storage, etc.)
+//! The [`RootResolver`] trait supports one-shot lookups, open subscriptions, and
+//! publishing. Enable the `nostr` feature for the Nostr implementation and its
+//! installation, resolution, and publishing guide in the `nostr` module.
 //!
-//! # Overview
-//!
-//! A root resolver maps mutable human-readable keys to immutable content-addressed
-//! merkle root hashes. This allows updating what content a key points to while
-//! keeping the underlying data immutable.
-//!
-//! Key format is implementation-specific:
-//! - Nostr: "npub1.../treename"
-//! - DNS: "example.com/treename"
-//! - Local: "local/mydata"
-//!
-//! # Example
-//!
-//! ```rust,ignore
-//! use hashtree_resolver::{RootResolver, ResolverEntry};
-//!
-//! async fn example(resolver: impl RootResolver) {
-//!     // One-shot resolve
-//!     if let Some(cid) = resolver.resolve("npub1.../mydata").await.unwrap() {
-//!         println!("Found cid: {}", cid);
-//!     }
-//!
-//!     // Subscribe to updates (returns a channel receiver)
-//!     let mut rx = resolver.subscribe("npub1.../mydata").await.unwrap();
-//!     while let Some(cid) = rx.recv().await {
-//!         println!("Updated cid: {:?}", cid);
-//!     }
-//! }
-//! ```
+//! A lookup that returns `None` is not proof of absence on a network. Live apps
+//! should keep subscriptions open and call [`RootResolver::stop`] on shutdown.
 
 mod traits;
 

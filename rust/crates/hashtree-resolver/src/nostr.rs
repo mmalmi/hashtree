@@ -1,17 +1,4 @@
-//! Nostr-based root resolver
-//!
-//! Maps npub/treename keys to content identifiers (Cid) using Nostr events.
-//!
-//! Key format: "npub1.../treename"
-//!
-//! Uses kind 30064 hashtree root events with legacy kind 30078 read compatibility:
-//! - d-tag: tree name (NIP-33 replaceable)
-//! - l-tag: "hashtree" (for filtering)
-//! - hash-tag: content hash (always present)
-//! - key-tag: CHK decryption key (public)
-//! - encryptedKey-tag: XOR-masked key (link-visible)
-//! - selfEncryptedKey-tag: NIP-44 key encrypted to self (private)
-//! - encrypted_key-tag: legacy AES-GCM shared key (backwards compat)
+#![doc = include_str!("../README.md")]
 
 use crate::{ResolverEntry, ResolverError, RootResolver};
 use async_trait::async_trait;

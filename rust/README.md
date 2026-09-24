@@ -110,7 +110,9 @@ View repos at git.iris.to, for example [hashtree/rust](https://git.iris.to/#/npu
 ## Usage
 
 For the library, add `hashtree-core` and follow its
-[runnable example and API documentation](crates/hashtree-core/README.md).
+[guide](crates/hashtree-core/README.md) for files, directories, streaming, and storage.
+The [published Rust API](https://docs.rs/hashtree-core/latest/hashtree_core/) is
+searchable by type or method; choose the version matching your `Cargo.lock`.
 For command-line applications, see the CLI examples below.
 
 ## Tree Nodes
@@ -349,6 +351,8 @@ Run these commands from `rust/`:
 ../scripts/release-gate.sh --fast # Compile Rust tests; run the faster checks
 cargo nextest run --workspace  # Run Rust tests with bounded parallelism
 cargo test -p hashtree-core    # Run core crate tests
+cargo test --locked -p hashtree-core -p hashtree-lmdb -p hashtree-blossom -p hashtree-resolver --features hashtree-resolver/nostr --doc
+cargo doc --locked -p hashtree-core -p hashtree-lmdb -p hashtree-blossom -p hashtree-resolver --features hashtree-resolver/nostr --no-deps --open
 cargo bench -p hashtree-core   # Run core benchmarks
 ```
 

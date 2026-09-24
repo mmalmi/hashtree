@@ -33,13 +33,12 @@ pub struct ResolverEntry {
 
 /// RootResolver - Maps human-readable keys to content identifiers (Cid)
 ///
-/// This abstraction allows different backends (Nostr, DNS, HTTP, local storage)
-/// to provide mutable pointers to immutable content-addressed data.
+/// Implement this trait to provide mutable pointers to immutable
+/// content-addressed data. The optional `nostr` feature supplies a Nostr backend.
 ///
 /// The Cid contains:
 /// - hash: content hash (always present)
 /// - key: optional decryption key (for CHK encrypted content)
-/// - size: content size
 ///
 /// Unlike the TypeScript version which uses callbacks, this Rust version uses
 /// channels which are more idiomatic for async Rust.
@@ -47,8 +46,8 @@ pub struct ResolverEntry {
 pub trait RootResolver: Send + Sync {
     /// Resolve a key to its current Cid (one-shot)
     ///
-    /// Returns None if the key doesn't exist or can't be resolved.
-    /// For shared content, pass the share_secret to decrypt the encrypted_key.
+    /// Returns `None` if no usable root was found in this lookup. This is not
+    /// proof of absence on a network. For shared content, use `resolve_shared`.
     async fn resolve(&self, key: &str) -> Result<Option<Cid>, ResolverError>;
 
     /// Resolve with a share secret (for encrypted_key decryption)

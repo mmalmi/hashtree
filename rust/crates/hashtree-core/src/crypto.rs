@@ -123,7 +123,7 @@ pub fn decrypt_chk(ciphertext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, Cr
 
 /// Encrypt with a provided key (non-CHK, random nonce)
 ///
-/// Returns: [12-byte nonce][ciphertext][16-byte auth tag]
+/// Returns: `[12-byte nonce][ciphertext][16-byte auth tag]`
 pub fn encrypt(plaintext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, CryptoError> {
     let cipher =
         Aes256Gcm::new_from_slice(key).map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
@@ -145,7 +145,7 @@ pub fn encrypt(plaintext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, CryptoE
 
 /// Decrypt with a provided key (non-CHK)
 ///
-/// Input: [12-byte nonce][ciphertext][auth tag]
+/// Input: `[12-byte nonce][ciphertext][auth tag]`
 pub fn decrypt(encrypted: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, CryptoError> {
     if encrypted.len() < NONCE_SIZE + TAG_SIZE {
         return Err(CryptoError::DataTooShort);

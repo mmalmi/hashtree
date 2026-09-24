@@ -166,8 +166,12 @@ run_rust_gate() {
         --exclude hashtree-ffi \
         --exclude hashtree-cashu-cli \
         --exclude tauri-plugin-hashtree-updater || exit $?
-      # These are the only workspace crates with executable doctests.
-      cargo test --locked -p hashtree-core -p hashtree-blossom --doc || exit $?
+      # The library READMEs are included in Rustdoc, so these exercise the guides.
+      cargo test --locked -p hashtree-core -p hashtree-lmdb -p hashtree-blossom \
+        -p hashtree-resolver --features hashtree-resolver/nostr --doc || exit $?
+      RUSTDOCFLAGS="${RUSTDOCFLAGS:+$RUSTDOCFLAGS }-D warnings" \
+        cargo doc --locked -p hashtree-core -p hashtree-lmdb -p hashtree-blossom \
+          -p hashtree-resolver --features hashtree-resolver/nostr --no-deps || exit $?
     fi
   )
 }

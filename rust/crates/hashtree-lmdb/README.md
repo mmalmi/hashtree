@@ -4,21 +4,49 @@ LMDB-backed content-addressed blob storage for hashtree.
 
 High-performance storage backend using LMDB (Lightning Memory-Mapped Database) for fast key-value storage.
 
-## Usage
+[Published API](https://docs.rs/hashtree-lmdb/latest/hashtree_lmdb/) · [Core guide](https://github.com/mmalmi/hashtree/blob/master/rust/crates/hashtree-core/README.md)
+
+## Write and reopen a file
+
+```bash
+cargo add hashtree-core hashtree-lmdb tempfile
+cargo add tokio --features macros,rt-multi-thread
+```
+
+This runnable example uses a temporary directory, deleted on exit. In an app,
+use your persistent data directory and keep the root metadata there too.
 
 ```rust
-use hashtree_core::Store;
-use hashtree_lmdb::{compute_sha256, LmdbBlobStore};
+use hashtree_core::{Cid, HashTree, HashTreeConfig};
+use hashtree_lmdb::LmdbBlobStore;
+use std::sync::Arc;
 
-let store = LmdbBlobStore::new("/path/to/data")?;
-let data = b"immutable blob".to_vec();
-let hash = compute_sha256(&data);
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let directory = tempfile::tempdir()?;
+    let blobs = directory.path().join("blobs");
+    let root_file = directory.path().join("root.txt");
+    {
+        let store = Arc::new(LmdbBlobStore::new(&blobs)?);
+        let tree = HashTree::new(HashTreeConfig::new(store));
+        let (cid, _) = tree.put(b"Persistent data").await?;
+        std::fs::write(&root_file, cid.to_string())?;
+    } // Drop the tree and store before reopening the database.
 
-assert!(store.put(hash, data.clone()).await?);
-assert!(!store.put(hash, data.clone()).await?); // idempotent
-
-assert_eq!(store.get(&hash).await?, Some(data));
+    let store = Arc::new(LmdbBlobStore::new(&blobs)?);
+    let tree = HashTree::new(HashTreeConfig::new(store));
+    let cid = Cid::parse(&std::fs::read_to_string(root_file)?)?;
+    let bytes = tree.get(&cid, Some(1024)).await?.ok_or("File is unavailable")?;
+    assert_eq!(bytes, b"Persistent data");
+    Ok(())
+}
 ```
+
+The root file includes the decryption key: restrict access to it. In a real app,
+write new root metadata atomically after the blocks are durable, retain old roots
+as needed, and coordinate pin/eviction policy. Saving only a hash loses encrypted
+content's key. The example owns its database; shared application stores should
+use the canonical opener below.
 
 ## Multiprocess sharing
 
@@ -34,10 +62,13 @@ Processes sharing Hashtree's application store should not construct
 the same configured storage budget as the application:
 
 ```rust
-use hashtree_lmdb::open_shared_lmdb_blob_store;
-use std::sync::Arc;
+use hashtree_core::StoreError;
+use hashtree_lmdb::{open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore};
+use std::{path::Path, sync::Arc};
 
-let store = Arc::new(open_shared_lmdb_blob_store(data_dir, max_size_bytes)?);
+fn open_app_store(data_dir: &Path, max_size_bytes: u64) -> Result<Arc<ConfiguredLmdbBlobStore>, StoreError> {
+    Ok(Arc::new(open_shared_lmdb_blob_store(data_dir, max_size_bytes)?))
+}
 ```
 
 The returned `ConfiguredLmdbBlobStore` implements `Store`. A fresh shared store is

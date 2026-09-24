@@ -1,30 +1,83 @@
 # hashtree-resolver
 
-Root resolver for hashtree - maps human-readable keys to merkle root hashes.
+Resolve mutable Nostr names (`npub1…/tree-name`) to immutable Hashtree `Cid`s.
+This discovers roots; your application's store/transport must fetch their blocks.
 
-Resolves `npub/path` style addresses to merkle root hashes by querying Nostr relays.
+[Published API](https://docs.rs/hashtree-resolver/latest/hashtree_resolver/) · [Core guide](https://github.com/mmalmi/hashtree/blob/master/rust/crates/hashtree-core/README.md)
 
-## Usage
+## Install and resolve a root
 
-```rust
-use hashtree_resolver::{NostrRootResolver, NostrResolverConfig, RootResolver};
+The default crate provides the `RootResolver` trait. Enable `nostr` for the
+Nostr implementation:
 
-let config = NostrResolverConfig {
-    relays: vec!["wss://relay.damus.io".to_string()],
-    ..Default::default()
-};
-let resolver = NostrRootResolver::new(config).await?;
-
-// Resolve npub/treename to hash
-let entry = resolver.resolve("npub1.../myrepo").await?;
-println!("Root hash: {}", entry.root_hash);
+```bash
+cargo add hashtree-core
+cargo add hashtree-resolver --features nostr
+cargo add tokio --features macros,rt-multi-thread
 ```
+
+Save this as `src/main.rs`. Run `cargo run -- 'npub1…/tree-name'`, substituting
+an actual author and tree name. Select relays that carry the author's events.
+This example is compiled as a doctest; it does not run against public relays.
+
+```rust,no_run
+use hashtree_resolver::{
+    nostr::{NostrResolverConfig, NostrRootResolver},
+    RootResolver,
+};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let key = std::env::args().nth(1).ok_or("Pass npub/tree-name as an argument")?;
+    let resolver = NostrRootResolver::new(NostrResolverConfig {
+        relays: vec!["wss://relay.damus.io".to_string()],
+        ..Default::default()
+    }).await?;
+
+    // Keep listening until a usable root arrives, even if the relays are slow.
+    let result = resolver.resolve_wait(&key).await;
+    resolver.stop().await?;
+    let cid = result?;
+    println!("Resolved root hash: {}", hashtree_core::to_hex(&cid.hash));
+    // Keep the complete CID (including its key) for HashTree reads.
+    Ok(())
+}
+```
+
+`resolve_wait()` waits indefinitely; an application can cancel the future or
+apply its own deadline, then call `stop()` when finished with the resolver.
+`resolve()` instead returns `Result<Option<Cid>, ResolverError>` after a bounded
+lookup. `None` means no usable root was found in that lookup, not proof that the
+tree does not exist.
+
+For live apps, use `subscribe(key).await?` and keep receiving with `rx.recv().await`.
+Its initial `None` means no root is cached yet: keep the subscription open.
+Updates may also be `None` when an event has no usable key. Drop the receiver when
+the app no longer needs updates, and call `stop()` on application shutdown.
+
+Pass the full tree name as the resolver key; tree names may themselves contain
+slashes. Resolve paths inside the selected tree with `HashTree::resolve_path()`.
+For URL parsing, see [URL encoding](https://github.com/mmalmi/hashtree/blob/master/docs/URL-ENCODING.md).
+
+## Publishing and visibility
+
+Reading public roots needs no secret key. Set `NostrResolverConfig::secret_key`
+to the owner's persisted `Keys` to publish or read that owner's private roots.
+Upload/replicate the tree's blocks before announcing its root.
+
+- `publish(key, &cid)` exposes the CID's read key in a public event.
+- `publish_shared(key, &cid, &share_secret)` masks the key for link holders;
+  readers use `resolve_shared(key, &share_secret)`.
+- `publish_private(key, &cid)` encrypts the key to the owner.
+
+The CID and sharing secret are read capabilities. Preserve them and only share
+with intended readers. A successful root announcement does not upload blocks.
 
 ## Event Format
 
 Trees are published as **kind 30064** (parameterized replaceable with label). Readers also accept legacy **kind 30078** roots for compatibility:
 
-```
+```text
 npub1abc.../treename/path/to/file.ext
       │        │           │
       │        │           └── Path within merkle tree (client-side traversal)
@@ -47,4 +100,14 @@ npub1abc.../treename/path/to/file.ext
 - **Link-visible**: `encryptedKey` + link key in share URL
 - **Private**: only `selfEncryptedKey` (owner access)
 
-Part of [hashtree-rs](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree).
+## API and verification
+
+From `rust/`, run:
+
+```bash
+cargo test --locked -p hashtree-resolver --features nostr --doc
+cargo doc --locked -p hashtree-resolver --features nostr --no-deps --open
+```
+
+This guide is also the `nostr` module's generated documentation. The published
+API follows the selected crate release.

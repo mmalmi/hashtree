@@ -8,6 +8,9 @@ homepage.workspace = true
 authors.workspace = true
 description = "Root resolver for hashtree - maps human-readable keys to merkle root hashes"
 
+[package.metadata.docs.rs]
+features = ["nostr"]
+
 [dependencies]
 hashtree-core.workspace = true
 async-trait.workspace = true

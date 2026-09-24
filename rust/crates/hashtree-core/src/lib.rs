@@ -1,44 +1,4 @@
-//! HashTree - Simple content-addressed merkle tree storage
-//!
-//! Rust-first library for building merkle trees with content-hash addressing:
-//! SHA256(content) -> content
-//!
-//! # Overview
-//!
-//! HashTree provides a simple, efficient way to build and traverse content-addressed
-//! merkle trees. It uses SHA256 for hashing and MessagePack for tree node encoding.
-//!
-//! Content is CHK (Content Hash Key) encrypted by default, enabling deduplication
-//! even for encrypted content. Use `.public()` config to disable encryption.
-//!
-//! # Core Concepts
-//!
-//! - **Blobs**: Raw data stored directly by their hash (SHA256(data) -> data)
-//! - **Tree Nodes**: MessagePack-encoded nodes with links to children (SHA256(msgpack(node)) -> msgpack(node))
-//! - **Links**: References to child nodes with optional name and size metadata
-//! - **Cid**: Content identifier with hash + optional encryption key
-//!
-//! # Example
-//!
-//! ```rust
-//! use hashtree_core::{HashTree, HashTreeConfig, MemoryStore};
-//! use std::sync::Arc;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let store = Arc::new(MemoryStore::new());
-//!     let tree = HashTree::new(HashTreeConfig::new(store));
-//!
-//!     // Store content (encrypted by default)
-//!     let (cid, _size) = tree.put(b"Hello, World!").await?;
-//!
-//!     // Read it back
-//!     let data = tree.get(&cid, None).await?;
-//!     assert_eq!(data, Some(b"Hello, World!".to_vec()));
-//!
-//!     Ok(())
-//! }
-//! ```
+#![doc = include_str!("../README.md")]
 
 pub mod blob_route;
 pub mod builder;

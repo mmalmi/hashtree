@@ -1,30 +1,4 @@
-//! Blossom protocol client for hashtree
-//!
-//! Provides upload/download of blobs to Blossom servers with NIP-98 authentication.
-//!
-//! # Example
-//!
-//! ```rust,no_run
-//! use hashtree_blossom::BlossomClient;
-//! use nostr::Keys;
-//!
-//! #[tokio::main]
-//! async fn main() -> Result<(), Box<dyn std::error::Error>> {
-//!     let keys = Keys::generate();
-//!     let client = BlossomClient::new(keys)
-//!         .with_servers(vec!["https://blossom.example.com".to_string()]);
-//!
-//!     // Upload
-//!     let hash = client.upload(b"hello world").await?;
-//!     println!("Uploaded: {}", hash);
-//!
-//!     // Download
-//!     let data = client.download(&hash).await?;
-//!     assert_eq!(data, b"hello world");
-//!
-//!     Ok(())
-//! }
-//! ```
+#![doc = include_str!("../README.md")]
 
 use base64::Engine;
 use nostr::prelude::*;

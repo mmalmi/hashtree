@@ -4,6 +4,7 @@
 
 - [TypeScript quickstart](../ts/GETTING_STARTED.md), [SDK packages](../ts/README.md), and [API reference](../ts/API.md)
 - [CLI installation and usage](../rust/README.md) and [Rust library](../rust/crates/hashtree-core/README.md)
+- [Rust API reference](https://docs.rs/hashtree-core/latest/hashtree_core/), [persistent storage](../rust/crates/hashtree-lmdb/README.md), and [Blossom client](../rust/crates/hashtree-blossom/README.md)
 - [Browser worker and app runtime](../ts/packages/hashtree-worker/README.md)
 - [Mobile FFI](../rust/crates/hashtree-ffi/README.md): UniFFI bindings for Kotlin/Swift attachment operations; native Rust apps can use the crates directly
 

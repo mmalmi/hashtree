@@ -1,4 +1,4 @@
-//! LMDB-backed content-addressed blob storage.
+#![doc = include_str!("../README.md")]
 
 mod configured;
 mod external_file;

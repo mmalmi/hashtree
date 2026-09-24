@@ -34,7 +34,7 @@ pub struct HashTreeConfig<S: Store> {
     pub store: Arc<S>,
     pub chunk_size: usize,
     pub max_links: usize,
-    /// Whether to encrypt content (default: true when encryption feature enabled)
+    /// Whether to encrypt content (default: true).
     pub encrypted: bool,
 }
 
@@ -163,7 +163,7 @@ impl<S: Store> HashTree<S> {
     // ============ UNIFIED API ============
 
     /// Store content, returns (Cid, size) where Cid is hash + optional key
-    /// Encrypts by default when encryption feature is enabled
+    /// Encrypts by default; `HashTreeConfig::public()` selects plaintext writes.
     pub async fn put(&self, data: &[u8]) -> Result<(Cid, u64), HashTreeError> {
         let size = data.len() as u64;
 

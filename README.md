@@ -32,7 +32,7 @@ cargo add hashtree-core                       # Library for a Rust project
 cargo install hashtree-cli git-remote-htree    # CLI and Git helper
 ```
 
-[Library example and API](rust/crates/hashtree-core/README.md) · [CLI guide](rust/README.md) · [Downloads and installation options](rust/README.md#installation)
+[Library guide](rust/crates/hashtree-core/README.md) · [API reference](https://docs.rs/hashtree-core/latest/hashtree_core/) · [CLI and installation](rust/README.md)
 
 ## Documentation
 
