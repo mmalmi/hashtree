@@ -1909,6 +1909,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
+name = "convert_case"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
+
+[[package]]
 name = "cookie"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2383,6 +2389,19 @@ checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 dependencies = [
  "powerfmt",
  "serde_core",
+]
+
+[[package]]
+name = "derive_more"
+version = "0.99.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6edb4b64a43d977b8e99788fe3a04d483834fba1215a7e02caa415b626497f7f"
+dependencies = [
+ "convert_case",
+ "proc-macro2",
+ "quote",
+ "rustc_version",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -3696,7 +3715,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.4.19"
+version = "0.4.20"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -5075,6 +5094,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "netlink-packet-netfilter"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27b511a24610c054dbbfea4c3e403fe4df2e811df6bc48fa2583b1b93333f020"
+dependencies = [
+ "bitflags 2.13.0",
+ "derive_more 0.99.20",
+ "libc",
+ "netlink-packet-core",
+ "zerocopy 0.8.50",
+]
+
+[[package]]
 name = "netlink-packet-route"
 version = "0.28.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5165,7 +5197,6 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
- "memoffset 0.9.1",
 ]
 
 [[package]]
@@ -5178,6 +5209,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset 0.9.1",
 ]
 
 [[package]]
@@ -5250,9 +5282,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub"
-version = "0.1.14"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7c47632af5e40b508f36d79782251860fee9d8cbc3b9f337cdea30c96748536a"
+checksum = "120d6c3ba6b099011edd0558b6ec257de09abf0917833428e2ff7a4cc542d8da"
 dependencies = [
  "async-trait",
  "nostr",
@@ -5263,9 +5295,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.5.4"
+version = "0.5.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7554d14b5a8d2d9317c25706afa8b20ac786108112e052959d72797fd4496f5f"
+checksum = "10b6b1f7fad00ad33630d30ca11af8aa5d128387877146dfd1a4bbd46c3af38e"
 dependencies = [
  "async-trait",
  "nostr",
@@ -5456,9 +5488,9 @@ dependencies = [
 
 [[package]]
 name = "nvpn-fips-core"
-version = "0.4.81"
+version = "0.4.83"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "70ecf9f062a22bee37163b1db2b01bb72683f0984f05a98215b5704de5923016"
+checksum = "6c073fb7b277e60bcbdeac60c05e3cb7c39df7ab2144af4de5f0f7b332d16b0c"
 dependencies = [
  "base64 0.22.1",
  "bluer",
@@ -5470,6 +5502,9 @@ dependencies = [
  "if-addrs",
  "libc",
  "mdns-sd",
+ "netlink-packet-core",
+ "netlink-packet-netfilter",
+ "netlink-sys",
  "nostr",
  "nostr-sdk",
  "nvpn-fips-identity",
@@ -5479,6 +5514,7 @@ dependencies = [
  "ring",
  "rtnetlink",
  "rustables",
+ "rustls",
  "secp256k1 0.30.0",
  "serde",
  "serde_json",
@@ -5522,9 +5558,9 @@ checksum = "7d5078996e38a6e568e2783b93601dc55eb96bb3df0fa1c4307cdab80b85ab97"
 
 [[package]]
 name = "nvpn-fips-tcp-endpoint"
-version = "0.2.16"
+version = "0.2.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57b56ce6b754bb4157d204543467b2eecd167d86df7c80d78950652d2630e76a"
+checksum = "26ae8eb058e45ee32577ffbf6b968b2b328b50d09fbc38c333bf53a02105ffe0"
 dependencies = [
  "nvpn-fips-core",
  "nvpn-fips-tcp",
@@ -6902,16 +6938,16 @@ dependencies = [
 
 [[package]]
 name = "rustables"
-version = "0.8.7"
+version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "19ff8788a90655f715f8236507161558a966c28a2845dc54d0f9985f9bbf389b"
+checksum = "9dcec6ec717f4e94e85d1a576e9ed696d933f4a89aff3d33d8363703ac97bc7d"
 dependencies = [
  "bindgen 0.72.1",
  "bitflags 2.13.0",
  "ipnetwork",
  "libc",
  "log",
- "nix 0.30.1",
+ "nix 0.31.3",
  "regex",
  "rustables-macros",
  "thiserror 2.0.18",
@@ -7246,7 +7282,7 @@ checksum = "c5d9c0c92a92d33f08817311cf3f2c29a3538a8240e94a6a3c622ce652d7e00c"
 dependencies = [
  "bitflags 2.13.0",
  "cssparser",
- "derive_more",
+ "derive_more 2.1.1",
  "log",
  "new_debug_unreachable",
  "phf 0.13.1",

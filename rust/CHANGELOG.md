@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Update the Rust FIPS transport to 0.4.20 with FIPS core 0.4.83 and TCP
+  endpoint 0.2.18. Use Nostr Pubsub's matching FIPS adapter 0.5.6.
+
 ## 0.2.150 - 2026-09-11
 
 ### Fixed
