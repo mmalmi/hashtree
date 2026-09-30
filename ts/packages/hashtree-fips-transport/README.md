@@ -11,8 +11,8 @@ package. These two peers are not yet available in the npm registry:
 
 ```bash
 npm install @hashtree/fips-transport \
-  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.42/fips-core-0.0.42.tgz \
-  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.29/fips-transport-webrtc-0.0.45.tgz
+  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.48/fips-core-0.0.48.tgz \
+  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.48/fips-transport-webrtc-0.0.51.tgz
 ```
 
 With npm 12, add `--allow-remote=all` to this command and subsequent `npm install`

@@ -16,10 +16,10 @@
       "esbuild"
     ],
     "overrides": {
-      "@fips/core": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.45/fips-core-0.0.45.tgz",
+      "@fips/core": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.48/fips-core-0.0.48.tgz",
       "@fips/tcp": "https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz",
-      "@fips/transport-webrtc": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.45/fips-transport-webrtc-0.0.50.tgz",
-      "@fips/transport-websocket": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.45/fips-transport-websocket-0.0.7.tgz",
+      "@fips/transport-webrtc": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.48/fips-transport-webrtc-0.0.51.tgz",
+      "@fips/transport-websocket": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.48/fips-transport-websocket-0.0.8.tgz",
       "@hashtree/collection": "link:packages/hashtree-collection",
       "@hashtree/core": "link:packages/hashtree",
       "@hashtree/dexie": "link:packages/hashtree-dexie",
