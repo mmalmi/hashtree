@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/fips-transport",
-  "version": "0.4.13",
+  "version": "0.4.14",
   "description": "Hashtree blob transport over reliable TCP/FIPS streams",
   "type": "module",
   "main": "dist/index.js",
@@ -50,7 +50,7 @@
     "@fips/tcp": "https://github.com/mmalmi/fips-tcp/releases/download/v0.2.0/fips-tcp-0.2.0.tgz",
     "@fips/transport-websocket": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.29/fips-transport-websocket-0.0.3.tgz",
     "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.9/hashtree-core-0.3.2.tgz",
-    "nostr-pubsub": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.12/nostr-pubsub-0.5.12.tgz"
+    "nostr-pubsub": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.13/nostr-pubsub-0.5.13.tgz"
   },
   "peerDependencies": {
     "@fips/core": ">=0.0.29",

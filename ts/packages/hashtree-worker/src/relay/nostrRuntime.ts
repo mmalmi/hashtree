@@ -29,7 +29,6 @@ export async function initNostrRuntime(relays: string[], options: { store: Store
     store: createWorkerEventStore(options.store, options.storeName),
     signAuthEvent: (_relay, template) => signEvent(template),
     maxSubscriptions: 256,
-    maxFiltersPerBatch: 32,
     maxFilterBytesPerBatch: 64 * 1024,
     onError: (error) => console.warn('[Worker pubsub]', error),
   });

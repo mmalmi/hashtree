@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.11 - 2026-09-30
+
+- Update the worker, indexed event adapter and browser peer transport to
+  nostr-pubsub 0.5.13, using relay-compatible batches of at most 20 filters
+  by default while preserving exact per-subscription event matching. Remove
+  the worker override so it inherits the shared relay compatibility limit.
+
 ## TypeScript runtime 0.5.10 - 2026-09-30
 
 - Update the worker, indexed event adapter and browser peer transport to
