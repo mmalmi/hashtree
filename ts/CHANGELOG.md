@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.8 - 2026-09-30
+
+- Replace the worker's NDK networking/cache with the shared nostr-pubsub runtime,
+  persistent Hashtree event indexes and a durable publication outbox.
+- Share one browser FIPS node between event subscriptions, retained history and
+  cached file serving; discover new file peers while probes are in flight.
+- Preserve blocks shared by event and outbox indexes during replacement, so
+  a queued update remains readable after reload.
+- Expose explicit query completion and publication receipts through the worker,
+  and coalesce relay subscriptions using nostr-pubsub 0.5.9.
+
 ## TypeScript runtime 0.5.7 - 2026-09-07
 
 ### Security

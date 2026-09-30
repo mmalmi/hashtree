@@ -53,6 +53,10 @@
     "./nostr-source-port": {
       "types": "./dist/nostrSourcePort.d.ts",
       "import": "./dist/nostrSourcePort.js"
+    },
+    "./event-store": {
+      "types": "./dist/relay/eventIndex.d.ts",
+      "import": "./dist/relay/eventIndex.js"
     }
   },
   "files": [
@@ -91,7 +95,7 @@
     "@msgpack/msgpack": "^3.1.2",
     "dexie": "4.4.2",
     "nostr-tools": "^2.23.3",
-    "nostr-pubsub": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.8/nostr-pubsub-0.5.8.tgz",
+    "nostr-pubsub": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.9/nostr-pubsub-0.5.9.tgz",
     "@hashtree/nostr-pubsub": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.8/hashtree-nostr-pubsub-0.1.4.tgz"
   },
   "peerDependencies": {
