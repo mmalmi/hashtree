@@ -37,8 +37,11 @@ it('retains signed roots and pending publications through an offline worker rest
     const cached = await query([{ authors: [pubkey], kinds: [30064], '#d': ['offline-doc'] }], { cache: 'cache-only' });
     expect(cached.complete).toBe(true);
     expect(cached.events.map((entry) => entry.id)).toEqual([signed.id]);
+    const updated = await signEvent({ ...signed, created_at: 125, content: 'updated root' });
+    expect((await publish(updated)).queued).toBe(true);
+    expect((await query([{ authors: [pubkey], kinds: [30064] }], { cache: 'cache-only' })).events.map(({ id }) => id)).toEqual([updated.id]);
     const persisted = createWorkerEventStore(blocks, name);
-    expect((await persisted.listPending()).map(({ event }) => event.id)).toEqual([signed.id]);
+    expect((await persisted.listPending()).map(({ event }) => event.id)).toEqual([updated.id]);
     await persisted.close();
     const afterRestart = await signEvent({ kind: 1, created_at: 124, content: 'same identity', tags: [] });
     expect(afterRestart.pubkey).toBe(pubkey);

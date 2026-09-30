@@ -357,9 +357,8 @@ export class NostrEventStore {
       throw new Error('Failed to create Nostr event manifest');
     }
 
-    if (decision.replaced) {
-      await this.store.delete(decision.replaced.cid.hash);
-    }
+    // Replaced event bytes can still be referenced by another index or snapshot.
+    // Reclaim unreferenced blocks at the store's root-aware eviction boundary.
 
     return manifestRoot;
   }

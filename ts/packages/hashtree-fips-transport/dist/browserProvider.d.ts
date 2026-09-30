@@ -46,9 +46,12 @@ export declare function supportsBrowserHashtreeFips(): boolean;
 export declare function createBrowserHashtreeFipsProvider(options: BrowserHashtreeFipsProviderOptions): Promise<BrowserHashtreeFipsProvider>;
 export type BrowserHashtreeNostrProviderOptions = BrowserHashtreeFipsProviderOptions & Pick<FipsNostrPubsubClientOptions, 'retainedEventReader' | 'allowedKinds' | 'limits'> & {
     onNostrError?: FipsNostrPubsubClientOptions['onError'];
+    /** Restrict event interests and retained history to application-admitted identities. */
+    nostrPeers?: () => readonly string[];
 };
 export interface BrowserHashtreeNostrProvider extends BrowserHashtreeFipsProvider {
     readonly nostrSource: RuntimeSource;
+    refreshNostrPeers(): void;
 }
 /** Files and events share one authenticated FIPS node, identity and set of links. */
 export declare function createBrowserHashtreeNostrProvider(options: BrowserHashtreeNostrProviderOptions): Promise<BrowserHashtreeNostrProvider>;

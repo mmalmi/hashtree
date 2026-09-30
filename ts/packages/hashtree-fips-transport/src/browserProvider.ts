@@ -179,10 +179,15 @@ function normalizeWebSocketSeedUrls(seedUrls: readonly string[]): string[] {
 
 export type BrowserHashtreeNostrProviderOptions = BrowserHashtreeFipsProviderOptions & Pick<
   FipsNostrPubsubClientOptions, 'retainedEventReader' | 'allowedKinds' | 'limits'
-> & { onNostrError?: FipsNostrPubsubClientOptions['onError'] };
+> & {
+  onNostrError?: FipsNostrPubsubClientOptions['onError'];
+  /** Restrict event interests and retained history to application-admitted identities. */
+  nostrPeers?: () => readonly string[];
+};
 
 export interface BrowserHashtreeNostrProvider extends BrowserHashtreeFipsProvider {
   readonly nostrSource: RuntimeSource;
+  refreshNostrPeers(): void;
 }
 
 /** Files and events share one authenticated FIPS node, identity and set of links. */
@@ -195,10 +200,10 @@ export async function createBrowserHashtreeNostrProvider(
     client = new FipsNostrPubsubClient({
       node: provider.node,
       localPeerId: provider.localPeerId,
-      peers: () => provider.listConnectedPeerIds(),
+      peers: options.nostrPeers ?? (() => provider.listConnectedPeerIds()),
       retainedEventReader: options.retainedEventReader,
       allowedKinds: options.allowedKinds,
-      limits: options.limits,
+      limits: { maxFiltersPerSubscription: 32, ...options.limits },
       onError: options.onNostrError,
     }).start();
   } catch (error) {
@@ -209,6 +214,7 @@ export async function createBrowserHashtreeNostrProvider(
   return {
     ...provider,
     nostrSource: Object.assign(new FipsNostrPubsubEventSource(client), { id: 'fips' }),
+    refreshNostrPeers: () => client.refreshPeers(),
     stop: async () => {
       if (stopped) return;
       stopped = true;

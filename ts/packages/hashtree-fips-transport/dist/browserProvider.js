@@ -134,10 +134,10 @@ export async function createBrowserHashtreeNostrProvider(options) {
         client = new FipsNostrPubsubClient({
             node: provider.node,
             localPeerId: provider.localPeerId,
-            peers: () => provider.listConnectedPeerIds(),
+            peers: options.nostrPeers ?? (() => provider.listConnectedPeerIds()),
             retainedEventReader: options.retainedEventReader,
             allowedKinds: options.allowedKinds,
-            limits: options.limits,
+            limits: { maxFiltersPerSubscription: 32, ...options.limits },
             onError: options.onNostrError,
         }).start();
     }
@@ -149,6 +149,7 @@ export async function createBrowserHashtreeNostrProvider(options) {
     return {
         ...provider,
         nostrSource: Object.assign(new FipsNostrPubsubEventSource(client), { id: 'fips' }),
+        refreshNostrPeers: () => client.refreshPeers(),
         stop: async () => {
             if (stopped)
                 return;

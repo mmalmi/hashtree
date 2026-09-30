@@ -48,6 +48,20 @@ describe('Hashtree runtime event persistence', () => {
     expect(await db.open().query([{}])).toEqual([]);
   });
 
+  it('keeps event blocks referenced by another retained index when replacing outbox history', async () => {
+    const db = fixture();
+    const store = db.open();
+    const saved = event(10, 30064);
+    const queued = event(20, 30064);
+    await store.put(saved);
+    await store.putPending({ event: saved, attempts: 0, updatedAt: 10 });
+    await store.putPending({ event: queued, attempts: 0, updatedAt: 20 });
+    await store.close();
+    const reopened = db.open();
+    expect((await reopened.query([{ kinds: [30064] }])).map((entry) => entry.id)).toEqual([saved.id]);
+    expect((await reopened.listPending()).map(({ event }) => event.id)).toEqual([queued.id]);
+  });
+
   it('serializes concurrent writes without losing an index entry', async () => {
     const store = fixture().open();
     await Promise.all([store.put(event(1)), store.put(event(2)), store.put(event(3))]);

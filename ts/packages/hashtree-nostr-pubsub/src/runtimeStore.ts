@@ -32,7 +32,10 @@ export class HashtreeRuntimeEventStore implements RuntimeEventStore {
     return this.read(async (state) => {
       const report = await new HashtreeNostrEventReader({ store: this.store, roots: state.root })
         .query(filters, options);
-      if (!report.complete) throw new Error('Hashtree event index is unavailable');
+      if (!report.complete) {
+        const reasons = report.partitions.flatMap((partition) => partition.attempts.map((attempt) => attempt.reason).filter(Boolean));
+        throw new Error(`Hashtree event index is unavailable: ${reasons.join('; ')}`);
+      }
       return report.events.map(({ event }) => event);
     });
   }
