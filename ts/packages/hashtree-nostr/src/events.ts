@@ -401,6 +401,15 @@ export class NostrEventStore {
     return this.readStoredEvent(eventCid);
   }
 
+  /** Remove an event from every index without deleting blocks used by older roots. */
+  async delete(root: CID | null, eventId: string): Promise<CID | null> {
+    const event = await this.getById(root, eventId);
+    if (!event) return root;
+    const writer = this.collectionWriterFromManifest(await this.getManifest(root));
+    await writer.delete(event);
+    return this.writeManifest(collectionManifestToNostrEventManifest(writer.manifest()));
+  }
+
   async listByAuthor(root: CID | null, pubkey: string, options: ListEventsOptions = {}): Promise<StoredNostrEvent[]> {
     return this.collectEvents(
       this.collectionSourceFromManifest(await this.getManifest(root)),

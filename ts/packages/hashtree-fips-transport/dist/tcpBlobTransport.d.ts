@@ -24,6 +24,8 @@ export declare class TcpBlobTransport {
     constructor(options: TcpBlobTransportOptions);
     get(hash: Hash, peerIds: readonly string[], htl?: number): Promise<Uint8Array | null>;
     close(): Promise<void>;
+    /** A valid authenticated response proves the peer implements the blob service. */
+    probe(peerId: string): Promise<boolean>;
     private fetchFromPeer;
     private pump;
     private serve;

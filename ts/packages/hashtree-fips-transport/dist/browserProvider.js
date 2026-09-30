@@ -1,4 +1,5 @@
-import { fromHex } from '@hashtree/core';
+import { FipsNostrPubsubClient, FipsNostrPubsubEventSource } from 'nostr-pubsub';
+import { fromHex, toHex } from '@hashtree/core';
 import { FipsNode, identityFromSecretKey, } from '@fips/core';
 import { WebRtcTransport } from '@fips/transport-webrtc';
 import { WebSocketTransport } from '@fips/transport-websocket';
@@ -53,18 +54,32 @@ export async function createBrowserHashtreeFipsProvider(options) {
         routingMode: 'reply_learned',
         logger: options.logger,
     });
+    const adjacentPeers = new Set();
     const provider = createFipsWorkerP2PProvider({
         node,
         localStore: options.localStore,
         requestTimeoutMs: options.requestTimeoutMs,
         providerRoutes: options.providerRoutes,
         allowIncomingPeer: options.allowIncomingPeer,
+        candidatePeerIds: () => [...adjacentPeers],
+    });
+    const removePeerListener = node.on('peer', (data) => {
+        const peer = data;
+        if (!peer.remotePubkey)
+            return;
+        if (peer.state === 'connected')
+            adjacentPeers.add(peer.remotePubkey);
+        else if (peer.state === 'disconnected')
+            adjacentPeers.delete(peer.remotePubkey);
+        void provider.discoverProviders();
     });
     let stopped = false;
     const stop = async () => {
         if (stopped)
             return;
         stopped = true;
+        removePeerListener();
+        adjacentPeers.clear();
         provider.close();
         await node.stop();
     };
@@ -79,6 +94,8 @@ export async function createBrowserHashtreeFipsProvider(options) {
         fetch: (hashHex, peerId, htl) => provider.fetch(hashHex, peerId, htl),
         listPeerIds: () => provider.listPeerIds(),
         node,
+        localPeerId: toHex(identity.publicKey),
+        listConnectedPeerIds: () => [...adjacentPeers],
         webRtcTransport,
         webSocketTransport,
         stop,
@@ -108,5 +125,41 @@ function normalizeWebSocketSeedUrls(seedUrls) {
             normalized.add(value);
     }
     return [...normalized];
+}
+/** Files and events share one authenticated FIPS node, identity and set of links. */
+export async function createBrowserHashtreeNostrProvider(options) {
+    const provider = await createBrowserHashtreeFipsProvider(options);
+    let client;
+    try {
+        client = new FipsNostrPubsubClient({
+            node: provider.node,
+            localPeerId: provider.localPeerId,
+            peers: () => provider.listConnectedPeerIds(),
+            retainedEventReader: options.retainedEventReader,
+            allowedKinds: options.allowedKinds,
+            limits: options.limits,
+            onError: options.onNostrError,
+        }).start();
+    }
+    catch (error) {
+        await provider.stop();
+        throw error;
+    }
+    let stopped = false;
+    return {
+        ...provider,
+        nostrSource: Object.assign(new FipsNostrPubsubEventSource(client), { id: 'fips' }),
+        stop: async () => {
+            if (stopped)
+                return;
+            stopped = true;
+            try {
+                await client.stop();
+            }
+            finally {
+                await provider.stop();
+            }
+        },
+    };
 }
 //# sourceMappingURL=browserProvider.js.map

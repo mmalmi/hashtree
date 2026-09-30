@@ -1,3 +1,4 @@
+import { type FipsNostrPubsubClientOptions, type RuntimeSource } from 'nostr-pubsub';
 import { type Store } from '@hashtree/core';
 import { FipsNode, type FipsIdentity, type Logger } from '@fips/core';
 import { WebRtcTransport, type WebRtcTransportConfig } from '@fips/transport-webrtc';
@@ -31,6 +32,8 @@ export type BrowserHashtreeFipsProviderOptions = BrowserHashtreeFipsProviderBase
 });
 export interface BrowserHashtreeFipsProvider extends HashtreeWorkerP2PProvider {
     readonly node: FipsNode;
+    readonly localPeerId: string;
+    listConnectedPeerIds(): string[];
     readonly webRtcTransport: WebRtcTransport;
     readonly webSocketTransport: WebSocketTransport;
     stop(): Promise<void>;
@@ -41,5 +44,13 @@ export declare function supportsBrowserHashtreeFips(): boolean;
  * then exposes Hashtree's worker-provider surface over authenticated FIPS data.
  */
 export declare function createBrowserHashtreeFipsProvider(options: BrowserHashtreeFipsProviderOptions): Promise<BrowserHashtreeFipsProvider>;
+export type BrowserHashtreeNostrProviderOptions = BrowserHashtreeFipsProviderOptions & Pick<FipsNostrPubsubClientOptions, 'retainedEventReader' | 'allowedKinds' | 'limits'> & {
+    onNostrError?: FipsNostrPubsubClientOptions['onError'];
+};
+export interface BrowserHashtreeNostrProvider extends BrowserHashtreeFipsProvider {
+    readonly nostrSource: RuntimeSource;
+}
+/** Files and events share one authenticated FIPS node, identity and set of links. */
+export declare function createBrowserHashtreeNostrProvider(options: BrowserHashtreeNostrProviderOptions): Promise<BrowserHashtreeNostrProvider>;
 export {};
 //# sourceMappingURL=browserProvider.d.ts.map

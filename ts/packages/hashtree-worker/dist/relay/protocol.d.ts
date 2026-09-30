@@ -1,3 +1,4 @@
+import type { RuntimeEventInfo, RuntimeCompletion, RuntimePublishResult, RuntimeQueryOptions, RuntimeQueryResult, RuntimeSource } from 'nostr-pubsub';
 /**
  * Worker Protocol Types
  *
@@ -37,6 +38,25 @@ export interface PeerStats {
     forwardedSuppressed: number;
 }
 export type WorkerRequest = {
+    type: 'attachNostrSource';
+    id: string;
+    sourceId: string;
+    port: MessagePort;
+    publishAcceptance?: RuntimeSource['publishAcceptance'];
+} | {
+    type: 'detachNostrSource';
+    id: string;
+    sourceId: string;
+} | {
+    type: 'cancelNostrQuery';
+    id: string;
+    requestId: string;
+} | {
+    type: 'query';
+    id: string;
+    filters: NostrFilter[];
+    options?: Omit<RuntimeQueryOptions, 'signal'>;
+} | {
     type: 'init';
     id: string;
     config: WorkerConfig;
@@ -305,6 +325,7 @@ export type WorkerResponse = {
     type: 'void';
     id: string;
     error?: string;
+    receipt?: RuntimePublishResult;
 } | {
     type: 'dirListing';
     id: string;
@@ -319,9 +340,20 @@ export type WorkerResponse = {
     type: 'event';
     subId: string;
     event: SignedEvent;
+    info?: RuntimeEventInfo;
 } | {
     type: 'eose';
     subId: string;
+    status?: RuntimeCompletion;
+} | {
+    type: 'nostrStatus';
+    subId: string;
+    status: RuntimeCompletion;
+} | {
+    type: 'nostrQuery';
+    id: string;
+    result?: RuntimeQueryResult;
+    error?: string;
 } | {
     type: 'peerStats';
     id: string;

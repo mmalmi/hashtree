@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/worker",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "Modular browser worker for hashtree blob caching, tree-root state, and Blossom connectivity",
   "type": "module",
   "main": "dist/index.js",
@@ -49,6 +49,10 @@
     "./tree-root": {
       "types": "./dist/tree-root.d.ts",
       "import": "./dist/tree-root.js"
+    },
+    "./nostr-source-port": {
+      "types": "./dist/nostrSourcePort.d.ts",
+      "import": "./dist/nostrSourcePort.js"
     }
   },
   "files": [
@@ -80,34 +84,26 @@
     "url": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree?tab=issues"
   },
   "dependencies": {
-    "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-core-0.3.2.tgz",
-    "@hashtree/dexie": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-dexie-0.1.10.tgz",
-    "@hashtree/mesh": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-mesh-0.3.2.tgz",
-    "@hashtree/nostr": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-nostr-0.2.3.tgz",
+    "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.8/hashtree-core-0.3.2.tgz",
+    "@hashtree/dexie": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.8/hashtree-dexie-0.1.11.tgz",
+    "@hashtree/mesh": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.8/hashtree-mesh-0.3.2.tgz",
+    "@hashtree/nostr": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.8/hashtree-nostr-0.2.4.tgz",
     "@msgpack/msgpack": "^3.1.2",
     "dexie": "4.4.2",
-    "nostr-tools": "^2.18.2"
+    "nostr-tools": "^2.23.3",
+    "nostr-pubsub": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.7/nostr-pubsub-0.5.7.tgz",
+    "@hashtree/nostr-pubsub": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.8/hashtree-nostr-pubsub-0.1.4.tgz"
   },
   "peerDependencies": {
-    "ndk": "*",
-    "ndk-cache": "*",
     "nostr-social-graph": "*"
   },
   "peerDependenciesMeta": {
-    "ndk": {
-      "optional": true
-    },
-    "ndk-cache": {
-      "optional": true
-    },
     "nostr-social-graph": {
       "optional": true
     }
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",
-    "ndk": "https://github.com/mmalmi/iris-kit/releases/download/runtime-v0.2.2/ndk-0.2.1.tgz",
-    "ndk-cache": "https://github.com/mmalmi/iris-kit/releases/download/runtime-v0.2.2/ndk-cache-0.2.1.tgz",
     "nostr-social-graph": "https://github.com/mmalmi/nostr-social-graph/releases/download/v2.0.0/nostr-social-graph-2.0.0.tgz",
     "typescript": "^5.3.0",
     "vitest": "^4.1.10"

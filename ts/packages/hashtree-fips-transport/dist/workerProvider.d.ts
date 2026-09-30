@@ -27,24 +27,30 @@ export interface FipsWorkerP2PProviderOptions {
     requestTimeoutMs?: number;
     /** Authenticated capability routes or explicitly configured Hashtree peers. */
     providerRoutes?: FipsBlobRouteSource;
+    /** Authenticated adjacent identities to probe before admitting as blob providers. */
+    candidatePeerIds?: () => readonly string[];
     /** Authorize an authenticated FIPS identity before serving local blobs. */
     allowIncomingPeer?: (peerId: string) => boolean | Promise<boolean>;
 }
 /**
  * Bridges a running FIPS node into HashtreeWorkerClient.setP2PProvider().
- * Provider selection comes only from the supplied route source; connected FIPS
- * peers are never inferred to be Hashtree providers.
+ * Provider selection uses supplied routes or a successful blob-service probe;
+ * ordinary FIPS connections alone never qualify a peer as a file provider.
  */
 export declare class FipsWorkerP2PProvider implements HashtreeWorkerP2PProvider {
     private readonly options;
     readonly transport: TcpBlobTransport;
     private closed;
+    private readonly probed;
+    private discovery;
     constructor(options: FipsWorkerP2PProviderOptions);
     fetch(hashHex: string, peerId?: string, htl?: number): Promise<Uint8Array | null>;
     private fetchHash;
     listPeerIds(): Promise<string[]>;
     close(): void;
     private routes;
+    /** Bounded service negotiation; ordinary FIPS peers are never assumed to serve files. */
+    discoverProviders(): Promise<void>;
     private fetchRoutes;
 }
 export declare function createFipsWorkerP2PProvider(options: FipsWorkerP2PProviderOptions): FipsWorkerP2PProvider;

@@ -1,5 +1,6 @@
+import type { NostrFilter, RuntimeSource, RuntimeSubscription, RuntimeSubscriptionHandlers, RuntimeQueryOptions, RuntimeQueryResult, RuntimePublishResult } from 'nostr-pubsub';
 import type { WorkerFactory, WorkerP2PProvider } from './client.js';
-import type { BlossomBandwidthStats, BlossomServerConfig, PeerStats as RelayPeerStats, RelayStats, TreeRootInfo, WorkerConfig as RelayWorkerConfig, WorkerRequest as RelayWorkerRequest, WorkerResponse as RelayWorkerResponse } from './relay/protocol.js';
+import type { BlossomBandwidthStats, BlossomServerConfig, PeerStats as RelayPeerStats, RelayStats, SignedEvent as RelayWorkerSignedEvent, TreeRootInfo, WorkerConfig as RelayWorkerConfig, WorkerRequest as RelayWorkerRequest, WorkerResponse as RelayWorkerResponse } from './relay/protocol.js';
 export interface TreeRootUpdate extends TreeRootInfo {
     npub: string;
     treeName: string;
@@ -16,6 +17,9 @@ export declare class RelayWorkerClient {
     private initPromise;
     private initPending;
     private pendingRequests;
+    private eventListeners;
+    private sourceBridge;
+    private sourceRevision;
     private treeRootListeners;
     private blossomBandwidthListeners;
     constructor(workerFactory: WorkerFactory, config: RelayWorkerClientConfig);
@@ -37,6 +41,11 @@ export declare class RelayWorkerClient {
     getPeerStats(): Promise<RelayPeerStats[]>;
     getRelayStats(): Promise<RelayStats[]>;
     setIdentity(pubkey: string, nsecHex?: string): Promise<void>;
+    subscribeEvents(filters: NostrFilter[], handlers: RuntimeSubscriptionHandlers): RuntimeSubscription;
+    queryEvents(filters: NostrFilter[], options?: RuntimeQueryOptions): Promise<RuntimeQueryResult>;
+    publishEvent(event: RelayWorkerSignedEvent): Promise<RuntimePublishResult>;
+    /** Attach pubsub on the same FIPS node already used by the blob provider. */
+    setNostrSource(source: RuntimeSource | null): Promise<void>;
     setP2PProvider(provider: WorkerP2PProvider | null): void;
     private notifyP2PProviderState;
     setBlossomServers(servers: BlossomServerConfig[]): Promise<void>;

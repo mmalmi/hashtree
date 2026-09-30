@@ -41,18 +41,22 @@ export interface FipsWorkerP2PProviderOptions {
   requestTimeoutMs?: number;
   /** Authenticated capability routes or explicitly configured Hashtree peers. */
   providerRoutes?: FipsBlobRouteSource;
+  /** Authenticated adjacent identities to probe before admitting as blob providers. */
+  candidatePeerIds?: () => readonly string[];
   /** Authorize an authenticated FIPS identity before serving local blobs. */
   allowIncomingPeer?: (peerId: string) => boolean | Promise<boolean>;
 }
 
 /**
  * Bridges a running FIPS node into HashtreeWorkerClient.setP2PProvider().
- * Provider selection comes only from the supplied route source; connected FIPS
- * peers are never inferred to be Hashtree providers.
+ * Provider selection uses supplied routes or a successful blob-service probe;
+ * ordinary FIPS connections alone never qualify a peer as a file provider.
  */
 export class FipsWorkerP2PProvider implements HashtreeWorkerP2PProvider {
   readonly transport: TcpBlobTransport;
   private closed = false;
+  private readonly probed = new Map<string, { available: boolean; retryAt: number }>();
+  private discovery: Promise<void> | null = null;
 
   constructor(private readonly options: FipsWorkerP2PProviderOptions) {
     this.transport = new TcpBlobTransport({
@@ -98,8 +102,33 @@ export class FipsWorkerP2PProvider implements HashtreeWorkerP2PProvider {
 
   private async routes(): Promise<FipsBlobRoute[]> {
     const source = this.options.providerRoutes;
-    if (!source) return [];
-    return normalizeRoutes(typeof source === 'function' ? await source() : source);
+    const explicit = source ? (typeof source === 'function' ? await source() : source) : [];
+    await this.discoverProviders();
+    const discovered = [...this.probed].filter(([, status]) => status.available)
+      .map(([peerId]) => ({ peerId, htl: 0 }));
+    return normalizeRoutes([...explicit, ...discovered]);
+  }
+
+  /** Bounded service negotiation; ordinary FIPS peers are never assumed to serve files. */
+  async discoverProviders(): Promise<void> {
+    if (this.closed || !this.options.candidatePeerIds) return;
+    if (this.discovery) return this.discovery;
+    this.discovery = (async () => {
+      // Re-read admission after every batch: another peer can connect while a seed
+      // probe is in flight. Bound total work and concurrent streams per pass.
+      for (let probes = 0; probes < 16 && !this.closed;) {
+        const candidates = [...new Set(this.options.candidatePeerIds!())].slice(0, 16);
+        for (const peer of this.probed.keys()) if (!candidates.includes(peer)) this.probed.delete(peer);
+        const pending = candidates.filter((peer) => (this.probed.get(peer)?.retryAt ?? 0) <= Date.now()).slice(0, 2);
+        if (pending.length === 0) break;
+        probes += pending.length;
+        await Promise.all(pending.map(async (peer) => {
+          const available = await this.transport.probe(peer);
+          if (!this.closed) this.probed.set(peer, { available, retryAt: Date.now() + (available ? 60_000 : 10_000) });
+        }));
+      }
+    })().finally(() => { this.discovery = null; });
+    return this.discovery;
   }
 
   private async fetchRoutes(

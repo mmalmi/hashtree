@@ -51,6 +51,17 @@ describe('P2PPeerRoutes', () => {
     expect(routes.isAvailable()).toBe(true);
   });
 
+  it('refreshes an empty peer list immediately when a peer becomes available', async () => {
+    const { bridge, requests, routes } = createRoutes();
+    const first = routes.peerList();
+    bridge.resolvePeerList(requests[0].requestId, []);
+    await first;
+    const next = routes.peerList();
+    expect(requests).toHaveLength(2);
+    bridge.resolvePeerList(requests[1].requestId, ['new-peer']);
+    await expect(next).resolves.toEqual(['new-peer']);
+  });
+
   it('isolates corrupt peers and returns the first centrally verified reply', async () => {
     const { bridge, requests, routes } = createRoutes();
     const data = new Uint8Array([1, 2, 3, 4]);

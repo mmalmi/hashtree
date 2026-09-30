@@ -33,3 +33,6 @@ export {
   HashtreeNostrReplicaUnavailableError,
   HashtreeNostrUnsupportedSearchError,
 } from './types.js';
+
+export { HashtreeRuntimeEventStore } from './runtimeStore.js';
+export type { HashtreeRuntimeState, HashtreeRuntimeStateStorage } from './runtimeStore.js';

@@ -1,4 +1,5 @@
 // @ts-nocheck
+import type { RuntimeEventInfo, RuntimeCompletion, RuntimePublishResult, RuntimeQueryOptions, RuntimeQueryResult, RuntimeSource } from 'nostr-pubsub';
 /**
  * Worker Protocol Types
  *
@@ -58,6 +59,10 @@ export interface PeerStats {
 // ============================================================================
 
 export type WorkerRequest =
+  | { type: 'attachNostrSource'; id: string; sourceId: string; port: MessagePort; publishAcceptance?: RuntimeSource['publishAcceptance'] }
+  | { type: 'detachNostrSource'; id: string; sourceId: string }
+  | { type: 'cancelNostrQuery'; id: string; requestId: string }
+  | { type: 'query'; id: string; filters: NostrFilter[]; options?: Omit<RuntimeQueryOptions, 'signal'> }
   // Lifecycle
   | { type: 'init'; id: string; config: WorkerConfig; p2pProviderEnabled?: boolean }
   | { type: 'close'; id: string }
@@ -183,15 +188,17 @@ export type WorkerResponse =
   | { type: 'result'; id: string; data?: Uint8Array; error?: string }
   | { type: 'bool'; id: string; value: boolean; error?: string }
   | { type: 'cid'; id: string; cid?: CID; error?: string }
-  | { type: 'void'; id: string; error?: string }
+  | { type: 'void'; id: string; error?: string; receipt?: RuntimePublishResult }
 
   // Tree operations
   | { type: 'dirListing'; id: string; entries?: DirEntry[]; error?: string }
   | { type: 'streamChunk'; id: string; chunk: Uint8Array; done: boolean }
 
   // Nostr events
-  | { type: 'event'; subId: string; event: SignedEvent }
-  | { type: 'eose'; subId: string }
+  | { type: 'event'; subId: string; event: SignedEvent; info?: RuntimeEventInfo }
+  | { type: 'eose'; subId: string; status?: RuntimeCompletion }
+  | { type: 'nostrStatus'; subId: string; status: RuntimeCompletion }
+  | { type: 'nostrQuery'; id: string; result?: RuntimeQueryResult; error?: string }
 
   // Stats
   | { type: 'peerStats'; id: string; stats: PeerStats[] }

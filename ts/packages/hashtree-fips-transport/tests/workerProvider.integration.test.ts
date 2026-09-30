@@ -66,6 +66,37 @@ describe('FIPS worker P2P provider integration', () => {
     }
   });
 
+  it('discovers the blob service on an authenticated peer and serves cached downloads onward', async () => {
+    const hub = new MemoryHub();
+    const nodes = await Promise.all([21, 22, 23].map(async (seed) => new FipsNode({
+      identity: await identityFromSecretKey(secret(seed)),
+      transports: [new MemoryTransport(hub)], routingMode: 'reply_learned',
+    })));
+    const stores = nodes.map(() => new MemoryStore());
+    const ids = nodes.map((node) => fipsToHex(node.identity.publicKey));
+    const providers = nodes.map((node, index) => createFipsWorkerP2PProvider({
+      node, localStore: stores[index]!, requestTimeoutMs: 2_000,
+      candidatePeerIds: () => index === 0 ? [] : [ids[index - 1]!],
+    }));
+    try {
+      await Promise.all(nodes.map((node) => node.start()));
+      await nodes[1]!.connect({ transport: 'memory', addr: ids[0]! });
+      await nodes[2]!.connect({ transport: 'memory', addr: ids[1]! });
+      const data = new TextEncoder().encode('cached files remain a peer source');
+      const hash = await sha256(data) as Hash;
+      await stores[0]!.put(hash, data);
+      expect(await providers[1]!.listPeerIds()).toEqual([ids[0]]);
+      expect(await providers[1]!.fetch(toHex(hash))).toEqual(data);
+      providers[0]!.close();
+      await nodes[0]!.stop();
+      expect(await providers[2]!.listPeerIds()).toEqual([ids[1]]);
+      expect(await providers[2]!.fetch(toHex(hash))).toEqual(data);
+    } finally {
+      providers.forEach((provider) => provider.close());
+      await Promise.all(nodes.map((node) => node.stop()));
+    }
+  });
+
   it('serves blocks only to authenticated peers admitted by the active policy', async () => {
     const hub = new MemoryHub();
     const sourceIdentity = await identityFromSecretKey(secret(11));
@@ -192,6 +223,23 @@ describe('FIPS worker P2P provider integration', () => {
       readerProvider.close();
       await Promise.all([sourceNode.stop(), readerNode.stop()]);
     }
+  });
+
+  it('discovers a peer admitted while an earlier capability probe is in flight', async () => {
+    const identity = await identityFromSecretKey(secret(8));
+    const node = new FipsNode({ identity, transports: [] });
+    const candidates = ['first'];
+    const provider = createFipsWorkerP2PProvider({ node, localStore: new MemoryStore(), candidatePeerIds: () => candidates });
+    let finishFirst!: (value: boolean) => void;
+    const probe = vi.spyOn(provider.transport, 'probe').mockImplementation((peer) => peer === 'first'
+      ? new Promise((resolve) => { finishFirst = resolve; }) : Promise.resolve(true));
+    try {
+      const listing = provider.listPeerIds();
+      candidates.push('second');
+      finishFirst(true);
+      await expect(listing).resolves.toEqual(['first', 'second']);
+      expect(probe).toHaveBeenCalledTimes(2);
+    } finally { provider.close(); }
   });
 
   it('rejects malformed hashes before sending FIPS data', async () => {

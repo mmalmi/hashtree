@@ -264,7 +264,7 @@ export class DexieStore implements Store {
    * Evict least-recently-used entries until totalBytes is below maxBytes.
    * Returns the number of entries deleted.
    */
-  async evict(maxBytes: number): Promise<number> {
+  async evict(maxBytes: number, protectedHashes: ReadonlySet<string> = new Set()): Promise<number> {
     try {
       await this.flushPendingLastAccessUpdates();
       const currentBytes = await this.totalBytes();
@@ -279,6 +279,7 @@ export class DexieStore implements Store {
 
       for (const entry of entries) {
         if (bytesRemoved >= targetRemoval) break;
+        if (protectedHashes.has(entry.hashHex)) continue;
 
         const blob = await this.db.blobs.get(entry.hashHex);
         await this.db.transaction('rw', this.db.blobs, this.db.accesses, async () => {

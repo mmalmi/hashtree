@@ -76,6 +76,17 @@ export class TcpBlobTransport {
         clearInterval(this.timer);
         await this.tcp.dispose();
     }
+    /** A valid authenticated response proves the peer implements the blob service. */
+    async probe(peerId) {
+        try {
+            await this.fetchFromPeer(peerId, new Uint8Array(32), Math.min(this.timeoutMs, 1_000), 0);
+            return true;
+        }
+        catch {
+            // Unavailable peers remain unknown; this is not a missing-content response.
+            return false;
+        }
+    }
     async fetchFromPeer(peer, hash, attemptTimeoutMs, htl) {
         const deadline = Date.now() + attemptTimeoutMs;
         const connection = await this.tcp.connect(peer);

@@ -7,7 +7,7 @@
  */
 
 import type { CID } from '@hashtree/core';
-import { SimplePool, type Event as NostrEvent } from 'nostr-tools';
+import type { Event as NostrEvent } from 'nostr-tools';
 import {
   HASHTREE_LABEL,
   HASHTREE_ROOT_KINDS,
@@ -15,11 +15,10 @@ import {
   storeTreeEventSnapshot,
   type StoredNostrEvent,
 } from '@hashtree/nostr';
-import { getNdk, subscribe as ndkSubscribe, unsubscribe as ndkUnsubscribe } from './ndk';
+import { query, subscribe as nostrSubscribe, unsubscribe as nostrUnsubscribe } from './nostrRuntime';
 import { getCachedRoot, getTreeRootCacheStore, setCachedRoot } from './treeRootCache';
 import type { SignedEvent, TreeVisibility } from './protocol';
 import { nip19 } from 'nostr-tools';
-import { NDKSubscriptionCacheUsage } from 'ndk';
 
 // Active subscriptions by pubkey
 const activeSubscriptions = new Map<string, string>(); // pubkeyHex -> subId
@@ -28,13 +27,6 @@ const inFlightHistoricalRootLists = new Map<string, Promise<CID[]>>();
 const historicalRootListCache = new Map<string, { roots: CID[]; expiresAt: number }>();
 const MAX_HISTORICAL_TREE_ROOT_EVENTS = 20;
 const HISTORICAL_TREE_ROOT_CACHE_TTL_MS = 30_000;
-
-const DEFAULT_TREE_ROOT_RELAYS = [
-  'wss://relay.damus.io',
-  'wss://relay.primal.net',
-  'wss://relay.nostr.band',
-  'wss://relay.snort.social',
-];
 
 // Callback to notify main thread
 let notifyCallback: ((npub: string, treeName: string, record: TreeRootRecord) => void) | null = null;
@@ -85,30 +77,6 @@ async function storeSnapshotNhash(event: SignedEvent): Promise<string | undefine
     event as StoredNostrEvent,
   );
   return snapshot?.snapshotNhash;
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T | null> {
-  return Promise.race([
-    promise,
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
-  ]);
-}
-
-function getHistoryRelayUrls(): string[] {
-  const urls = new Set<string>(DEFAULT_TREE_ROOT_RELAYS);
-  const ndk = getNdk();
-  const connected = typeof ndk?.pool?.connectedRelays === 'function'
-    ? Array.from(ndk.pool.connectedRelays()).map((relay) => relay.url)
-    : [];
-  for (const url of connected) {
-    urls.add(url);
-  }
-  if (typeof ndk?.pool?.urls === 'function') {
-    for (const url of ndk.pool.urls()) {
-      urls.add(url);
-    }
-  }
-  return Array.from(urls);
 }
 
 function toSignedEvent(event: NostrEvent): SignedEvent {
@@ -232,68 +200,17 @@ export function parseTreeRootEvent(event: SignedEvent): ParsedTreeRootEvent | nu
   };
 }
 
-async function fetchTreeRootEventsFromNdk(
-  pubkeyHex: string,
-  treeName: string,
-  timeoutMs: number
+async function fetchTreeRootEvents(
+  pubkeyHex: string, treeName: string, timeoutMs: number,
 ): Promise<SignedEvent[]> {
-  const ndk = getNdk();
-  if (!ndk) return [];
-
-  try {
-    const events = await withTimeout(
-      ndk.fetchEvents({
-        kinds: [...HASHTREE_ROOT_KINDS],
-        authors: [pubkeyHex],
-        '#d': [treeName],
-        limit: MAX_HISTORICAL_TREE_ROOT_EVENTS,
-      }, {
-        cacheUsage: NDKSubscriptionCacheUsage.ONLY_RELAY,
-      }),
-      timeoutMs,
-    );
-    if (!events) return [];
-    return uniqueEvents(Array.from(events).map((event) => toSignedEvent(event.rawEvent?.() ?? event)))
-      .sort(compareReplaceableEvents);
-  } catch {
-    return [];
+  const result = await query([{
+    kinds: [...HASHTREE_ROOT_KINDS], authors: [pubkeyHex], '#d': [treeName],
+    limit: MAX_HISTORICAL_TREE_ROOT_EVENTS,
+  }], { deadline: Date.now() + timeoutMs });
+  if (!result.complete && result.events.length === 0) {
+    throw new Error('Tree history is not available yet');
   }
-}
-
-async function fetchTreeRootEventsFromRelays(
-  pubkeyHex: string,
-  treeName: string,
-  timeoutMs: number
-): Promise<SignedEvent[]> {
-  const relayUrls = getHistoryRelayUrls();
-  if (relayUrls.length === 0) return [];
-
-  const pool = new SimplePool();
-  try {
-    const events = await withTimeout(
-      pool.querySync(relayUrls, {
-        kinds: [...HASHTREE_ROOT_KINDS],
-        authors: [pubkeyHex],
-        '#d': [treeName],
-        limit: MAX_HISTORICAL_TREE_ROOT_EVENTS,
-      }, {
-        maxWait: timeoutMs,
-      }),
-      timeoutMs + 500,
-    );
-    if (!events) return [];
-    return uniqueEvents(Array.from(events).map((event) => toSignedEvent(event)))
-      .sort(compareReplaceableEvents);
-  } catch {
-    return [];
-  } finally {
-    try {
-      pool.close(relayUrls);
-    } catch {}
-    try {
-      pool.destroy();
-    } catch {}
-  }
+  return uniqueEvents(result.events).sort(compareReplaceableEvents);
 }
 
 function cidKey(cid: CID): string {
@@ -345,13 +262,10 @@ export async function getHistoricalTreeRoots(
       return [];
     }
 
-    const [ndkEvents, relayEvents] = await Promise.all([
-      fetchTreeRootEventsFromNdk(pubkeyHex, treeName, timeoutMs),
-      fetchTreeRootEventsFromRelays(pubkeyHex, treeName, timeoutMs),
-    ]);
+    const events = await fetchTreeRootEvents(pubkeyHex, treeName, timeoutMs);
 
     const roots = dedupeRoots(
-      uniqueEvents([...ndkEvents, ...relayEvents])
+      uniqueEvents(events)
         .sort(compareReplaceableEvents)
         .map((event) => {
           const parsed = parseTreeRootEvent(event);
@@ -410,9 +324,7 @@ export async function resolveTreeRootNow(
     }
 
     const fetched = (
-      await fetchTreeRootEventsFromNdk(pubkeyHex, treeName, timeoutMs)
-    )[0] ?? (
-      await fetchTreeRootEventsFromRelays(pubkeyHex, treeName, timeoutMs)
+      await fetchTreeRootEvents(pubkeyHex, treeName, timeoutMs)
     )[0];
     if (!fetched) {
       return null;
@@ -484,11 +396,11 @@ export function subscribeToTreeRoots(pubkeyHex: string): () => void {
   const subId = `tree-${pubkeyHex.slice(0, 8)}`;
   activeSubscriptions.set(pubkeyHex, subId);
 
-  ndkSubscribe(subId, [{
+  nostrSubscribe(subId, [{
     kinds: [...HASHTREE_ROOT_KINDS],
     authors: [pubkeyHex],
   }], {
-    cacheUsage: NDKSubscriptionCacheUsage.ONLY_RELAY,
+    cache: 'cache-first',
   });
 
   return () => unsubscribeFromTreeRoots(pubkeyHex);
@@ -500,7 +412,7 @@ export function subscribeToTreeRoots(pubkeyHex: string): () => void {
 export function unsubscribeFromTreeRoots(pubkeyHex: string): void {
   const subId = activeSubscriptions.get(pubkeyHex);
   if (subId) {
-    ndkUnsubscribe(subId);
+    nostrUnsubscribe(subId);
     activeSubscriptions.delete(pubkeyHex);
   }
 }

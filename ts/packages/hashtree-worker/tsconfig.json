@@ -5,8 +5,6 @@
     "moduleResolution": "bundler",
     "baseUrl": ".",
     "paths": {
-      "ndk": ["./src/relay/shims.d.ts"],
-      "ndk-cache": ["./src/relay/shims.d.ts"],
       "nostr-social-graph": ["./src/relay/shims.d.ts"]
     },
     "declaration": true,

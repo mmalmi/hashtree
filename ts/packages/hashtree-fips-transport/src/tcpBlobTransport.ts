@@ -97,6 +97,17 @@ export class TcpBlobTransport {
     await this.tcp.dispose();
   }
 
+  /** A valid authenticated response proves the peer implements the blob service. */
+  async probe(peerId: string): Promise<boolean> {
+    try {
+      await this.fetchFromPeer(peerId, new Uint8Array(32) as Hash, Math.min(this.timeoutMs, 1_000), 0);
+      return true;
+    } catch {
+      // Unavailable peers remain unknown; this is not a missing-content response.
+      return false;
+    }
+  }
+
   private async fetchFromPeer(
     peer: string,
     hash: Hash,

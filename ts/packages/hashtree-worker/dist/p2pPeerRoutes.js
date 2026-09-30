@@ -47,7 +47,7 @@ export class P2PPeerRoutes {
     async peerList() {
         if (!this.bridge.isEnabled())
             return [];
-        if (Date.now() - this.refreshedAt < this.cacheMs)
+        if (this.peerIds.length > 0 && Date.now() - this.refreshedAt < this.cacheMs)
             return [...this.peerIds];
         const generation = this.generation;
         const pending = this.inflight ?? this.bridge.listPeers();

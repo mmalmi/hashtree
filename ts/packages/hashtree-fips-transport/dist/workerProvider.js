@@ -3,13 +3,15 @@ import { TCP_BLOB_DEFAULT_HTL, TCP_BLOB_MAX_HTL, TCP_BLOB_SERVICE_PORT, TcpBlobT
 export const HASHTREE_BLOB_CAPABILITY = 'hashtree.blob/1';
 /**
  * Bridges a running FIPS node into HashtreeWorkerClient.setP2PProvider().
- * Provider selection comes only from the supplied route source; connected FIPS
- * peers are never inferred to be Hashtree providers.
+ * Provider selection uses supplied routes or a successful blob-service probe;
+ * ordinary FIPS connections alone never qualify a peer as a file provider.
  */
 export class FipsWorkerP2PProvider {
     options;
     transport;
     closed = false;
+    probed = new Map();
+    discovery = null;
     constructor(options) {
         this.options = options;
         this.transport = new TcpBlobTransport({
@@ -49,9 +51,38 @@ export class FipsWorkerP2PProvider {
     }
     async routes() {
         const source = this.options.providerRoutes;
-        if (!source)
-            return [];
-        return normalizeRoutes(typeof source === 'function' ? await source() : source);
+        const explicit = source ? (typeof source === 'function' ? await source() : source) : [];
+        await this.discoverProviders();
+        const discovered = [...this.probed].filter(([, status]) => status.available)
+            .map(([peerId]) => ({ peerId, htl: 0 }));
+        return normalizeRoutes([...explicit, ...discovered]);
+    }
+    /** Bounded service negotiation; ordinary FIPS peers are never assumed to serve files. */
+    async discoverProviders() {
+        if (this.closed || !this.options.candidatePeerIds)
+            return;
+        if (this.discovery)
+            return this.discovery;
+        this.discovery = (async () => {
+            // Re-read admission after every batch: another peer can connect while a seed
+            // probe is in flight. Bound total work and concurrent streams per pass.
+            for (let probes = 0; probes < 16 && !this.closed;) {
+                const candidates = [...new Set(this.options.candidatePeerIds())].slice(0, 16);
+                for (const peer of this.probed.keys())
+                    if (!candidates.includes(peer))
+                        this.probed.delete(peer);
+                const pending = candidates.filter((peer) => (this.probed.get(peer)?.retryAt ?? 0) <= Date.now()).slice(0, 2);
+                if (pending.length === 0)
+                    break;
+                probes += pending.length;
+                await Promise.all(pending.map(async (peer) => {
+                    const available = await this.transport.probe(peer);
+                    if (!this.closed)
+                        this.probed.set(peer, { available, retryAt: Date.now() + (available ? 60_000 : 10_000) });
+                }));
+            }
+        })().finally(() => { this.discovery = null; });
+        return this.discovery;
     }
     async fetchRoutes(hash, routes, requestedHtl) {
         const groups = new Map();

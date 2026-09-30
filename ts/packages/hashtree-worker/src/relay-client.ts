@@ -1,3 +1,5 @@
+import type { NostrFilter, RuntimeSource, RuntimeSubscription, RuntimeSubscriptionHandlers, RuntimeQueryOptions, RuntimeQueryResult, RuntimePublishResult } from 'nostr-pubsub';
+import { serveNostrSource } from './nostrSourcePort.js';
 import type { WorkerFactory, WorkerP2PProvider } from './client.js';
 import type {
   BlossomBandwidthStats,
@@ -71,6 +73,9 @@ export class RelayWorkerClient {
       }
     | null = null;
   private pendingRequests = new Map<string, PendingRequest>();
+  private eventListeners = new Map<string, RuntimeSubscriptionHandlers>();
+  private sourceBridge: { id: string; close(): void } | null = null;
+  private sourceRevision = 0;
   private treeRootListeners = new Set<(update: TreeRootUpdate) => void>();
   private blossomBandwidthListeners = new Set<(stats: BlossomBandwidthStats) => void>();
 
@@ -144,6 +149,18 @@ export class RelayWorkerClient {
         return;
       }
 
+      if (message.type === 'void' && message.error && message.id && this.eventListeners.has(message.id)) {
+        this.eventListeners.get(message.id)?.onError?.(new Error(message.error));
+        return;
+      }
+      if (message.type === 'event') {
+        this.eventListeners.get(message.subId)?.onEvent(message.event, message.info ?? { source: 'worker', cached: false });
+        return;
+      }
+      if (message.type === 'nostrStatus') {
+        this.eventListeners.get(message.subId)?.onEose?.(message.status);
+        return;
+      }
       if (message.type === 'blossomBandwidth') {
         for (const listener of this.blossomBandwidthListeners) {
           listener(message.stats);
@@ -375,22 +392,36 @@ export class RelayWorkerClient {
     payload: RelayWorkerRequestPayload,
     timeoutMs = REQUEST_TIMEOUT_MS,
     transfer: Transferable[] = [],
+    signal?: AbortSignal,
   ): Promise<RelayWorkerResponse> {
     await this.init();
     if (!this.worker) {
       throw new Error('Worker not initialized');
     }
 
+    if (signal?.aborted) throw new DOMException('Worker request cancelled', 'AbortError');
     const id = this.nextRequestId(payload.type);
     const message = { ...payload, id } as RelayWorkerRequest;
 
     return new Promise<RelayWorkerResponse>((resolve, reject) => {
+      const cleanup = () => { clearTimeout(timeoutId); signal?.removeEventListener('abort', abort); };
+      const cancelRemote = () => {
+        if (payload.type === 'query') this.worker?.postMessage({ type: 'cancelNostrQuery', id: this.nextRequestId('cancel_query'), requestId: id } satisfies RelayWorkerRequest);
+      };
+      const abort = () => {
+        cleanup(); cancelRemote(); this.pendingRequests.delete(id);
+        reject(new DOMException('Worker request cancelled', 'AbortError'));
+      };
       const timeoutId = setTimeout(() => {
-        this.pendingRequests.delete(id);
+        cleanup(); cancelRemote(); this.pendingRequests.delete(id);
         reject(new Error(`Worker request timed out: ${payload.type}`));
       }, timeoutMs);
-
-      this.pendingRequests.set(id, { resolve, reject, timeoutId });
+      this.pendingRequests.set(id, {
+        resolve: (value) => { cleanup(); resolve(value); },
+        reject: (error) => { cleanup(); reject(error); },
+        timeoutId,
+      });
+      signal?.addEventListener('abort', abort, { once: true });
       this.worker?.postMessage(message, transfer);
     });
   }
@@ -439,6 +470,52 @@ export class RelayWorkerClient {
     if (res.error) {
       throw new Error(res.error);
     }
+  }
+
+  subscribeEvents(filters: NostrFilter[], handlers: RuntimeSubscriptionHandlers): RuntimeSubscription {
+    const id = this.nextRequestId('nostr_sub');
+    this.eventListeners.set(id, handlers);
+    void this.init().then(() => {
+      if (this.eventListeners.has(id)) this.worker?.postMessage({ type: 'subscribe', id, filters } satisfies RelayWorkerRequest);
+    }).catch((error) => handlers.onError?.(error instanceof Error ? error : new Error(String(error))));
+    return { close: () => {
+      if (!this.eventListeners.delete(id)) return;
+      if (this.workerReady) this.worker?.postMessage({ type: 'unsubscribe', id: this.nextRequestId('nostr_close'), subId: id } satisfies RelayWorkerRequest);
+    } };
+  }
+
+  async queryEvents(filters: NostrFilter[], options: RuntimeQueryOptions = {}): Promise<RuntimeQueryResult> {
+    if (options.signal?.aborted) throw new DOMException('Query cancelled', 'AbortError');
+    const { signal, ...wireOptions } = options;
+    const response = await this.request({ type: 'query', filters, options: wireOptions }, REQUEST_TIMEOUT_MS, [], signal);
+    if (signal?.aborted) throw new DOMException('Query cancelled', 'AbortError');
+    if (response.type !== 'nostrQuery' || !response.result) throw new Error('error' in response && response.error || 'Invalid event query response');
+    return response.result;
+  }
+
+  async publishEvent(event: RelayWorkerSignedEvent): Promise<RuntimePublishResult> {
+    const response = await this.request({ type: 'publish', event });
+    if (response.type !== 'void' || response.error || !response.receipt) throw new Error('error' in response && response.error || 'Invalid event publication receipt');
+    return response.receipt;
+  }
+
+  /** Attach pubsub on the same FIPS node already used by the blob provider. */
+  async setNostrSource(source: RuntimeSource | null): Promise<void> {
+    const revision = ++this.sourceRevision;
+    await this.init();
+    if (revision !== this.sourceRevision) return;
+    const previous = this.sourceBridge;
+    this.sourceBridge = null;
+    if (previous) {
+      previous.close();
+      await this.request({ type: 'detachNostrSource', sourceId: previous.id });
+    }
+    if (!source || revision !== this.sourceRevision) return;
+    const channel = new MessageChannel();
+    const close = serveNostrSource(channel.port1, source);
+    this.sourceBridge = { id: source.id, close };
+    try { await this.request({ type: 'attachNostrSource', sourceId: source.id, port: channel.port2, publishAcceptance: source.publishAcceptance }, REQUEST_TIMEOUT_MS, [channel.port2]); }
+    catch (error) { close(); if (this.sourceBridge?.close === close) this.sourceBridge = null; throw error; }
   }
 
   setP2PProvider(provider: WorkerP2PProvider | null): void {
@@ -520,6 +597,10 @@ export class RelayWorkerClient {
   }
 
   async close(): Promise<void> {
+    ++this.sourceRevision;
+    this.sourceBridge?.close();
+    this.sourceBridge = null;
+    this.eventListeners.clear();
     try {
       const res = await this.request({ type: 'close' });
       if (res.type !== 'void' && res.type !== 'error') {

@@ -8,6 +8,7 @@ const fake = vi.hoisted(() => ({
 
 vi.mock('@fips/core', () => ({
   FipsNode: class {
+    on(): () => void { return () => {}; }
     async start(): Promise<void> {}
     async stop(): Promise<void> {}
   },
@@ -29,6 +30,7 @@ vi.mock('@fips/transport-websocket', () => ({
 vi.mock('../src/workerProvider.js', () => ({
   createFipsWorkerP2PProvider: () => ({
     close: vi.fn(),
+    discoverProviders: vi.fn(),
     fetch: vi.fn(),
     listPeerIds: vi.fn(() => []),
   }),

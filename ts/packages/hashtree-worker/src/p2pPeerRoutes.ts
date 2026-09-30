@@ -55,7 +55,7 @@ export class P2PPeerRoutes implements BlobRoute {
 
   async peerList(): Promise<string[]> {
     if (!this.bridge.isEnabled()) return [];
-    if (Date.now() - this.refreshedAt < this.cacheMs) return [...this.peerIds];
+    if (this.peerIds.length > 0 && Date.now() - this.refreshedAt < this.cacheMs) return [...this.peerIds];
 
     const generation = this.generation;
     const pending = this.inflight ?? this.bridge.listPeers();

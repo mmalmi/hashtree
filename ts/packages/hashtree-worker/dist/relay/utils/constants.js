@@ -66,24 +66,6 @@ export const KIND_STATUS_CLOSED = 1632; // Closed
 export const KIND_STATUS_DRAFT = 1633; // Draft
 // Debug namespaces for debug pkg
 export const DEBUG_NAMESPACES = {
-    // NDK
-    NDK_RELAY: "ndk:relay",
-    NDK_RELAY_CONN: "ndk:relay:conn",
-    NDK_RELAY_ERROR: "ndk:relay:error",
-    NDK_RELAY_WARN: "ndk:relay:warn",
-    NDK_SUBSCRIPTION: "ndk:subscription",
-    NDK_SUBSCRIPTION_ERROR: "ndk:subscription:error",
-    NDK_SUBSCRIPTION_WARN: "ndk:subscription:warn",
-    NDK_CACHE: "ndk:cache",
-    NDK_CACHE_ERROR: "ndk:cache:error",
-    NDK_CACHE_WARN: "ndk:cache:warn",
-    NDK_POOL: "ndk:pool",
-    NDK_POOL_ERROR: "ndk:pool:error",
-    NDK_POOL_WARN: "ndk:pool:warn",
-    NDK_WORKER: "ndk:worker",
-    NDK_WORKER_ERROR: "ndk:worker:error",
-    NDK_WORKER_WARN: "ndk:worker:warn",
-    NDK_TRANSPORT: "ndk:transport",
     // Cashu
     CASHU_WALLET: "cashu:wallet",
     CASHU_WALLET_ERROR: "cashu:wallet:error",

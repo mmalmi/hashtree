@@ -14,7 +14,7 @@ import { BlobRouter } from '@hashtree/mesh';
 import { DexieStore } from '@hashtree/dexie';
 import { initTreeRootCache, getCachedRootInfo, setCachedRoot, mergeCachedRootKey, clearMemoryCache } from './treeRootCache';
 import { handleTreeRootEvent, isTreeRootEvent, setNotifyCallback as setTreeRootNotifyCallback, subscribeToTreeRoots, unsubscribeFromTreeRoots } from './treeRootSubscription';
-import { initNdk, closeNdk, subscribe as ndkSubscribe, unsubscribe as ndkUnsubscribe, publish as ndkPublish, setOnEvent, setOnEose, getRelayStats as getNdkRelayStats, republishTrees, republishTree, setRelays as ndkSetRelays, } from './ndk';
+import { initNostrRuntime, addSource, removeSource, query as queryNostr, closeNostrRuntime, subscribe as nostrSubscribe, unsubscribe as nostrUnsubscribe, publish as nostrPublish, setOnEvent, setOnEose, getRelayStats as getNostrRelayStats, republishTrees, republishTree, setRelays as nostrSetRelays, } from './nostrRuntime';
 import { initIdentity, setIdentity, clearIdentity } from './identity';
 import { setResponseSender, signEvent, handleSignedResponse, handleEncryptedResponse, handleDecryptedResponse, } from './signing';
 import { SocialGraph } from 'nostr-social-graph';
@@ -38,6 +38,10 @@ const socialGraphDB = new SocialGraphDB();
 import { initMediaHandler, registerMediaPort } from './mediaHandler';
 import { resolveRootPath } from './rootPathResolver';
 import { BlossomBandwidthTracker } from '../capabilities/blossomBandwidthTracker';
+import { connectNostrSource } from '../nostrSourcePort';
+import { evictWorkerCache } from './eventIndex';
+const nostrQueries = new Map();
+const nostrSourceBridges = new Map();
 import { P2PBridge } from '../p2pBridge';
 import { P2PPeerRoutes } from '../p2pPeerRoutes';
 // Worker state
@@ -75,7 +79,7 @@ function runEvictionCheck() {
         if (!store)
             return;
         try {
-            const evicted = await store.evict(storageMaxBytes);
+            const evicted = await evictWorkerCache(store, _config?.storeName || 'hashtree-worker', storageMaxBytes);
             if (evicted > 0) {
                 console.log(`[Worker] Eviction completed, removed ${evicted} entries`);
             }
@@ -378,6 +382,38 @@ self.onmessage = async (e) => {
     const msg = e.data;
     try {
         switch (msg.type) {
+            case 'attachNostrSource': {
+                nostrSourceBridges.get(msg.sourceId)?.close();
+                removeSource(msg.sourceId);
+                const bridge = connectNostrSource(msg.port, msg.sourceId, msg.publishAcceptance);
+                nostrSourceBridges.set(msg.sourceId, bridge);
+                addSource(bridge.source);
+                respond({ type: 'void', id: msg.id });
+                break;
+            }
+            case 'detachNostrSource':
+                removeSource(msg.sourceId);
+                nostrSourceBridges.get(msg.sourceId)?.close();
+                nostrSourceBridges.delete(msg.sourceId);
+                respond({ type: 'void', id: msg.id });
+                break;
+            case 'cancelNostrQuery':
+                nostrQueries.get(msg.requestId)?.abort();
+                break;
+            case 'query': {
+                const controller = new AbortController();
+                nostrQueries.set(msg.id, controller);
+                try {
+                    respond({ type: 'nostrQuery', id: msg.id, result: await queryNostr(msg.filters, { ...msg.options, signal: controller.signal }) });
+                }
+                catch (error) {
+                    respond({ type: 'nostrQuery', id: msg.id, error: getErrorMessage(error) });
+                }
+                finally {
+                    nostrQueries.delete(msg.id);
+                }
+                break;
+            }
             // Lifecycle
             case 'init':
                 await handleInit(msg.id, msg.config, msg.p2pProviderEnabled === true);
@@ -501,7 +537,7 @@ self.onmessage = async (e) => {
                 break;
             // Relay configuration
             case 'setRelays':
-                await ndkSetRelays(msg.relays);
+                await nostrSetRelays(msg.relays);
                 console.log('[Worker] Relay configuration updated:', msg.relays.length, 'relays');
                 respond({ type: 'void', id: msg.id });
                 break;
@@ -624,14 +660,14 @@ async function handleInit(id, cfg, hasP2PProvider) {
             blossomStore = createTrackedBlossomStore(cfg.blossomServers);
             console.log('[Worker] Initialized BlossomStore with', cfg.blossomServers.length, 'servers');
         }
-        // Initialize NDK with relays, cache, and nostr-wasm verification
-        await initNdk(cfg.relays, {
-            pubkey: cfg.pubkey,
-            nsec: cfg.nsec,
+        // Use the shared event runtime and the existing Hashtree block cache.
+        await initNostrRuntime(cfg.relays, {
+            store,
+            storeName,
         });
-        console.log('[Worker] NDK initialized with', cfg.relays.length, 'relays');
+        console.log('[Worker] Nostr runtime initialized with', cfg.relays.length, 'relays');
         // Set up unified event handler for all subscriptions
-        setOnEvent(async (subId, event) => {
+        setOnEvent(async (subId, event, info) => {
             const isTreeRoot = isTreeRootEvent(event);
             if (isTreeRoot) {
                 try {
@@ -642,7 +678,7 @@ async function handleInit(id, cfg, hasP2PProvider) {
                 }
             }
             // Forward to main thread
-            respond({ type: 'event', subId, event });
+            respond({ type: 'event', subId, event, info });
             // Route to SocialGraph handler (all socialgraph-* subscriptions)
             if (subId.startsWith('socialgraph-') && event.kind === KIND_CONTACTS) {
                 handleSocialGraphEvent(event);
@@ -667,8 +703,10 @@ async function handleInit(id, cfg, hasP2PProvider) {
             });
         });
         // Set up EOSE handler
-        setOnEose((subId) => {
-            respond({ type: 'eose', subId });
+        setOnEose((subId, status) => {
+            respond({ type: 'nostrStatus', subId, status });
+            if (status.complete)
+                respond({ type: 'eose', subId, status });
         });
         // Initialize media handler with the tree
         initMediaHandler(tree);
@@ -772,12 +810,19 @@ function emitBlossomBandwidthSnapshot() {
     respond({ type: 'blossomBandwidth', stats: blossomBandwidthTracker.getStats() });
 }
 async function handleClose(id) {
-    // Close NDK connections
-    closeNdk();
+    // Close event subscriptions and connections
+    for (const query of nostrQueries.values())
+        query.abort();
+    nostrQueries.clear();
+    for (const bridge of nostrSourceBridges.values())
+        bridge.close();
+    nostrSourceBridges.clear();
+    await closeNostrRuntime();
     // Clear identity
     clearIdentity();
     // Clear caches
     clearMemoryCache();
+    store?.close();
     store = null;
     blobRouter = null;
     tree = null;
@@ -1098,7 +1143,7 @@ function normalizePubkey(pubkey) {
 async function handleSubscribe(id, filters) {
     try {
         // Use the request id as the subscription id
-        ndkSubscribe(id, filters);
+        nostrSubscribe(id, filters);
         respond({ type: 'void', id });
     }
     catch (err) {
@@ -1107,7 +1152,7 @@ async function handleSubscribe(id, filters) {
 }
 async function handleUnsubscribe(id, subId) {
     try {
-        ndkUnsubscribe(subId);
+        nostrUnsubscribe(subId);
         respond({ type: 'void', id });
     }
     catch (err) {
@@ -1116,8 +1161,8 @@ async function handleUnsubscribe(id, subId) {
 }
 async function handlePublish(id, event) {
     try {
-        await ndkPublish(event);
-        respond({ type: 'void', id });
+        const receipt = await nostrPublish(event);
+        respond({ type: 'void', id, receipt });
     }
     catch (err) {
         respond({ type: 'void', id, error: getErrorMessage(err) });
@@ -1154,7 +1199,7 @@ async function handleGetPeerStats(id) {
 }
 async function handleGetRelayStats(id) {
     try {
-        const stats = getNdkRelayStats();
+        const stats = getNostrRelayStats();
         respond({ type: 'relayStats', id, stats });
     }
     catch {
@@ -1290,7 +1335,7 @@ function handleFetchUserFollows(id, pubkey) {
         // Subscribe to their kind:3 event
         if (!subscribedPubkeys.has(pubkey)) {
             subscribedPubkeys.add(pubkey);
-            ndkSubscribe(`socialgraph-profile-${pubkey.slice(0, 8)}`, [{
+            nostrSubscribe(`socialgraph-profile-${pubkey.slice(0, 8)}`, [{
                     kinds: [KIND_CONTACTS],
                     authors: [pubkey],
                 }]);
@@ -1327,7 +1372,7 @@ function handleFetchUserFollowers(id, pubkey) {
         fetchedFollowersPubkeys.add(pubkey);
         // Subscribe to recent kind:3 events that mention this user
         // Limit to 100 to avoid overwhelming the connection
-        ndkSubscribe(`socialgraph-followers-${pubkey.slice(0, 8)}`, [{
+        nostrSubscribe(`socialgraph-followers-${pubkey.slice(0, 8)}`, [{
                 kinds: [KIND_CONTACTS],
                 '#p': [pubkey],
                 limit: 100,
@@ -1437,7 +1482,7 @@ function subscribeToFollowsContactLists(pubkeys, depth) {
         const batchSize = 50;
         for (let i = 0; i < newPubkeys.length; i += batchSize) {
             const batch = newPubkeys.slice(i, i + batchSize);
-            ndkSubscribe(`socialgraph-depth${depth}-${i}`, [{
+            nostrSubscribe(`socialgraph-depth${depth}-${i}`, [{
                     kinds: [KIND_CONTACTS],
                     authors: batch,
                 }]);
@@ -1466,7 +1511,7 @@ function setupSocialGraphSubscription(rootPubkey) {
             authors.push(DEFAULT_BOOTSTRAP_PUBKEY);
             subscribedPubkeys.add(DEFAULT_BOOTSTRAP_PUBKEY);
         }
-        ndkSubscribe('socialgraph-contacts', [{
+        nostrSubscribe('socialgraph-contacts', [{
                 kinds: [KIND_CONTACTS],
                 authors,
             }]);
