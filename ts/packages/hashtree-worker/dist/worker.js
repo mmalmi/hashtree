@@ -1132,7 +1132,7 @@ function respondBlobStored(id, fileCid, upload) {
         nhash,
     });
 }
-async function handleRequest(req) {
+async function handleRequest(req, nostrSubscribe) {
     switch (req.type) {
         case 'init': {
             await init(req.config, req.p2pProviderEnabled === true);
@@ -1363,7 +1363,7 @@ async function handleRequest(req) {
                 return;
             }
             try {
-                const cid = await resolveRootPathFromRelays(tree, nostrRelays, req.npub, req.path, req.timeoutMs, req.settleMs);
+                const cid = await resolveRootPathFromRelays(tree, nostrRelays, req.npub, req.path, req.timeoutMs, req.settleMs, nostrSubscribe);
                 respond({ type: 'cid', id: req.id, cid: cid ?? undefined });
             }
             catch (err) {
@@ -1380,7 +1380,7 @@ async function handleRequest(req) {
             try {
                 const watch = await watchRootPathFromRelays(tree, nostrRelays, req.npub, req.path, (cid) => {
                     respond({ type: 'rootUpdate', watchId, cid: cid ?? undefined });
-                }, req.timeoutMs, req.settleMs);
+                }, req.timeoutMs, req.settleMs, nostrSubscribe);
                 activeRootWatches.set(watchId, { close: watch.close });
                 respond({
                     type: 'rootWatchStarted',
@@ -1434,7 +1434,7 @@ export function attachHashtreeWorker(target = self, options = {}) {
         if (!isWorkerRequestMessage(req)) {
             return;
         }
-        void handleRequest(req).catch((err) => {
+        void handleRequest(req, options.nostrSubscribe).catch((err) => {
             respond({ type: 'error', id: req.id, error: getErrorMessage(err) });
         });
     });

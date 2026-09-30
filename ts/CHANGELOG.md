@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.9 - 2026-09-30
+
+- Make repeated admission of the same signed event idempotent, preserving
+  event indexes and retry metadata across worker restarts.
+- Update nostr-pubsub to 0.5.11 for exact source evidence, truthful history,
+  bounded subscription batching, peer admission, and delayed event responses.
+- Let high-level workers resolve and watch roots through an app-owned runtime,
+  preserving cached roots and subpaths without opening another relay connection.
+
 ## TypeScript runtime 0.5.8 - 2026-09-30
 
 - Replace the worker's NDK networking/cache with the shared nostr-pubsub runtime,

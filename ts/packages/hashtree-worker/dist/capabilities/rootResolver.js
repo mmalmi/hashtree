@@ -105,7 +105,16 @@ function parseRelayMessage(data) {
         return null;
     }
 }
-function openRelaySubscriptions(relays, filter, handlers) {
+function openRelaySubscriptions(relays, filter, handlers, nostrSubscribe) {
+    if (nostrSubscribe) {
+        const subscription = nostrSubscribe([filter], {
+            onEvent: (event, info) => handlers.onEvent?.(event, info.source),
+            onEose: (status) => { if (status.complete)
+                handlers.onEose?.('nostr'); },
+            onError: () => handlers.onError?.('nostr'),
+        });
+        return { async close() { subscription.close(); } };
+    }
     const subId = createSubscriptionId();
     const sockets = [];
     let closed = false;
@@ -216,7 +225,7 @@ async function cacheParsedRootEvent(npub, event) {
         selfEncryptedLinkKey: parsed.selfEncryptedLinkKey,
     });
 }
-async function queryLatestTreeRoot(relays, npub, treeName, timeoutMs, settleMs) {
+async function queryLatestTreeRoot(relays, npub, treeName, timeoutMs, settleMs, nostrSubscribe) {
     const pubkey = decodeNpub(npub);
     if (!pubkey) {
         return null;
@@ -256,7 +265,7 @@ async function queryLatestTreeRoot(relays, npub, treeName, timeoutMs, settleMs) 
             onEose() {
                 // Slower relays may still provide a newer replaceable event.
             },
-        });
+        }, nostrSubscribe);
         const finish = (record) => {
             if (closed) {
                 return;
@@ -277,7 +286,7 @@ async function queryLatestTreeRoot(relays, npub, treeName, timeoutMs, settleMs) 
         }, timeoutMs);
     });
 }
-export async function watchRootPathFromRelays(tree, relays, npub, path, onUpdate, timeoutMs = DEFAULT_ROOT_RESOLVE_TIMEOUT_MS, settleMs = DEFAULT_ROOT_RESOLVE_SETTLE_MS) {
+export async function watchRootPathFromRelays(tree, relays, npub, path, onUpdate, timeoutMs = DEFAULT_ROOT_RESOLVE_TIMEOUT_MS, settleMs = DEFAULT_ROOT_RESOLVE_SETTLE_MS, nostrSubscribe) {
     const relayList = withUniqueRelays(relays);
     const pubkey = decodeNpub(npub);
     if (!pubkey) {
@@ -291,7 +300,7 @@ export async function watchRootPathFromRelays(tree, relays, npub, path, onUpdate
     const { treeName, subPath } = parseRootLookupPath(path);
     let treeRecord = cachedRootToRecord(await getCachedRootInfo(npub, treeName));
     if (!treeRecord) {
-        const initialRecord = await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs);
+        const initialRecord = await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs, nostrSubscribe);
         if (initialRecord) {
             treeRecord = initialRecord;
         }
@@ -397,13 +406,13 @@ export async function watchRootPathFromRelays(tree, relays, npub, path, onUpdate
         onError() {
             // Ignore relay close notifications. Other relays may still be active.
         },
-    });
+    }, nostrSubscribe);
     return {
         initialCid,
         close,
     };
 }
-export async function resolveRootPathFromRelays(tree, relays, npub, path, timeoutMs = DEFAULT_ROOT_RESOLVE_TIMEOUT_MS, settleMs = DEFAULT_ROOT_RESOLVE_SETTLE_MS) {
+export async function resolveRootPathFromRelays(tree, relays, npub, path, timeoutMs = DEFAULT_ROOT_RESOLVE_TIMEOUT_MS, settleMs = DEFAULT_ROOT_RESOLVE_SETTLE_MS, nostrSubscribe) {
     const relayList = withUniqueRelays(relays);
     const { treeName, subPath } = parseRootLookupPath(path);
     const cachedTreeRoot = cachedRootToRecord(await getCachedRootInfo(npub, treeName));
@@ -417,13 +426,13 @@ export async function resolveRootPathFromRelays(tree, relays, npub, path, timeou
                 // Fall through to a fresh relay lookup when the cached root no longer decodes locally.
             }
         }
-        const refreshedTreeRoot = preferLatestRecord(cachedTreeRoot, await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs));
+        const refreshedTreeRoot = preferLatestRecord(cachedTreeRoot, await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs, nostrSubscribe));
         if (refreshedTreeRoot) {
             return await resolvePreferredCid(tree, refreshedTreeRoot, subPath);
         }
         return null;
     }
-    const root = await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs);
+    const root = await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs, nostrSubscribe);
     if (!root) {
         return null;
     }
