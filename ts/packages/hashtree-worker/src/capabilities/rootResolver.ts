@@ -1,6 +1,9 @@
 import type { CID, HashTree } from '@hashtree/core';
 import { HASHTREE_ROOT_KINDS, parseHashtreeRootEvent, type NostrEvent } from '@hashtree/nostr';
 import { nip19 } from 'nostr-tools';
+import type { NostrFilter, NostrRuntime } from 'nostr-pubsub';
+
+export type RootNostrSubscribe = NostrRuntime['subscribe'];
 import { getCachedRootInfo, setCachedRoot } from '../relay/treeRootCache.js';
 
 export const DEFAULT_ROOT_RESOLVE_TIMEOUT_MS = 15_000;
@@ -156,7 +159,16 @@ function openRelaySubscriptions(
     onEose?: (relay: string) => void;
     onError?: (relay: string) => void;
   },
+  nostrSubscribe?: RootNostrSubscribe,
 ): { close(): Promise<void> } {
+  if (nostrSubscribe) {
+    const subscription = nostrSubscribe([filter as NostrFilter], {
+      onEvent: (event, info) => handlers.onEvent?.(event, info.source),
+      onEose: (status) => { if (status.complete) handlers.onEose?.('nostr'); },
+      onError: () => handlers.onError?.('nostr'),
+    });
+    return { async close() { subscription.close(); } };
+  }
   const subId = createSubscriptionId();
   const sockets: WebSocket[] = [];
   let closed = false;
@@ -293,6 +305,7 @@ async function queryLatestTreeRoot(
   treeName: string,
   timeoutMs: number,
   settleMs: number,
+  nostrSubscribe?: RootNostrSubscribe,
 ): Promise<RootRecord | null> {
   const pubkey = decodeNpub(npub);
   if (!pubkey) {
@@ -337,7 +350,7 @@ async function queryLatestTreeRoot(
       onEose() {
         // Slower relays may still provide a newer replaceable event.
       },
-    });
+    }, nostrSubscribe);
 
     const finish = (record: RootRecord | null): void => {
       if (closed) {
@@ -369,6 +382,7 @@ export async function watchRootPathFromRelays(
   onUpdate: (cid: CID | null) => void | Promise<void>,
   timeoutMs: number = DEFAULT_ROOT_RESOLVE_TIMEOUT_MS,
   settleMs: number = DEFAULT_ROOT_RESOLVE_SETTLE_MS,
+  nostrSubscribe?: RootNostrSubscribe,
 ): Promise<RootWatchHandle> {
   const relayList = withUniqueRelays(relays);
   const pubkey = decodeNpub(npub);
@@ -384,7 +398,7 @@ export async function watchRootPathFromRelays(
   const { treeName, subPath } = parseRootLookupPath(path);
   let treeRecord: RootRecord | null = cachedRootToRecord(await getCachedRootInfo(npub, treeName));
   if (!treeRecord) {
-    const initialRecord = await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs);
+    const initialRecord = await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs, nostrSubscribe);
     if (initialRecord) {
       treeRecord = initialRecord;
     }
@@ -503,7 +517,7 @@ export async function watchRootPathFromRelays(
     onError() {
       // Ignore relay close notifications. Other relays may still be active.
     },
-  });
+  }, nostrSubscribe);
 
   return {
     initialCid,
@@ -518,6 +532,7 @@ export async function resolveRootPathFromRelays(
   path?: string,
   timeoutMs: number = DEFAULT_ROOT_RESOLVE_TIMEOUT_MS,
   settleMs: number = DEFAULT_ROOT_RESOLVE_SETTLE_MS,
+  nostrSubscribe?: RootNostrSubscribe,
 ): Promise<CID | null> {
   const relayList = withUniqueRelays(relays);
   const { treeName, subPath } = parseRootLookupPath(path);
@@ -534,7 +549,7 @@ export async function resolveRootPathFromRelays(
 
     const refreshedTreeRoot = preferLatestRecord(
       cachedTreeRoot,
-      await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs),
+      await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs, nostrSubscribe),
     );
     if (refreshedTreeRoot) {
       return await resolvePreferredCid(tree, refreshedTreeRoot, subPath);
@@ -542,7 +557,7 @@ export async function resolveRootPathFromRelays(
     return null;
   }
 
-  const root = await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs);
+  const root = await queryLatestTreeRoot(relayList, npub, treeName, timeoutMs, settleMs, nostrSubscribe);
   if (!root) {
     return null;
   }

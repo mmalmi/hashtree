@@ -31,7 +31,7 @@ import type {
 import { IdbBlobStorage } from './capabilities/idbStorage.js';
 import { BlossomTransport, DEFAULT_BLOSSOM_SERVERS } from './capabilities/blossomTransport.js';
 import { probeConnectivity } from './capabilities/connectivity.js';
-import { resolveRootPathFromRelays, watchRootPathFromRelays } from './capabilities/rootResolver.js';
+import { resolveRootPathFromRelays, watchRootPathFromRelays, type RootNostrSubscribe } from './capabilities/rootResolver.js';
 import { clearMemoryCache, initTreeRootCache } from './relay/treeRootCache.js';
 import { assertEncryptedUploadCid, markEncryptedHashes, shouldServeHashToPeer } from './privacyGuards.js';
 import { streamFileRangeChunks } from './mediaStreaming.js';
@@ -62,6 +62,8 @@ export interface HashtreeWorkerRuntime {
 }
 
 export interface AttachHashtreeWorkerOptions {
+  /** Reuse the app's worker-owned event runtime for mutable root reads/watches. */
+  nostrSubscribe?: RootNostrSubscribe;
   handleExtensionRequest?: (
     request: unknown,
     runtime: HashtreeWorkerRuntime,
@@ -1396,7 +1398,7 @@ function respondBlobStored(id: string, fileCid: CID, upload: boolean): void {
   });
 }
 
-async function handleRequest(req: WorkerRequest): Promise<void> {
+async function handleRequest(req: WorkerRequest, nostrSubscribe?: RootNostrSubscribe): Promise<void> {
   switch (req.type) {
     case 'init': {
       await init(req.config, req.p2pProviderEnabled === true);
@@ -1659,6 +1661,7 @@ async function handleRequest(req: WorkerRequest): Promise<void> {
           req.path,
           req.timeoutMs,
           req.settleMs,
+          nostrSubscribe,
         );
         respond({ type: 'cid', id: req.id, cid: cid ?? undefined });
       } catch (err) {
@@ -1685,6 +1688,7 @@ async function handleRequest(req: WorkerRequest): Promise<void> {
           },
           req.timeoutMs,
           req.settleMs,
+          nostrSubscribe,
         );
         activeRootWatches.set(watchId, { close: watch.close });
         respond({
@@ -1747,7 +1751,7 @@ export function attachHashtreeWorker(
     if (!isWorkerRequestMessage(req)) {
       return;
     }
-    void handleRequest(req).catch((err) => {
+    void handleRequest(req, options.nostrSubscribe).catch((err) => {
       respond({ type: 'error', id: req.id, error: getErrorMessage(err) });
     });
   }) as EventListener;

@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryStore, fromHex, toHex, type CID } from '@hashtree/core';
+import { createNostrRuntime } from 'nostr-pubsub';
+import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
 import { HASHTREE_ROOT_KIND } from '@hashtree/nostr';
 
 const decodeMock = vi.hoisted(() => vi.fn());
@@ -92,6 +94,35 @@ describe('rootResolver capability', () => {
     vi.useRealTimers();
     // @ts-expect-error test cleanup
     delete globalThis.WebSocket;
+  });
+
+  it('resolves cached events and watches updates through the supplied runtime without extra sockets', async () => {
+    const runtime = createNostrRuntime({ relays: [] });
+    const key = generateSecretKey();
+    const signRoot = (hash: string, timestamp: number) => finalizeEvent({
+      kind: HASHTREE_ROOT_KIND, created_at: timestamp, content: '',
+      tags: [['d', 'runtime-catalog'], ['l', 'hashtree'], ['hash', hash]],
+    }, key);
+    const initial = signRoot(ROOT_HASH, 1700000000);
+    decodeMock.mockReturnValue({ type: 'npub', data: initial.pubkey });
+    await runtime.ingest(initial, 'fixture');
+    const resolvePath = vi.fn(async () => ({ cid: CHILD, name: 'song' }));
+    const subscribe = runtime.subscribe.bind(runtime);
+    try {
+      const resolved = await resolveRootPathFromRelays({ resolvePath }, [], NPUB, 'runtime-catalog/song', 100, 1, subscribe);
+      expect(resolved).toEqual(CHILD);
+      expect(resolvePath).toHaveBeenCalledWith({ hash: fromHex(ROOT_HASH) }, ['song']);
+      const updated = vi.fn();
+      const watch = await watchRootPathFromRelays({ resolvePath }, [], NPUB, 'runtime-catalog', updated, 100, 1, subscribe);
+      expect(toHex(watch.initialCid!.hash)).toBe(ROOT_HASH);
+      await runtime.ingest(signRoot(UPDATED_HASH, 1700000001), 'fixture');
+      await vi.waitFor(() => expect(updated).toHaveBeenCalledWith({ hash: fromHex(UPDATED_HASH) }));
+      await watch.close();
+      await runtime.ingest(signRoot('9'.repeat(64), 1700000002), 'fixture');
+      expect(updated).toHaveBeenCalledTimes(1);
+      expect(socketSendMock).not.toHaveBeenCalled();
+      expect(socketPlanMock).not.toHaveBeenCalled();
+    } finally { await runtime.close(); }
   });
 
   it('returns a tree root without resolving a subpath', async () => {

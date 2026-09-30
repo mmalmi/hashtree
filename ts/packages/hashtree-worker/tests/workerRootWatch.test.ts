@@ -191,7 +191,8 @@ describe('worker root resolution message flow', () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
 
     const ctx = globalThis.self as FakeWorkerGlobal;
-    attachHashtreeWorker(ctx);
+    const nostrSubscribe = vi.fn();
+    attachHashtreeWorker(ctx, { nostrSubscribe });
 
     ctx.dispatch({
       type: 'init',
@@ -219,6 +220,7 @@ describe('worker root resolution message flow', () => {
       'audio-catalog/root.json',
       4_500,
       500,
+      nostrSubscribe,
     );
     expect(postMessageMock).toHaveBeenCalledWith({
       type: 'cid',
