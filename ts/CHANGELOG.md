@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.10 - 2026-09-30
+
+- Update the worker, indexed event adapter and browser peer transport to
+  nostr-pubsub 0.5.12, so completed history queries wait for all received
+  events to finish admission before reporting completion.
+
 ## TypeScript runtime 0.5.9 - 2026-09-30
 
 - Make repeated admission of the same signed event idempotent, preserving
