@@ -2338,18 +2338,14 @@ impl RemoteHelper {
             .spawn()
             .context("spawn git cat-file for loose object byte accounting")?;
 
-        {
-            let stdin = child.stdin.as_mut().context("open git cat-file stdin")?;
-            for oid in &sorted_ids {
-                writeln!(stdin, "{}", oid)?;
-            }
-        }
-
+        let mut stdin = child.stdin.take().context("open git cat-file stdin")?;
         let stdout = child.stdout.take().context("open git cat-file stdout")?;
         let mut reader = BufReader::new(stdout);
         let mut total = 0usize;
 
         for oid in &sorted_ids {
+            // Drain each response before another request can fill the input pipe.
+            writeln!(stdin, "{}", oid)?;
             let mut header = String::new();
             reader
                 .read_line(&mut header)
@@ -2398,6 +2394,7 @@ impl RemoteHelper {
             total = total.saturating_add(encoder.finish()?.bytes);
         }
 
+        drop(stdin);
         drop(reader);
         let output = child
             .wait_with_output()
@@ -3381,13 +3378,15 @@ mod tests {
         RemoteHelper, UploadCounters, DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS,
         GIT_BATCH_UPLOAD_TARGET_BYTES_ENV, GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS_ENV,
     };
+    use flate2::{write::ZlibEncoder, Compression};
     use std::collections::{HashMap, HashSet};
-    use std::process::Command;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
     use std::sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     };
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     static BATCH_TARGET_ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -3539,6 +3538,71 @@ mod tests {
         assert_eq!(
             git_pack_checkpoint_underfull_min_objects(),
             DEFAULT_GIT_PACK_CHECKPOINT_UNDERFULL_MIN_OBJECTS
+        );
+    }
+
+    #[test]
+    fn git_loose_object_upload_bytes_drains_responses_before_more_requests() {
+        const FIXTURE_ENV: &str = "HTREE_TEST_LOOSE_ACCOUNTING_FIXTURE";
+        if let Some(path) = std::env::var_os(FIXTURE_ENV) {
+            let (ids, expected): (HashSet<String>, usize) =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            assert_eq!(
+                RemoteHelper::git_loose_object_upload_bytes(&ids).unwrap(),
+                expected
+            );
+            return;
+        }
+
+        let temp = TempDir::new().expect("fixture directory");
+        let repo = temp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        let mut expected = 0;
+        // The request list and responses both exceed ordinary pipe capacity.
+        for index in 0..4096 {
+            let content = format!("{index}\n{}", "large object content\n".repeat(128));
+            std::fs::write(repo.join(format!("{index}.txt")), &content).unwrap();
+            let mut compressed = ZlibEncoder::new(Vec::new(), Compression::default());
+            write!(compressed, "blob {}\0{}", content.len(), content).unwrap();
+            expected += compressed.finish().unwrap().len();
+        }
+        git(&repo, &["add", "."]);
+        let ids: HashSet<String> = git(&repo, &["ls-files", "--stage"])
+            .lines()
+            .map(|line| line.split_whitespace().nth(1).unwrap().to_owned())
+            .collect();
+        assert_eq!(ids.len(), 4096);
+        let fixture = temp.path().join("fixture.json");
+        std::fs::write(&fixture, serde_json::to_vec(&(ids, expected)).unwrap()).unwrap();
+        // A subprocess lets a regression fail promptly instead of hanging the suite.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "helper::push::tests::git_loose_object_upload_bytes_drains_responses_before_more_requests",
+                "--nocapture",
+            ])
+            .env(FIXTURE_ENV, fixture)
+            .current_dir(&repo)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("loose object accounting blocked on cat-file pipes");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
