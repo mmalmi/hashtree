@@ -334,6 +334,11 @@ export class NostrEventStore {
   async add(root: CID | null, event: StoredNostrEvent): Promise<CID> {
     const normalized = await this.validateEvent(event);
     const manifest = await this.getManifest(root);
+    // The validated event id commits to immutable event contents. Replayed
+    // relay history and outbox retries must not replace derived collection keys.
+    if (root && await this.collectionSourceFromManifest(manifest).get(normalized.id)) {
+      return root;
+    }
     const decision = await this.resolveReplaceableDecision(manifest, normalized);
     if (!decision.accept) {
       if (!root) {

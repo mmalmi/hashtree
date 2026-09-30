@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MemoryStore } from '@hashtree/core';
+import { createNostrRuntime, verifyNostrEvent } from 'nostr-pubsub';
 import { finalizeEvent } from 'nostr-tools/pure';
 import { HashtreeRuntimeEventStore, type HashtreeRuntimeState } from '../src/runtimeStore.js';
 
@@ -32,6 +33,37 @@ describe('Hashtree runtime event persistence', () => {
     await reopened.deletePending(signed.id);
     expect(await db.open().listPending()).toEqual([]);
     expect(await db.open().query([{ ids: [signed.id] }])).toHaveLength(1);
+  });
+
+  it('retains duplicate relay history and updates retry metadata after reopening', async () => {
+    const db = fixture();
+    const signed = event(10, 7368);
+    const first = db.open();
+    await first.put(signed);
+    await first.putPending({ event: signed, attempts: 1, updatedAt: 10 });
+    await first.close();
+    const reopened = db.open();
+    await reopened.put(structuredClone(signed));
+    await reopened.putPending({ event: structuredClone(signed), attempts: 2, updatedAt: 20 });
+    expect((await reopened.query([{ kinds: [7368], authors: [signed.pubkey] }])).map(value => value.id)).toEqual([signed.id]);
+    expect(await reopened.listPending()).toMatchObject([{ event: { id: signed.id }, attempts: 2, updatedAt: 20 }]);
+  });
+
+  it('returns repeated remote history through the production runtime after an index restart', async () => {
+    const db = fixture();
+    const signed = event(10, 7368);
+    const source = {
+      id: 'relay-fixture',
+      query: async () => ({ complete: true, events: [{ event: verifyNostrEvent(signed), source: { id: 'relay-fixture', kind: 'relay' as const }, priority: 0 }] }),
+    };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const runtime = createNostrRuntime({ store: db.open(), sources: [source] });
+      try {
+        const result = await runtime.query([{ kinds: [7368], authors: [signed.pubkey] }], { cache: 'network-only' });
+        expect(result.complete).toBe(true);
+        expect(result.events.map(value => value.id)).toEqual([signed.id]);
+      } finally { await runtime.close(); }
+    }
   });
 
   it('removes events from all indexes and keeps the newest replaceable root', async () => {

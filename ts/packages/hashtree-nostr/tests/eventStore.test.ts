@@ -66,6 +66,19 @@ describe('NostrEventStore', () => {
     await expect(store.getById(root, 'f'.repeat(64))).resolves.toBeNull();
   });
 
+  it('treats repeated immutable event ids as idempotent across indexed writes and reopening', async () => {
+    const blocks = new MemoryStore();
+    const store = new NostrEventStore(blocks);
+    for (const kind of [1, 7368, 30064]) {
+      const event = await makeEvent({ kind, tags: [['d', 'duplicate'], ['p', 'a'.repeat(64)]] });
+      const root = await store.add(null, event);
+      const duplicateRoot = await new NostrEventStore(blocks).add(root, structuredClone(event));
+      expect(duplicateRoot).toEqual(root);
+      await expect(store.getById(duplicateRoot, event.id)).resolves.toEqual(event);
+      await expect(store.listByAuthorAndKind(duplicateRoot, event.pubkey, kind)).resolves.toEqual([event]);
+    }
+  });
+
   it('exposes only the by-id manifest key', async () => {
     const backing = new MemoryStore();
     const store = new NostrEventStore(backing);
