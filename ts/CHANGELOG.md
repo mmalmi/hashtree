@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.12 - 2026-09-30
+
+- Update the FIPS file transport to the shared runtime with authenticated
+  browser reconnection recovery and size-aware signaling routes. Require
+  compatible core and WebRTC peers and use the matching WebSocket transport.
+
 ## TypeScript runtime 0.5.11 - 2026-09-30
 
 - Update the worker, indexed event adapter and browser peer transport to
