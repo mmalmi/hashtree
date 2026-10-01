@@ -65,7 +65,7 @@ nostr-social-graph-heed.workspace = true
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-tungstenite = "0.24"
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3"
 
 # Serialization

@@ -166,3 +166,45 @@ impl CatchupSource for RelaySource {
         result
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::AsyncReadExt;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn wss_source_starts_tls_before_websocket_handshake() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("wss://localhost:{}", listener.local_addr().unwrap().port());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut header = [0; 5];
+            tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut header))
+                .await
+                .expect("TLS ClientHello timeout")
+                .expect("WSS client must start TLS, not reject an uncompiled backend");
+            assert_eq!(header[0], 0x16, "first record must be a TLS handshake");
+            assert_eq!(header[1], 0x03, "TLS record version");
+        });
+        let error = RelaySource::new(5, 1024)
+            .query(
+                &url,
+                &CatchupQuery {
+                    author: "00".repeat(32),
+                    kinds: vec![1],
+                    since: 0,
+                    until: 1,
+                    limit: 1,
+                },
+            )
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(!error.to_string().contains("TLS support not compiled in"));
+        // The local listener deliberately closes before presenting a trusted
+        // certificate. WSS must fail, never downgrade to plaintext Nostr.
+        assert!(error.to_string().starts_with("connect:"));
+    }
+}
