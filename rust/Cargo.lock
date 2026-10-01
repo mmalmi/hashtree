@@ -8173,6 +8173,8 @@ dependencies = [
  "hashtree-updater",
  "log",
  "nostr",
+ "nostr-pubsub",
+ "nostr-pubsub-relay",
  "serde",
  "serde_json",
  "tauri",
