@@ -122,6 +122,20 @@ async fn release_daemon_handoff_reaches_late_fips_consumer_without_relays() -> R
     options.share_local_candidates = false;
     options.udp_bind_addr = Some("127.0.0.1:0".into());
     let consumer_endpoint = bind_fips_endpoint(options).await?;
+    // The production wrapper's configured-only discovery policy accepts UDP
+    // handshakes only from configured peers; authorize both ends of this fixture.
+    set_fips_peer_configs(
+        daemon.endpoint.as_ref(),
+        vec![FipsPeerConfig {
+            npub: consumer_endpoint.local_peer_id.clone(),
+            udp_addresses: vec![consumer_endpoint
+                .native_endpoint
+                .bound_udp_listen_addrs()
+                .await?[0]
+                .to_string()],
+        }],
+    )
+    .await?;
     set_fips_peer_configs(
         consumer_endpoint.native_endpoint.as_ref(),
         vec![FipsPeerConfig {
