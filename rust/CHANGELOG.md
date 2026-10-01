@@ -2,8 +2,12 @@
 
 ## Unreleased
 
-- Update the Rust FIPS transport to 0.4.20 with FIPS core 0.4.83 and TCP
-  endpoint 0.2.18. Use Nostr Pubsub's matching FIPS adapter 0.5.6.
+- Use application-owned Nostr Pubsub providers for signed update discovery in
+  updater 0.2.87, retaining authenticated rollback watermarks between checks.
+- Share authenticated root parsing and release event construction in resolver
+  0.2.86. Publish FIPS release announcements through the running local daemon.
+- Update the Rust FIPS transport to 0.4.21 with FIPS core 0.4.89 and TCP
+  endpoint 0.2.22. Use Nostr Pubsub's matching FIPS adapter 0.5.12.
 
 ## 0.2.150 - 2026-09-11
 
