@@ -12,6 +12,7 @@ pub(super) enum ReleasePublisher {
         client: reqwest::Client,
         base: reqwest::Url,
         keys: NostrKeys,
+        relays: Vec<String>,
     },
 }
 
@@ -50,7 +51,14 @@ impl ReleasePublisher {
                 if status["nostr_event_transport"] != "fips-local-only" {
                     bail!("Release publication requires the local daemon to use nostr.event_transport=fips-local-only; restart it with the matching configuration");
                 }
-                Ok(Self::FipsDaemon { client, base, keys })
+                Ok(Self::FipsDaemon {
+                    client,
+                    base,
+                    keys,
+                    // Release heads remain visible to already shipped relay
+                    // clients, even when ordinary daemon reads use only FIPS.
+                    relays: config.nostr.relays.clone(),
+                })
             }
         }
     }
@@ -102,7 +110,12 @@ impl ReleasePublisher {
                     bail!("Release publish returned false");
                 }
             }
-            Self::FipsDaemon { client, base, keys } => {
+            Self::FipsDaemon {
+                client,
+                base,
+                keys,
+                relays,
+            } => {
                 let (_, tree_name) = key.split_once('/').context("Invalid release tree key")?;
                 let event =
                     NostrRootResolver::root_event_builder(tree_name, cid, latest_created_at)
@@ -117,10 +130,34 @@ impl ReleasePublisher {
                     .await?
                     .error_for_status()
                     .context("Local FIPS daemon rejected release publication")?;
+                publish_legacy_head(relays, &event).await?;
             }
         }
         Ok(())
     }
+}
+
+async fn publish_legacy_head(relays: &[String], event: &nostr::Event) -> Result<()> {
+    if relays.is_empty() {
+        return Ok(());
+    }
+    let client = nostr_sdk::Client::default();
+    let result = tokio::time::timeout(Duration::from_secs(15), async {
+        for relay in relays {
+            client.add_relay(relay).await?;
+        }
+        client.connect().await;
+        let output = client.send_event(event).await?;
+        if output.success.is_empty() {
+            bail!("No configured legacy relay acknowledged the signed release head");
+        }
+        Ok::<(), anyhow::Error>(())
+    })
+    .await;
+    client.shutdown().await;
+    result
+        .context("Legacy relay release publication timed out")?
+        .context("FIPS accepted the release head, but legacy relay publication failed")
 }
 
 fn daemon_url(bind_address: &str) -> Result<reqwest::Url> {

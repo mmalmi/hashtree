@@ -361,6 +361,10 @@ pub struct NostrConfig {
     /// not imply pubsub support. The adapter validates and bounds this roster.
     #[serde(default)]
     pub fips_pubsub_peers: Vec<String>,
+    /// Public author/tree roots to retain across restarts and serve to late
+    /// peers. Intake follows these exact keys on configured relays and FIPS.
+    #[serde(default)]
+    pub retained_roots: Vec<String>,
     /// Optional npub or hex identities whose signed machine ratings guide
     /// FIPS peer selection alongside local observations. Empty by default.
     #[serde(default)]
@@ -791,6 +795,7 @@ impl Default for NostrConfig {
             archive_history_max_relay_pages: default_nostr_archive_history_max_relay_pages(),
             decentralized_pubsub: false,
             fips_pubsub_peers: Vec::new(),
+            retained_roots: Vec::new(),
             fips_trusted_raters: Vec::new(),
             decentralized_pubsub_max_event_bytes:
                 default_nostr_decentralized_pubsub_max_event_bytes(),

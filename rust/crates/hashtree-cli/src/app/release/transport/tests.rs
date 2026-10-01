@@ -10,6 +10,30 @@ use nostr_pubsub::{EventBus, QueryOptions};
 use nostr_pubsub_fips::FipsPubsubClient;
 use std::sync::Arc;
 
+#[path = "../../../../tests/common/mod.rs"]
+mod common;
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn legacy_release_publication_preserves_the_exact_signed_head() -> Result<()> {
+    let relay = common::test_relay::TestRelay::new();
+    let keys = NostrKeys::generate();
+    let event = NostrRootResolver::root_event_builder("releases/test", &Cid::public([5; 32]), None)
+        .custom_created_at(Timestamp::from(1))
+        .sign_with_keys(&keys)?;
+    publish_legacy_head(&[relay.url()], &event).await?;
+    let client = nostr_sdk::Client::default();
+    client.add_relay(relay.url()).await?;
+    client.connect().await;
+    let events = client
+        .fetch_events(nostr::Filter::new().id(event.id), Duration::from_secs(2))
+        .await;
+    client.shutdown().await;
+    let events = events?;
+    assert_eq!(events.len(), 1);
+    assert_eq!(events.iter().next(), Some(&event));
+    Ok(())
+}
+
 #[test]
 fn release_daemon_url_stays_loopback() {
     assert_eq!(
@@ -29,6 +53,16 @@ fn release_daemon_url_stays_loopback() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn release_daemon_handoff_reaches_late_fips_consumer_without_relays() -> Result<()> {
+    release_daemon_handoff(false).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn release_daemon_restart_replays_head_after_hot_cache_eviction() -> Result<()> {
+    release_daemon_handoff(true).await
+}
+
+async fn release_daemon_handoff(restart: bool) -> Result<()> {
+    let legacy_relay = restart.then(common::test_relay::TestRelay::new);
     let temp = tempfile::tempdir()?;
     let store = Arc::new(HashtreeStore::new(temp.path().join("db"))?);
     let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
@@ -50,7 +84,10 @@ async fn release_daemon_handoff_reaches_late_fips_consumer_without_relays() -> R
 
     let mut config = Config::default();
     config.nostr.event_transport = NostrEventTransport::FipsLocalOnly;
-    config.nostr.relays.clear();
+    config.nostr.relays = legacy_relay
+        .as_ref()
+        .map(|relay| vec![relay.url()])
+        .unwrap_or_default();
     config.server.fips_relays = Some(Vec::new());
     config.server.fips_websocket_seed_urls = Some(Vec::new());
     config.server.fips_udp_bind_addr = Some("127.0.0.1:0".into());
@@ -60,20 +97,21 @@ async fn release_daemon_handoff_reaches_late_fips_consumer_without_relays() -> R
     let rendezvous = std::net::UdpSocket::bind("127.0.0.1:0")?;
     config.server.fips_local_rendezvous_addr = Some(rendezvous.local_addr()?.to_string());
     drop(rendezvous);
-    let daemon =
-        start_daemon_fips_transport(&config, &NostrKeys::generate(), store.clone(), Vec::new())
-            .await?
-            .context("daemon FIPS")?;
-    let provider = start_daemon_nostr_provider(&config, Some(&daemon), None)
+    let daemon_keys = NostrKeys::generate();
+    let mut daemon = start_daemon_fips_transport(&config, &daemon_keys, store.clone(), Vec::new())
+        .await?
+        .context("daemon FIPS")?;
+    let cache = hashtree_cli::fips_transport::open_daemon_nostr_cache(&store)?;
+    let provider = start_daemon_nostr_provider(&config, Some(&daemon), None, Some(cache))
         .await?
         .context("daemon provider")?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     config.server.bind_address = listener.local_addr()?.to_string();
     let base = daemon_url(&config.server.bind_address)?;
-    let server = HashtreeServer::new(store, config.server.bind_address.clone())
-        .with_nostr_provider(provider)
+    let server = HashtreeServer::new(store.clone(), config.server.bind_address.clone())
+        .with_nostr_provider(provider.clone())
         .with_nostr_event_transport(config.nostr.event_transport);
-    let server_task = tokio::spawn(server.run_with_listener(listener));
+    let mut server_task = tokio::spawn(server.run_with_listener(listener));
     let http = reqwest::Client::new();
     // A migration explicitly hands the existing signed release root to the daemon.
     http.post(base.join("api/nostr/events")?)
@@ -103,7 +141,8 @@ async fn release_daemon_handoff_reaches_late_fips_consumer_without_relays() -> R
     let daemon_client = daemon
         .pubsub_client
         .as_ref()
-        .context("daemon pubsub client")?;
+        .context("daemon pubsub client")?
+        .clone();
     let cached = daemon_client
         .query(
             vec![NostrRootResolver::filter_for_key(&key)?],
@@ -113,6 +152,66 @@ async fn release_daemon_handoff_reaches_late_fips_consumer_without_relays() -> R
     assert!(cached.events.iter().any(|entry| {
         NostrRootResolver::root_from_event(&key, entry.event.as_event()).ok().flatten() == Some(new_root.clone())
     }), "the daemon's actual FIPS replay cache must retain the newly published signed root ({} matching events)", cached.events.len());
+
+    if let Some(relay) = &legacy_relay {
+        let expected = cached
+            .events
+            .iter()
+            .find(|entry| {
+                NostrRootResolver::root_from_event(&key, entry.event.as_event())
+                    .ok()
+                    .flatten()
+                    == Some(new_root.clone())
+            })
+            .context("newly published FIPS head")?
+            .event
+            .as_event();
+        let client = nostr_sdk::Client::default();
+        client.add_relay(relay.url()).await?;
+        client.connect().await;
+        let events = client
+            .fetch_events(
+                NostrRootResolver::filter_for_key(&key)?,
+                Duration::from_secs(2),
+            )
+            .await;
+        client.shutdown().await;
+        let events = events?;
+        assert!(
+            events.iter().any(|event| event == expected),
+            "legacy relay and FIPS must receive the same signed head"
+        );
+    }
+
+    let mut restarted_provider = None;
+    if restart {
+        for index in 0..12 {
+            let event =
+                NostrRootResolver::root_event_builder(&format!("other/{index}"), &new_root, None)
+                    .sign_with_keys(&keys)?;
+            http.post(base.join("api/nostr/events")?)
+                .json(&event)
+                .send()
+                .await?
+                .error_for_status()?;
+        }
+        server_task.abort();
+        let _ = (&mut server_task).await;
+        provider.shutdown().await;
+        daemon.shutdown().await;
+        drop(daemon_client);
+        drop(daemon);
+        daemon = start_daemon_fips_transport(&config, &daemon_keys, store.clone(), Vec::new())
+            .await?
+            .context("restarted FIPS daemon")?;
+        let cache = hashtree_cli::fips_transport::open_daemon_nostr_cache(&store)?;
+        restarted_provider =
+            start_daemon_nostr_provider(&config, Some(&daemon), None, Some(cache)).await?;
+    }
+    let daemon_client = daemon
+        .pubsub_client
+        .as_ref()
+        .context("daemon pubsub client")?;
 
     // Start the consumer after the publishing command has exited: the daemon
     // must still serve the signed event through the real FIPS WANT exchange.
@@ -240,6 +339,13 @@ async fn release_daemon_handoff_reaches_late_fips_consumer_without_relays() -> R
     consumer.shutdown_shared().await;
     consumer_endpoint.native_endpoint.shutdown().await?;
     server_task.abort();
+    if !restart {
+        let _ = server_task.await;
+    }
+    provider.shutdown().await;
+    if let Some(provider) = restarted_provider {
+        provider.shutdown().await;
+    }
     daemon.shutdown().await;
     Ok(())
 }

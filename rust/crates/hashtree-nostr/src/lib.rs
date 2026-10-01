@@ -3351,7 +3351,9 @@ fn trim_index_commit_allocations() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn trim_index_commit_allocations() {}
 
-fn retain_unique_latest_events(events: Vec<StoredNostrEvent>) -> Vec<StoredNostrEvent> {
+/// Coalesce duplicate IDs and replaceable coordinates using the same ordering
+/// as the event index. Apply this before an external retention count limit.
+pub fn retain_unique_latest_events(events: Vec<StoredNostrEvent>) -> Vec<StoredNostrEvent> {
     let mut winners = BTreeMap::<(ReplaceableSlot, String), StoredNostrEvent>::new();
     let mut seen_ids = HashSet::new();
     let mut plain = Vec::new();
