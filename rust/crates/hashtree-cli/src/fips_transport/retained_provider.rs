@@ -12,8 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
 
-/// Daemon-owned provider; shutdown releases intake and the durable namespace
-/// even while a stopped server/controller still holds this handle.
+/// Daemon-owned provider; shutdown closes intake and drains owned cache work.
+/// Full daemon shutdown stops replay workers first so already-owned requests
+/// cannot retain the durable namespace through a stopped external handle.
 pub struct DaemonNostrProvider {
     mode: PubsubProviderMode,
     state: tokio::sync::RwLock<Option<ProviderState>>,

@@ -817,10 +817,6 @@ fn run_command(
                 Err(err) => anyhow::bail!("Daemon server task failed: {}", err),
             }
 
-            if let Some(provider) = &nostr_provider {
-                provider.shutdown().await;
-            }
-
             // Shutdown social graph crawler
             // Shutdown background eviction
             if let Some(eviction_handle) = eviction_handle {
@@ -834,6 +830,12 @@ fn run_command(
 
             if let Some(ref fips_handle) = fips_handle {
                 fips_handle.shutdown().await;
+            }
+
+            // Replay workers must stop before the provider drains owned cache
+            // reads, including reads whose requesting worker was canceled.
+            if let Some(provider) = &nostr_provider {
+                provider.shutdown().await;
             }
 
             if let Some(controller) = background_services_controller {

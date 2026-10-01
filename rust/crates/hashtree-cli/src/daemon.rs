@@ -462,15 +462,17 @@ impl EmbeddedDaemonController {
 
     pub async fn shutdown(&self) {
         self.server_controller.shutdown().await;
-        if let Some(provider) = self.nostr_provider.lock().await.take() {
-            provider.shutdown().await;
-        }
         #[cfg(feature = "experimental-decentralized-pubsub")]
         if let Some(handle) = self.nostr_pubsub_handle.as_ref() {
             handle.shutdown().await;
         }
         if let Some(handle) = self.fips_handle.as_ref() {
             handle.shutdown().await;
+        }
+        // Stop replay workers before draining the cache: a queued replay may
+        // otherwise begin an owned read after the provider's final barrier.
+        if let Some(provider) = self.nostr_provider.lock().await.take() {
+            provider.shutdown().await;
         }
         if let Some(controller) = self.background_services_controller.as_ref() {
             controller.shutdown().await;
@@ -800,6 +802,10 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
 fn embedded_nostr_enabled_after_relay_override(config: &Config) -> bool {
     config.nostr.decentralized_pubsub || !config.nostr.relays.is_empty()
 }
+
+#[cfg(test)]
+#[path = "daemon/shutdown_tests.rs"]
+mod shutdown_tests;
 
 #[cfg(test)]
 mod tests {
