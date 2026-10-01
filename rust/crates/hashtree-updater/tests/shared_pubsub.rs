@@ -183,7 +183,7 @@ async fn cached_only_wrong_author_and_disconnected_provider_are_inconclusive() {
         path: None,
     };
     let key = reference.resolver_key();
-    let cid = Cid::new([7; 32]);
+    let cid = Cid::public([7; 32]);
     let resolver = PubsubRootResolver::new(provider.clone(), Duration::from_millis(25));
     for (author, source) in [
         (&keys, EventSource::local_index("cache")),
@@ -218,8 +218,8 @@ fn cache_rejects_tampering_and_uses_the_resolver_tie_break() {
         path: None,
     };
     let mut events = [
-        signed_root(&keys, "release", 10, &Cid::new([1; 32])),
-        signed_root(&keys, "release", 10, &Cid::new([2; 32])),
+        signed_root(&keys, "release", 10, &Cid::public([1; 32])),
+        signed_root(&keys, "release", 10, &Cid::public([2; 32])),
     ];
     events.sort_by_key(|event| event.id);
     let mut cache = UpdateEventCache::new(&reference).unwrap();
