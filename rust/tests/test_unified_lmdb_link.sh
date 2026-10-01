@@ -3,6 +3,8 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rust_dir="$(cd "${script_dir}/.." && pwd)"
+core_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/crates/hashtree-core/Cargo.toml")"
+: "${core_version:?missing hashtree-core package version}"
 git_remote_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/crates/git-remote-htree/Cargo.toml")"
 : "${git_remote_version:?missing git-remote-htree package version}"
 blossom_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/crates/hashtree-blossom/Cargo.toml")"
@@ -87,7 +89,7 @@ for archive in \
     hashtree-lmdb-master-sys-0.2.6-hashtree.1.crate \
     hashtree-heed-0.20.5-hashtree.1.crate \
     hashtree-nostr-social-graph-heed-0.1.3-hashtree.2.crate \
-    hashtree-core-0.2.89.crate \
+    "hashtree-core-${core_version}.crate" \
     "hashtree-lmdb-${lmdb_version}.crate" \
     "hashtree-blossom-${blossom_version}.crate" \
     "git-remote-htree-${git_remote_version}.crate"
@@ -112,7 +114,7 @@ git-remote-htree = { path = "${package_dir}/git-remote-htree-${git_remote_versio
 
 [patch.crates-io]
 hashtree-blossom = { path = "${package_dir}/hashtree-blossom-${blossom_version}" }
-hashtree-core = { path = "${package_dir}/hashtree-core-0.2.89" }
+hashtree-core = { path = "${package_dir}/hashtree-core-${core_version}" }
 hashtree-heed = { path = "${package_dir}/hashtree-heed-0.20.5-hashtree.1" }
 hashtree-lmdb = { path = "${package_dir}/hashtree-lmdb-${lmdb_version}" }
 hashtree-lmdb-master-sys = { path = "${package_dir}/hashtree-lmdb-master-sys-0.2.6-hashtree.1" }
@@ -153,7 +155,7 @@ for extracted_package in \
     "$package_dir/hashtree-lmdb-master-sys-0.2.6-hashtree.1" \
     "$package_dir/hashtree-heed-0.20.5-hashtree.1" \
     "$package_dir/hashtree-nostr-social-graph-heed-0.1.3-hashtree.2" \
-    "$package_dir/hashtree-core-0.2.89" \
+    "$package_dir/hashtree-core-${core_version}" \
     "$package_dir/hashtree-lmdb-${lmdb_version}" \
     "$package_dir/hashtree-blossom-${blossom_version}" \
     "$package_dir/git-remote-htree-${git_remote_version}"
