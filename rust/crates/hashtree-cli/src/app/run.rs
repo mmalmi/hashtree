@@ -607,6 +607,9 @@ fn run_command(
                 &config,
                 fips_handle.as_ref(),
                 Some(Arc::clone(&nostr_cache)),
+                Some(hashtree_cli::fips_transport::open_daemon_nostr_cache(
+                    &store,
+                )?),
             )
             .await?;
             #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -653,9 +656,9 @@ fn run_command(
             if let Some(nostr_relay) = nostr_relay.clone() {
                 server = server.with_nostr_relay(nostr_relay);
             }
-            if let Some(provider) = nostr_provider {
+            if let Some(provider) = &nostr_provider {
                 server = server
-                    .with_nostr_provider(provider)
+                    .with_nostr_provider(provider.clone())
                     .with_nostr_event_transport(config.nostr.event_transport);
             }
 
@@ -812,6 +815,10 @@ fn run_command(
                 Ok(Ok(_)) => {}
                 Ok(Err(err)) => return Err(err),
                 Err(err) => anyhow::bail!("Daemon server task failed: {}", err),
+            }
+
+            if let Some(provider) = &nostr_provider {
+                provider.shutdown().await;
             }
 
             // Shutdown social graph crawler

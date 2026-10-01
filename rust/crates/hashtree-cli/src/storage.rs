@@ -2485,6 +2485,21 @@ impl HashtreeStore {
             .map_err(|err| anyhow::anyhow!("Failed to sync blob store: {}", err))
     }
 
+    /// Called only while opening an exclusively owned metadata namespace,
+    /// before sharing the store with tasks. Its checkpoint commit must remain
+    /// synchronous even when disposable stores use relaxed process defaults.
+    pub(crate) fn enable_durable_metadata_commits(&mut self) -> Result<()> {
+        // SAFETY: the caller owns the namespace writer lock and has not exposed
+        // this store. No other thread can change its environment flags.
+        unsafe {
+            self.env.set_flags(
+                EnvFlags::NO_SYNC | EnvFlags::NO_META_SYNC | EnvFlags::MAP_ASYNC,
+                heed::FlagSetMode::Disable,
+            )?;
+        }
+        Ok(())
+    }
+
     fn access_tracking_tree(&self) -> (HashTree<AccessRecordingStore>, AccessRecordingStore) {
         let access_store = AccessRecordingStore::new(self.store_arc());
         let tree = HashTree::new(HashTreeConfig::new(Arc::new(access_store.clone())).public());

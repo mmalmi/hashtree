@@ -6,13 +6,28 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use hashtree_core::{Cid, Store};
 use hashtree_nostr::{
-    stored_event_from_nostr_sdk_event, NostrEventStore, StoredNostrEvent, VerifiedStoredNostrEvent,
+    retain_unique_latest_events, stored_event_from_nostr_sdk_event, NostrEventStore,
+    StoredNostrEvent, VerifiedStoredNostrEvent,
 };
 use nostr_pubsub::{
     EventBus, EventRetentionPolicy, EventSource, PublishReport, PubsubError, QueryEvent,
     QueryOptions, QueryReport, Result, SourceRoute, VerifiedEvent, CAP_HASHTREE_FETCH,
 };
 use tokio::sync::Mutex;
+
+#[cfg(test)]
+mod checkpoint_tests;
+
+/// Commits the index pointer after its blocks have been written. Implementations
+/// must preserve the previous pointer on failure. Called on a blocking worker,
+/// with cache reads and writes serialized until the commit completes.
+pub trait EventIndexCheckpoint: Send + Sync {
+    /// Recover any uncommitted blocks before starting the next bounded write.
+    fn prepare(&self, _root: Option<&Cid>) -> Result<()> {
+        Ok(())
+    }
+    fn commit(&self, root: Option<&Cid>) -> Result<()>;
+}
 
 #[derive(Clone)]
 pub struct HashtreeNostrIndexEventBus<S> {
@@ -93,6 +108,7 @@ pub struct HashtreeNostrBoundedEventCache<S> {
     source: EventSource,
     priority: i32,
     retention: EventRetentionPolicy,
+    checkpoint: Option<Arc<dyn EventIndexCheckpoint>>,
 }
 
 impl<S> HashtreeNostrBoundedEventCache<S> {
@@ -108,11 +124,17 @@ impl<S> HashtreeNostrBoundedEventCache<S> {
             source,
             priority: 0,
             retention,
+            checkpoint: None,
         }
     }
 
     pub fn with_priority(mut self, priority: i32) -> Self {
         self.priority = priority;
+        self
+    }
+
+    pub fn with_checkpoint(mut self, checkpoint: Arc<dyn EventIndexCheckpoint>) -> Self {
+        self.checkpoint = Some(checkpoint);
         self
     }
 
@@ -151,15 +173,15 @@ where
         }
 
         let stored_event = stored_event_from_nostr_sdk_event(event.as_event());
-        let mut root = self.root.lock().await;
-        let next_root = append_bounded_index_event(
+        let root = Arc::clone(&self.root).lock_owned().await;
+        append_bounded_index_event(
             Arc::clone(&self.store),
-            root.clone(),
+            root,
             self.retention.clone(),
             stored_event,
+            self.checkpoint.clone(),
         )
         .await?;
-        *root = next_root;
 
         Ok(PublishReport {
             accepted: true,
@@ -173,38 +195,68 @@ where
         filters: Vec<nostr_pubsub::Filter>,
         options: QueryOptions,
     ) -> Result<QueryReport> {
-        let root = self.root.lock().await.clone();
-        query_index(
-            Arc::clone(&self.store),
-            root,
-            self.source.clone(),
-            self.priority,
-            filters,
-            options,
-        )
+        // A checkpoint may reclaim superseded blocks after committing. Keep the
+        // read snapshot alive until its query has finished.
+        let root = Arc::clone(&self.root).lock_owned().await;
+        let store = Arc::clone(&self.store);
+        let source = self.source.clone();
+        let priority = self.priority;
+        let checkpoint = self.checkpoint.clone();
+        tokio::spawn(async move {
+            let result = query_index(store, root.clone(), source, priority, filters, options).await;
+            drop(checkpoint);
+            drop(root);
+            result
+        })
         .await
+        .map_err(|error| PubsubError::Storage(format!("join hashtree cache query: {error}")))?
     }
 }
 
 async fn append_bounded_index_event<S>(
     store: Arc<S>,
-    root: Option<Cid>,
+    mut root: tokio::sync::OwnedMutexGuard<Option<Cid>>,
     retention: EventRetentionPolicy,
     event: StoredNostrEvent,
-) -> Result<Option<Cid>>
+    checkpoint: Option<Arc<dyn EventIndexCheckpoint>>,
+) -> Result<()>
 where
     S: Store + 'static,
 {
     tokio::task::spawn_blocking(move || {
+        // The worker owns the lock, so canceling a publisher cannot start a
+        // second write while this commit is still completing.
+        let previous_root = root.clone();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| {
                 PubsubError::Storage(format!("build hashtree cache runtime: {error}"))
             })?;
-        runtime
+        // The existing ID index proves this exact signed event is retained.
+        // Reconciliation need not scan, rebuild, sync, or reclaim its DAG again.
+        let identical = runtime
+            .block_on(NostrEventStore::new(store.clone()).query_events(
+                previous_root.as_ref(),
+                &nostr_pubsub::Filter::new().id(
+                    nostr_pubsub::EventId::from_hex(&event.id).map_err(|error| {
+                        PubsubError::Storage(format!("decode cached ID: {error}"))
+                    })?,
+                ),
+                1,
+            ))
+            .map_err(|error| PubsubError::Storage(format!("read cached ID: {error}")))?;
+        if !identical.is_empty() {
+            drop(checkpoint);
+            return Ok(());
+        }
+        if let Some(checkpoint) = &checkpoint {
+            checkpoint.prepare(previous_root.as_ref())?;
+        }
+        let next_root = runtime
             .block_on(async move {
                 let event_store = NostrEventStore::new(store);
+                let root = previous_root;
                 let mut seen = HashSet::new();
                 let mut retained = Vec::new();
                 let filters = if retention.filters.is_empty() {
@@ -223,8 +275,11 @@ where
                     }
                 }
 
-                retained.retain(|stored| stored.id != event.id);
+                if retained.iter().any(|stored| stored.id == event.id) {
+                    return Ok(root);
+                }
                 retained.push(event);
+                let mut retained = retain_unique_latest_events(retained);
                 retained.sort_by(|left, right| {
                     right
                         .created_at
@@ -234,7 +289,14 @@ where
                 retained.truncate(retention.max_events);
                 event_store.build(None, retained).await
             })
-            .map_err(|error| PubsubError::Storage(format!("write hashtree nostr cache: {error}")))
+            .map_err(|error| {
+                PubsubError::Storage(format!("write hashtree nostr cache: {error}"))
+            })?;
+        if let Some(checkpoint) = checkpoint {
+            checkpoint.commit(next_root.as_ref())?;
+        }
+        *root = next_root;
+        Ok(())
     })
     .await
     .map_err(|error| PubsubError::Storage(format!("join hashtree nostr cache write: {error}")))?

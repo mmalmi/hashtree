@@ -434,6 +434,7 @@ impl EmbeddedBackgroundServicesController {
 
 pub struct EmbeddedDaemonController {
     server_controller: Arc<EmbeddedServerController>,
+    nostr_provider: tokio::sync::Mutex<Option<Arc<crate::fips_transport::DaemonNostrProvider>>>,
     fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
     #[cfg(feature = "experimental-decentralized-pubsub")]
     nostr_pubsub_handle: Option<Arc<crate::fips_transport::DaemonNostrPubsubHandle>>,
@@ -451,6 +452,7 @@ impl EmbeddedDaemonController {
     ) -> Self {
         Self {
             server_controller,
+            nostr_provider: Default::default(),
             fips_handle,
             #[cfg(feature = "experimental-decentralized-pubsub")]
             nostr_pubsub_handle,
@@ -460,6 +462,9 @@ impl EmbeddedDaemonController {
 
     pub async fn shutdown(&self) {
         self.server_controller.shutdown().await;
+        if let Some(provider) = self.nostr_provider.lock().await.take() {
+            provider.shutdown().await;
+        }
         #[cfg(feature = "experimental-decentralized-pubsub")]
         if let Some(handle) = self.nostr_pubsub_handle.as_ref() {
             handle.shutdown().await;
@@ -672,6 +677,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         &config,
         fips_handle.as_deref(),
         Some(Arc::clone(&nostr_cache)),
+        Some(crate::fips_transport::open_daemon_nostr_cache(&store)?),
     )
     .await?;
     #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -714,9 +720,9 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     if let Some(nostr_relay) = nostr_relay {
         server = server.with_nostr_relay(nostr_relay);
     }
-    if let Some(provider) = nostr_provider {
+    if let Some(provider) = &nostr_provider {
         server = server
-            .with_nostr_provider(provider)
+            .with_nostr_provider(provider.clone())
             .with_nostr_event_transport(config.nostr.event_transport);
     }
 
@@ -772,6 +778,8 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         nostr_pubsub_handle.clone(),
         background_services_controller.clone(),
     ));
+
+    *daemon_controller.nostr_provider.lock().await = nostr_provider;
 
     tracing::info!(
         "Embedded daemon started on {}, identity {}",
@@ -872,6 +880,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(client.active_subscription_count().unwrap(), 0);
+        // A stopped controller/client and an upgraded socket may remain held;
+        // none may retain the durable namespace writer lease after shutdown.
+        let reopened = crate::fips_transport::open_daemon_nostr_cache(&info.store)
+            .expect("stopped handles must not prevent opening retained heads");
+        drop(reopened);
         // Events queued before shutdown may still drain from a closed channel.
         tokio::time::timeout(Duration::from_secs(1), async {
             while subscription.recv().await.is_some() {}
