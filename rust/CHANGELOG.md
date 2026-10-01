@@ -4,6 +4,8 @@
 
 ## 0.2.151 - 2026-10-01
 
+- Publish Hashtree core 0.2.90 with canonical metadata encoding and loaded-CID
+  tree decoding required by pin verification.
 - Use application-owned Nostr Pubsub providers for signed update discovery in
   updater 0.2.87, retaining authenticated rollback watermarks between checks.
 - Share authenticated root parsing and release event construction in resolver
