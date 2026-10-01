@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use hashtree_cli::{Config, HashtreeStore};
-use hashtree_nostr::catchup::{fetch_catchup_author, CatchupPolicy, CatchupState};
+use hashtree_nostr::catchup::{
+    fetch_catchup_author, CatchupPolicy, CatchupState, DEFAULT_CATCHUP_OVERLAP_SECS,
+};
 use hashtree_nostr::{NostrEventStore, NostrEventStoreOptions};
 use sha2::{Digest, Sha256};
 
@@ -26,6 +28,9 @@ pub(crate) struct CatchupArgs {
     /// Fixed pass end. Defaults to saved unfinished end, or now for a new pass.
     #[arg(long)]
     until: Option<u64>,
+    /// Revisit this many seconds before the previous pass end for late arrivals.
+    #[arg(long, default_value_t = DEFAULT_CATCHUP_OVERLAP_SECS)]
+    overlap_secs: u64,
     /// Required source relay (repeatable); every source must complete.
     #[arg(long = "relay", required = true)]
     relays: Vec<String>,
@@ -91,6 +96,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         authors_sha256: hex::encode(Sha256::digest(&author_bytes)),
         author_count: authors.len(),
         initial_since: args.since,
+        overlap_secs: args.overlap_secs,
         relays,
         kinds,
         page_size: args.page_size,

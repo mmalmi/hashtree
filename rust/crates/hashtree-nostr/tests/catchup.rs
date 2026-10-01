@@ -17,6 +17,7 @@ fn policy() -> CatchupPolicy {
         authors_sha256: "ordered-authors".into(),
         author_count: 2,
         initial_since: 10,
+        overlap_secs: 20,
         relays: vec!["relay-a".into(), "relay-b".into()],
         kinds: vec![1, 5],
         page_size: 4,
@@ -82,7 +83,7 @@ fn resumes_exact_unfinished_interval_and_continues_completed_frontier() {
     assert_eq!(next.root, "committed-root");
     assert_eq!(
         (next.pass_since, next.pass_until, next.next_author),
-        (100, 200, 0)
+        (80, 200, 0)
     );
 }
 
@@ -105,6 +106,7 @@ fn resumes_failed_author_with_larger_operational_bounds() {
     state.next_author = 1;
     state.root = "first-author-durable-root".into();
     let mut larger = policy();
+    larger.overlap_secs *= 2;
     larger.page_size *= 2;
     larger.max_pages_per_author *= 2;
     larger.max_events_per_author *= 2;
@@ -117,6 +119,79 @@ fn resumes_failed_author_with_larger_operational_bounds() {
     assert_eq!(resumed.root, "first-author-durable-root");
     assert_eq!(resumed.pass_until, 100);
     assert!(CatchupState::prepare(Some(resumed), policy(), None, 200).is_err());
+}
+
+#[test]
+fn overlap_respects_initial_floor_and_defaults_older_candidate_checkpoints() {
+    let mut state = CatchupState::prepare(None, policy(), Some(25), 25).unwrap();
+    state.next_author = state.policy.author_count;
+    let next = CatchupState::prepare(Some(state.clone()), policy(), Some(100), 100).unwrap();
+    assert_eq!(next.pass_since, 10);
+    let mut serialized = serde_json::to_value(state).unwrap();
+    serialized["policy"]
+        .as_object_mut()
+        .unwrap()
+        .remove("overlap_secs");
+    let restored: CatchupState = serde_json::from_value(serialized).unwrap();
+    assert_eq!(restored.policy.overlap_secs, 86_400);
+    let next =
+        CatchupState::prepare(Some(restored.clone()), restored.policy, Some(100), 100).unwrap();
+    assert_eq!(next.pass_since, 10);
+}
+
+#[tokio::test]
+async fn overlapping_pass_collects_late_arrivals_and_deduplicates_retained_history() {
+    let keys = Keys::generate();
+    let author = keys.public_key().to_hex();
+    let old = event(&keys, 1, "old archive", Kind::TextNote);
+    let already_indexed = event(&keys, 90, "previous pass", Kind::TextNote);
+    let late = event(&keys, 95, "arrived after previous EOSE", Kind::TextNote);
+    let new = event(&keys, 150, "next pass", Kind::TextNote);
+    let store = NostrEventStore::new(Arc::new(MemoryStore::new()));
+    let root = store
+        .build(None, [old.clone(), already_indexed.clone()])
+        .await
+        .unwrap()
+        .unwrap();
+    let mut state = CatchupState::prepare(None, policy(), Some(100), 100).unwrap();
+    state.next_author = state.policy.author_count;
+    let next = CatchupState::prepare(Some(state), policy(), Some(200), 200).unwrap();
+    assert_eq!((next.pass_since, next.pass_until), (80, 200));
+    let mut source = Source::default();
+    source.events.insert(
+        "relay-a".into(),
+        vec![already_indexed.clone(), late.clone(), new.clone()],
+    );
+    let incoming = fetch_catchup_author(
+        &mut source,
+        &next.policy,
+        &author,
+        next.pass_since,
+        next.pass_until,
+    )
+    .await
+    .unwrap();
+    let next_root = store
+        .build(Some(&root), incoming.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        store.build(Some(&next_root), incoming).await.unwrap(),
+        Some(next_root.clone())
+    );
+    let events = store
+        .list_by_author(Some(&next_root), &author, ListEventsOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(events.len(), 4);
+    for expected in [old.clone(), already_indexed, late, new] {
+        assert!(events.iter().any(|event| event.id == expected.id));
+    }
+    assert_eq!(
+        store.get_by_id(Some(&root), &old.id).await.unwrap(),
+        Some(old)
+    );
 }
 
 #[tokio::test]

@@ -2330,6 +2330,12 @@ impl LmdbBlobStore {
     }
 
     fn evict_for_write_pressure(&self, incoming_bytes: u64) -> Result<u64, StoreError> {
+        // Raw archive and Pool member stores leave max_bytes unset: their
+        // owning layer controls retention. A full map must fail, not silently
+        // delete history outside that layer's catalog or root policy.
+        if self.max_bytes.load(Ordering::Relaxed) == 0 {
+            return Ok(0);
+        }
         let current = self.total_bytes()?;
         if current == 0 {
             return Ok(0);
@@ -5059,6 +5065,64 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    fn assert_unbounded_map_full_preserves_history(batch_write: bool) -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let store = LmdbBlobStore::with_exact_map_size_and_external_blob_options(
+            temp.path().join("blobs"),
+            512 * 1024,
+            None,
+        )?;
+        assert!(store.max_bytes().is_none());
+        let mut retained = Vec::new();
+        let mut exhausted = false;
+        for batch in 0..128u64 {
+            let items = (0..1usize)
+                .map(|offset| {
+                    let mut bytes = vec![0x5a; 16 * 1024];
+                    let sequence = batch + offset as u64;
+                    bytes[..8].copy_from_slice(&sequence.to_le_bytes());
+                    (sha256(&bytes), bytes)
+                })
+                .collect::<Vec<_>>();
+            let result = if !batch_write {
+                store.put_sync(items[0].0, &items[0].1).map(usize::from)
+            } else {
+                store.put_many_sync(&items)
+            };
+            match result {
+                Ok(_) => retained.extend(items),
+                Err(error) => {
+                    assert!(is_map_full_store_error(&error), "unexpected error: {error}");
+                    exhausted = true;
+                    break;
+                }
+            }
+        }
+        assert!(!retained.is_empty());
+        for (hash, bytes) in &retained {
+            assert!(
+                store.get_sync(hash)?.as_deref() == Some(bytes.as_slice()),
+                "map pressure deleted previously committed history"
+            );
+        }
+        assert!(
+            exhausted,
+            "bounded map must reject a write instead of evicting archive history"
+        );
+        assert_eq!(store.stats()?.count, retained.len());
+        Ok(())
+    }
+
+    #[test]
+    fn unbounded_single_write_map_full_preserves_history() -> Result<(), StoreError> {
+        assert_unbounded_map_full_preserves_history(false)
+    }
+
+    #[test]
+    fn unbounded_batch_write_map_full_preserves_history() -> Result<(), StoreError> {
+        assert_unbounded_map_full_preserves_history(true)
     }
 
     #[test]

@@ -243,6 +243,7 @@ async fn cli_restarts_failed_author_then_continues_time_without_losing_history()
     );
     relay.events.lock().unwrap().extend([
         event(&alice, 100, "inclusive overlap"),
+        event(&alice, 90, "late relay arrival"),
         event(&bob, 150, "next pass"),
     ]);
     let next = success(
@@ -251,7 +252,7 @@ async fn cli_restarts_failed_author_then_continues_time_without_losing_history()
             .output()
             .unwrap(),
     );
-    assert_eq!(next["pass_since"], 100);
+    assert_eq!(next["pass_since"], 10);
     let current = success(
         command(&temp)
             .args([
@@ -267,7 +268,7 @@ async fn cli_restarts_failed_author_then_continues_time_without_losing_history()
             .output()
             .unwrap(),
     );
-    assert_eq!(current["count"], 5);
+    assert_eq!(current["count"], 6);
     let prior = success(
         command(&temp)
             .args([

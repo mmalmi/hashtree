@@ -15,6 +15,12 @@ pub struct CatchupError(pub String);
 
 pub type Result<T> = std::result::Result<T, CatchupError>;
 
+pub const DEFAULT_CATCHUP_OVERLAP_SECS: u64 = 86_400;
+
+fn default_overlap_secs() -> u64 {
+    DEFAULT_CATCHUP_OVERLAP_SECS
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatchupPolicy {
@@ -22,6 +28,8 @@ pub struct CatchupPolicy {
     pub authors_sha256: String,
     pub author_count: usize,
     pub initial_since: u64,
+    #[serde(default = "default_overlap_secs")]
+    pub overlap_secs: u64,
     pub relays: Vec<String>,
     pub kinds: Vec<u16>,
     pub page_size: usize,
@@ -69,7 +77,8 @@ impl CatchupState {
         }
         if let Some(mut state) = saved {
             let previous = &state.policy;
-            if policy.page_size < previous.page_size
+            if policy.overlap_secs < previous.overlap_secs
+                || policy.page_size < previous.page_size
                 || policy.max_pages_per_author < previous.max_pages_per_author
                 || policy.max_events_per_author < previous.max_events_per_author
                 || policy.max_bytes_per_author < previous.max_bytes_per_author
@@ -80,6 +89,7 @@ impl CatchupState {
                 ));
             }
             let mut identity = previous.clone();
+            identity.overlap_secs = policy.overlap_secs;
             identity.page_size = policy.page_size;
             identity.max_pages_per_author = policy.max_pages_per_author;
             identity.max_events_per_author = policy.max_events_per_author;
@@ -114,8 +124,12 @@ impl CatchupState {
                 ));
             }
             if until > state.pass_until {
-                // Inclusive overlap retains events sharing the previous boundary.
-                state.pass_since = state.pass_until;
+                // Revisit a bounded interval for late relay arrivals, retaining
+                // the complete accumulated index and original migration floor.
+                state.pass_since = state
+                    .pass_until
+                    .saturating_sub(policy.overlap_secs)
+                    .max(policy.initial_since);
                 state.pass_until = until;
                 state.next_author = 0;
             }
