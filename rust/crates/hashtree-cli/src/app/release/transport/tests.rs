@@ -6,6 +6,7 @@ use hashtree_fips_transport::{
     bind_fips_endpoint, set_fips_peer_configs, FipsEndpointOptions, FipsPeerConfig,
 };
 use hashtree_updater::PubsubRootResolver;
+use nostr_pubsub::{EventBus, QueryOptions};
 use nostr_pubsub_fips::FipsPubsubClient;
 use std::sync::Arc;
 
@@ -99,6 +100,19 @@ async fn release_daemon_handoff_reaches_late_fips_consumer_without_relays() -> R
         super::super::publish_release_root(&tree, current_root, "v2", &new_release, false).await?;
     publisher.publish(&key, &new_root, created_at).await?;
     drop(publisher);
+    let daemon_client = daemon
+        .pubsub_client
+        .as_ref()
+        .context("daemon pubsub client")?;
+    let cached = daemon_client
+        .query(
+            vec![NostrRootResolver::filter_for_key(&key)?],
+            QueryOptions { limit: Some(8) },
+        )
+        .await?;
+    assert!(cached.events.iter().any(|entry| {
+        NostrRootResolver::root_from_event(&key, entry.event.as_event()).ok().flatten() == Some(new_root.clone())
+    }), "the daemon's actual FIPS replay cache must retain the newly published signed root ({} matching events)", cached.events.len());
 
     // Start the consumer after the publishing command has exited: the daemon
     // must still serve the signed event through the real FIPS WANT exchange.
@@ -123,6 +137,64 @@ async fn release_daemon_handoff_reaches_late_fips_consumer_without_relays() -> R
         )
         .await?,
     );
+    // Separate endpoint/service startup from the updater's observation window.
+    let ready = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            let daemon_connected = daemon
+                .endpoint
+                .peers()
+                .await?
+                .iter()
+                .any(|peer| peer.connected);
+            let consumer_connected = consumer_endpoint
+                .native_endpoint
+                .peers()
+                .await?
+                .iter()
+                .any(|peer| peer.connected);
+            if daemon_connected
+                && consumer_connected
+                && daemon_client.connected_peer_count()? > 0
+                && consumer.connected_peer_count()? > 0
+            {
+                return Ok::<(), anyhow::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await;
+    if ready.is_err() {
+        let daemon_links = daemon
+            .endpoint
+            .peers()
+            .await?
+            .into_iter()
+            .map(|peer| {
+                (
+                    peer.connected,
+                    peer.transport_type,
+                    peer.packets_sent,
+                    peer.packets_recv,
+                )
+            })
+            .collect::<Vec<_>>();
+        let consumer_links = consumer_endpoint
+            .native_endpoint
+            .peers()
+            .await?
+            .into_iter()
+            .map(|peer| {
+                (
+                    peer.connected,
+                    peer.transport_type,
+                    peer.packets_sent,
+                    peer.packets_recv,
+                )
+            })
+            .collect::<Vec<_>>();
+        bail!("FIPS release test startup failed: daemon links {daemon_links:?}, consumer links {consumer_links:?}; pubsub service peers daemon={}, consumer={}; reputation errors={}", daemon_client.connected_peer_count()?, consumer.connected_peer_count()?, daemon_client.reputation_error_count());
+    }
+    ready.expect("checked timeout")?;
     let resolver = PubsubRootResolver::new(
         Arc::new(consumer.fresh_subscriber()),
         Duration::from_secs(8),
