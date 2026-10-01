@@ -20,14 +20,19 @@ ios = { level = "none", notes = "" }
 tauri-plugin = { version = "2", features = ["build"] }
 
 [dependencies]
-hashtree-updater.workspace = true
+hashtree-updater = { workspace = true, features = ["nostr-pubsub"] }
 hashtree-resolver = { workspace = true, features = ["nostr"] }
 hashtree-blossom = { workspace = true, features = ["store"] }
 hashtree-core.workspace = true
 nostr.workspace = true
+nostr-pubsub-relay.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tauri = { version = "2" }
 tokio = { workspace = true, features = ["sync"] }
 log = "0.4"
+
+[dev-dependencies]
+nostr-pubsub.workspace = true
+tokio = { workspace = true, features = ["macros"] }

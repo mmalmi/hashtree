@@ -4,10 +4,10 @@ use std::time::Duration;
 
 use hashtree_blossom::{BlossomClient, BlossomStore};
 use hashtree_core::{HashTree, HashTreeConfig};
-use hashtree_resolver::nostr::{NostrResolverConfig, NostrRootResolver};
 use hashtree_updater::{
     install, AssetKind, DownloadCallback, DownloadOptions, HashtreeUpdater, InstallTarget,
-    UpdateAsset, UpdateCheckOptions, UpdateRef, UpdateTarget,
+    NostrEventSubscriber, PubsubRootResolver, UpdateAsset, UpdateCheckOptions, UpdateRef,
+    UpdateTarget,
 };
 use nostr::Keys;
 use tauri::{AppHandle, Manager, Runtime};
@@ -37,11 +37,11 @@ pub struct InstallOverrides {
     pub executable: bool,
 }
 
-/// Per-app updater handle. Built fresh on each request because Nostr/Blossom
-/// connections are cheap and short-lived.
+/// Per-app updater handle sharing the application's announcement transport.
 pub struct UpdaterContext {
     pub config: Config,
     pub current_version: String,
+    provider: Option<Arc<dyn NostrEventSubscriber>>,
 }
 
 impl UpdaterContext {
@@ -49,7 +49,13 @@ impl UpdaterContext {
         Self {
             config,
             current_version,
+            provider: None,
         }
+    }
+
+    pub fn with_provider(mut self, provider: Arc<dyn NostrEventSubscriber>) -> Self {
+        self.provider = Some(provider);
+        self
     }
 
     fn reference(&self) -> Result<UpdateRef> {
@@ -61,33 +67,37 @@ impl UpdaterContext {
         Ok(UpdateRef::parse(raw)?)
     }
 
-    async fn build_updater(&self) -> Result<HashtreeUpdater<NostrRootResolver, BlossomStore>> {
+    async fn build_updater(&self) -> Result<HashtreeUpdater<PubsubRootResolver, BlossomStore>> {
         let keys = Keys::generate();
-        let mut blossom = BlossomClient::new(keys.clone());
+        let mut blossom = BlossomClient::new(keys);
         if !self.config.blossom_servers.is_empty() {
             blossom = blossom.with_servers(self.config.blossom_servers.clone());
         }
         let store = Arc::new(BlossomStore::new(blossom));
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
-        // Fall back to NostrResolverConfig::default()'s built-in relay set
-        // when the app's tauri.conf.json doesn't list any. End users can
-        // still override by setting `relays` in the plugin config.
-        let mut resolver_config = NostrResolverConfig {
-            resolve_timeout: Duration::from_secs(10),
-            secret_key: Some(keys),
-            ..NostrResolverConfig::default()
+        let provider = match &self.provider {
+            Some(provider) => provider.clone(),
+            None if self.config.relays.is_empty() => {
+                return Err(Error::Config(
+                    "supply a pubsub provider or explicit relays".into(),
+                ));
+            }
+            None => Arc::new(
+                nostr_pubsub_relay::RelayEventBus::new(
+                    self.config.relays.clone(),
+                    Duration::from_secs(10),
+                )
+                .await
+                .map_err(|error| Error::Config(error.to_string()))?,
+            ),
         };
-        if !self.config.relays.is_empty() {
-            resolver_config.relays = self.config.relays.clone();
-        }
-        let resolver = NostrRootResolver::new(resolver_config).await?;
+        let resolver = PubsubRootResolver::new(provider, Duration::from_secs(10));
         Ok(HashtreeUpdater::new(resolver, tree))
     }
 
-    pub async fn check(&self) -> Result<Option<CheckedUpdate>> {
-        let updater = self.build_updater().await?;
-        let options = UpdateCheckOptions {
+    fn check_options(&self) -> Result<UpdateCheckOptions> {
+        Ok(UpdateCheckOptions {
             reference: self.reference()?,
             current_version: self.current_version.clone(),
             target: UpdateTarget::current(),
@@ -97,7 +107,12 @@ impl UpdaterContext {
                 .clone()
                 .unwrap_or_else(|| "release.json".to_string()),
             ..UpdateCheckOptions::default()
-        };
+        })
+    }
+
+    pub async fn check(&self) -> Result<Option<CheckedUpdate>> {
+        let updater = self.build_updater().await?;
+        let options = self.check_options()?;
         let check = match updater.check(options).await {
             Ok(check) => check,
             // Treat "nothing published yet" as a quiet "no update" so the UI
@@ -126,17 +141,7 @@ impl UpdaterContext {
         on_event: Option<DownloadCallback>,
     ) -> Result<CheckedUpdate> {
         let updater = self.build_updater().await?;
-        let options = UpdateCheckOptions {
-            reference: self.reference()?,
-            current_version: self.current_version.clone(),
-            target: UpdateTarget::current(),
-            manifest_path: self
-                .config
-                .manifest_path
-                .clone()
-                .unwrap_or_else(|| "release.json".to_string()),
-            ..UpdateCheckOptions::default()
-        };
+        let options = self.check_options()?;
         let check = updater.check(options).await?;
         let mut asset: UpdateAsset = check
             .asset
@@ -178,8 +183,11 @@ impl UpdaterContext {
 /// current version unless overridden.
 pub fn context_from_app<R: Runtime>(app: &AppHandle<R>) -> UpdaterContext {
     let state = app.state::<crate::PluginState>();
-    let pkg = app.package_info();
-    UpdaterContext::new(state.config.clone(), pkg.version.to_string())
+    UpdaterContext {
+        config: state.config.clone(),
+        current_version: app.package_info().version.to_string(),
+        provider: state.provider.clone(),
+    }
 }
 
 /// Best-effort default install destination based on the running binary.
@@ -208,4 +216,35 @@ fn walk_up_to_app(start: &std::path::Path) -> Option<PathBuf> {
         current = dir.parent();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn empty_configuration_never_selects_default_relays() {
+        let context = UpdaterContext::new(Config::default(), "1.0.0".into());
+        assert!(matches!(
+            context.build_updater().await,
+            Err(Error::Config(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn application_provider_owns_transport_policy() {
+        let provider = Arc::new(nostr_pubsub::InMemoryEventBus::new());
+        let context = UpdaterContext::new(
+            Config {
+                relays: vec!["invalid-relay-url".into()],
+                ..Config::default()
+            },
+            "1.0.0".into(),
+        )
+        .with_provider(provider);
+        context
+            .build_updater()
+            .await
+            .expect("application provider bypasses relay configuration");
+    }
 }

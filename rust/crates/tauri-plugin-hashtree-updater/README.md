@@ -53,9 +53,18 @@ tauri-plugin-hashtree-updater = "0.2"  # or path = "..." while developing
 
 ```rust
 tauri::Builder::default()
-    .plugin(tauri_plugin_hashtree_updater::init())
+    .plugin(tauri_plugin_hashtree_updater::init_with_provider(update_provider))
     // ...
 ```
+
+Pass the application-owned `Arc<dyn NostrEventSubscriber>` as `update_provider`.
+For FIPS, wrap `Arc::new(client.fresh_subscriber())` so cached announcements
+cannot report an offline check as current. Transport policy and connections stay
+with the application. Checks wait for a live signed release announcement and
+report an error when the provider is unreachable.
+
+Apps using only explicit Nostr relays may use `init()` and configure `relays`.
+An empty relay list never enables built-in relay defaults.
 
 ### `src-tauri/tauri.conf.json`
 

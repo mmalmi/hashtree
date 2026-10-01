@@ -34,7 +34,7 @@ hashtree-nostr-pubsub.workspace = true
 hashtree-fips-transport.workspace = true
 hashtree-network.workspace = true
 hashtree-resolver = { workspace = true, features = ["nostr"] }
-hashtree-updater.workspace = true
+hashtree-updater = { workspace = true, features = ["nostr-pubsub"] }
 hashtree-index.workspace = true
 cashu-service = { workspace = true, default-features = false }
 
