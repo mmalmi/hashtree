@@ -310,9 +310,10 @@ network is not proof that the release tree is empty. Explicit `"relay"` mode con
 to use the configured Nostr relays.
 
 Keep the publishing daemon online so late FIPS consumers can fetch the announcement.
-This handoff does not add durable replay after daemon restarts: retained dissemination
-of the signed release root, including restart recovery, is a rollout prerequisite for
-FIPS-only releases. Verify the release from a separate FIPS consumer before rollout.
+Its bounded FIPS cache can evict announcements while it is running, and this handoff
+adds no durable replay after restarts. Retained dissemination of the signed release
+root, including eviction and restart recovery, is a rollout prerequisite for FIPS-only
+releases. Verify the release from a separate FIPS consumer before rollout.
 
 Publish the canonical repo release and mirror the same staged files to GitHub in one step:
 
