@@ -189,8 +189,9 @@ pub async fn fetch_catchup_author(
     for relay in &policy.relays {
         // Probe the oldest returned second independently before moving below
         // it. Never subtract one from an unexamined same-second boundary.
-        let mut pending = vec![(since, until, None)];
-        while let Some((lower, upper, observed_page_capacity)) = pending.pop() {
+        let mut pending = vec![(since, until)];
+        let mut observed_broad_capacity = 0;
+        while let Some((lower, upper)) = pending.pop() {
             if pages >= policy.max_pages_per_author {
                 return Err(CatchupError(format!(
                     "author {author}, relay {relay}: page budget exhausted; coverage incomplete"
@@ -214,19 +215,20 @@ pub async fn fetch_catchup_author(
                     "author {author}, relay {relay}: source exceeded requested page limit"
                 )));
             }
+            if lower != upper {
+                // A short final page does not lower capacity already observed
+                // from this same relay and author during this fetch.
+                observed_broad_capacity = observed_broad_capacity.max(events.len());
+            }
             if lower == upper && events.len() >= policy.page_size {
                 return Err(CatchupError(format!("author {author}, relay {relay}: saturated timestamp {lower}; coverage incomplete")));
             }
-            if lower == upper
-                && events.len() > 1
-                && events.len() >= observed_page_capacity.unwrap_or(events.len())
-            {
+            if lower == upper && events.len() > 1 && events.len() >= observed_broad_capacity {
                 // A source may clamp below our requested limit. If a tied
                 // second fills the observed page capacity, EOSE does not
                 // distinguish its final IDs from an undisclosed truncation.
                 return Err(CatchupError(format!("author {author}, relay {relay}: ambiguous capped timestamp {lower}; coverage incomplete")));
             }
-            let page_count = events.len();
             let oldest = events.iter().map(|event| event.created_at).min();
             for event in events {
                 if event.pubkey != author
@@ -260,9 +262,9 @@ pub async fn fetch_catchup_author(
                     // Even short pages can reflect a relay-side cap. Continue
                     // into the older interval instead of assuming exhaustion.
                     if oldest > lower {
-                        pending.push((lower, oldest - 1, None));
+                        pending.push((lower, oldest - 1));
                     }
-                    pending.push((oldest, oldest, Some(page_count)));
+                    pending.push((oldest, oldest));
                 }
             }
         }

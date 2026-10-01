@@ -229,6 +229,74 @@ async fn catches_full_gap_with_lower_relay_cap_duplicates_and_boundary_ties() {
 }
 
 #[tokio::test]
+async fn earlier_full_page_proves_capacity_for_short_same_second_tail() {
+    let keys = Keys::generate();
+    let author = keys.public_key().to_hex();
+    let mut events = vec![
+        event(&keys, 20, "tail a", Kind::TextNote),
+        event(&keys, 20, "tail b", Kind::EventDeletion),
+    ];
+    events.extend(
+        (30..=60)
+            .step_by(10)
+            .map(|at| event(&keys, at, "newer", Kind::TextNote)),
+    );
+    let mut source = Source::default();
+    for relay in ["relay-a", "relay-b"] {
+        source.events.insert(relay.into(), events.clone());
+    }
+    let fetched = fetch_catchup_author(&mut source, &policy(), &author, 10, 100)
+        .await
+        .unwrap();
+    assert_eq!(fetched.len(), events.len());
+    assert!(source
+        .requests
+        .iter()
+        .any(|query| query.since == 20 && query.until == 20));
+}
+
+#[tokio::test]
+async fn observed_capacity_is_not_shared_between_relays_or_authors() {
+    let keys = Keys::generate();
+    let other = Keys::generate();
+    let mut source = Source::default();
+    let mut full_page = (30..=60)
+        .step_by(10)
+        .map(|at| event(&keys, at, "newer", Kind::TextNote))
+        .collect::<Vec<_>>();
+    full_page.extend([
+        event(&other, 20, "other a", Kind::TextNote),
+        event(&other, 20, "other b", Kind::TextNote),
+    ]);
+    source.events.insert("relay-a".into(), full_page);
+    source.events.insert(
+        "relay-b".into(),
+        vec![
+            event(&keys, 20, "tail a", Kind::TextNote),
+            event(&keys, 20, "tail b", Kind::TextNote),
+        ],
+    );
+    let error = fetch_catchup_author(&mut source, &policy(), &keys.public_key().to_hex(), 10, 100)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("relay-b: ambiguous capped timestamp 20"));
+    let error = fetch_catchup_author(
+        &mut source,
+        &policy(),
+        &other.public_key().to_hex(),
+        10,
+        100,
+    )
+    .await
+    .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("relay-a: ambiguous capped timestamp 20"));
+}
+
+#[tokio::test]
 async fn saturated_single_second_is_incomplete_instead_of_skipping_ids() {
     let keys = Keys::generate();
     let mut source = Source::default();
