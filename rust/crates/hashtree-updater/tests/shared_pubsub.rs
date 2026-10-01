@@ -251,3 +251,34 @@ async fn cancelling_a_check_closes_only_its_subscription() {
     .expect("cancelled subscription closed");
     assert_eq!(provider.closed.load(Ordering::SeqCst), 1);
 }
+
+#[tokio::test]
+async fn replacing_a_provider_preserves_watermarks_and_uses_the_new_transport() {
+    let original = Arc::new(SharedProvider::default());
+    let replacement = Arc::new(SharedProvider::default());
+    let resolver = PubsubRootResolver::new(original.clone(), Duration::from_millis(25));
+    let keys = Keys::generate();
+    let key = format!("{}/release", keys.public_key().to_bech32().unwrap());
+    let cid = Cid::public([3; 32]);
+    let event = signed_root(&keys, "release", 3, &cid);
+    resolver.ingest_event(event.clone()).await.unwrap();
+    let rebound = resolver.clone().with_provider(replacement.clone());
+    assert_eq!(
+        rebound.latest_event(&key).await.unwrap(),
+        Some(event.clone())
+    );
+    let (result, ()) = tokio::join!(rebound.resolve(&key), async {
+        tokio::time::timeout(Duration::from_secs(1), replacement.started.notified())
+            .await
+            .expect("replacement provider selected");
+        announce(
+            &replacement.bus,
+            event,
+            EventSource::peer("replacement-peer"),
+        )
+        .await;
+    });
+    assert_eq!(result.unwrap(), Some(cid));
+    assert_eq!(original.closed.load(Ordering::SeqCst), 0);
+    assert_eq!(replacement.closed.load(Ordering::SeqCst), 1);
+}

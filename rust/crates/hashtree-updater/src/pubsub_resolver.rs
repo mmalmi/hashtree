@@ -34,6 +34,12 @@ impl PubsubRootResolver {
         }
     }
 
+    /// Replace the live transport while retaining all observed root watermarks.
+    pub fn with_provider(mut self, provider: Arc<dyn NostrEventSubscriber>) -> Self {
+        self.provider = provider;
+        self
+    }
+
     /// Remember a signed announcement without treating it as a fresh check.
     pub async fn ingest_event(&self, event: Event) -> Result<bool, ResolverError> {
         let tree = event

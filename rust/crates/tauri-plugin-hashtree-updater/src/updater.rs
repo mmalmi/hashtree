@@ -56,6 +56,10 @@ impl UpdaterContext {
     }
 
     pub fn with_provider(mut self, provider: Arc<dyn NostrEventSubscriber>) -> Self {
+        self.resolver =
+            Arc::new(tokio::sync::OnceCell::new_with(self.resolver.get().map(
+                |resolver| resolver.clone().with_provider(provider.clone()),
+            )));
         self.provider = Some(provider);
         self
     }
@@ -277,6 +281,18 @@ mod tests {
         let second = context.build_updater().await.unwrap();
         assert_eq!(
             second.resolver().latest_event(&key).await.unwrap(),
+            Some(event.clone())
+        );
+        let rebound = context.with_provider(Arc::new(nostr_pubsub::InMemoryEventBus::new()));
+        assert_eq!(
+            rebound
+                .build_updater()
+                .await
+                .unwrap()
+                .resolver()
+                .latest_event(&key)
+                .await
+                .unwrap(),
             Some(event)
         );
     }
