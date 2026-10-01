@@ -17,6 +17,8 @@ use crate::UpdateEventCache;
 /// Local-index deliveries may advance the rollback watermark but never confirm
 /// a check. Quiet windows and stale peer responses are inconclusive errors.
 /// This resolver never creates a client, opens sockets, or stops the provider.
+/// Clones share observed roots, preserving the rollback watermark between checks.
+#[derive(Clone)]
 pub struct PubsubRootResolver {
     provider: Arc<dyn NostrEventSubscriber>,
     window: Duration,
