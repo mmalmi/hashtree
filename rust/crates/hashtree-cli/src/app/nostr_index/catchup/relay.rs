@@ -5,14 +5,70 @@ use futures::{SinkExt, StreamExt};
 use hashtree_nostr::catchup::{CatchupError, CatchupQuery, CatchupSource, Result};
 use hashtree_nostr::{stored_event_from_nostr_sdk_event, StoredNostrEvent};
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 use tokio_tungstenite::{
     connect_async_with_config,
-    tungstenite::{protocol::WebSocketConfig, Message},
+    tungstenite::{
+        error::ProtocolError,
+        protocol::{frame::coding::CloseCode, WebSocketConfig},
+        Error as WebSocketError, Message,
+    },
     MaybeTlsStream, WebSocketStream,
 };
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
+const RECONNECT_DELAY: Duration = Duration::from_millis(250);
+const CLOSE_TIMEOUT: Duration = Duration::from_millis(100);
+
+#[derive(Debug)]
+struct QueryFailure {
+    error: CatchupError,
+    reconnect: bool,
+}
+
+impl From<CatchupError> for QueryFailure {
+    fn from(error: CatchupError) -> Self {
+        Self {
+            error,
+            reconnect: false,
+        }
+    }
+}
+
+impl QueryFailure {
+    fn transport(context: &str, error: WebSocketError) -> Self {
+        let reconnect = match &error {
+            WebSocketError::ConnectionClosed
+            | WebSocketError::AlreadyClosed
+            | WebSocketError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => true,
+            WebSocketError::Io(error) => matches!(
+                error.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            ),
+            _ => false,
+        };
+        Self {
+            error: CatchupError(format!("{context}: {error}")),
+            reconnect,
+        }
+    }
+}
+
+#[derive(Default)]
+struct QueryBudget {
+    bytes: usize,
+    messages: usize,
+}
+
+#[derive(Debug)]
+struct CompletedPage {
+    events: Vec<StoredNostrEvent>,
+    subscription: String,
+}
 
 pub(super) struct RelaySource {
     sockets: BTreeMap<String, Socket>,
@@ -35,7 +91,8 @@ impl RelaySource {
         &mut self,
         relay: &str,
         query: &CatchupQuery,
-    ) -> Result<Vec<StoredNostrEvent>> {
+        budget: &mut QueryBudget,
+    ) -> std::result::Result<CompletedPage, QueryFailure> {
         if !self.sockets.contains_key(relay) {
             let config = WebSocketConfig {
                 max_message_size: Some(MAX_EVENT_BYTES + 4096),
@@ -44,7 +101,7 @@ impl RelaySource {
             };
             let (socket, _) = connect_async_with_config(relay, Some(config), false)
                 .await
-                .map_err(|err| CatchupError(format!("connect: {err}")))?;
+                .map_err(|err| QueryFailure::transport("connect", err))?;
             self.sockets.insert(relay.to_owned(), socket);
         }
         self.sequence += 1;
@@ -59,21 +116,22 @@ impl RelaySource {
                 .to_string(),
             ))
             .await
-            .map_err(|err| CatchupError(format!("send REQ: {err}")))?;
+            .map_err(|err| QueryFailure::transport("send REQ", err))?;
         let mut events = BTreeMap::new();
-        let mut bytes = 0usize;
-        let mut messages = 0usize;
         loop {
             let message = socket
                 .next()
                 .await
-                .ok_or_else(|| CatchupError("socket ended before EOSE".into()))?
-                .map_err(|err| CatchupError(format!("socket before EOSE: {err}")))?;
-            messages += 1;
-            if messages > query.limit.saturating_mul(4).saturating_add(100) {
-                return Err(CatchupError(
-                    "source message budget exhausted before EOSE".into(),
-                ));
+                .ok_or_else(|| QueryFailure {
+                    error: CatchupError("socket ended before EOSE".into()),
+                    reconnect: true,
+                })?
+                .map_err(|err| QueryFailure::transport("socket before EOSE", err))?;
+            budget.messages += 1;
+            if budget.messages > query.limit.saturating_mul(4).saturating_add(100) {
+                return Err(
+                    CatchupError("source message budget exhausted before EOSE".into()).into(),
+                );
             }
             let raw = match message {
                 Message::Text(text) => text,
@@ -81,18 +139,23 @@ impl RelaySource {
                     socket
                         .send(Message::Pong(payload))
                         .await
-                        .map_err(|err| CatchupError(err.to_string()))?;
+                        .map_err(|err| QueryFailure::transport("send PONG", err))?;
                     continue;
                 }
                 Message::Pong(_) => continue,
-                Message::Close(_) => return Err(CatchupError("socket closed before EOSE".into())),
-                _ => return Err(CatchupError("unexpected non-text relay message".into())),
+                Message::Close(frame) => {
+                    return Err(QueryFailure {
+                        error: CatchupError("socket closed before EOSE".into()),
+                        reconnect: frame.as_ref().is_none_or(|frame| {
+                            matches!(frame.code, CloseCode::Normal | CloseCode::Away)
+                        }),
+                    })
+                }
+                _ => return Err(CatchupError("unexpected non-text relay message".into()).into()),
             };
-            bytes = bytes.saturating_add(raw.len());
-            if bytes > self.max_bytes.saturating_add(4096) {
-                return Err(CatchupError(
-                    "source byte budget exhausted before EOSE".into(),
-                ));
+            budget.bytes = budget.bytes.saturating_add(raw.len());
+            if budget.bytes > self.max_bytes.saturating_add(4096) {
+                return Err(CatchupError("source byte budget exhausted before EOSE".into()).into());
             }
             let value: serde_json::Value = serde_json::from_str(&raw)
                 .map_err(|err| CatchupError(format!("invalid relay JSON: {err}")))?;
@@ -112,7 +175,7 @@ impl RelaySource {
                         .len()
                         > MAX_EVENT_BYTES
                     {
-                        return Err(CatchupError("event exceeds 1 MiB".into()));
+                        return Err(CatchupError("event exceeds 1 MiB".into()).into());
                     }
                     let event: nostr::Event = serde_json::from_value(raw_event.clone())
                         .map_err(|err| CatchupError(format!("invalid event: {err}")))?;
@@ -126,85 +189,94 @@ impl RelaySource {
                     {
                         return Err(CatchupError(
                             "signed event does not match requested filter".into(),
-                        ));
+                        )
+                        .into());
                     }
                     events.insert(event.id, stored_event_from_nostr_sdk_event(&event));
                     if events.len() > query.limit {
-                        return Err(CatchupError("source exceeded requested event limit".into()));
+                        return Err(
+                            CatchupError("source exceeded requested event limit".into()).into()
+                        );
                     }
                 }
                 Some("EOSE") if parts.len() == 2 => {
-                    socket
-                        .send(Message::Text(
-                            serde_json::json!(["CLOSE", subscription]).to_string(),
-                        ))
-                        .await
-                        .map_err(|err| CatchupError(format!("close subscription: {err}")))?;
-                    return Ok(events.into_values().collect());
+                    return Ok(CompletedPage {
+                        events: events.into_values().collect(),
+                        subscription,
+                    });
                 }
                 Some("CLOSED") => {
-                    return Err(CatchupError("relay CLOSED subscription before EOSE".into()))
+                    return Err(CatchupError("relay CLOSED subscription before EOSE".into()).into())
                 }
-                _ => return Err(CatchupError("unexpected subscription message".into())),
+                _ => return Err(CatchupError("unexpected subscription message".into()).into()),
             }
         }
+    }
+
+    async fn finish_page(
+        &mut self,
+        relay: &str,
+        page: CompletedPage,
+        deadline: Instant,
+    ) -> Vec<StoredNostrEvent> {
+        let close_deadline = deadline.min(Instant::now() + CLOSE_TIMEOUT);
+        let closed = if let Some(socket) = self.sockets.get_mut(relay) {
+            matches!(
+                tokio::time::timeout_at(
+                    close_deadline,
+                    socket.send(Message::Text(
+                        serde_json::json!(["CLOSE", page.subscription]).to_string()
+                    ))
+                )
+                .await,
+                Ok(Ok(()))
+            )
+        } else {
+            false
+        };
+        if !closed {
+            self.sockets.remove(relay);
+        }
+        // EOSE already established completion. Cleanup failure cannot discard
+        // verified results, and an unhealthy connection is never reused.
+        page.events
     }
 }
 
 impl CatchupSource for RelaySource {
     async fn query(&mut self, relay: &str, query: &CatchupQuery) -> Result<Vec<StoredNostrEvent>> {
-        let result = tokio::time::timeout(self.timeout, self.query_inner(relay, query))
-            .await
-            .unwrap_or_else(|_| {
-                Err(CatchupError(
-                    "timeout before EOSE; coverage incomplete".into(),
-                ))
-            });
-        if result.is_err() {
-            self.sockets.remove(relay);
+        let deadline = Instant::now() + self.timeout;
+        let mut budget = QueryBudget::default();
+        let result = tokio::time::timeout_at(deadline, async {
+            for attempt in 0..=1 {
+                match self.query_inner(relay, query, &mut budget).await {
+                    Ok(page) => return Ok(page),
+                    Err(failure) => {
+                        self.sockets.remove(relay);
+                        if attempt == 1 || !failure.reconnect {
+                            return Err(failure.error);
+                        }
+                        tokio::time::sleep(RECONNECT_DELAY).await;
+                    }
+                }
+            }
+            unreachable!("bounded reconnect loop always returns")
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(CatchupError(
+                "timeout before EOSE; coverage incomplete".into(),
+            ))
+        });
+        match result {
+            Ok(page) => Ok(self.finish_page(relay, page, deadline).await),
+            Err(error) => {
+                self.sockets.remove(relay);
+                Err(error)
+            }
         }
-        result
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use tokio::io::AsyncReadExt;
-    use tokio::net::TcpListener;
-
-    #[tokio::test]
-    async fn wss_source_starts_tls_before_websocket_handshake() {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("wss://localhost:{}", listener.local_addr().unwrap().port());
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut header = [0; 5];
-            tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut header))
-                .await
-                .expect("TLS ClientHello timeout")
-                .expect("WSS client must start TLS, not reject an uncompiled backend");
-            assert_eq!(header[0], 0x16, "first record must be a TLS handshake");
-            assert_eq!(header[1], 0x03, "TLS record version");
-        });
-        let error = RelaySource::new(5, 1024)
-            .query(
-                &url,
-                &CatchupQuery {
-                    author: "00".repeat(32),
-                    kinds: vec![1],
-                    since: 0,
-                    until: 1,
-                    limit: 1,
-                },
-            )
-            .await
-            .unwrap_err();
-        server.await.unwrap();
-        assert!(!error.to_string().contains("TLS support not compiled in"));
-        // The local listener deliberately closes before presenting a trusted
-        // certificate. WSS must fail, never downgrade to plaintext Nostr.
-        assert!(error.to_string().starts_with("connect:"));
-    }
-}
+mod tests;
