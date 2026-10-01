@@ -535,10 +535,56 @@ pub async fn build_secure_nostr_blossom_updater_with_events(
     for event in events {
         resolver.ingest_event(event).await?;
     }
+    Ok(HashtreeUpdater::new(
+        resolver,
+        blossom_tree(config.blossom_read_servers, config.download_timeout),
+    ))
+}
+
+#[cfg(feature = "secure-nostr-blossom")]
+pub type SecurePubsubBlossomUpdater = HashtreeUpdater<crate::PubsubRootResolver, BlossomStore>;
+
+#[cfg(feature = "secure-nostr-blossom")]
+pub type SecurePubsubBlossomSelection =
+    ProductUpdateSelection<crate::PubsubRootResolver, BlossomStore>;
+
+/// Blob download settings; announcement transports belong to the application.
+#[cfg(feature = "secure-nostr-blossom")]
+#[derive(Clone, Debug)]
+pub struct SecurePubsubBlossomConfig {
+    pub blossom_read_servers: Vec<String>,
+    pub manifest_timeout: Duration,
+    pub download_timeout: Duration,
+}
+
+#[cfg(feature = "secure-nostr-blossom")]
+impl Default for SecurePubsubBlossomConfig {
+    fn default() -> Self {
+        Self {
+            blossom_read_servers: Vec::new(),
+            manifest_timeout: Duration::from_secs(8),
+            download_timeout: Duration::from_secs(180),
+        }
+    }
+}
+
+/// Reuse a live provider for signed announcements without opening Nostr relays.
+/// See [`crate::PubsubRootResolver`] for the fresh-observation provider contract.
+#[cfg(feature = "secure-nostr-blossom")]
+pub async fn build_secure_pubsub_blossom_updater(
+    provider: std::sync::Arc<dyn nostr_pubsub::NostrEventSubscriber>,
+    config: SecurePubsubBlossomConfig,
+) -> Result<SecurePubsubBlossomUpdater, UpdateError> {
+    Ok(HashtreeUpdater::new(
+        crate::PubsubRootResolver::new(provider, config.manifest_timeout),
+        blossom_tree(config.blossom_read_servers, config.download_timeout),
+    ))
+}
+
+#[cfg(feature = "secure-nostr-blossom")]
+fn blossom_tree(servers: Vec<String>, timeout: Duration) -> HashTree<BlossomStore> {
     let blossom = BlossomClient::new_empty(HashtreeResolverKeys::generate())
-        .with_read_servers(config.blossom_read_servers)
-        .with_timeout(config.download_timeout);
-    let store = std::sync::Arc::new(BlossomStore::new(blossom));
-    let tree = HashTree::new(HashTreeConfig::new(store).public());
-    Ok(HashtreeUpdater::new(resolver, tree))
+        .with_read_servers(servers)
+        .with_timeout(timeout);
+    HashTree::new(HashTreeConfig::new(std::sync::Arc::new(BlossomStore::new(blossom))).public())
 }

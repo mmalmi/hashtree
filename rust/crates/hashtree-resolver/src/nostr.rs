@@ -357,11 +357,17 @@ impl NostrRootResolver {
     /// untrusted transport. Private roots require resolver keys and therefore
     /// are not considered usable by this transport-neutral check.
     pub fn event_matches_key(key: &str, event: &Event) -> Result<bool, ResolverError> {
+        Ok(Self::root_from_event(key, event)?.is_some())
+    }
+
+    /// Authenticate and decode a public root without creating a relay client.
+    pub fn root_from_event(key: &str, event: &Event) -> Result<Option<Cid>, ResolverError> {
         let (pubkey, tree_name) = Self::parse_key(key)?;
         let event = VerifiedEvent::try_from(event.clone()).map_err(ResolverError::Other)?;
-        Ok(event.as_event().pubkey == pubkey
-            && is_matching_tree_event(&event, &tree_name)
-            && Self::cid_from_event_with_keys(event.as_event(), None).is_some())
+        if event.as_event().pubkey != pubkey || !is_matching_tree_event(&event, &tree_name) {
+            return Ok(None);
+        }
+        Ok(Self::cid_from_event_with_keys(event.as_event(), None))
     }
 
     /// Ingest a signed root event obtained from any transport. Returns true

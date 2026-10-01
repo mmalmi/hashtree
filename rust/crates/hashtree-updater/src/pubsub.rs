@@ -20,7 +20,10 @@ pub struct UpdateEventCache {
 
 impl UpdateEventCache {
     pub fn new(reference: &UpdateRef) -> Result<Self, UpdateError> {
-        let resolver_key = reference.resolver_key();
+        Self::for_key(reference.resolver_key())
+    }
+
+    pub(crate) fn for_key(resolver_key: String) -> Result<Self, UpdateError> {
         Ok(Self {
             filter: NostrRootResolver::filter_for_key(&resolver_key)?,
             resolver_key,
@@ -48,8 +51,9 @@ impl UpdateEventCache {
                 Ok(true)
             )
             || self.latest.as_ref().is_some_and(|current| {
-                (event.as_event().created_at, event.as_event().id)
-                    <= (current.as_event().created_at, current.as_event().id)
+                event.as_event().created_at < current.as_event().created_at
+                    || (event.as_event().created_at == current.as_event().created_at
+                        && event.as_event().id >= current.as_event().id)
             })
         {
             return false;
