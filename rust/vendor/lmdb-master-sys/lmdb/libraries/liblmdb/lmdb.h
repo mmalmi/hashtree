@@ -866,6 +866,20 @@ int  mdb_env_set_expected_file_identity(MDB_env *env,
 	uint64_t data_dev, uint64_t data_ino,
 	uint64_t lock_dev, uint64_t lock_ino);
 
+/** Optional admission for physical data-file writes and lock-file extension.
+ * Return zero to admit the exact fd/offset/length, or a positive errno to refuse.
+ * Commit metadata reserves twice its length for the original write plus one
+ * mandatory best-effort restoration, which cannot receive a second veto.
+ * The callback must not unwind, reenter LMDB, or retain/close the borrowed fd.
+ * Install only before mdb_env_open; caller owns context until mdb_env_close.
+ * Guarded MDB_WRITEMAP opens are rejected because stores bypass write syscalls.
+ * Environment-copy output files are not covered by this callback.
+ */
+typedef int MDB_write_admission_func(void *context, mdb_filehandle_t fd,
+	uint64_t offset, size_t length);
+int mdb_env_set_write_admission(MDB_env *env,
+	MDB_write_admission_func *callback, void *context);
+
 	/** @brief Set the size of the memory map to use for this environment.
 	 *
 	 * The size should be a multiple of the OS page size. The default is

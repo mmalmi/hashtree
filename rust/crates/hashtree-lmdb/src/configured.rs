@@ -1,6 +1,6 @@
 use crate::{
-    ExternalBlobOptions, LmdbBlobStore, PoolMemberConfig, PoolStore, PoolStoreConfig,
-    ReadOnlyPoolStore,
+    ExternalBlobOptions, LmdbBlobStore, PhysicalSpaceGuard, PoolMemberConfig, PoolStore,
+    PoolStoreConfig, ReadOnlyPoolStore,
 };
 use async_trait::async_trait;
 use hashtree_core::store::{Store, StoreError};
@@ -204,10 +204,41 @@ pub fn open_shared_lmdb_blob_store<P: AsRef<Path>>(
     )
 }
 
+/// Open the same canonical layout with process-local physical write admission.
+pub fn open_shared_lmdb_blob_store_with_space_guard<P: AsRef<Path>>(
+    data_dir: P,
+    storage_budget_bytes: u64,
+    guard: PhysicalSpaceGuard,
+) -> Result<ConfiguredLmdbBlobStore, StoreError> {
+    if pool_audit_read_only_enabled()? {
+        return Err(pool_audit_read_only_error());
+    }
+    open_shared_lmdb_blob_store_with_audit_and_space_guard(
+        data_dir.as_ref(),
+        storage_budget_bytes,
+        false,
+        Some(guard),
+    )
+}
+
 fn open_shared_lmdb_blob_store_with_audit_mode(
     data_dir: &Path,
     storage_budget_bytes: u64,
     audit_read_only: bool,
+) -> Result<ConfiguredLmdbBlobStore, StoreError> {
+    open_shared_lmdb_blob_store_with_audit_and_space_guard(
+        data_dir,
+        storage_budget_bytes,
+        audit_read_only,
+        None,
+    )
+}
+
+fn open_shared_lmdb_blob_store_with_audit_and_space_guard(
+    data_dir: &Path,
+    storage_budget_bytes: u64,
+    audit_read_only: bool,
+    physical_space: Option<PhysicalSpaceGuard>,
 ) -> Result<ConfiguredLmdbBlobStore, StoreError> {
     let blob_path = data_dir.join("blobs");
     let map_size_bytes = storage_budget_bytes.max(SHARED_BLOB_MIN_MAP_SIZE_BYTES);
@@ -223,10 +254,27 @@ fn open_shared_lmdb_blob_store_with_audit_mode(
         return Ok(ConfiguredLmdbBlobStore::ReadOnlyPool(Box::new(pool)));
     }
     if !pool_path.join("data.mdb").exists() && blob_path.join("data.mdb").exists() {
+        if let Some(guard) = physical_space {
+            return LmdbBlobStore::with_physical_space_guard(
+                &blob_path,
+                usize::try_from(map_size_bytes)
+                    .map_err(|_| StoreError::Other("map size exceeds usize".into()))?,
+                Some(configured_external_blob_options(&blob_path)),
+                None,
+                guard,
+            )
+            .map(ConfiguredLmdbBlobStore::Single);
+        }
         return open_configured_lmdb_blob_store(&blob_path, Some(map_size_bytes));
     }
 
-    let pool = PoolStore::open(&pool_path, PoolStoreConfig::default())?;
+    let pool = PoolStore::open(
+        &pool_path,
+        PoolStoreConfig {
+            physical_space,
+            ..PoolStoreConfig::default()
+        },
+    )?;
     // Placement capacity is a member guardrail, not the application's quota.
     // Keep bounded staging room so Hashtree can finish and index a raw tree
     // before application-owned retention decides what to evict.

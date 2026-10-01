@@ -140,6 +140,14 @@ fn success(output: Output) -> Value {
 }
 
 fn import(temp: &TempDir, event: &Event) -> String {
+    import_events(temp, &[event.clone()])
+}
+
+fn import_events(temp: &TempDir, events: &[Event]) -> String {
+    import_events_with_external(temp, events, false)
+}
+
+fn import_events_with_external(temp: &TempDir, events: &[Event], external: bool) -> String {
     std::fs::create_dir_all(temp.path().join("config")).unwrap();
     std::fs::write(
         temp.path().join("config/config.toml"),
@@ -147,10 +155,14 @@ fn import(temp: &TempDir, event: &Event) -> String {
     )
     .unwrap();
     let path = temp.path().join("events.json");
-    std::fs::write(&path, serde_json::to_vec(&[event]).unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec(events).unwrap()).unwrap();
+    let mut cmd = command(temp);
+    if external {
+        cmd.env("HTREE_LMDB_EXTERNAL_BLOB_MIN_BYTES", "1024")
+            .env("HTREE_LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES", "1048576");
+    }
     success(
-        command(temp)
-            .args(["nostr-index", "import", "--events"])
+        cmd.args(["nostr-index", "import", "--events"])
             .arg(path)
             .output()
             .unwrap(),
@@ -161,11 +173,17 @@ fn import(temp: &TempDir, event: &Event) -> String {
 }
 
 fn catchup(temp: &TempDir, root: &str, relay: &Relay) -> Command {
+    catchup_with_floor(temp, root, relay, 0)
+}
+
+fn catchup_with_floor(temp: &TempDir, root: &str, relay: &Relay, floor: u64) -> Command {
     let mut command = command(temp);
     command
         .args(["nostr-index", "catch-up", "--root", root, "--authors-file"])
         .arg(temp.path().join("authors.txt"))
         .args([
+            "--min-free-bytes",
+            &floor.to_string(),
             "--since",
             "10",
             "--relay",
@@ -321,4 +339,155 @@ async fn cli_rejects_missing_eose_and_unreadable_base_without_advancing() {
     assert!(String::from_utf8_lossy(&failed.stderr).contains("timeout before EOSE"));
     assert_eq!(checkpoint(&temp)["next_author"], 0);
     assert_eq!(checkpoint(&temp)["root"], root);
+}
+
+/// Run only inside the explicitly provisioned private 128 MiB tmpfs. This is
+/// production CLI, real signed events, real LMDB/catalog and external writes.
+#[cfg(all(target_os = "linux", feature = "lmdb"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires HTREE_CAPACITY_TEST_ROOT on a private 128 MiB tmpfs"]
+async fn cli_physical_capacity_stops_tag_replacement_and_resumes_exact_checkpoint() {
+    use std::fs::File;
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    const MIB: u64 = 1024 * 1024;
+    const FLOOR: u64 = 32 * MIB;
+    fn available(path: &std::path::Path) -> u64 {
+        let file = File::open(path).unwrap();
+        let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        assert_eq!(
+            unsafe { libc::fstatvfs(file.as_raw_fd(), stat.as_mut_ptr()) },
+            0
+        );
+        let stat = unsafe { stat.assume_init() };
+        stat.f_bavail * stat.f_frsize
+    }
+    let fixture = std::path::PathBuf::from(
+        std::env::var_os("HTREE_CAPACITY_TEST_ROOT").expect("explicit isolated tmpfs required"),
+    );
+    let fd = File::open(&fixture).unwrap();
+    let mut fs = std::mem::MaybeUninit::<libc::statfs>::uninit();
+    assert_eq!(unsafe { libc::fstatfs(fd.as_raw_fd(), fs.as_mut_ptr()) }, 0);
+    assert_eq!(unsafe { fs.assume_init() }.f_type, libc::TMPFS_MAGIC);
+    assert!(available(&fixture) > 100 * MIB && available(&fixture) <= 128 * MIB);
+    let temp = TempDir::new_in(&fixture).unwrap();
+    let alice = Keys::generate();
+    let bob = Keys::generate();
+    let old = event(&alice, 1, "retained history");
+    let tags = (0..5000)
+        .map(|i| nostr::Tag::parse(["p".to_owned(), format!("{i:064x}")]).unwrap())
+        .collect::<Vec<_>>();
+    let old_contacts = EventBuilder::new(Kind::ContactList, "old contacts")
+        .tags(tags.clone())
+        .custom_created_at(Timestamp::from_secs(2))
+        .sign_with_keys(&bob)
+        .unwrap();
+    let replacement = EventBuilder::new(Kind::ContactList, "new contacts")
+        .tags(tags)
+        .custom_created_at(Timestamp::from_secs(30))
+        .sign_with_keys(&bob)
+        .unwrap();
+    let root = import_events_with_external(&temp, &[old.clone(), old_contacts.clone()], true);
+    std::fs::write(
+        temp.path().join("authors.txt"),
+        format!(
+            "{}\n{}\n",
+            alice.public_key().to_hex(),
+            bob.public_key().to_hex()
+        ),
+    )
+    .unwrap();
+    let relay = Relay::new(vec![
+        event(&alice, 20, "durable first author"),
+        replacement.clone(),
+    ])
+    .await;
+    let guarded = || {
+        let mut cmd = catchup_with_floor(&temp, &root, &relay, FLOOR);
+        cmd.args(["--kind", "3"]);
+        cmd
+    };
+    let first = success(
+        guarded()
+            .args(["--until", "100", "--max-authors-per-run", "1"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(first["next_author"], 1);
+    let state_path = temp.path().join("data/nostr-index/catchup-state.json");
+    let durable_bytes = std::fs::read(&state_path).unwrap();
+    let pressure_path = temp.path().join("fixture-pressure");
+    let mut pressure = File::create(&pressure_path).unwrap();
+    let leave = FLOOR + hashtree_lmdb::PHYSICAL_SPACE_METADATA_MARGIN + MIB;
+    let mut fill = available(&fixture).checked_sub(leave).unwrap();
+    let chunk = vec![0x5a; MIB as usize];
+    while fill > 0 {
+        let n = fill.min(MIB) as usize;
+        pressure.write_all(&chunk[..n]).unwrap();
+        fill -= n as u64;
+    }
+    pressure.sync_all().unwrap();
+    drop(pressure);
+    let failed = guarded().output().unwrap();
+    let error = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        !failed.status.success(),
+        "tag projection must exceed the remaining write allowance"
+    );
+    assert!(
+        error.contains("append catchup author 1"),
+        "failure must reach actual indexing: {error}"
+    );
+    assert!(
+        error.contains("physical-space admission") && error.contains("latched_errno=28"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read(&state_path).unwrap(),
+        durable_bytes,
+        "failed author cannot advance durable state"
+    );
+    assert!(
+        available(&fixture) >= FLOOR,
+        "guard must preserve the physical floor"
+    );
+    std::fs::remove_file(&pressure_path).unwrap();
+    let resumed = success(guarded().output().unwrap());
+    assert_eq!(resumed["next_author"], 2);
+    assert_eq!(resumed["pass_until"], 100);
+    let find = |root: &str, id: String| {
+        success(
+            command(&temp)
+                .args([
+                    "nostr-index",
+                    "query",
+                    "--root",
+                    root,
+                    "--filter",
+                    &json!({"ids":[id]}).to_string(),
+                    "--limit",
+                    "10",
+                ])
+                .output()
+                .unwrap(),
+        )["count"]
+            .as_u64()
+            .unwrap()
+    };
+    assert_eq!(find(&root, old.id.to_hex()), 1);
+    assert_eq!(
+        find(&root, old_contacts.id.to_hex()),
+        1,
+        "original replaceable history remains reachable by old root"
+    );
+    assert_eq!(find(resumed["root"].as_str().unwrap(), old.id.to_hex()), 1);
+    assert_eq!(
+        find(resumed["root"].as_str().unwrap(), replacement.id.to_hex()),
+        1
+    );
+    assert_eq!(
+        find(resumed["root"].as_str().unwrap(), old_contacts.id.to_hex()),
+        0
+    );
+    println!("capacity acceptance: floor={FLOOR}, free_after_resume={}, previous_checkpoint_preserved=true", available(&fixture));
 }

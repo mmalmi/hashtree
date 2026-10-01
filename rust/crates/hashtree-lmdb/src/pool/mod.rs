@@ -111,6 +111,7 @@ pub struct PoolStoreInner {
     temperature_worker: TemperatureWorker,
     member_runtime_paths: HashMap<PoolMemberId, PoolMemberRuntimePaths>,
     expected_manifest_sha256: Option<Hash>,
+    physical_space: Option<crate::PhysicalSpaceGuard>,
 }
 
 impl Deref for PoolStore {
@@ -269,7 +270,11 @@ impl PoolStore {
         }
         let path = path.as_ref();
         if !controlled {
-            fs::create_dir_all(path).map_err(StoreError::Io)?;
+            if let Some(guard) = &config.physical_space {
+                guard.create_dir_all(path)?;
+            } else {
+                fs::create_dir_all(path).map_err(StoreError::Io)?;
+            }
         }
         let existing_size = match config.catalog_lmdb_identity {
             Some(identity) => pinned_lmdb_data_len(path, identity)?,
@@ -290,6 +295,9 @@ impl PoolStore {
             .map_err(|_| StoreError::Other("pool catalog map size exceeds usize".into()))?;
 
         let mut options = EnvOpenOptions::new();
+        if let Some(guard) = &config.physical_space {
+            guard.install(&mut options)?;
+        }
         if !controlled {
             options.map_size(map_size);
         }
@@ -414,7 +422,12 @@ impl PoolStore {
             }
         }
 
-        let temperature_config = config.temperature.clone();
+        let mut temperature_config = config.temperature.clone();
+        // Guarded catch-up is append-only. Background relocation has separate
+        // publication/retention ownership and must not bypass this writer.
+        if config.physical_space.is_some() {
+            temperature_config.enabled = false;
+        }
         let store = Self {
             inner: Arc::new(PoolStoreInner {
                 env,
@@ -437,6 +450,7 @@ impl PoolStore {
                 temperature_worker: TemperatureWorker::default(),
                 member_runtime_paths,
                 expected_manifest_sha256: config.expected_manifest_sha256,
+                physical_space: config.physical_space,
             }),
         };
         store.refresh_members()?;
@@ -498,9 +512,14 @@ impl PoolStore {
             return Ok(None);
         }
         validate_new_member_paths(&manifest, &config)?;
-        let id = prepare_member_paths(&config, PoolMemberId::new())?;
+        let id = prepare_member_paths(&config, PoolMemberId::new(), self.physical_space.as_ref())?;
         drop(wtxn);
-        let store = Arc::new(open_member_store(id, &config, None)?);
+        let store = Arc::new(open_member_store(
+            id,
+            &config,
+            None,
+            self.physical_space.as_ref(),
+        )?);
 
         let mut wtxn = self.env.write_txn().map_err(map_heed)?;
         let mut manifest = self.manifest_from_txn(&wtxn)?;
@@ -757,6 +776,14 @@ impl PoolStore {
                 self.finalize_pending(hash, location)?;
                 Ok(inserted)
             }
+            Err(error)
+                if self
+                    .physical_space
+                    .as_ref()
+                    .is_some_and(|guard| guard.stop_after_write_error(&error)) =>
+            {
+                return Err(self.physical_space.as_ref().unwrap().refusal_error().into())
+            }
             Err(_) => {
                 let mut excluded = HashSet::new();
                 excluded.insert(target);
@@ -883,6 +910,14 @@ impl PoolStore {
             self.record_write(target, started.elapsed(), bytes, success);
             let report = match result {
                 Ok(report) => report,
+                Err(error)
+                    if self
+                        .physical_space
+                        .as_ref()
+                        .is_some_and(|guard| guard.stop_after_write_error(&error)) =>
+                {
+                    return Err(self.physical_space.as_ref().unwrap().refusal_error().into())
+                }
                 Err(_) => {
                     drop(permit);
                     for (hash, data) in batch {
@@ -1774,7 +1809,12 @@ impl PoolStore {
                 .member_runtime_paths
                 .get(&member.id)
                 .map(|binding| binding.lmdb_identity);
-            match open_member_store(member.id, &config, pinned_identity) {
+            match open_member_store(
+                member.id,
+                &config,
+                pinned_identity,
+                self.physical_space.as_ref(),
+            ) {
                 Ok(store) => {
                     runtime.stores.insert(member.id, Arc::new(store));
                     runtime.errors.remove(&member.id);
@@ -1850,7 +1890,7 @@ impl PoolStore {
             .member_runtime_paths
             .get(&id)
             .map(|binding| binding.lmdb_identity);
-        match open_member_store(id, &config, pinned_identity) {
+        match open_member_store(id, &config, pinned_identity, self.physical_space.as_ref()) {
             Ok(store) => {
                 let store = Arc::new(store);
                 let mut runtime = self
@@ -2018,6 +2058,14 @@ impl PoolStore {
                 .and_then(|store| self.write_verified_member(target, &store, hash, data));
             match result {
                 Ok(inserted) => break (target, inserted),
+                Err(error)
+                    if self
+                        .physical_space
+                        .as_ref()
+                        .is_some_and(|guard| guard.stop_after_write_error(&error)) =>
+                {
+                    return Err(self.physical_space.as_ref().unwrap().refusal_error().into())
+                }
                 Err(error) => {
                     excluded.insert(target);
                     last_error = Some(error);
@@ -2324,5 +2372,5 @@ fn put_many_report(
 }
 
 fn map_heed(error: heed::Error) -> StoreError {
-    StoreError::Other(error.to_string())
+    super::map_heed_error(error)
 }

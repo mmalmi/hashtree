@@ -9,9 +9,11 @@ use hashtree_core::{sha256, to_hex, types::Hash, Cid, HashTree, HashTreeConfig, 
 use hashtree_fs::FsBlobStore;
 #[cfg(feature = "lmdb")]
 use hashtree_lmdb::{
-    open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, pool_audit_read_only_enabled,
-    ConfiguredLmdbBlobStore, ExternalBlobOptions, LmdbBlobReader, LmdbBlobStore, PoolStore,
-    ReadOnlyPoolStore, POOL_AUDIT_READ_ONLY_ERROR, SHARED_BLOB_POOL_DIR_NAME,
+    open_configured_lmdb_blob_store, open_shared_lmdb_blob_store,
+    open_shared_lmdb_blob_store_with_space_guard, pool_audit_read_only_enabled,
+    ConfiguredLmdbBlobStore, ExternalBlobOptions, LmdbBlobReader, LmdbBlobStore,
+    PhysicalSpaceGuard, PoolStore, ReadOnlyPoolStore, POOL_AUDIT_READ_ONLY_ERROR,
+    SHARED_BLOB_POOL_DIR_NAME,
 };
 use heed::types::*;
 use heed::{Database, EnvFlags, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
@@ -1438,6 +1440,7 @@ fn open_local_blob_store_with_options<P: AsRef<Path>>(
     data_dir: P,
     backend: &StorageBackend,
     max_size_bytes: u64,
+    #[cfg(feature = "lmdb")] physical_space: Option<&PhysicalSpaceGuard>,
 ) -> Result<Arc<LocalStore>, StoreError> {
     #[cfg(feature = "lmdb")]
     {
@@ -1454,7 +1457,15 @@ fn open_local_blob_store_with_options<P: AsRef<Path>>(
     if *backend == StorageBackend::Lmdb {
         let data_dir = data_dir.as_ref();
         let pool_read_fallback_config = configured_pool_read_fallback()?;
-        return open_shared_lmdb_blob_store(data_dir, max_size_bytes).and_then(|store| {
+        let opened = match physical_space {
+            Some(guard) => open_shared_lmdb_blob_store_with_space_guard(
+                data_dir,
+                max_size_bytes,
+                guard.clone(),
+            ),
+            None => open_shared_lmdb_blob_store(data_dir, max_size_bytes),
+        };
+        return opened.and_then(|store| {
             let primary_pool_path = data_dir.join(SHARED_BLOB_POOL_DIR_NAME);
             let local = match store {
                 ConfiguredLmdbBlobStore::Single(store) => {
@@ -2239,6 +2250,8 @@ pub struct HashtreeStore {
     cached_roots: Database<Str, Bytes>,
     /// Storage router - handles LMDB + optional S3 (Arc for sharing with HashTree)
     router: Arc<StorageRouter>,
+    #[cfg(feature = "lmdb")]
+    physical_space: Option<PhysicalSpaceGuard>,
     /// Maximum storage size in bytes (from config)
     max_size_bytes: u64,
     /// Whether quota enforcement may delete local blobs not tracked by any indexed tree.
@@ -2317,6 +2330,54 @@ impl HashtreeStore {
         )
     }
 
+    /// Catch-up alone opts into fd-based write admission on every local backend.
+    /// Unsupported backends fail before opening any writable environment.
+    pub fn with_catchup_physical_space<P: AsRef<Path>>(
+        path: P,
+        s3_config: Option<&S3Config>,
+        max_size_bytes: u64,
+        minimum_free_bytes: u64,
+    ) -> Result<Self> {
+        let config = hashtree_config::Config::load_or_default();
+        anyhow::ensure!(
+            config.storage.backend == StorageBackend::Lmdb && s3_config.is_none(),
+            "physical catch-up admission requires the local LMDB backend without S3"
+        );
+        Self::with_options_and_backend_and_env_flags(
+            path,
+            None,
+            max_size_bytes,
+            false,
+            &config.storage.backend,
+            EnvFlags::empty(),
+            Some(minimum_free_bytes),
+        )
+    }
+
+    pub fn physical_space_status(&self) -> String {
+        #[cfg(feature = "lmdb")]
+        if let Some(guard) = &self.physical_space {
+            return guard.status();
+        }
+        "physical-space admission disabled".into()
+    }
+
+    /// The atomic checkpoint consists of one small file and same-directory
+    /// publication; charge its exact bytes plus the common metadata margin.
+    pub fn admit_checkpoint_write(&self, path: &Path, bytes: usize) -> Result<()> {
+        #[cfg(feature = "lmdb")]
+        if let Some(guard) = &self.physical_space {
+            let parent = path.parent().context("checkpoint has no parent")?;
+            guard.create_dir_all(parent)?;
+            guard
+                .admit_file(&std::fs::File::open(parent)?, 0, bytes)
+                .with_context(|| guard.status())?;
+        }
+        #[cfg(not(feature = "lmdb"))]
+        let _ = (path, bytes);
+        Ok(())
+    }
+
     pub fn with_options_and_backend<P: AsRef<Path>>(
         path: P,
         s3_config: Option<&S3Config>,
@@ -2331,6 +2392,7 @@ impl HashtreeStore {
             evict_orphans,
             backend,
             EnvFlags::empty(),
+            None,
         )
     }
 
@@ -2352,6 +2414,7 @@ impl HashtreeStore {
             true,
             &hashtree_config::StorageBackend::Fs,
             EnvFlags::NO_LOCK,
+            None,
         )
     }
 
@@ -2362,9 +2425,23 @@ impl HashtreeStore {
         evict_orphans: bool,
         backend: &hashtree_config::StorageBackend,
         env_flags: EnvFlags,
+        minimum_free_bytes: Option<u64>,
     ) -> Result<Self> {
+        #[cfg(not(feature = "lmdb"))]
+        anyhow::ensure!(
+            minimum_free_bytes.is_none(),
+            "physical catch-up admission requires the LMDB feature"
+        );
+        #[cfg(feature = "lmdb")]
+        let physical_space = minimum_free_bytes
+            .map(PhysicalSpaceGuard::new)
+            .transpose()?;
         let env_flags = env_flags | lmdb_env_flags_from_env();
         let path = path.as_ref();
+        #[cfg(feature = "lmdb")]
+        if let Some(guard) = &physical_space {
+            guard.create_dir_all(path)?;
+        }
         std::fs::create_dir_all(path)?;
         let metadata_map_size = lmdb_map_size_for_existing_env(
             path,
@@ -2372,6 +2449,10 @@ impl HashtreeStore {
         )?;
 
         let mut env_options = EnvOpenOptions::new();
+        #[cfg(feature = "lmdb")]
+        if let Some(guard) = &physical_space {
+            guard.install(&mut env_options)?;
+        }
         env_options
             .map_size(metadata_map_size)
             .max_dbs(11) // pins, pinned_refs, tracked_authors, blob_owners, pubkey_blobs, pubkey_blob_index, tree_meta, blob_trees, tree_refs, cached_roots, blobs
@@ -2401,8 +2482,14 @@ impl HashtreeStore {
         // Intentionally keep the raw blob backend unbounded here. HashtreeStore
         // owns quota policy above this layer, where it can coordinate eviction
         // with tree refs, blob ownership, pins, and S3 archival behavior.
-        let local_store = open_local_blob_store_with_options(path, backend, max_size_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to create blob store: {}", e))?;
+        let local_store = open_local_blob_store_with_options(
+            path,
+            backend,
+            max_size_bytes,
+            #[cfg(feature = "lmdb")]
+            physical_space.as_ref(),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to create blob store: {}", e))?;
         let pool_audit_read_only = local_store.is_pool_audit_read_only();
 
         // Create storage router with optional S3
@@ -2443,6 +2530,8 @@ impl HashtreeStore {
             tree_refs,
             cached_roots,
             router,
+            #[cfg(feature = "lmdb")]
+            physical_space,
             max_size_bytes,
             evict_orphans: evict_orphans && !pool_audit_read_only,
             cache_quota: CacheQuotaController::default(),
