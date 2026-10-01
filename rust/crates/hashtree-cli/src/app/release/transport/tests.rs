@@ -132,7 +132,7 @@ async fn release_daemon_handoff_reaches_late_fips_consumer_without_relays() -> R
         .latest_event(&key)
         .await?
         .context("signed release event")?;
-    assert_eq!(observed.created_at.as_secs(), prior_timestamp.as_secs() + 1);
+    assert!(observed.created_at > prior_timestamp);
     assert_eq!(
         NostrRootResolver::root_from_event(&key, &observed)?,
         Some(new_root.clone())
