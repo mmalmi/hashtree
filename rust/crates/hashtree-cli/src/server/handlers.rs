@@ -686,15 +686,29 @@ pub async fn nostr_profile(
         .unwrap()
 }
 
+#[derive(Deserialize)]
+pub struct PublishNostrEventOptions {
+    transport: Option<crate::config::NostrEventTransport>,
+}
+
 pub async fn publish_nostr_event(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    Query(options): Query<PublishNostrEventOptions>,
     Json(event): Json<nostr::Event>,
 ) -> Response<Body> {
     if !peer.ip().is_loopback() {
         return Response::builder()
             .status(StatusCode::FORBIDDEN)
             .body(Body::from("Nostr event publication is loopback-only"))
+            .unwrap();
+    }
+    if options.transport.is_some() && options.transport != state.nostr_event_transport {
+        return Response::builder()
+            .status(StatusCode::CONFLICT)
+            .body(Body::from(
+                "Configured Nostr event transport does not match publication request",
+            ))
             .unwrap();
     }
     let Some(provider) = state.nostr_provider.as_ref() else {

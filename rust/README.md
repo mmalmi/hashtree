@@ -300,6 +300,20 @@ rust/scripts/publish_release.sh v<version> "$release" releases/hashtree
 
 That stores the new release under `v<version>/`, repoints `latest/` at the same CID, and leaves older versions intact.
 
+Release announcements follow `nostr.event_transport`. For consumers using FIPS pubsub,
+set it to `"fips-local-only"` and run a local `htree` daemon with the same configuration.
+`htree release publish` resolves and hands its signed announcement to that daemon;
+it fails if the daemon is unavailable, uses another transport, or cannot observe the
+existing release root. Before migrating an existing release tree, submit its already
+signed root event to the daemon's loopback `POST /api/nostr/events` endpoint. A quiet
+network is not proof that the release tree is empty. Explicit `"relay"` mode continues
+to use the configured Nostr relays.
+
+Keep the publishing daemon online so late FIPS consumers can fetch the announcement.
+This handoff does not add durable replay after daemon restarts: retained dissemination
+of the signed release root, including restart recovery, is a rollout prerequisite for
+FIPS-only releases. Verify the release from a separate FIPS consumer before rollout.
+
 Publish the canonical repo release and mirror the same staged files to GitHub in one step:
 
 ```bash

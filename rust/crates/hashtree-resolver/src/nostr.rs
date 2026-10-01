@@ -351,6 +351,35 @@ impl NostrRootResolver {
         Ok(Self::build_tree_filter(pubkey, &tree_name))
     }
 
+    /// Build an unsigned public-root announcement for any event transport.
+    /// The caller signs with the owner of the resolver key.
+    pub fn root_event_builder(
+        tree_name: &str,
+        cid: &Cid,
+        latest_created_at: Option<Timestamp>,
+    ) -> EventBuilder {
+        let mut tags = vec![
+            Tag::identifier(tree_name),
+            Tag::custom(
+                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                vec![HASHTREE_LABEL],
+            ),
+            Tag::custom(TagKind::Custom(TAG_HASH.into()), vec![to_hex(&cid.hash)]),
+        ];
+        if let Some(key) = cid.key {
+            tags.push(Tag::custom(
+                TagKind::Custom(TAG_KEY.into()),
+                vec![hex::encode(key)],
+            ));
+        }
+        EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
+            .tags(tags)
+            .custom_created_at(next_replaceable_created_at(
+                Timestamp::now(),
+                latest_created_at,
+            ))
+    }
+
     /// Validate that a signed event is a usable root for exactly this key.
     ///
     /// Pubsub consumers can use this before caching an event obtained from an
@@ -922,38 +951,14 @@ impl RootResolver for NostrRootResolver {
             return Err(ResolverError::NotAuthorized);
         }
 
-        // Build event with tags
-        let mut tags = vec![
-            Tag::identifier(tree_name.clone()),
-            Tag::custom(
-                TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
-                vec![HASHTREE_LABEL],
-            ),
-            Tag::custom(TagKind::Custom(TAG_HASH.into()), vec![to_hex(&cid.hash)]),
-        ];
-
-        // Add key tag if present
-        if let Some(key) = cid.key {
-            tags.push(Tag::custom(
-                TagKind::Custom(TAG_KEY.into()),
-                vec![hex::encode(key)],
-            ));
-        }
-
-        let created_at = next_replaceable_created_at(
-            Timestamp::now(),
-            self.latest_existing_created_at(pubkey, &tree_name)
-                .await
-                .ok()
-                .flatten(),
-        );
+        let latest_created_at = self
+            .latest_existing_created_at(pubkey, &tree_name)
+            .await
+            .ok()
+            .flatten();
         let event = self
             .client
-            .sign_event_builder(
-                EventBuilder::new(Kind::Custom(HASHTREE_KIND), "")
-                    .tags(tags)
-                    .custom_created_at(created_at),
-            )
+            .sign_event_builder(Self::root_event_builder(&tree_name, cid, latest_created_at))
             .await
             .map_err(|e| ResolverError::Network(e.to_string()))?;
 

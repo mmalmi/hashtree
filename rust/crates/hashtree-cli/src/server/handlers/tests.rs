@@ -284,6 +284,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         socialgraph_snapshot_public: false,
         nostr_relay: None,
         nostr_provider: None,
+        nostr_event_transport: None,
         nostr_relay_urls: Vec::new(),
         tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),

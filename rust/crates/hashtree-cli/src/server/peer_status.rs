@@ -179,6 +179,7 @@ pub(super) async fn daemon_status(
 
     Json(json!({
         "status": "running",
+        "nostr_event_transport": state.nostr_provider.as_ref().and(state.nostr_event_transport),
         "daemon_started_at": state.daemon_started_at,
         "uptime_seconds": current_unix_secs().saturating_sub(state.daemon_started_at),
         "mode": state.peer_mode.as_str(),

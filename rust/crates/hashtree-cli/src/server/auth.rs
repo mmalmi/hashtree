@@ -310,6 +310,8 @@ pub struct AppState {
     pub nostr_relay: Option<Arc<NostrRelay>>,
     /// Selected provider for Hashtree Nostr root/site lookup and publication.
     pub nostr_provider: Option<Arc<dyn nostr_pubsub::PubsubProvider>>,
+    /// Configured transport of the active event provider, when known.
+    pub nostr_event_transport: Option<crate::config::NostrEventTransport>,
     /// Active upstream Nostr relays for HTTP resolver operations.
     pub nostr_relay_urls: Vec<String>,
     /// In-process cache for resolved mutable tree roots, keyed by npub/tree(+key)

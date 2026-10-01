@@ -654,7 +654,9 @@ fn run_command(
                 server = server.with_nostr_relay(nostr_relay);
             }
             if let Some(provider) = nostr_provider {
-                server = server.with_nostr_provider(provider);
+                server = server
+                    .with_nostr_provider(provider)
+                    .with_nostr_event_transport(config.nostr.event_transport);
             }
 
             if let Some(ref fips_handle) = fips_handle {
