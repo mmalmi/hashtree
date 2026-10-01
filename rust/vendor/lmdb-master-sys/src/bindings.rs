@@ -271,6 +271,21 @@ extern "C" {
         lock_ino: u64,
     ) -> ::libc::c_int;
 }
+pub type MDB_write_admission_func = ::core::option::Option<
+    unsafe extern "C" fn(
+        context: *mut ::libc::c_void,
+        fd: mdb_filehandle_t,
+        offset: u64,
+        length: usize,
+    ) -> ::libc::c_int,
+>;
+extern "C" {
+    pub fn mdb_env_set_write_admission(
+        env: *mut MDB_env,
+        callback: MDB_write_admission_func,
+        context: *mut ::libc::c_void,
+    ) -> ::libc::c_int;
+}
 extern "C" {
     #[doc = "Set the size of the memory map to use for this environment.\n\n The size should be a multiple of the OS page size. The default is\n 10485760 bytes. The size of the memory map is also the maximum size\n of the database. The value should be chosen as large as possible,\n to accommodate future growth of the database.\n This function should be called after #mdb_env_create() and before #mdb_env_open().\n It may be called at later times if no transactions are active in\n this process. Note that the library does not check for this condition,\n the caller must ensure it explicitly.\n\n The new size takes effect immediately for the current process but\n will not be persisted to any others until a write transaction has been\n committed by the current process. Also, only mapsize increases are\n persisted into the environment.\n\n If the mapsize is increased by another process, and data has grown\n beyond the range of the current mapsize, #mdb_txn_begin() will\n return #MDB_MAP_RESIZED. This function may be called with a size\n of zero to adopt the new size.\n\n Any attempt to set a size smaller than the space already consumed\n by the environment will be silently changed to the current size of the used space.\n # Arguments\n\n* `env` (direction in) - An environment handle returned by #mdb_env_create()\n * `size` (direction in) - The size in bytes\n # Returns\n\nA non-zero error value on failure and 0 on success. Some possible\n errors are:\n <ul>\n\t<li>EINVAL - an invalid parameter was specified, or the environment has\n \tan active write transaction.\n </ul>"]
     pub fn mdb_env_set_mapsize(env: *mut MDB_env, size: mdb_size_t) -> ::libc::c_int;

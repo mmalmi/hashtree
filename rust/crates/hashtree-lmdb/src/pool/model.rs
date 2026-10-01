@@ -206,6 +206,8 @@ impl PoolTemperatureConfig {
 
 #[derive(Debug, Clone)]
 pub struct PoolStoreConfig {
+    /// Runtime-only opt-in admission; never persisted in the pool manifest.
+    pub physical_space: Option<crate::PhysicalSpaceGuard>,
     pub catalog_map_size_bytes: u64,
     pub member_failure_cooldown: Duration,
     pub temperature: PoolTemperatureConfig,
@@ -242,6 +244,7 @@ pub struct PoolDeleteProtectionChange {
 impl Default for PoolStoreConfig {
     fn default() -> Self {
         Self {
+            physical_space: None,
             catalog_map_size_bytes: DEFAULT_CATALOG_MAP_SIZE_BYTES,
             member_failure_cooldown: Duration::from_secs(5),
             temperature: PoolTemperatureConfig::default(),

@@ -2,6 +2,8 @@ use std::ptr;
 
 #[cfg(target_os = "linux")]
 pub use ffi::mdb_env_get_lockfd;
+#[cfg(unix)]
+pub use ffi::mdb_env_set_write_admission;
 pub use ffi::{
     mdb_cursor_close, mdb_cursor_del, mdb_cursor_get, mdb_cursor_open, mdb_cursor_put,
     mdb_dbi_open, mdb_del, mdb_drop, mdb_env_close, mdb_env_copyfd2, mdb_env_create,

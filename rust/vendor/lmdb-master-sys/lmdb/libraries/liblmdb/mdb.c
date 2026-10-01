@@ -1609,7 +1609,22 @@ struct MDB_env {
 #endif
 	void		*me_userctx;	 /**< User-settable context */
 	MDB_assert_func *me_assert_func; /**< Callback for assertion failures */
+	MDB_write_admission_func *me_write_admission; /**< Optional physical write guard */
+	void *me_write_admission_ctx;
 };
+
+static int
+mdb_write_admit(MDB_env *env, mdb_filehandle_t fd, MDB_OFF_T offset, size_t length)
+{
+	int rc;
+	if (!env->me_write_admission)
+		return MDB_SUCCESS;
+	if (offset < 0)
+		return EINVAL;
+	rc = env->me_write_admission(env->me_write_admission_ctx, fd,
+		(uint64_t)offset, length);
+	return rc < 0 ? EIO : rc;
+}
 
 	/** Nested transaction */
 typedef struct MDB_ntxn {
@@ -3904,6 +3919,9 @@ mdb_page_flush(MDB_txn *txn, int keep)
 retry_write:
 				/* Write previous page(s) */
 				DPRINTF(("committing page %"Z"u", pgno));
+				rc = mdb_write_admit(env, fd, wpos, (size_t)wsize);
+				if (rc)
+					return rc;
 #ifdef _WIN32
 				OVERLAPPED *this_ov = &ov[async_i];
 				/* Clear status, and keep hEvent, we reuse that */
@@ -4371,17 +4389,22 @@ mdb_env_init_meta(MDB_env *env, MDB_meta *meta)
 {
 	MDB_page *p, *q;
 	int rc;
+	int admission_error = 0;
 	unsigned int	 psize;
 #ifdef _WIN32
 	DWORD len;
 	OVERLAPPED ov;
 	memset(&ov, 0, sizeof(ov));
 #define DO_PWRITE(rc, fd, ptr, size, len, pos)	do { \
+	admission_error = mdb_write_admit(env, fd, pos, size); \
+	if (admission_error) { rc = 0; break; } \
 	ov.Offset = pos;	\
 	rc = WriteFile(fd, ptr, size, &len, &ov);	} while(0)
 #else
 	int len;
 #define DO_PWRITE(rc, fd, ptr, size, len, pos)	do { \
+	admission_error = mdb_write_admit(env, fd, pos, size); \
+	if (admission_error) { rc = 0; break; } \
 	len = pwrite(fd, ptr, size, pos);	\
 	if (len == -1 && ErrCode() == EINTR) continue; \
 	rc = (len >= 0); break; } while(1)
@@ -4403,7 +4426,9 @@ mdb_env_init_meta(MDB_env *env, MDB_meta *meta)
 	*(MDB_meta *)METADATA(q) = *meta;
 
 	DO_PWRITE(rc, env->me_fd, p, psize * NUM_METAS, len, 0);
-	if (!rc)
+	if (admission_error)
+		rc = admission_error;
+	else if (!rc)
 		rc = ErrCode();
 	else if ((unsigned) len == psize * NUM_METAS)
 		rc = MDB_SUCCESS;
@@ -4493,6 +4518,16 @@ mdb_env_write_meta(MDB_txn *txn)
 	 * also syncs to disk.  Avoids a separate fdatasync() call.)
 	 */
 	mfd = (flags & (MDB_NOSYNC|MDB_NOMETASYNC)) ? env->me_fd : env->me_mfd;
+#ifndef _WIN32
+retry_write:
+#endif
+	/* Reserve the original write and a possible recovery write together.
+	 * Once a partial write occurs, restoration must not be vetoed by a
+	 * fresh admission check. This tiny metadata operation is the sole
+	 * exception to one admission per physical write. */
+	rc = mdb_write_admit(env, mfd, off, (size_t)len * 2);
+	if (rc)
+		return rc; /* No meta write occurred, so recovery is unnecessary. */
 #ifdef _WIN32
 	{
 		memset(&ov, 0, sizeof(ov));
@@ -4501,7 +4536,6 @@ mdb_env_write_meta(MDB_txn *txn)
 			rc = -1;
 	}
 #else
-retry_write:
 	rc = pwrite(mfd, ptr, len, off);
 #endif
 	if (rc != len) {
@@ -5154,6 +5188,9 @@ mdb_env_open2(MDB_env *env, int prev)
 	if (newenv) {
 		char dummy = 0;
 		DWORD len;
+		rc = mdb_write_admit(env, env->me_fd, 0, 1);
+		if (rc)
+			return rc;
 		rc = WriteFile(env->me_fd, &dummy, 1, &len, NULL);
 		if (!rc) {
 			rc = ErrCode();
@@ -5519,6 +5556,9 @@ mdb_env_setup_locks(MDB_env *env, MDB_name *fname, int mode, int *excl)
 #endif
 	rsize = (env->me_maxreaders-1) * sizeof(MDB_reader) + sizeof(MDB_txninfo);
 	if (size < rsize && *excl > 0) {
+		rc = mdb_write_admit(env, env->me_lfd, size, (size_t)(rsize - size));
+		if (rc)
+			goto fail;
 #ifdef _WIN32
 		if (SetFilePointer(env->me_lfd, rsize, NULL, FILE_BEGIN) != (DWORD)rsize
 			|| !SetEndOfFile(env->me_lfd))
@@ -5727,6 +5767,8 @@ mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_mode_t mode
 	MDB_name fname;
 
 	if (env->me_fd!=INVALID_HANDLE_VALUE || (flags & ~(CHANGEABLE|CHANGELESS)))
+		return EINVAL;
+	if (env->me_write_admission && ((flags | env->me_flags) & MDB_WRITEMAP))
 		return EINVAL;
 
 #ifdef MDB_VL32
@@ -10972,6 +11014,17 @@ mdb_env_set_expected_file_identity(MDB_env *env,
 	env->me_has_expected_file_identity = 1;
 	return MDB_SUCCESS;
 #endif
+}
+
+int ESECT
+mdb_env_set_write_admission(MDB_env *env,
+	MDB_write_admission_func *callback, void *context)
+{
+	if (!env || env->me_fd != INVALID_HANDLE_VALUE)
+		return EINVAL;
+	env->me_write_admission = callback;
+	env->me_write_admission_ctx = context;
+	return MDB_SUCCESS;
 }
 
 /** Common code for #mdb_stat() and #mdb_env_stat().

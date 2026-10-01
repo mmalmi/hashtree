@@ -52,6 +52,9 @@ pub(crate) struct CatchupArgs {
     fetch_timeout_secs: u64,
     #[arg(long, default_value_t = 256)]
     index_commit_batch_size: usize,
+    /// Physical free-space floor checked at each local write (not resume policy).
+    #[arg(long, default_value_t = 10 * 1024 * 1024 * 1024u64)]
+    min_free_bytes: u64,
 }
 
 pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
@@ -106,6 +109,21 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         fetch_timeout_secs: args.fetch_timeout_secs,
         index_commit_batch_size: args.index_commit_batch_size,
     };
+    // The advisory lock has no payload; only first-time namespace creation can
+    // allocate. Admit that small operation before opening any writable store.
+    #[cfg(feature = "lmdb")]
+    {
+        let guard = hashtree_lmdb::PhysicalSpaceGuard::new(args.min_free_bytes)?;
+        let directory = data_dir.join(INDEX_DIR);
+        guard
+            .create_dir_all(&directory)
+            .with_context(|| guard.status())?;
+        if !directory.join(super::CRAWL_LOCK_FILE).exists() {
+            guard
+                .admit_file(&std::fs::File::open(&directory)?, 0, 1)
+                .with_context(|| guard.status())?;
+        }
+    }
     // Share the existing writer lock while preserving the original crawl state.
     let _lock = CrawlStateLock::acquire(&data_dir)?;
     let state_file = data_dir.join(INDEX_DIR).join("catchup-state.json");
@@ -121,11 +139,12 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         .as_secs();
     let mut state = CatchupState::prepare(saved, policy, args.until, now)?;
     let config = Config::load()?;
-    let store = Arc::new(HashtreeStore::with_options(
+    let store = Arc::new(HashtreeStore::with_catchup_physical_space(
         &data_dir,
         config.storage.s3.as_ref(),
         config.storage.max_size_gb * 1024 * 1024 * 1024,
-    )?);
+        args.min_free_bytes,
+    ).with_context(|| format!("open catch-up storage: physical-space floor={} metadata_margin=16777216 max_write_quantum=67108864", args.min_free_bytes))?);
     let event_store = NostrEventStore::with_options(
         store.store_arc(),
         NostrEventStoreOptions {
@@ -143,6 +162,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         .validate_index_root(Some(&root))
         .await
         .context("validate catchup checkpoint root")?;
+    store.admit_checkpoint_write(&state_file, serde_json::to_vec(&state)?.len() + 1)?;
     persist_json_atomic(&state_file, &state, "Nostr catchup checkpoint")?;
     let end = args
         .max_authors_per_run
@@ -166,7 +186,13 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         let report = event_store
             .build_with_superseded_nodes(Some(&root), events)
             .await
-            .with_context(|| format!("append catchup author {} ({author})", state.next_author))?;
+            .with_context(|| {
+                format!(
+                    "append catchup author {} ({author}); {}",
+                    state.next_author,
+                    store.physical_space_status()
+                )
+            })?;
         let next_root = report
             .root
             .context("catchup writer discarded its nonempty base root")?;
@@ -176,6 +202,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         next.root = cid_to_nhash(&next_root)?;
         next.next_author += 1;
         next.events_received = next.events_received.saturating_add(received);
+        store.admit_checkpoint_write(&state_file, serde_json::to_vec(&next)?.len() + 1)?;
         persist_json_atomic(&state_file, &next, "Nostr catchup checkpoint")?;
         state = next;
         root = next_root;
