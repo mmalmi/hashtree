@@ -42,6 +42,7 @@ pub struct UpdaterContext {
     pub config: Config,
     pub current_version: String,
     provider: Option<Arc<dyn NostrEventSubscriber>>,
+    resolver: Arc<tokio::sync::OnceCell<PubsubRootResolver>>,
 }
 
 impl UpdaterContext {
@@ -50,6 +51,7 @@ impl UpdaterContext {
             config,
             current_version,
             provider: None,
+            resolver: Arc::default(),
         }
     }
 
@@ -76,23 +78,29 @@ impl UpdaterContext {
         let store = Arc::new(BlossomStore::new(blossom));
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
-        let provider = match &self.provider {
-            Some(provider) => provider.clone(),
-            None if self.config.relays.is_empty() => {
-                return Err(Error::Config(
-                    "supply a pubsub provider or explicit relays".into(),
-                ));
-            }
-            None => Arc::new(
-                nostr_pubsub_relay::RelayEventBus::new(
-                    self.config.relays.clone(),
-                    Duration::from_secs(10),
-                )
-                .await
-                .map_err(|error| Error::Config(error.to_string()))?,
-            ),
-        };
-        let resolver = PubsubRootResolver::new(provider, Duration::from_secs(10));
+        let resolver = self
+            .resolver
+            .get_or_try_init(|| async {
+                let provider = match &self.provider {
+                    Some(provider) => provider.clone(),
+                    None if self.config.relays.is_empty() => {
+                        return Err(Error::Config(
+                            "supply a pubsub provider or explicit relays".into(),
+                        ));
+                    }
+                    None => Arc::new(
+                        nostr_pubsub_relay::RelayEventBus::new(
+                            self.config.relays.clone(),
+                            Duration::from_secs(10),
+                        )
+                        .await
+                        .map_err(|error| Error::Config(error.to_string()))?,
+                    ),
+                };
+                Ok::<_, Error>(PubsubRootResolver::new(provider, Duration::from_secs(10)))
+            })
+            .await?
+            .clone();
         Ok(HashtreeUpdater::new(resolver, tree))
     }
 
@@ -187,6 +195,7 @@ pub fn context_from_app<R: Runtime>(app: &AppHandle<R>) -> UpdaterContext {
         config: state.config.clone(),
         current_version: app.package_info().version.to_string(),
         provider: state.provider.clone(),
+        resolver: state.resolver.clone(),
     }
 }
 
@@ -246,5 +255,29 @@ mod tests {
             .build_updater()
             .await
             .expect("application provider bypasses relay configuration");
+    }
+
+    #[tokio::test]
+    async fn repeated_checks_share_signed_root_observations() {
+        use nostr::{EventBuilder, Kind, Tag, TagKind, ToBech32};
+        let context = UpdaterContext::new(Config::default(), "1.0.0".into())
+            .with_provider(Arc::new(nostr_pubsub::InMemoryEventBus::new()));
+        let keys = Keys::generate();
+        let event = EventBuilder::new(Kind::Custom(30064), "")
+            .tags([
+                Tag::identifier("release"),
+                Tag::custom(TagKind::Custom("hash".into()), ["42".repeat(32)]),
+            ])
+            .sign_with_keys(&keys)
+            .unwrap();
+        let key = format!("{}/release", keys.public_key().to_bech32().unwrap());
+        let first = context.build_updater().await.unwrap();
+        first.resolver().ingest_event(event.clone()).await.unwrap();
+        drop(first);
+        let second = context.build_updater().await.unwrap();
+        assert_eq!(
+            second.resolver().latest_event(&key).await.unwrap(),
+            Some(event)
+        );
     }
 }

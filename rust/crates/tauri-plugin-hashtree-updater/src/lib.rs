@@ -44,6 +44,7 @@ use tauri::{
 pub(crate) struct PluginState {
     pub(crate) config: Config,
     pub(crate) provider: Option<Arc<dyn NostrEventSubscriber>>,
+    pub(crate) resolver: Arc<tokio::sync::OnceCell<hashtree_updater::PubsubRootResolver>>,
 }
 
 /// Convenience accessor for the plugin's `UpdaterContext` from a Tauri app
@@ -75,7 +76,11 @@ fn build_plugin<R: Runtime>(
     PluginBuilder::<R, Config>::new("hashtree-updater")
         .setup(move |app, api| {
             let config = api.config().clone();
-            app.manage(PluginState { config, provider });
+            app.manage(PluginState {
+                config,
+                provider,
+                resolver: Arc::default(),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
