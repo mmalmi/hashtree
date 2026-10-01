@@ -68,6 +68,20 @@ htree mount htree://npub1.../mytree ~/mnt/mytree
 htree mount htree://npub1.../mytree/docs ~/mnt/docs
 ```
 
+## Resuming an archived Nostr index
+
+```bash
+htree --data-dir ./archive nostr-index catch-up \
+  --root <original-nhash> --authors-file ./authors.txt --since <unix-seconds> \
+  --relay wss://relay.example --kind 1 --kind 5 --max-authors-per-run 16
+```
+
+Choose an initial `--since` at or before the original fetch pass began, not its completion date. The ordered author file, original root, initial time, kinds, and required relays identify the continuation. All required sources must finish each author before its new root and author cursor are committed to `nostr-index/catchup-state.json`. The original crawl state remains intact. Larger resource limits can resume a stopped author without discarding earlier progress.
+
+Omitting `--until` resumes the saved end of an unfinished pass. After every author completes, the next invocation captures a new end time and starts at the previous end inclusively. An explicit `--until` can fix the pass end for controlled runs. Timeouts, resource limits, and ambiguous capped timestamp ties stop the run without advancing that author. Coverage describes the configured relays' EOSE responses; it cannot establish absence of events on other relays or detect every undisclosed relay omission.
+
+The command retains prior-root blocks and only updates index paths touched by incoming events. It does not publish a pointer. After the previous root is already available on the destination, `htree push <new-root> --previous-root <retained-root>` uploads a DAG delta. This explicit delta mode fails if comparison nodes are unavailable instead of falling back to a whole-archive walk. Keep advertised and rollback roots readable until publication and retention checks finish.
+
 ## Social Graph
 
 The daemon maintains a local social graph store. On startup it crawls follow lists (kind 3) from Nostr relays and uses follow distance to control write access to your Blossom server, without a manual allow-list for people in your social circle.

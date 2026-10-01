@@ -1,5 +1,6 @@
 //! Hashtree-native Nostr event indexes.
 
+pub mod catchup;
 pub mod crawl;
 pub mod tree_event_snapshots;
 pub use crawl::{

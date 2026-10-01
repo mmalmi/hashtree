@@ -1120,6 +1120,9 @@ fn run_command(
             }
         }),
         Commands::NostrIndex { command } => command_future!(match *command.0 {
+            NostrIndexCommands::CatchUp { options } => {
+                super::nostr_index::catchup::run(data_dir, options).await?;
+            }
             NostrIndexCommands::Import {
                 root,
                 events_file,
@@ -1829,11 +1832,16 @@ fn run_command(
             server,
             force,
             shallow,
+            previous_root,
         } => command_future!({
             // Resolve npub/repo or htree:// URLs to CID
             let resolved = resolve_cid_input(&cid_input).await?;
             let cid = resolved.cid.to_string();
-            push_to_blossom(&data_dir, &cid, server, force, shallow).await?;
+            let previous = match previous_root {
+                Some(input) => Some(resolve_cid_input(&input).await?.cid.to_string()),
+                None => None,
+            };
+            push_to_blossom(&data_dir, &cid, server, force, shallow, previous.as_deref()).await?;
         }),
         Commands::Storage { command } => command_future!({
             // The migration launcher is an inert rendezvous until its
