@@ -51,7 +51,7 @@ hashtree-updater = { version = "0.2.87", path = "crates/hashtree-updater" }
 cashu-service = { version = "0.3.0", default-features = false }
 nostr-pubsub = "0.1.14"
 nostr-pubsub-fips = "0.5.12"
-nostr-pubsub-relay = "0.1.11"
+nostr-pubsub-relay = "0.1.13"
 
 # AWS S3
 # Keep the modern HTTPS client without the deprecated `rustls` feature's legacy HTTP/TLS stack.
