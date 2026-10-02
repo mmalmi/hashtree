@@ -82,6 +82,8 @@ Omitting `--until` resumes the saved end of an unfinished pass. After every auth
 
 The command retains prior-root blocks and only updates index paths touched by incoming events. It does not publish a pointer. After the previous root is already available on the destination, `htree push <new-root> --previous-root <retained-root>` uploads a DAG delta. This explicit delta mode fails if comparison nodes are unavailable instead of falling back to a whole-archive walk. Keep advertised and rollback roots readable until publication and retention checks finish.
 
+For a proven historical kind-1 event that remains in the author-kind-time index but is missing from by-ID, `nostr-index repair-id` accepts one original signed event object. It requires `--root`, `--event`, `--expected-id`, the exact input and checkpoint byte hashes (`--expected-event-sha256` and `--expected-checkpoint-sha256`), and a new `--receipt` path whose parent exists. It checks the original stored body, holds the crawl lock, applies the physical write guard (`--min-free-bytes`, default 10 GiB), and force-syncs the repaired blocks before writing a no-replace receipt. It retains old roots and leaves catch-up state, latest-root files, and publication unchanged. An operator must separately validate and record the receipt's root transition before resuming from it.
+
 ## Social Graph
 
 The daemon maintains a local social graph store. On startup it crawls follow lists (kind 3) from Nostr relays and uses follow distance to control write access to your Blossom server, without a manual allow-list for people in your social circle.

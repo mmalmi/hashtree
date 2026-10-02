@@ -325,6 +325,7 @@ pub(crate) fn should_spawn_background_update(cli: &Cli) -> bool {
                 command.0.as_ref(),
                 NostrIndexCommands::RepairBulkProjectionProfiles { .. }
                     | NostrIndexCommands::RepairBulkProjectionEventBlobs { .. }
+                    | NostrIndexCommands::RepairId { .. }
             )
     ) && !matches!(
         &cli.command,
@@ -1129,6 +1130,9 @@ fn run_command(
             }
         }),
         Commands::NostrIndex { command } => command_future!(match *command.0 {
+            NostrIndexCommands::RepairId { options } => {
+                super::nostr_index::repair_id::run(data_dir, options).await?;
+            }
             NostrIndexCommands::CatchUp { options } => {
                 super::nostr_index::catchup::run(data_dir, options).await?;
             }

@@ -1193,6 +1193,11 @@ pub(crate) struct SocialGraphIndexArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum NostrIndexCommands {
+    /// Restore one proven missing by-ID entry without advancing catch-up state
+    RepairId {
+        #[command(flatten)]
+        options: super::nostr_index::repair_id::RepairIdArgs,
+    },
     /// Resume the missing time interval into an exact existing archive root
     CatchUp {
         #[command(flatten)]

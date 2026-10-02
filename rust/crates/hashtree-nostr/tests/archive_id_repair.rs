@@ -1,7 +1,9 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use hashtree_core::{Cid, HashTree, HashTreeConfig, MemoryStore, Store};
+use hashtree_core::{
+    nhash_encode_full, sha256, Cid, HashTree, HashTreeConfig, MemoryStore, NHashData, Store,
+};
 use hashtree_index::{BTree, BTreeOptions};
 use hashtree_nostr::{
     ListEventsOptions, NostrEventIndex, NostrEventStore, NostrEventStoreOptions, StoredNostrEvent,
@@ -185,8 +187,49 @@ async fn verified_reappend_repairs_only_missing_id_and_retains_every_prior_root(
             )
             .await
             .unwrap(),
-        Some(target_cid)
+        Some(target_cid.clone())
     );
+    // Optional cross-language acceptance artifact. Only this generated fixture
+    // is exported, and the caller must provide a new directory under its own
+    // test workspace. Normal test runs create no output files.
+    if let Some(directory) = std::env::var_os("HTREE_ARCHIVE_ID_REPAIR_FIXTURE_DIR") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir(&directory).unwrap();
+        let blocks = directory.join("blocks");
+        std::fs::create_dir(&blocks).unwrap();
+        let hashes = backing.keys();
+        assert!(hashes.len() < 5000 && backing.total_bytes() < 8 * 1024 * 1024);
+        for hash in &hashes {
+            let bytes = backing.get(hash).await.unwrap().unwrap();
+            assert_eq!(sha256(&bytes), *hash);
+            std::fs::write(blocks.join(format!("{}.bin", hex::encode(hash))), bytes).unwrap();
+        }
+        let root_text = |cid: &Cid| {
+            nhash_encode_full(&NHashData {
+                hash: cid.hash,
+                decrypt_key: cid.key,
+            })
+            .unwrap()
+        };
+        let canaries = std::iter::once(target.clone())
+            .chain(historical.iter().take(15).cloned())
+            .collect::<Vec<_>>();
+        let metadata = serde_json::json!({
+            "format": "hashtree/archive-id-repair-fixture@1",
+            "originalRoot": root_text(&original), "previousRoot": root_text(&damaged),
+            "beforeRoot": root_text(&appended), "repairedRoot": root_text(&repaired),
+            "event": target, "eventCid": root_text(&target_cid),
+            "canaryEventIds": canaries.iter().map(|event| &event.id).collect::<Vec<_>>(),
+            "canaryEvents": canaries,
+            "authors": [keys.public_key().to_hex(), Keys::parse(&format!("{:064x}", 2)).unwrap().public_key().to_hex()],
+            "blockCount": hashes.len(), "blockBytes": backing.total_bytes(),
+        });
+        std::fs::write(
+            directory.join("fixture.json"),
+            serde_json::to_vec_pretty(&metadata).unwrap(),
+        )
+        .unwrap();
+    }
     assert_eq!(
         store
             .build_with_superseded_nodes(Some(&repaired), [target.clone()])
