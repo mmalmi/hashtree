@@ -91,7 +91,7 @@ export class FipsWorkerP2PProvider implements HashtreeWorkerP2PProvider {
 
   async listPeerIds(): Promise<string[]> {
     if (this.closed) return [];
-    return (await this.routes()).map((route) => route.peerId);
+    return (await this.routes(false)).map((route) => route.peerId);
   }
 
   close(): void {
@@ -100,10 +100,12 @@ export class FipsWorkerP2PProvider implements HashtreeWorkerP2PProvider {
     void this.transport.close();
   }
 
-  private async routes(): Promise<FipsBlobRoute[]> {
+  private async routes(waitForDiscovery = true): Promise<FipsBlobRoute[]> {
     const source = this.options.providerRoutes;
     const explicit = source ? (typeof source === 'function' ? await source() : source) : [];
-    await this.discoverProviders();
+    // Listing already admitted routes must not wait for unrelated service probes.
+    // Fetches still await discovery so their fallback set is not incomplete.
+    if (waitForDiscovery || explicit.length === 0) await this.discoverProviders();
     const discovered = [...this.probed].filter(([, status]) => status.available)
       .map(([peerId]) => ({ peerId, htl: 0 }));
     return normalizeRoutes([...explicit, ...discovered]);
