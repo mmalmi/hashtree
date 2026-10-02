@@ -12,14 +12,14 @@ keywords = ["hashtree", "fips", "p2p", "merkle"]
 [features]
 default = []
 interop-fixture = ["dep:hex", "dep:serde", "dep:serde_json"]
-webrtc-endpoint = ["fips-core/webrtc-transport"]
+webrtc-endpoint = ["nvpn-fips-core/webrtc-transport"]
 webrtc = ["webrtc-endpoint"]
 
 [dependencies]
 async-trait.workspace = true
-fips-core = { package = "nvpn-fips-core", version = "=0.4.89" }
-fips-tcp = { package = "nvpn-fips-tcp", version = "=0.2.2" }
-fips-tcp-endpoint = { package = "nvpn-fips-tcp-endpoint", version = "=0.2.22" }
+nvpn-fips-core = { version = "=0.4.89" }
+nvpn-fips-tcp = { version = "=0.2.2" }
+nvpn-fips-tcp-endpoint = { version = "=0.2.22" }
 hashtree-core = { version = "0.2.86", path = "../hashtree-core" }
 hex = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
