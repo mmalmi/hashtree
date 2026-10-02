@@ -271,8 +271,18 @@ export function encodeStoredNostrEventMsgpack(event: StoredNostrEvent): Uint8Arr
   ]);
 }
 
+const eventTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
+
+function decodeEventText(value: unknown): string {
+  if (!(value instanceof Uint8Array)) {
+    throw new Error('Invalid Nostr event envelope string');
+  }
+  return eventTextDecoder.decode(value);
+}
+
 export function decodeStoredNostrEventMsgpack(data: Uint8Array): StoredNostrEvent {
-  const decoded = decode(data);
+  const bytes = new Uint8Array(data);
+  const decoded = decode(bytes);
   if (!Array.isArray(decoded) || decoded.length !== 8) {
     throw new Error('Invalid Nostr event envelope');
   }
@@ -303,14 +313,20 @@ export function decodeStoredNostrEventMsgpack(data: Uint8Array): StoredNostrEven
 
   assertStringArray(tags);
 
+  // MessagePack's default UTF-8 fast path strips leading U+FEFF. Decode the
+  // original string bytes only after checking their types: rawStrings alone
+  // cannot distinguish a MessagePack string from a binary value.
+  const raw = decode(bytes, { rawStrings: true }) as unknown[];
+  const rawTags = raw[5] as unknown[][];
+
   return validateEventShape({
-    id,
-    pubkey,
+    id: decodeEventText(raw[1]),
+    pubkey: decodeEventText(raw[2]),
     created_at: createdAt,
     kind,
-    tags,
-    content,
-    sig,
+    tags: rawTags.map(tag => tag.map(decodeEventText)),
+    content: decodeEventText(raw[6]),
+    sig: decodeEventText(raw[7]),
   });
 }
 
