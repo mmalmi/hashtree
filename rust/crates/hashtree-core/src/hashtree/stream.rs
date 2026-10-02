@@ -5,7 +5,7 @@ use futures::stream::{self, Stream};
 use crate::codec::{decode_tree_node, is_tree_node};
 use crate::crypto::{decrypt_chk, EncryptionKey};
 use crate::store::Store;
-use crate::types::{to_hex, Cid, Hash};
+use crate::types::{to_hex, Cid, Hash, Link};
 
 use super::{HashTree, HashTreeError};
 
@@ -83,13 +83,7 @@ impl<S: Store> HashTree<S> {
                             }
                         };
 
-                        let mut stack: Vec<EncryptedStackItem> = Vec::new();
-                        for link in node.links.into_iter().rev() {
-                            stack.push(EncryptedStackItem {
-                                hash: link.hash,
-                                key: link.key,
-                            });
-                        }
+                        let mut stack = node.links.into_iter().rev().collect();
 
                         tree.process_encrypted_stream_stack(&mut stack).await
                     }
@@ -104,7 +98,7 @@ impl<S: Store> HashTree<S> {
 
     async fn process_encrypted_stream_stack<'a>(
         &'a self,
-        stack: &mut Vec<EncryptedStackItem>,
+        stack: &mut Vec<Link>,
     ) -> Option<(Result<Vec<u8>, HashTreeError>, EncryptedStreamState<'a, S>)> {
         while let Some(item) = stack.pop() {
             let data = match self.store.get(&item.hash).await {
@@ -138,29 +132,18 @@ impl<S: Store> HashTree<S> {
                 data
             };
 
-            if is_tree_node(&decrypted) {
-                // Nested tree node - add children to stack
-                let node = match decode_tree_node(&decrypted) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        return Some((Err(HashTreeError::Codec(e)), EncryptedStreamState::Done))
-                    }
-                };
-                for link in node.links.into_iter().rev() {
-                    stack.push(EncryptedStackItem {
-                        hash: link.hash,
-                        key: link.key,
-                    });
+            match Self::decode_linked_file_node(&item, &decrypted) {
+                Ok(Some(node)) => stack.extend(node.links.into_iter().rev()),
+                Ok(None) => {
+                    return Some((
+                        Ok(decrypted),
+                        EncryptedStreamState::Processing {
+                            stack: std::mem::take(stack),
+                            tree: self,
+                        },
+                    ))
                 }
-            } else {
-                // Leaf chunk - yield decrypted data
-                return Some((
-                    Ok(decrypted),
-                    EncryptedStreamState::Processing {
-                        stack: std::mem::take(stack),
-                        tree: self,
-                    },
-                ));
+                Err(e) => return Some((Err(e), EncryptedStreamState::Done)),
             }
         }
         None
@@ -202,10 +185,7 @@ impl<S: Store> HashTree<S> {
                         };
 
                         // Create stack with all links to process
-                        let mut stack: Vec<StreamStackItem> = Vec::new();
-                        for link in node.links.into_iter().rev() {
-                            stack.push(StreamStackItem::Hash(link.hash));
-                        }
+                        let mut stack = node.links.into_iter().rev().collect();
 
                         // Process first item
                         tree.process_stream_stack(&mut stack).await
@@ -221,49 +201,37 @@ impl<S: Store> HashTree<S> {
 
     async fn process_stream_stack<'a>(
         &'a self,
-        stack: &mut Vec<StreamStackItem>,
+        stack: &mut Vec<Link>,
     ) -> Option<(Result<Vec<u8>, HashTreeError>, ReadStreamState<'a, S>)> {
         while let Some(item) = stack.pop() {
-            match item {
-                StreamStackItem::Hash(hash) => {
-                    let data = match self.store.get(&hash).await {
-                        Ok(Some(d)) => d,
-                        Ok(None) => {
-                            return Some((
-                                Err(HashTreeError::MissingChunk(to_hex(&hash))),
-                                ReadStreamState::Done,
-                            ))
-                        }
-                        Err(e) => {
-                            return Some((
-                                Err(HashTreeError::Store(e.to_string())),
-                                ReadStreamState::Done,
-                            ))
-                        }
-                    };
-
-                    if is_tree_node(&data) {
-                        // Nested tree - push its children to stack
-                        let node = match decode_tree_node(&data) {
-                            Ok(n) => n,
-                            Err(e) => {
-                                return Some((Err(HashTreeError::Codec(e)), ReadStreamState::Done))
-                            }
-                        };
-                        for link in node.links.into_iter().rev() {
-                            stack.push(StreamStackItem::Hash(link.hash));
-                        }
-                    } else {
-                        // Leaf blob - yield it
-                        return Some((
-                            Ok(data),
-                            ReadStreamState::Processing {
-                                stack: std::mem::take(stack),
-                                tree: self,
-                            },
-                        ));
-                    }
+            let data = match self.store.get(&item.hash).await {
+                Ok(Some(d)) => d,
+                Ok(None) => {
+                    return Some((
+                        Err(HashTreeError::MissingChunk(to_hex(&item.hash))),
+                        ReadStreamState::Done,
+                    ))
                 }
+                Err(e) => {
+                    return Some((
+                        Err(HashTreeError::Store(e.to_string())),
+                        ReadStreamState::Done,
+                    ))
+                }
+            };
+
+            match Self::decode_linked_file_node(&item, &data) {
+                Ok(Some(node)) => stack.extend(node.links.into_iter().rev()),
+                Ok(None) => {
+                    return Some((
+                        Ok(data),
+                        ReadStreamState::Processing {
+                            stack: std::mem::take(stack),
+                            tree: self,
+                        },
+                    ))
+                }
+                Err(e) => return Some((Err(e), ReadStreamState::Done)),
             }
         }
         None
@@ -272,28 +240,19 @@ impl<S: Store> HashTree<S> {
 
 // Internal state types for streaming
 
-enum StreamStackItem {
-    Hash(Hash),
-}
-
 enum ReadStreamState<'a, S: Store> {
     Init {
         hash: Hash,
         tree: &'a HashTree<S>,
     },
     Processing {
-        stack: Vec<StreamStackItem>,
+        stack: Vec<Link>,
         tree: &'a HashTree<S>,
     },
     Done,
 }
 
 // Encrypted stream state types
-struct EncryptedStackItem {
-    hash: Hash,
-    key: Option<[u8; 32]>,
-}
-
 enum EncryptedStreamState<'a, S: Store> {
     Init {
         hash: Hash,
@@ -301,7 +260,7 @@ enum EncryptedStreamState<'a, S: Store> {
         tree: &'a HashTree<S>,
     },
     Processing {
-        stack: Vec<EncryptedStackItem>,
+        stack: Vec<Link>,
         tree: &'a HashTree<S>,
     },
     Done,
