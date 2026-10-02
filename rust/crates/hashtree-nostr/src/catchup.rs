@@ -3,7 +3,7 @@
 //! Coverage is relative to the required source relays. A relay's EOSE is not a
 //! claim that no other relay has older or later-arriving events.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -172,6 +172,13 @@ pub struct CatchupQuery {
 #[allow(async_fn_in_trait)]
 pub trait CatchupSource {
     async fn query(&mut self, relay: &str, query: &CatchupQuery) -> Result<Vec<StoredNostrEvent>>;
+
+    /// An unbounded-by-limit count for the exact filter, when the source can
+    /// supply one without marking it approximate. None means unavailable.
+    /// Like EOSE, this is evidence from that source, not global completeness.
+    async fn exact_count(&mut self, _relay: &str, _query: &CatchupQuery) -> Result<Option<usize>> {
+        Ok(None)
+    }
 }
 
 /// Fetch one author's full missing interval from all required relays. No
@@ -220,14 +227,39 @@ pub async fn fetch_catchup_author(
                 // from this same relay and author during this fetch.
                 observed_broad_capacity = observed_broad_capacity.max(events.len());
             }
-            if lower == upper && events.len() >= policy.page_size {
-                return Err(CatchupError(format!("author {author}, relay {relay}: saturated timestamp {lower}; coverage incomplete")));
-            }
-            if lower == upper && events.len() > 1 && events.len() >= observed_broad_capacity {
-                // A source may clamp below our requested limit. If a tied
-                // second fills the observed page capacity, EOSE does not
-                // distinguish its final IDs from an undisclosed truncation.
-                return Err(CatchupError(format!("author {author}, relay {relay}: ambiguous capped timestamp {lower}; coverage incomplete")));
+            let saturated = events.len() >= policy.page_size;
+            if lower == upper
+                && (saturated || (events.len() > 1 && events.len() >= observed_broad_capacity))
+            {
+                // A small author's entire history can be a timestamp tie.
+                // Its size alone cannot distinguish completion from a relay
+                // cap. Ask the same source for its count without a limit;
+                // unavailable, mismatching or approximate counts never clear
+                // this guard. Count requests share the author's page budget.
+                if pages >= policy.max_pages_per_author {
+                    return Err(CatchupError(format!(
+                        "author {author}, relay {relay}: page budget exhausted before timestamp count; coverage incomplete"
+                    )));
+                }
+                pages += 1;
+                let count = source.exact_count(relay, &query).await.map_err(|err| {
+                    CatchupError(format!(
+                        "author {author}, relay {relay}, timestamp {lower} count: {err}"
+                    ))
+                })?;
+                let unique = events
+                    .iter()
+                    .map(|event| &event.id)
+                    .collect::<BTreeSet<_>>()
+                    .len();
+                if count != Some(unique) {
+                    let reason = if saturated {
+                        "saturated"
+                    } else {
+                        "ambiguous capped"
+                    };
+                    return Err(CatchupError(format!("author {author}, relay {relay}: {reason} timestamp {lower}; coverage incomplete")));
+                }
             }
             let oldest = events.iter().map(|event| event.created_at).min();
             for event in events {

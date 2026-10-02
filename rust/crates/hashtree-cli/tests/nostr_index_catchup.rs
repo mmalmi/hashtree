@@ -17,6 +17,8 @@ struct Relay {
     fail_author: Arc<Mutex<Option<String>>>,
     omit_eose: Arc<AtomicBool>,
     connections: Arc<AtomicUsize>,
+    event_page_cap: Arc<AtomicUsize>,
+    count_filters: Arc<Mutex<Vec<Value>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -28,21 +30,26 @@ impl Relay {
         let fail_author = Arc::new(Mutex::new(None));
         let omit_eose = Arc::new(AtomicBool::new(false));
         let connections = Arc::new(AtomicUsize::new(0));
+        let event_page_cap = Arc::new(AtomicUsize::new(usize::MAX));
+        let count_filters = Arc::new(Mutex::new(Vec::new()));
         let state = (
             events.clone(),
             fail_author.clone(),
             omit_eose.clone(),
             connections.clone(),
+            event_page_cap.clone(),
+            count_filters.clone(),
         );
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let (events, fail_author, omit_eose, connections) = state.clone();
+                let (events, fail_author, omit_eose, connections, event_page_cap, count_filters) =
+                    state.clone();
                 connections.fetch_add(1, Ordering::Relaxed);
                 tokio::spawn(async move {
                     let mut socket = accept_async(stream).await.unwrap();
                     while let Some(Ok(Message::Text(text))) = socket.next().await {
                         let message: Value = serde_json::from_str(&text).unwrap();
-                        if message[0] != "REQ" {
+                        if message[0] != "REQ" && message[0] != "COUNT" {
                             continue;
                         }
                         let subscription = &message[1];
@@ -58,6 +65,9 @@ impl Relay {
                             .iter()
                             .filter(|event| {
                                 event.pubkey.to_hex() == author
+                                    && filter["kinds"].as_array().unwrap().iter().any(|kind| {
+                                        kind.as_u64() == Some(u64::from(event.kind.as_u16()))
+                                    })
                                     && event.created_at.as_secs()
                                         >= filter["since"].as_u64().unwrap()
                                     && event.created_at.as_secs()
@@ -65,8 +75,27 @@ impl Relay {
                             })
                             .cloned()
                             .collect::<Vec<_>>();
+                        if message[0] == "COUNT" {
+                            // The count describes the complete exact filter before
+                            // the simulated relay's lower EVENT result cap.
+                            count_filters.lock().unwrap().push(filter.clone());
+                            if socket
+                                .send(Message::Text(
+                                    json!(["COUNT", subscription, {"count": matched.len()}])
+                                        .to_string(),
+                                ))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                            continue;
+                        }
                         matched.sort_by_key(|event| std::cmp::Reverse(event.created_at));
-                        matched.truncate(filter["limit"].as_u64().unwrap() as usize);
+                        matched.truncate(
+                            (filter["limit"].as_u64().unwrap() as usize)
+                                .min(event_page_cap.load(Ordering::Relaxed)),
+                        );
                         for event in matched {
                             if socket
                                 .send(Message::Text(
@@ -96,6 +125,8 @@ impl Relay {
             fail_author,
             omit_eose,
             connections,
+            event_page_cap,
+            count_filters,
             task,
         }
     }
@@ -339,6 +370,150 @@ async fn cli_rejects_missing_eose_and_unreadable_base_without_advancing() {
     assert!(String::from_utf8_lossy(&failed.stderr).contains("timeout before EOSE"));
     assert_eq!(checkpoint(&temp)["next_author"], 0);
     assert_eq!(checkpoint(&temp)["root"], root);
+}
+
+fn query_id_count(temp: &TempDir, root: &str, ids: &[String]) -> u64 {
+    success(
+        command(temp)
+            .args([
+                "nostr-index",
+                "query",
+                "--root",
+                root,
+                "--filter",
+                &json!({"ids": ids}).to_string(),
+                "--limit",
+                "100",
+            ])
+            .output()
+            .unwrap(),
+    )["count"]
+        .as_u64()
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_exact_count_completes_same_second_pair_and_retains_history() {
+    let temp = TempDir::new().unwrap();
+    let keys = Keys::generate();
+    let other = Keys::generate();
+    let old = event(&keys, 1, "retained archive");
+    let first = event(&keys, 20, "first tied post");
+    let second = event(&keys, 20, "second tied post");
+    let root = import(&temp, &old);
+    std::fs::write(
+        temp.path().join("authors.txt"),
+        format!("{}\n", keys.public_key()),
+    )
+    .unwrap();
+    let wrong_kind = EventBuilder::new(Kind::Reaction, "+")
+        .custom_created_at(Timestamp::from_secs(20))
+        .sign_with_keys(&keys)
+        .unwrap();
+    let relay = Relay::new(vec![
+        old.clone(),
+        first.clone(),
+        second.clone(),
+        wrong_kind,
+        event(&other, 20, "different author"),
+        event(&keys, 200, "outside pass"),
+    ])
+    .await;
+    relay.event_page_cap.store(2, Ordering::Relaxed);
+    let completed = success(
+        catchup(&temp, &root, &relay)
+            .args(["--until", "100"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(completed["next_author"], 1);
+    assert_eq!(completed["complete"], true);
+    assert_eq!(completed["events_received"], 2);
+    assert_eq!(completed["pass_until"], 100);
+    assert_eq!(
+        *relay.count_filters.lock().unwrap(),
+        vec![
+            json!({"authors": [keys.public_key().to_hex()], "kinds": [1, 5], "since": 20, "until": 20})
+        ],
+        "exact COUNT must be bounded to this author/second/kinds, without a limit",
+    );
+    assert_eq!(
+        relay.connections.load(Ordering::Relaxed),
+        1,
+        "COUNT should reuse the event socket"
+    );
+    assert_eq!(query_id_count(&temp, &root, &[old.id.to_hex()]), 1);
+    assert_eq!(
+        query_id_count(
+            &temp,
+            completed["root"].as_str().unwrap(),
+            &[old.id.to_hex(), first.id.to_hex(), second.id.to_hex(),]
+        ),
+        3,
+        "new root must retain history and both tied posts"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_exact_count_detects_hidden_tied_event_and_preserves_exact_checkpoint() {
+    let temp = TempDir::new().unwrap();
+    let alice = Keys::generate();
+    let bob = Keys::generate();
+    let old = event(&alice, 1, "archive");
+    let ready = event(&alice, 20, "durable prior author");
+    let root = import(&temp, &old);
+    std::fs::write(
+        temp.path().join("authors.txt"),
+        format!("{}\n{}\n", alice.public_key(), bob.public_key()),
+    )
+    .unwrap();
+    let relay = Relay::new(vec![
+        ready.clone(),
+        event(&bob, 30, "tie one"),
+        event(&bob, 30, "tie two"),
+        event(&bob, 30, "hidden third event"),
+    ])
+    .await;
+    relay.event_page_cap.store(2, Ordering::Relaxed);
+    let first = success(
+        catchup(&temp, &root, &relay)
+            .args(["--until", "100", "--max-authors-per-run", "1"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(first["next_author"], 1);
+    assert!(relay.count_filters.lock().unwrap().is_empty());
+    let state_file = temp.path().join("data/nostr-index/catchup-state.json");
+    let saved = std::fs::read(&state_file).unwrap();
+    let failed = catchup(&temp, &root, &relay).output().unwrap();
+    let error = String::from_utf8_lossy(&failed.stderr);
+    assert!(!failed.status.success());
+    assert!(
+        error.contains("ambiguous capped timestamp 30") && error.contains("coverage incomplete"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read(&state_file).unwrap(),
+        saved,
+        "incomplete author cannot rewrite the prior durable checkpoint"
+    );
+    assert_eq!(checkpoint(&temp)["root"], first["root"]);
+    assert_eq!(checkpoint(&temp)["next_author"], 1);
+    assert_eq!(
+        *relay.count_filters.lock().unwrap(),
+        vec![
+            json!({"authors": [bob.public_key().to_hex()], "kinds": [1, 5], "since": 30, "until": 30})
+        ],
+    );
+    assert_eq!(query_id_count(&temp, &root, &[old.id.to_hex()]), 1);
+    assert_eq!(
+        query_id_count(
+            &temp,
+            first["root"].as_str().unwrap(),
+            &[old.id.to_hex(), ready.id.to_hex()]
+        ),
+        2
+    );
 }
 
 /// Run only inside the explicitly provisioned private 128 MiB tmpfs. This is

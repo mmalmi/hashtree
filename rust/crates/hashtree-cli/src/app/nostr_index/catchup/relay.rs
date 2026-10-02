@@ -17,14 +17,17 @@ use tokio_tungstenite::{
 };
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+mod count;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
+const GATEWAY_RECONNECT_DELAY: Duration = Duration::from_secs(1);
 const CLOSE_TIMEOUT: Duration = Duration::from_millis(100);
 
 #[derive(Debug)]
 struct QueryFailure {
     error: CatchupError,
     reconnect: bool,
+    gateway_retry_after: Option<Duration>,
 }
 
 impl From<CatchupError> for QueryFailure {
@@ -32,12 +35,40 @@ impl From<CatchupError> for QueryFailure {
         Self {
             error,
             reconnect: false,
+            gateway_retry_after: None,
         }
     }
 }
 
 impl QueryFailure {
     fn transport(context: &str, error: WebSocketError) -> Self {
+        if let WebSocketError::Http(response) = &error {
+            let status = response.status().as_u16();
+            let delay = if matches!(status, 502 | 503 | 504) {
+                match response.headers().get("retry-after") {
+                    None => Some(GATEWAY_RECONNECT_DELAY),
+                    Some(value) => value.to_str().ok().and_then(|value| {
+                        let value = value.trim();
+                        // HTTP dates and malformed values remain terminal. Never
+                        // reconnect early when the requested delay is unknown.
+                        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                            return None;
+                        }
+                        value.parse::<u64>().ok().map(|seconds| {
+                            Duration::from_secs(seconds).max(GATEWAY_RECONNECT_DELAY)
+                        })
+                    }),
+                }
+            } else {
+                None
+            };
+            return Self {
+                // Do not include gateway bodies or arbitrary response headers.
+                error: CatchupError(format!("{context}: HTTP status {status}")),
+                reconnect: delay.is_some(),
+                gateway_retry_after: delay,
+            };
+        }
         let reconnect = match &error {
             WebSocketError::ConnectionClosed
             | WebSocketError::AlreadyClosed
@@ -54,6 +85,7 @@ impl QueryFailure {
         Self {
             error: CatchupError(format!("{context}: {error}")),
             reconnect,
+            gateway_retry_after: None,
         }
     }
 }
@@ -87,12 +119,7 @@ impl RelaySource {
         }
     }
 
-    async fn query_inner(
-        &mut self,
-        relay: &str,
-        query: &CatchupQuery,
-        budget: &mut QueryBudget,
-    ) -> std::result::Result<CompletedPage, QueryFailure> {
+    async fn ensure_connected(&mut self, relay: &str) -> std::result::Result<(), QueryFailure> {
         if !self.sockets.contains_key(relay) {
             let config = WebSocketConfig {
                 max_message_size: Some(MAX_EVENT_BYTES + 4096),
@@ -104,6 +131,16 @@ impl RelaySource {
                 .map_err(|err| QueryFailure::transport("connect", err))?;
             self.sockets.insert(relay.to_owned(), socket);
         }
+        Ok(())
+    }
+
+    async fn query_inner(
+        &mut self,
+        relay: &str,
+        query: &CatchupQuery,
+        budget: &mut QueryBudget,
+    ) -> std::result::Result<CompletedPage, QueryFailure> {
+        self.ensure_connected(relay).await?;
         self.sequence += 1;
         let subscription = format!("catchup-{}", self.sequence);
         let socket = self.sockets.get_mut(relay).expect("connected source");
@@ -125,6 +162,7 @@ impl RelaySource {
                 .ok_or_else(|| QueryFailure {
                     error: CatchupError("socket ended before EOSE".into()),
                     reconnect: true,
+                    gateway_retry_after: None,
                 })?
                 .map_err(|err| QueryFailure::transport("socket before EOSE", err))?;
             budget.messages += 1;
@@ -149,6 +187,7 @@ impl RelaySource {
                         reconnect: frame.as_ref().is_none_or(|frame| {
                             matches!(frame.code, CloseCode::Normal | CloseCode::Away)
                         }),
+                        gateway_retry_after: None,
                     })
                 }
                 _ => return Err(CatchupError("unexpected non-text relay message".into()).into()),
@@ -244,6 +283,10 @@ impl RelaySource {
 }
 
 impl CatchupSource for RelaySource {
+    async fn exact_count(&mut self, relay: &str, query: &CatchupQuery) -> Result<Option<usize>> {
+        self.count(relay, query).await
+    }
+
     async fn query(&mut self, relay: &str, query: &CatchupQuery) -> Result<Vec<StoredNostrEvent>> {
         let deadline = Instant::now() + self.timeout;
         let mut budget = QueryBudget::default();
@@ -256,7 +299,13 @@ impl CatchupSource for RelaySource {
                         if attempt == 1 || !failure.reconnect {
                             return Err(failure.error);
                         }
-                        tokio::time::sleep(RECONNECT_DELAY).await;
+                        if failure.gateway_retry_after.is_some_and(|delay| {
+                            delay >= deadline.saturating_duration_since(Instant::now())
+                        }) {
+                            return Err(failure.error);
+                        }
+                        tokio::time::sleep(failure.gateway_retry_after.unwrap_or(RECONNECT_DELAY))
+                            .await;
                     }
                 }
             }

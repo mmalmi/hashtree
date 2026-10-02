@@ -8,7 +8,10 @@ use std::sync::{
 };
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
-use tokio_tungstenite::{accept_async, accept_hdr_async, tungstenite::protocol::CloseFrame};
+use tokio_tungstenite::{accept_hdr_async, tungstenite::protocol::CloseFrame};
+
+mod count;
+mod gateway;
 
 #[derive(Clone, Copy)]
 enum Mode {
@@ -34,12 +37,34 @@ impl Relay {
         close_after_first: bool,
         notice_bytes: usize,
     ) -> Self {
+        Self::with_upgrades(
+            events,
+            failures,
+            partial,
+            mode,
+            close_after_first,
+            notice_bytes,
+            vec![],
+        )
+        .await
+    }
+
+    async fn with_upgrades(
+        events: Vec<Event>,
+        failures: usize,
+        partial: Option<Event>,
+        mode: Mode,
+        close_after_first: bool,
+        notice_bytes: usize,
+        upgrades: Vec<(u16, Option<String>)>,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let connections = Arc::new(AtomicUsize::new(0));
         let remaining = Arc::new(AtomicUsize::new(failures));
         let close_once = Arc::new(AtomicBool::new(close_after_first));
+        let upgrades = Arc::new(Mutex::new(std::collections::VecDeque::from(upgrades)));
         let (observed, count) = (requests.clone(), connections.clone());
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
@@ -47,8 +72,16 @@ impl Relay {
                 let (requests, remaining, close_once) =
                     (observed.clone(), remaining.clone(), close_once.clone());
                 let (events, partial) = (events.clone(), partial.clone());
+                let upgrade = upgrades.lock().unwrap().pop_front();
                 tokio::spawn(async move {
-                    let mut socket = accept_async(stream).await.unwrap();
+                    let Ok(mut socket) = accept_hdr_async(stream, move |_: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                        response: tokio_tungstenite::tungstenite::handshake::server::Response| {
+                        if let Some((status, retry_after)) = upgrade {
+                            let mut response = tokio_tungstenite::tungstenite::http::Response::builder().status(status);
+                            if let Some(value) = retry_after { response = response.header("Retry-After", value); }
+                            Err(response.body(Some("private gateway detail".to_owned())).unwrap())
+                        } else { Ok(response) }
+                    }).await else { return; };
                     while let Some(Ok(Message::Text(raw))) = socket.next().await {
                         let request: Value = serde_json::from_str(&raw).unwrap();
                         if request[0] != "REQ" {

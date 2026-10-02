@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use hashtree_cli::{Config, HashtreeStore};
@@ -173,6 +174,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         state.policy.max_bytes_per_author,
     );
     while state.next_author < end {
+        let author_started = Instant::now();
         let author = &authors[state.next_author];
         let events = fetch_catchup_author(
             &mut source,
@@ -182,7 +184,9 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
             state.pass_until,
         )
         .await?;
+        let fetch_ms = author_started.elapsed().as_millis();
         let received = events.len() as u64;
+        let append_started = Instant::now();
         let report = event_store
             .build_with_superseded_nodes(Some(&root), events)
             .await
@@ -193,11 +197,17 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                     store.physical_space_status()
                 )
             })?;
+        let append_ms = append_started.elapsed().as_millis();
         let next_root = report
             .root
             .context("catchup writer discarded its nonempty base root")?;
+        let validate_started = Instant::now();
         event_store.validate_index_root(Some(&next_root)).await?;
+        let validate_ms = validate_started.elapsed().as_millis();
+        let sync_started = Instant::now();
         store.force_sync().context("force-sync catchup blocks")?;
+        let sync_ms = sync_started.elapsed().as_millis();
+        let checkpoint_started = Instant::now();
         let mut next = state.clone();
         next.root = cid_to_nhash(&next_root)?;
         next.next_author += 1;
@@ -209,12 +219,19 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         // Do not delete superseded nodes: published roots and rollback readers
         // may still depend on them. Publication owns eventual root-aware GC.
         eprintln!(
-            "Nostr catchup checkpoint: authors={}/{} interval={}..{} events_received={}",
+            "Nostr catchup checkpoint: authors={}/{} interval={}..{} events_received={} author_events={} fetch_ms={} append_ms={} validate_ms={} sync_ms={} checkpoint_ms={} elapsed_ms={}",
             state.next_author,
             authors.len(),
             state.pass_since,
             state.pass_until,
-            state.events_received
+            state.events_received,
+            received,
+            fetch_ms,
+            append_ms,
+            validate_ms,
+            sync_ms,
+            checkpoint_started.elapsed().as_millis(),
+            author_started.elapsed().as_millis()
         );
     }
     println!(

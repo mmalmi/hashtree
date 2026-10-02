@@ -2,6 +2,39 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-10-02 - Catch-up Timestamp Ties and Append Costs
+
+An archive catch-up repeatedly stopped on an author whose two returned events
+shared a timestamp. The existing conservative pagination rule could not
+distinguish that complete small history from an undisclosed relay result cap.
+A matching, non-approximate relay count can resolve that ambiguity without
+skipping the timestamp or removing a required source. Unsupported, approximate,
+malformed, timed-out or mismatched counts still leave coverage incomplete.
+Counts, like EOSE, are source-reported evidence, not proof of global completeness.
+
+A deterministic optimized Rust fixture separately compared appends to an
+order-64 historical tree. It used 2,051 historical events and 1,573 incoming
+items, including duplicates, timestamp overlap, hot tags and replaceable events.
+Every configuration preserved all nine logical projections and historical
+event bodies, and duplicate replay added no blobs.
+
+| Fanout | Commit events | Append milliseconds | New retained payload bytes |
+| --- | ---: | ---: | ---: |
+| 32 | 256 | 97 | 11,378,893 |
+| 64 | 256 | 110 | 12,272,047 |
+| 128 | 256 | 122 | 13,735,752 |
+| 32 | 1,024 | 49 | 6,821,975 |
+| 64 | 1,024 | 55 | 6,868,974 |
+| 128 | 1,024 | 51 | 6,965,944 |
+
+These are single in-memory production-path measurements, excluding signing and
+verification, not physical disk allocation or live throughput. Wider fanout
+reduced node counts but increased retained bytes, so the catch-up fanout stays
+unchanged. Larger commits merit separate resource and policy validation; the
+current change preserves the existing 256-event commit bound and fixes the
+demonstrated pagination blockage. Per-author timings distinguish fetching,
+appending, validation, syncing and checkpoint persistence in subsequent runs.
+
 ## 2026-09-21 - Complete Tree Traversal and Store Reads
 
 A deterministic TypeScript core regression walks a directory with two links to

@@ -44,6 +44,9 @@ struct Source {
     cap: Option<usize>,
     failed_relay: Option<String>,
     requests: Vec<CatchupQuery>,
+    counts_available: bool,
+    count_override: Option<usize>,
+    count_requests: Vec<(String, CatchupQuery)>,
 }
 
 impl CatchupSource for Source {
@@ -67,6 +70,28 @@ impl CatchupSource for Source {
         events.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(a.id.cmp(&b.id)));
         events.truncate(query.limit.min(self.cap.unwrap_or(usize::MAX)));
         Ok(events)
+    }
+
+    async fn exact_count(&mut self, relay: &str, query: &CatchupQuery) -> Result<Option<usize>> {
+        self.count_requests.push((relay.to_owned(), query.clone()));
+        if !self.counts_available {
+            return Ok(None);
+        }
+        Ok(Some(self.count_override.unwrap_or_else(|| {
+            self.events
+                .get(relay)
+                .into_iter()
+                .flatten()
+                .filter(|event| {
+                    event.pubkey == query.author
+                        && event.created_at >= query.since
+                        && event.created_at <= query.until
+                        && query.kinds.contains(&(event.kind as u16))
+                })
+                .map(|event| &event.id)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+        })))
     }
 }
 
@@ -330,6 +355,89 @@ async fn undisclosed_lower_cap_with_hidden_same_second_ids_is_incomplete() {
         .unwrap_err();
     assert!(error.to_string().contains("ambiguous capped timestamp 20"));
     assert!(error.to_string().contains("relay-a"));
+}
+
+#[tokio::test]
+async fn matching_source_count_resolves_small_and_full_timestamp_ties() {
+    let keys = Keys::generate();
+    for count in [2, 4] {
+        let events = (0..count)
+            .map(|i| event(&keys, 20, &i.to_string(), Kind::TextNote))
+            .collect::<Vec<_>>();
+        let mut source = Source {
+            counts_available: true,
+            ..Default::default()
+        };
+        source.events.insert("relay-a".into(), events.clone());
+        let fetched =
+            fetch_catchup_author(&mut source, &policy(), &keys.public_key().to_hex(), 10, 100)
+                .await
+                .unwrap();
+        assert_eq!(fetched.len(), count);
+        assert!(events
+            .iter()
+            .all(|expected| fetched.iter().any(|actual| actual.id == expected.id)));
+        assert_eq!(source.count_requests.len(), 1);
+        let (relay, query) = &source.count_requests[0];
+        assert_eq!(relay, "relay-a");
+        assert_eq!((query.since, query.until), (20, 20));
+        assert_eq!(query.author, keys.public_key().to_hex());
+        assert_eq!(query.kinds, policy().kinds);
+    }
+}
+
+#[tokio::test]
+async fn matching_count_is_required_and_hidden_tied_ids_stay_incomplete() {
+    let keys = Keys::generate();
+    for reported in [None, Some(1), Some(3)] {
+        let mut source = Source {
+            cap: Some(2),
+            counts_available: true,
+            count_override: reported,
+            ..Default::default()
+        };
+        source.events.insert(
+            "relay-a".into(),
+            (0..3)
+                .map(|i| event(&keys, 20, &i.to_string(), Kind::TextNote))
+                .collect(),
+        );
+        let error =
+            fetch_catchup_author(&mut source, &policy(), &keys.public_key().to_hex(), 10, 100)
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("ambiguous capped timestamp 20"));
+    }
+}
+
+#[tokio::test]
+async fn timestamp_counts_share_page_budget_and_never_skip_a_required_source() {
+    let keys = Keys::generate();
+    let mut source = Source {
+        counts_available: true,
+        ..Default::default()
+    };
+    source.events.insert(
+        "relay-a".into(),
+        (0..2)
+            .map(|i| event(&keys, 20, &i.to_string(), Kind::TextNote))
+            .collect(),
+    );
+    let mut limited = policy();
+    limited.max_pages_per_author = 2;
+    let error = fetch_catchup_author(&mut source, &limited, &keys.public_key().to_hex(), 10, 100)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("page budget exhausted before timestamp count"));
+    assert!(source.count_requests.is_empty());
+    source.failed_relay = Some("relay-b".into());
+    let error = fetch_catchup_author(&mut source, &policy(), &keys.public_key().to_hex(), 10, 100)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("relay-b"));
+    assert!(error.to_string().contains("before EOSE"));
 }
 
 #[tokio::test]
