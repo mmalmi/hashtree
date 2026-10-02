@@ -104,8 +104,8 @@ export type WorkerRequest =
   | { type: 'setP2PProviderState'; id: string; enabled: boolean; peerListSupported?: boolean }
   | { type: 'putFile'; id: string; data: Uint8Array; upload?: boolean }
   | { type: 'putBlob'; id: string; data: Uint8Array; mimeType?: string; upload?: boolean }
-  | { type: 'putBlock'; id: string; data: Uint8Array; hashHex?: string; mimeType?: string; upload?: boolean }
-  | { type: 'putBlocks'; id: string; blocks: RawBlockInput[]; upload?: boolean }
+  | { type: 'putBlock'; id: string; data: Uint8Array; hashHex?: string; mimeType?: string; upload?: boolean; peerShare?: boolean }
+  | { type: 'putBlocks'; id: string; blocks: RawBlockInput[]; upload?: boolean; peerShare?: boolean }
   | { type: 'beginPutBlobStream'; id: string; mimeType?: string; upload?: boolean }
   | { type: 'appendPutBlobStream'; id: string; streamId: string; chunk: Uint8Array }
   | { type: 'finishPutBlobStream'; id: string; streamId: string }

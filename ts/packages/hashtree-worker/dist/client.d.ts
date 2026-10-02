@@ -48,13 +48,17 @@ export declare class HashtreeWorkerClient {
         hashHex: string;
         nhash: string;
     }>;
+    /** Store raw bytes; peerShare explicitly permits peers to read those unchanged bytes. */
     putBlock(data: Uint8Array, options?: {
         hashHex?: string;
         mimeType?: string;
         upload?: boolean;
+        peerShare?: boolean;
     }): Promise<StoredBlockResult>;
+    /** Store raw blocks; peerShare authorizes only this batch after every hash validates. */
     putBlocks(blocks: RawBlockInput[], options?: {
         upload?: boolean;
+        peerShare?: boolean;
     }): Promise<StoredBlockResult[]>;
     beginPutBlobStream(mimeType?: string, upload?: boolean): Promise<string>;
     appendPutBlobStream(streamId: string, chunk: Uint8Array): Promise<void>;

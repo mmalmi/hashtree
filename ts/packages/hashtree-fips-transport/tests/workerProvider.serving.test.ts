@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { MemoryStore, sha256, toHex } from '@hashtree/core';
 import { FipsNode, identityFromSecretKey } from '@fips/core';
-import { createFipsWorkerP2PProvider } from '../src/workerProvider.js';
+import { createFipsWorkerP2PProvider, type FipsWorkerP2PProviderOptions } from '../src/workerProvider.js';
 import type { TcpBlobTransportOptions } from '../src/tcpBlobTransport.js';
 import { MemoryHub, MemoryTransport } from './support/memoryTransport.js';
 
@@ -10,6 +10,7 @@ async function pair(
   allowed = true,
   getUploadLimitBytesPerSecond?: () => number | null,
   requestTimeoutMs = 1_000,
+  routes?: (peerId: string) => Pick<FipsWorkerP2PProviderOptions, 'providerRoutes' | 'candidatePeerIds'>,
 ) {
   const hub = new MemoryHub();
   const nodes = await Promise.all([61, 62].map(async (seed) => new FipsNode({
@@ -23,7 +24,7 @@ async function pair(
     createFipsWorkerP2PProvider({ node: nodes[0], localStore: stores[0], serveBlob, getUploadLimitBytesPerSecond,
       allowIncomingPeer: (peer) => allowed && peer === ids[1], requestTimeoutMs }),
     createFipsWorkerP2PProvider({ node: nodes[1], localStore: stores[1], serveBlob: outgoingServe,
-      providerRoutes: [{ peerId: ids[0], htl: 10 }], requestTimeoutMs }),
+      providerRoutes: [{ peerId: ids[0], htl: 10 }], requestTimeoutMs, ...routes?.(ids[0]) }),
   ];
   const close = async () => {
     providers.forEach((provider) => provider.close());
@@ -37,6 +38,32 @@ async function pair(
 }
 
 describe('authenticated inbound blob serving', () => {
+  it.each([
+    { name: 'explicit forwarding', routeHtl: 10, priority: 0, requestedHtl: undefined, expectedHtl: 10 },
+    { name: 'lower-priority explicit forwarding', routeHtl: 3, priority: -1, requestedHtl: undefined, expectedHtl: 3 },
+    { name: 'explicit local-only policy', routeHtl: 0, priority: 0, requestedHtl: 10, expectedHtl: 0 },
+    { name: 'caller local-only policy', routeHtl: 10, priority: 0, requestedHtl: 0, expectedHtl: 0 },
+    { name: 'discovered-only policy', routeHtl: null, priority: 0, requestedHtl: 10, expectedHtl: 0 },
+  ])('preserves $name after a successful service probe', async ({ routeHtl, priority, requestedHtl, expectedHtl }) => {
+    const data = new TextEncoder().encode('content served after authenticated discovery');
+    const hash = await sha256(data);
+    const serve = vi.fn(async (requestedHash) => toHex(requestedHash) === toHex(hash) ? data : null);
+    const fixture = await pair(serve, true, undefined, 1_000, (peerId) => ({
+      providerRoutes: () => routeHtl === null ? [] : [{ peerId: ` ${peerId} `, htl: routeHtl, priority }],
+      candidatePeerIds: () => [peerId],
+    }));
+    try {
+      const probe = vi.spyOn(fixture.providers[1].transport, 'probe');
+      await fixture.providers[1].discoverProviders();
+      expect(probe).toHaveBeenCalledExactlyOnceWith(fixture.ids[0]);
+      await expect(probe.mock.results[0].value).resolves.toBe(true);
+      serve.mockClear();
+      await expect(fixture.providers[1].fetch(toHex(hash), undefined, requestedHtl)).resolves.toEqual(data);
+      expect(serve).toHaveBeenCalledExactlyOnceWith(hash, fixture.ids[1], expect.any(AbortSignal), expectedHtl);
+      expect(fixture.outgoingServe).not.toHaveBeenCalled();
+    } finally { await fixture.close(); }
+  });
+
   it('serves uncached bytes only on the incoming path with the authenticated peer identity', async () => {
     const data = new TextEncoder().encode('upstream content behind the authenticated provider');
     const hash = await sha256(data);

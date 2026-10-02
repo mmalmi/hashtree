@@ -26,17 +26,6 @@ async function storeSnapshotNhash(event) {
     const snapshot = await storeTreeEventSnapshot(snapshotTarget, nip19, event);
     return snapshot?.snapshotNhash;
 }
-function toSignedEvent(event) {
-    return {
-        id: event.id,
-        pubkey: event.pubkey,
-        kind: event.kind,
-        content: event.content,
-        tags: event.tags,
-        created_at: event.created_at,
-        sig: event.sig,
-    };
-}
 function uniqueEvents(events) {
     const seen = new Set();
     const result = [];

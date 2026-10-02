@@ -295,6 +295,11 @@ async function markEncryptedTreeHashesAsPeerShareable(id) {
     for await (const block of tree.walkBlocks(id)) {
         hashes.push(toHex(block.hash));
     }
+    await authorizePeerSharing(hashes);
+}
+async function authorizePeerSharing(hashes) {
+    if (!storage)
+        throw new Error('Worker storage not initialized');
     await storage.authorizePeerSharing(hashes);
     markEncryptedHashes(hashes, peerShareableHashes);
 }
@@ -1004,14 +1009,13 @@ async function uploadRawBlocks(blocks) {
             .join('; ');
         throw new Error(detail ? `Raw block upload failed: ${detail}` : 'Raw block upload failed');
     }
-    const hashHexes = blocks.map(({ hashHex }) => hashHex);
-    if (!storage)
-        throw new Error('Worker storage not initialized');
-    await storage.authorizePeerSharing(hashHexes);
-    markEncryptedHashes(hashHexes, peerShareableHashes);
+    await authorizePeerSharing(blocks.map(({ hashHex }) => hashHex));
 }
-async function storeAndMaybeUploadRawBlocks(blocks, upload) {
+async function storeAndMaybeUploadRawBlocks(blocks, upload, peerShare) {
     const storedBlocks = await Promise.all(blocks.map((block) => storeRawBlock(block)));
+    if (peerShare) {
+        await authorizePeerSharing(storedBlocks.map(({ hashHex }) => hashHex));
+    }
     if (upload) {
         await uploadRawBlocks(storedBlocks);
     }
@@ -1181,7 +1185,7 @@ async function handleRequest(req, nostrSubscribe) {
                     data: req.data,
                     hashHex: req.hashHex,
                     mimeType: req.mimeType,
-                }], req.upload === true);
+                }], req.upload === true, req.peerShare === true);
             respond({
                 type: 'blockStored',
                 id: req.id,
@@ -1197,7 +1201,7 @@ async function handleRequest(req, nostrSubscribe) {
                 respond({ type: 'error', id: req.id, error: 'Worker not initialized' });
                 return;
             }
-            const storedBlocks = await storeAndMaybeUploadRawBlocks(req.blocks, req.upload === true);
+            const storedBlocks = await storeAndMaybeUploadRawBlocks(req.blocks, req.upload === true, req.peerShare === true);
             respond({
                 type: 'blocksStored',
                 id: req.id,

@@ -7,7 +7,7 @@ Runs hashtree storage operations in a Web Worker to keep the main thread free. H
 ## Install
 
 ```bash
-npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.16/hashtree-worker-0.4.8.tgz
+npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.17/hashtree-worker-0.4.9.tgz
 ```
 
 The npm registry version is older than this runtime archive. With npm 12+, add
@@ -78,6 +78,14 @@ without uploading it. Upload defaults to false. The returned secret `nhash`
 allows readers to decrypt the file; peer serving exposes only its ciphertext.
 `putBlob(data, mimeType, false)` remains a raw local operation and does not grant
 peer access.
+
+For public data or already-encrypted blocks, use
+`client.putBlock(data, { peerShare: true })` or
+`client.putBlocks(blocks, { peerShare: true })`. These explicitly allow peers to
+read the exact supplied bytes without changing their hashes or encrypting them.
+The permission persists across restarts after every supplied hash validates;
+unrelated cached blocks remain private. Upload is a separate option and defaults
+to false. Use `putFile` for files that still need encryption.
 
 `client.getBlobForPeer(hashHex, { sourceIds: ['blossom'] })` limits a privacy-checked
 peer read to local authorized content and the configured Blossom source. An

@@ -7,7 +7,6 @@
  */
 
 import type { CID } from '@hashtree/core';
-import type { Event as NostrEvent } from 'nostr-tools';
 import {
   HASHTREE_LABEL,
   HASHTREE_ROOT_KINDS,
@@ -77,18 +76,6 @@ async function storeSnapshotNhash(event: SignedEvent): Promise<string | undefine
     event as StoredNostrEvent,
   );
   return snapshot?.snapshotNhash;
-}
-
-function toSignedEvent(event: NostrEvent): SignedEvent {
-  return {
-    id: event.id,
-    pubkey: event.pubkey,
-    kind: event.kind,
-    content: event.content,
-    tags: event.tags,
-    created_at: event.created_at,
-    sig: event.sig,
-  };
 }
 
 function uniqueEvents(events: SignedEvent[]): SignedEvent[] {

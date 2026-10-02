@@ -35,6 +35,17 @@ let upstreamError: Error | null;
 const payload = new Uint8Array([10, 20, 30]);
 const fetch = vi.fn();
 
+async function restartWorker(): Promise<void> {
+  const init = worker.requests.find((message) => message.type === 'init');
+  if (init?.type !== 'init') throw new Error('Expected init');
+  await client.close();
+  worker = new InProcessWorker();
+  client = new HashtreeWorkerClient((class {
+    constructor() { return worker; }
+  }) as unknown as new () => Worker, init.config);
+  await client.init();
+}
+
 beforeEach(async () => {
   upstream = null;
   upstreamError = null;
@@ -119,14 +130,7 @@ describe('worker peer-serving source scope', () => {
     const ciphertext = await client.getBlobForPeer(file.hashHex, { sourceIds: [] });
     expect(ciphertext).not.toBeNull();
     expect(ciphertext).not.toEqual(payload);
-    const init = worker.requests.find((message) => message.type === 'init');
-    if (init?.type !== 'init') throw new Error('Expected init');
-    await client.close();
-    worker = new InProcessWorker();
-    client = new HashtreeWorkerClient((class {
-      constructor() { return worker; }
-    }) as unknown as new () => Worker, init.config);
-    await client.init();
+    await restartWorker();
     const remoteStore = new MemoryStore();
     remoteStore.get = (hash) => client.getBlobForPeer(toHex(hash), { sourceIds: [] });
     const reader = new HashTree({ store: remoteStore });
@@ -138,6 +142,40 @@ describe('worker peer-serving source scope', () => {
     const raw = await client.putBlob(payload, undefined, false);
     expect(raw.hashHex).toBe(toHex(await sha256(payload)));
     await expect(client.getBlobForPeer(raw.hashHex, { sourceIds: [] })).resolves.toBeNull();
+  });
+
+  it.each(['single', 'batch'] as const)('persists explicit sharing of %s raw blocks without sharing unrelated cache', async (kind) => {
+    const privateData = new Uint8Array([40, 50, 60]);
+    const privateBlock = await client.putBlock(privateData);
+    const hashHex = toHex(await sha256(payload));
+    const shared = kind === 'single'
+      ? [await client.putBlock(payload, { hashHex, peerShare: true })]
+      : await client.putBlocks([{ data: payload, hashHex }], { peerShare: true });
+    expect(shared[0].hashHex).toBe(hashHex);
+    await expect(client.getBlobForPeer(hashHex, { sourceIds: [] })).resolves.toEqual(payload);
+    await restartWorker();
+    await expect(client.getBlobForPeer(hashHex, { sourceIds: [] })).resolves.toEqual(payload);
+    await expect(client.getBlobForPeer(privateBlock.hashHex, { sourceIds: [] })).resolves.toBeNull();
+    expect(fetch.mock.calls.filter(([, init]) => init?.method !== 'HEAD')).toEqual([]);
+  });
+
+  it('does not authorize any hashes from a batch with an invalid supplied hash', async () => {
+    const existing = await client.putBlock(payload);
+    const other = new Uint8Array([70, 80, 90]);
+    const hashHex = toHex(await sha256(other));
+    await expect(client.putBlocks([
+      { data: payload, hashHex: existing.hashHex },
+      { data: payload, hashHex },
+    ], { peerShare: true })).rejects.toThrow('Hash mismatch');
+    await restartWorker();
+    await expect(client.getBlobForPeer(existing.hashHex, { sourceIds: [] })).resolves.toBeNull();
+    await expect(client.getBlobForPeer(hashHex, { sourceIds: [] })).resolves.toBeNull();
+  });
+
+  it('keeps a raw batch private when peer sharing is not requested', async () => {
+    const [block] = await client.putBlocks([{ data: payload }]);
+    await restartWorker();
+    await expect(client.getBlobForPeer(block.hashHex, { sourceIds: [] })).resolves.toBeNull();
   });
 
 });
