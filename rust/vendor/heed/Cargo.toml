@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "hashtree-heed"
-version = "0.20.5-hashtree.1"
+version = "0.20.5-hashtree.2"
 authors = ["Kerollmops <renault.cle@gmail.com>"]
 build = false
 autobins = false
@@ -88,7 +88,7 @@ version = "0.2.155"
 
 [dependencies.lmdb-master-sys]
 package = "hashtree-lmdb-master-sys"
-version = "=0.2.6-hashtree.1"
+version = "=0.2.6-hashtree.2"
 path = "../lmdb-master-sys"
 
 [dependencies.once_cell]

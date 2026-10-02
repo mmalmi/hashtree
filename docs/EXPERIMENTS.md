@@ -2,6 +2,91 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-10-02 - Bounded Catch-up Fetch Pipeline
+
+The CLI overlaps two author fetches while preserving one ordered writer. The
+writer, fetched results and active requests together occupy at most two author
+slots. A slot is reused only after its blocks are synced and its checkpoint is
+persisted. Each slot keeps its own relay connections and capacity cache; a
+required relay can therefore see two connections and two independent bounded
+capacity probes per pass. Fetch failures remain errors, and successful earlier
+authors can still reach their durable checkpoints before the error is returned.
+
+Network jobs run on the existing Tokio worker pool. The CLI's storage work stays
+on its calling thread, so a long synchronous append does not stop a prefetched
+query from consuming timely relay replies. Owned jobs are aborted and drained on
+ordinary failure; dropping the coordinator aborts them on cancellation. There
+are no detached writer jobs or additional result queues.
+
+The focused fixtures cover out-of-order results, backpressure, source reuse,
+writer and fetch failures, cancellation, and a synchronous writer phase longer
+than the next query's deadline. The signed local-relay integration fixture
+compares overlapping fetches with one-author invocations under the same frozen
+policy. Test execution and any measured speedup belong to the integration gate;
+no live throughput improvement is claimed before that measurement.
+
+Per-author `fetch_ms` can overlap the preceding author's append. `elapsed_ms`
+includes any wait for the preceding author to commit, so summing these values no
+longer measures process duration. Compare actual invocation wall times and
+processed author/event counts. The two-slot bound limits accepted event payload
+to twice the per-author cap, not total RSS: parsing, event clones and index
+structures need additional memory.
+
+## 2026-10-02 - Catch-up Timestamp Ties and Append Costs
+
+The catch-up pagination guard treated a two-event history at one timestamp as
+an observed relay cap of two. When the relay did not provide COUNT, that author
+could remain incomplete even after both its broad and exact-second queries
+returned the complete pair with EOSE.
+
+For an ambiguous tie below the requested page limit, the source can now supply
+the largest unique, signature-verified EOSE page observed under the same frozen
+pass interval, kinds and requested limit. It may make one bounded query without
+the author filter to obtain that measurement. The measurement is local to that
+relay; another relay's events or declared maximum limit cannot substitute for
+it. Capacity calls consume the existing page budget even when cached, and probe
+events never enter the author's result or archive append.
+
+A tied pair below a verified three-event capacity no longer looks saturated.
+A uniform hidden cap of two still leaves that pair ambiguous and requires a
+matching same-source COUNT. A tie filling the requested limit always requires
+COUNT, regardless of other observed capacities. Signature, filter, EOSE,
+deadline, byte/event limits, required-source coverage, checkpoint durability and
+retention checks remain in force; probe failures remain incomplete coverage.
+
+This is a source-relative observed uniform-cap heuristic. It does not prove
+completeness against a relay that applies filter-dependent caps, omits events,
+or otherwise misrepresents its data. COUNT is likewise source-reported evidence,
+and an unmarked estimate is not a mathematical completeness proof.
+
+Focused regressions cover the complete pair, a hidden third event under a
+uniform cap, independent required sources, the exact frozen probe filter,
+probe/count page budgets, probe errors, and full-limit ties. Test execution is
+recorded by the integration gate; no throughput improvement is claimed here.
+
+A deterministic optimized Rust fixture separately compared appends to an
+order-64 historical tree. It used 2,051 historical events and 1,573 incoming
+items, including duplicates, timestamp overlap, hot tags and replaceable events.
+Every configuration preserved all nine logical projections and historical
+event bodies, and duplicate replay added no blobs.
+
+| Fanout | Commit events | Append milliseconds | New retained payload bytes |
+| --- | ---: | ---: | ---: |
+| 32 | 256 | 97 | 11,378,893 |
+| 64 | 256 | 110 | 12,272,047 |
+| 128 | 256 | 122 | 13,735,752 |
+| 32 | 1,024 | 49 | 6,821,975 |
+| 64 | 1,024 | 55 | 6,868,974 |
+| 128 | 1,024 | 51 | 6,965,944 |
+
+These are single in-memory production-path measurements, excluding signing and
+verification, not physical disk allocation or live throughput. Wider fanout
+reduced node counts but increased retained bytes, so the catch-up fanout stays
+unchanged. Larger commits merit separate resource and policy validation; the
+current change preserves the existing 256-event commit bound and fixes the
+demonstrated pagination blockage. Per-author timings distinguish fetching,
+appending, validation, syncing and checkpoint persistence in subsequent runs.
+
 ## 2026-09-21 - Complete Tree Traversal and Store Reads
 
 A deterministic TypeScript core regression walks a directory with two links to

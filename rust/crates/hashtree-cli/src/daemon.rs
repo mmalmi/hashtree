@@ -434,6 +434,7 @@ impl EmbeddedBackgroundServicesController {
 
 pub struct EmbeddedDaemonController {
     server_controller: Arc<EmbeddedServerController>,
+    nostr_provider: tokio::sync::Mutex<Option<Arc<crate::fips_transport::DaemonNostrProvider>>>,
     fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
     #[cfg(feature = "experimental-decentralized-pubsub")]
     nostr_pubsub_handle: Option<Arc<crate::fips_transport::DaemonNostrPubsubHandle>>,
@@ -451,6 +452,7 @@ impl EmbeddedDaemonController {
     ) -> Self {
         Self {
             server_controller,
+            nostr_provider: Default::default(),
             fips_handle,
             #[cfg(feature = "experimental-decentralized-pubsub")]
             nostr_pubsub_handle,
@@ -466,6 +468,11 @@ impl EmbeddedDaemonController {
         }
         if let Some(handle) = self.fips_handle.as_ref() {
             handle.shutdown().await;
+        }
+        // Stop replay workers before draining the cache: a queued replay may
+        // otherwise begin an owned read after the provider's final barrier.
+        if let Some(provider) = self.nostr_provider.lock().await.take() {
+            provider.shutdown().await;
         }
         if let Some(controller) = self.background_services_controller.as_ref() {
             controller.shutdown().await;
@@ -672,6 +679,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         &config,
         fips_handle.as_deref(),
         Some(Arc::clone(&nostr_cache)),
+        Some(crate::fips_transport::open_daemon_nostr_cache(&store)?),
     )
     .await?;
     #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -714,8 +722,10 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     if let Some(nostr_relay) = nostr_relay {
         server = server.with_nostr_relay(nostr_relay);
     }
-    if let Some(provider) = nostr_provider {
-        server = server.with_nostr_provider(provider);
+    if let Some(provider) = &nostr_provider {
+        server = server
+            .with_nostr_provider(provider.clone())
+            .with_nostr_event_transport(config.nostr.event_transport);
     }
 
     if let Some(ref fips_handle) = fips_handle {
@@ -771,6 +781,8 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
         background_services_controller.clone(),
     ));
 
+    *daemon_controller.nostr_provider.lock().await = nostr_provider;
+
     tracing::info!(
         "Embedded daemon started on {}, identity {}",
         actual_addr,
@@ -790,6 +802,10 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
 fn embedded_nostr_enabled_after_relay_override(config: &Config) -> bool {
     config.nostr.decentralized_pubsub || !config.nostr.relays.is_empty()
 }
+
+#[cfg(test)]
+#[path = "daemon/shutdown_tests.rs"]
+mod shutdown_tests;
 
 #[cfg(test)]
 mod tests {
@@ -870,6 +886,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(client.active_subscription_count().unwrap(), 0);
+        // A stopped controller/client and an upgraded socket may remain held;
+        // none may retain the durable namespace writer lease after shutdown.
+        let reopened = crate::fips_transport::open_daemon_nostr_cache(&info.store)
+            .expect("stopped handles must not prevent opening retained heads");
+        drop(reopened);
         // Events queued before shutdown may still drain from a closed channel.
         tokio::time::timeout(Duration::from_secs(1), async {
             while subscription.recv().await.is_some() {}

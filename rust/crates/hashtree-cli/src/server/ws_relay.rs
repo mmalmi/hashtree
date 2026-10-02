@@ -751,6 +751,7 @@ mod tests {
             socialgraph_snapshot_public: false,
             nostr_relay: Some(relay),
             nostr_provider: None,
+            nostr_event_transport: None,
             nostr_relay_urls: vec![relay_url],
             tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(

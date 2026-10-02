@@ -19,7 +19,7 @@ SHA = "a" * 40
 def receipt(revision=SHA):
     return {"schema_version": 1, "status": "passed", "release_gate": True,
             "lab_revision": guard.LAB_REV, "lab_worktree_clean": True, "products": {
-                "hashtree": {"source": "https://github.com/mmalmi/hashtree", "rev": revision, "sha256": "b" * 64},
+                "hashtree": {"source": "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree", "rev": revision, "sha256": "b" * 64},
                 "chat": {"source": "https://github.com/irislib/iris-chat-rs", "rev": "2270f5778fecf1e2eea7d47a4c382aacad63d551", "sha256": "b" * 64},
                 "drive": {"source": "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-drive", "rev": "7cb74966ddaecf90fb91b8f36a44ecc4bbda7b02", "sha256": "b" * 64}},
             "metrics": {"idle": [{"seconds": 65, "cpu_required": True, "cpu_budget_percent": 5,
@@ -30,6 +30,15 @@ def receipt(revision=SHA):
 class MeshReleaseTests(unittest.TestCase):
     def test_exact_candidate_and_configured_companions_pass(self):
         guard.check(receipt(), SHA)
+
+    def test_same_commit_from_another_source_fails(self):
+        canonical = receipt()["products"]["hashtree"]["source"]
+        for source in ["https://github.com/mmalmi/hashtree", "local-binary",
+                       canonical + "/rust", canonical.replace("/hashtree", "/other")]:
+            candidate = receipt()
+            candidate["products"]["hashtree"]["source"] = source
+            with self.subTest(source=source), self.assertRaises(ValueError):
+                guard.check(candidate, SHA)
 
     def test_stale_candidate_lab_and_companions_fail(self):
         for path in [("lab_revision",), ("products", "hashtree", "rev"),

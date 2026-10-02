@@ -1,16 +1,15 @@
 use anyhow::{bail, Context, Result};
 use hashtree_cli::config::ensure_keys_string;
-use hashtree_cli::{
-    Config, FetchConfig, Fetcher, HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver,
-    NostrToBech32, RootResolver,
-};
+use hashtree_cli::{Config, FetchConfig, Fetcher, HashtreeStore, NostrKeys, NostrToBech32};
 use hashtree_core::{Cid, HashTree, HashTreeConfig, LinkType, Store};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::blossom::background_blossom_push_incremental_with_store;
 use super::resolve::resolve_cid_input;
+
+mod transport;
+use transport::ReleasePublisher;
 
 pub(crate) struct PublishedRelease {
     pub(crate) npub: String,
@@ -261,17 +260,9 @@ pub(crate) async fn publish_release_version(
         println!("Identity: {} (new)", npub);
     }
 
-    let resolver_config = NostrResolverConfig {
-        relays: config.nostr.relays.clone(),
-        resolve_timeout: Duration::from_secs(5),
-        secret_key: Some(keys),
-    };
-    let resolver = NostrRootResolver::new(resolver_config)
-        .await
-        .context("Failed to create Nostr resolver")?;
-
+    let publisher = ReleasePublisher::connect(&config, keys).await?;
     let nostr_key = format!("{}/{}", npub, tree_name);
-    let current_root = resolver
+    let (current_root, latest_created_at) = publisher
         .resolve(&nostr_key)
         .await
         .with_context(|| format!("Failed to resolve existing release tree {}", nostr_key))?;
@@ -313,13 +304,9 @@ pub(crate) async fn publish_release_version(
         }
     }
 
-    match resolver.publish(&nostr_key, &new_root).await {
-        Ok(true) => {}
-        Ok(false) => bail!("Release publish returned false"),
-        Err(err) => bail!("Release publish failed: {}", err),
-    }
-
-    let _ = resolver.stop().await;
+    publisher
+        .publish(&nostr_key, &new_root, latest_created_at)
+        .await?;
 
     Ok(PublishedRelease {
         npub,

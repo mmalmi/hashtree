@@ -6,10 +6,15 @@ mod managed_env;
 mod migration;
 mod migration_audit;
 mod parallel_key_scan;
+mod physical_space;
+pub use physical_space::{
+    PhysicalSpaceGuard, MAX_GUARDED_WRITE_BYTES, PHYSICAL_SPACE_METADATA_MARGIN,
+};
 mod pool;
 
 pub use configured::{
-    open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, pool_audit_read_only_enabled,
+    open_configured_lmdb_blob_store, open_shared_lmdb_blob_store,
+    open_shared_lmdb_blob_store_with_space_guard, pool_audit_read_only_enabled,
     ConfiguredLmdbBlobStore, LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, POOL_AUDIT_READ_ONLY_ENV,
     POOL_AUDIT_READ_ONLY_ERROR, SHARED_BLOB_MIN_MAP_SIZE_BYTES, SHARED_BLOB_POOL_DIR_NAME,
 };
@@ -340,6 +345,7 @@ impl PinnedExternalRoot {
         relative: &Path,
         create: bool,
         durable: bool,
+        guard: Option<&PhysicalSpaceGuard>,
     ) -> Result<(File, CString), StoreError> {
         let components = Self::components(relative)?;
         let (leaf, directories) = components
@@ -360,6 +366,9 @@ impl PinnedExternalRoot {
                 && create
                 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound
             {
+                if let Some(guard) = guard {
+                    guard.admit_file(&current, 0, 1)?;
+                }
                 let status = unsafe { libc::mkdirat(current.as_raw_fd(), name.as_ptr(), 0o700) };
                 if status != 0
                     && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
@@ -389,7 +398,7 @@ impl PinnedExternalRoot {
     }
 
     fn open_regular(&self, relative: &Path) -> Result<File, StoreError> {
-        let (parent, leaf) = self.open_parent(relative, false, false)?;
+        let (parent, leaf) = self.open_parent(relative, false, false, None)?;
         let raw = unsafe {
             libc::openat(
                 parent.as_raw_fd(),
@@ -478,6 +487,7 @@ impl PinnedExternalRoot {
         Ok(true)
     }
 
+    #[cfg(test)]
     fn write_blob(
         &self,
         relative: &Path,
@@ -485,14 +495,35 @@ impl PinnedExternalRoot {
         expected_hash: &Hash,
         sync: bool,
     ) -> Result<(), StoreError> {
-        let (parent, leaf) = self.open_parent(relative, true, sync)?;
+        self.write_blob_guarded(relative, data, expected_hash, sync, None)
+    }
+
+    fn write_blob_guarded(
+        &self,
+        relative: &Path,
+        data: &[u8],
+        expected_hash: &Hash,
+        sync: bool,
+        guard: Option<&PhysicalSpaceGuard>,
+    ) -> Result<(), StoreError> {
+        let (parent, leaf) = self.open_parent(relative, true, sync, guard)?;
         if Self::verify_existing_blob(&parent, &leaf, expected_hash, data.len(), sync)? {
             return Ok(());
         }
+        if let Some(guard) = guard {
+            guard.admit_file(&parent, 0, 1)?;
+        }
         let mut file = Self::create_unnamed_file(&parent)?;
-        file.write_all(data).map_err(StoreError::Io)?;
+        if let Some(guard) = guard {
+            guard.write_all(&mut file, data)?;
+        } else {
+            file.write_all(data).map_err(StoreError::Io)?;
+        }
         if sync {
             file.sync_all().map_err(StoreError::Io)?;
+        }
+        if let Some(guard) = guard {
+            guard.admit_file(&parent, 0, 1)?;
         }
         let linked = match Self::link_open_file(&file, &parent, &leaf) {
             Ok(()) => true,
@@ -511,18 +542,25 @@ impl PinnedExternalRoot {
         &self,
         relative: &Path,
         sync: bool,
+        guard: Option<&PhysicalSpaceGuard>,
         write: impl FnOnce(&mut File) -> Result<T, StoreError>,
     ) -> Result<T, StoreError> {
-        let (parent, leaf) = self.open_parent(relative, true, sync)?;
+        let (parent, leaf) = self.open_parent(relative, true, sync, guard)?;
         if Self::open_regular_optional(&parent, &leaf)?.is_some() {
             return Err(StoreError::Other(
                 "generated external pack already exists".into(),
             ));
         }
+        if let Some(guard) = guard {
+            guard.admit_file(&parent, 0, 1)?;
+        }
         let mut file = Self::create_unnamed_file(&parent)?;
         let value = write(&mut file)?;
         if sync {
             file.sync_all().map_err(StoreError::Io)?;
+        }
+        if let Some(guard) = guard {
+            guard.admit_file(&parent, 0, 1)?;
         }
         Self::link_open_file(&file, &parent, &leaf).map_err(StoreError::Io)?;
         if sync {
@@ -532,7 +570,7 @@ impl PinnedExternalRoot {
     }
 
     fn remove_file(&self, relative: &Path, sync: bool) -> Result<(), StoreError> {
-        let (parent, leaf) = self.open_parent(relative, false, false)?;
+        let (parent, leaf) = self.open_parent(relative, false, false, None)?;
         if unsafe { libc::unlinkat(parent.as_raw_fd(), leaf.as_ptr(), 0) } != 0 {
             let error = std::io::Error::last_os_error();
             if error.kind() != std::io::ErrorKind::NotFound {
@@ -687,6 +725,7 @@ pub struct LmdbBlobStore {
     max_bytes: AtomicU64,
     next_order: AtomicU64,
     external_blobs: Option<ExternalBlobConfig>,
+    physical_space: Option<PhysicalSpaceGuard>,
 }
 
 /// Read-only view of an existing LMDB blob store for online migration and verification.
@@ -950,6 +989,7 @@ impl LmdbBlobReader {
                 max_bytes: AtomicU64::new(0),
                 next_order: AtomicU64::new(0),
                 external_blobs,
+                physical_space: None,
             },
             external_read_concurrency,
         })
@@ -1576,6 +1616,7 @@ impl LmdbBlobStore {
             |_| external_blobs.map(Into::into),
             false,
             None,
+            None,
         )
     }
 
@@ -1592,6 +1633,26 @@ impl LmdbBlobStore {
             |_| external_blobs.map(Into::into),
             false,
             Some(identity),
+            None,
+        )
+    }
+
+    /// Open an archive member with admission on its actual LMDB/external writes.
+    pub fn with_physical_space_guard<P: AsRef<Path>>(
+        path: P,
+        map_size: usize,
+        external: Option<ExternalBlobOptions>,
+        pinned_identity: Option<PinnedLmdbIdentity>,
+        guard: PhysicalSpaceGuard,
+    ) -> Result<Self, StoreError> {
+        Self::with_map_size_and_settings_mode(
+            path,
+            map_size,
+            env_flags_from_env(),
+            |_| external.map(Into::into),
+            false,
+            pinned_identity,
+            Some(guard),
         )
     }
 
@@ -1605,7 +1666,15 @@ impl LmdbBlobStore {
         P: AsRef<Path>,
         F: FnOnce(&Path) -> Option<ExternalBlobConfig>,
     {
-        Self::with_map_size_and_settings_mode(path, map_size, flags, external_blobs, true, None)
+        Self::with_map_size_and_settings_mode(
+            path,
+            map_size,
+            flags,
+            external_blobs,
+            true,
+            None,
+            None,
+        )
     }
 
     fn with_map_size_and_settings_mode<P, F>(
@@ -1615,6 +1684,7 @@ impl LmdbBlobStore {
         external_blobs: F,
         add_reopen_headroom: bool,
         pinned_identity: Option<PinnedLmdbIdentity>,
+        physical_space: Option<PhysicalSpaceGuard>,
     ) -> Result<Self, StoreError>
     where
         P: AsRef<Path>,
@@ -1623,7 +1693,11 @@ impl LmdbBlobStore {
         let path_ref = path.as_ref();
         let controlled = pinned_identity.is_some();
         if !controlled {
-            std::fs::create_dir_all(path_ref).map_err(StoreError::Io)?;
+            if let Some(guard) = &physical_space {
+                guard.create_dir_all(path_ref)?;
+            } else {
+                std::fs::create_dir_all(path_ref).map_err(StoreError::Io)?;
+            }
         }
         let existing_map_size = match pinned_identity {
             Some(identity) => pinned_lmdb_data_len(path_ref, identity)?,
@@ -1645,6 +1719,9 @@ impl LmdbBlobStore {
         .unwrap_or(usize::MAX);
 
         let mut env_options = EnvOpenOptions::new();
+        if let Some(guard) = &physical_space {
+            guard.install(&mut env_options)?;
+        }
         if !controlled {
             env_options.map_size(map_size);
         }
@@ -1746,6 +1823,7 @@ impl LmdbBlobStore {
             max_bytes: AtomicU64::new(0),
             next_order: AtomicU64::new(next_order),
             external_blobs,
+            physical_space,
         })
     }
 
@@ -2330,6 +2408,12 @@ impl LmdbBlobStore {
     }
 
     fn evict_for_write_pressure(&self, incoming_bytes: u64) -> Result<u64, StoreError> {
+        // Raw archive and Pool member stores leave max_bytes unset: their
+        // owning layer controls retention. A full map must fail, not silently
+        // delete history outside that layer's catalog or root policy.
+        if self.max_bytes.load(Ordering::Relaxed) == 0 {
+            return Ok(0);
+        }
         let current = self.total_bytes()?;
         if current == 0 {
             return Ok(0);
@@ -3614,11 +3698,12 @@ impl LmdbBlobStore {
     ) -> Result<(), StoreError> {
         #[cfg(unix)]
         if let Some(root) = &config.pinned_root {
-            return root.write_blob(
+            return root.write_blob_guarded(
                 &ExternalBlobConfig::relative_blob_path(hash),
                 data,
                 hash,
                 config.sync,
+                self.physical_space.as_ref(),
             );
         }
         let path = Self::external_blob_path_for_config(config, hash);
@@ -3629,19 +3714,39 @@ impl LmdbBlobStore {
         let parent = path
             .parent()
             .ok_or_else(|| StoreError::Other("external blob path has no parent".to_string()))?;
-        fs::create_dir_all(parent)?;
+        if let Some(guard) = &self.physical_space {
+            guard.create_dir_all(parent)?;
+            guard.admit_file(&File::open(parent)?, 0, 1)?;
+        } else {
+            fs::create_dir_all(parent)?;
+        }
         let temp_path = unique_temp_path(&path);
-        {
+        let written = (|| -> Result<(), StoreError> {
             let mut file = File::options()
                 .write(true)
                 .create_new(true)
                 .open(&temp_path)?;
-            file.write_all(data)?;
+            if let Some(guard) = &self.physical_space {
+                guard.write_all(&mut file, data)?;
+            } else {
+                file.write_all(data)?;
+            }
             if config.sync {
                 file.sync_all()?;
             }
+            Ok(())
+        })();
+        if let Err(error) = written {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error);
         }
 
+        if let Some(guard) = &self.physical_space {
+            if let Err(error) = guard.admit_file(&File::open(parent)?, 0, 1) {
+                let _ = fs::remove_file(&temp_path);
+                return Err(error.into());
+            }
+        }
         if let Err(error) = external_file::publish(&temp_path, &path, config.sync) {
             let _ = fs::remove_file(&temp_path);
             return Err(error.into());
@@ -3693,26 +3798,40 @@ impl LmdbBlobStore {
         #[cfg(unix)]
         if let Some(root) = &config.pinned_root {
             let relative = ExternalBlobConfig::relative_pack_path(&pack_name);
-            return root.create_file(&relative, config.sync, |file| {
-                let mut markers = Vec::with_capacity(entries.len());
-                let mut offset = 0u64;
-                for (index, _, data) in entries {
-                    let len = data.len() as u64;
-                    file.write_all(data).map_err(StoreError::Io)?;
-                    markers.push((
-                        *index,
-                        Self::external_pack_blob_ref(&pack_name, offset, len)?,
-                    ));
-                    offset = offset.saturating_add(len);
-                }
-                Ok(markers)
-            });
+            return root.create_file(
+                &relative,
+                config.sync,
+                self.physical_space.as_ref(),
+                |file| {
+                    let mut markers = Vec::with_capacity(entries.len());
+                    let mut offset = 0u64;
+                    for (index, _, data) in entries {
+                        let len = data.len() as u64;
+                        if let Some(guard) = &self.physical_space {
+                            guard.write_all(file, data)?;
+                        } else {
+                            file.write_all(data).map_err(StoreError::Io)?;
+                        }
+                        markers.push((
+                            *index,
+                            Self::external_pack_blob_ref(&pack_name, offset, len)?,
+                        ));
+                        offset = offset.saturating_add(len);
+                    }
+                    Ok(markers)
+                },
+            );
         }
         let path = Self::external_pack_path_for_config(config, &pack_name);
         let parent = path
             .parent()
             .ok_or_else(|| StoreError::Other("external pack path has no parent".to_string()))?;
-        fs::create_dir_all(parent)?;
+        if let Some(guard) = &self.physical_space {
+            guard.create_dir_all(parent)?;
+            guard.admit_file(&File::open(parent)?, 0, 1)?;
+        } else {
+            fs::create_dir_all(parent)?;
+        }
         let temp_path = unique_temp_path(&path);
         let mut markers = Vec::with_capacity(entries.len());
         let write_result = (|| -> Result<(), StoreError> {
@@ -3723,7 +3842,11 @@ impl LmdbBlobStore {
             let mut offset = 0u64;
             for (index, _, data) in entries {
                 let len = data.len() as u64;
-                file.write_all(data)?;
+                if let Some(guard) = &self.physical_space {
+                    guard.write_all(&mut file, data)?;
+                } else {
+                    file.write_all(data)?;
+                }
                 markers.push((
                     *index,
                     Self::external_pack_blob_ref(&pack_name, offset, len)?,
@@ -3739,6 +3862,12 @@ impl LmdbBlobStore {
         if let Err(error) = write_result {
             let _ = fs::remove_file(&temp_path);
             return Err(error);
+        }
+        if let Some(guard) = &self.physical_space {
+            if let Err(error) = guard.admit_file(&File::open(parent)?, 0, 1) {
+                let _ = fs::remove_file(&temp_path);
+                return Err(error.into());
+            }
         }
         if let Err(error) = external_file::publish(&temp_path, &path, config.sync) {
             let _ = fs::remove_file(&temp_path);
@@ -5059,6 +5188,64 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    fn assert_unbounded_map_full_preserves_history(batch_write: bool) -> Result<(), StoreError> {
+        let temp = TempDir::new().unwrap();
+        let store = LmdbBlobStore::with_exact_map_size_and_external_blob_options(
+            temp.path().join("blobs"),
+            512 * 1024,
+            None,
+        )?;
+        assert!(store.max_bytes().is_none());
+        let mut retained = Vec::new();
+        let mut exhausted = false;
+        for batch in 0..128u64 {
+            let items = (0..1usize)
+                .map(|offset| {
+                    let mut bytes = vec![0x5a; 16 * 1024];
+                    let sequence = batch + offset as u64;
+                    bytes[..8].copy_from_slice(&sequence.to_le_bytes());
+                    (sha256(&bytes), bytes)
+                })
+                .collect::<Vec<_>>();
+            let result = if !batch_write {
+                store.put_sync(items[0].0, &items[0].1).map(usize::from)
+            } else {
+                store.put_many_sync(&items)
+            };
+            match result {
+                Ok(_) => retained.extend(items),
+                Err(error) => {
+                    assert!(is_map_full_store_error(&error), "unexpected error: {error}");
+                    exhausted = true;
+                    break;
+                }
+            }
+        }
+        assert!(!retained.is_empty());
+        for (hash, bytes) in &retained {
+            assert!(
+                store.get_sync(hash)?.as_deref() == Some(bytes.as_slice()),
+                "map pressure deleted previously committed history"
+            );
+        }
+        assert!(
+            exhausted,
+            "bounded map must reject a write instead of evicting archive history"
+        );
+        assert_eq!(store.stats()?.count, retained.len());
+        Ok(())
+    }
+
+    #[test]
+    fn unbounded_single_write_map_full_preserves_history() -> Result<(), StoreError> {
+        assert_unbounded_map_full_preserves_history(false)
+    }
+
+    #[test]
+    fn unbounded_batch_write_map_full_preserves_history() -> Result<(), StoreError> {
+        assert_unbounded_map_full_preserves_history(true)
     }
 
     #[test]

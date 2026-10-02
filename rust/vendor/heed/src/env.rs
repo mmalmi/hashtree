@@ -34,7 +34,7 @@ use crate::database::DatabaseOpenOptions;
 use crate::mdb::error::mdb_result;
 use crate::mdb::ffi;
 use crate::mdb::lmdb_flags::AllDatabaseFlags;
-use crate::{Database, EnvFlags, Error, Result, RoCursor, RoTxn, RwTxn, Unspecified};
+use crate::{Database, EnvFlags, Error, Result, RoCursor, RoTxn, RwTxn, Unspecified, WriteAdmission};
 
 /// The list of opened environments, the value is an optional environment, it is None
 /// when someone asks to close the environment, closing is a two-phase step, to make sure
@@ -230,6 +230,8 @@ pub struct EnvOpenOptions {
     max_readers: Option<u32>,
     max_dbs: Option<u32>,
     flags: EnvFlags,
+    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    write_admission: Option<WriteAdmission>,
 }
 
 impl Default for EnvOpenOptions {
@@ -246,7 +248,15 @@ impl EnvOpenOptions {
             max_readers: None,
             max_dbs: None,
             flags: EnvFlags::empty(),
+            write_admission: None,
         }
+    }
+
+    /// Install admission before environment initialization and every physical
+    /// data write or lock-file extension. Clone one handle for compatible opens.
+    pub fn write_admission(&mut self, admission: WriteAdmission) -> &mut Self {
+        self.write_admission = Some(admission);
+        self
     }
 
     /// Set the size of the memory map to use for this environment.
@@ -407,6 +417,13 @@ impl EnvOpenOptions {
         path: PathBuf,
         pinned: Option<PinnedLmdbIdentity>,
     ) -> Result<Env> {
+        #[cfg(not(unix))]
+        if self.write_admission.is_some() {
+            return Err(Error::Io(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "LMDB write admission requires Unix file descriptors",
+            )));
+        }
         let mut lock = OPENED_ENV.write().unwrap();
         match lock.entry(path) {
             Entry::Occupied(entry) => {
@@ -425,6 +442,18 @@ impl EnvOpenOptions {
                 unsafe {
                     let mut env: *mut ffi::MDB_env = ptr::null_mut();
                     mdb_result(ffi::mdb_env_create(&mut env))?;
+
+                    #[cfg(unix)]
+                    if let Some(admission) = &self.write_admission {
+                        if let Err(error) = mdb_result(ffi::mdb_env_set_write_admission(
+                            env,
+                            Some(crate::write_admission::admit_write),
+                            admission.context(),
+                        )) {
+                            ffi::mdb_env_close(env);
+                            return Err(error.into());
+                        }
+                    }
 
                     if let Some(pinned) = pinned {
                         mdb_result(ffi::mdb_env_set_expected_file_identity(
@@ -487,6 +516,7 @@ impl EnvOpenOptions {
                             let inner = EnvInner {
                                 env,
                                 path: path.clone(),
+                                _write_admission: self.write_admission.clone(),
                             };
                             let env = Env(Arc::new(inner));
                             let cache_entry = EnvEntry {
@@ -521,7 +551,7 @@ pub struct Env(Arc<EnvInner>);
 
 impl fmt::Debug for Env {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let EnvInner { env: _, path } = self.0.as_ref();
+        let EnvInner { path, .. } = self.0.as_ref();
         f.debug_struct("Env")
             .field("path", &path.display())
             .finish_non_exhaustive()
@@ -531,6 +561,7 @@ impl fmt::Debug for Env {
 struct EnvInner {
     env: *mut ffi::MDB_env,
     path: PathBuf,
+    _write_admission: Option<WriteAdmission>,
 }
 
 unsafe impl Send for EnvInner {}

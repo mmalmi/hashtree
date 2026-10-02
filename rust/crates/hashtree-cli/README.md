@@ -68,6 +68,24 @@ htree mount htree://npub1.../mytree ~/mnt/mytree
 htree mount htree://npub1.../mytree/docs ~/mnt/docs
 ```
 
+## Resuming an archived Nostr index
+
+```bash
+htree --data-dir ./archive nostr-index catch-up \
+  --root <original-nhash> --authors-file ./authors.txt --since <unix-seconds> \
+  --relay wss://relay.example --kind 1 --kind 5 --max-authors-per-run 16
+```
+
+Choose an initial `--since` at or before the original fetch pass began, not its completion date. The ordered author file, original root, initial time, kinds, and required relays identify the continuation. All required sources must finish each author before its new root and author cursor are committed to `nostr-index/catchup-state.json`. The original crawl state remains intact. Larger resource limits can resume a stopped author without discarding earlier progress.
+
+Fetching overlaps at most two authors, counting the author being written, buffered results, and active network jobs together. Each slot reuses its relay connections and capacity observations. Writes stay in the author-file order, and a slot is reused only after blocks are synced and the checkpoint is persisted. A later fetch failure preserves the earlier durable prefix and stops further admission. Error and cancellation paths abort the owned network jobs. With the default limits, the two slots can hold up to 128 MiB of accepted event payload; parsing buffers and index structures require additional memory. Each required relay can have two connections.
+
+Omitting `--until` resumes the saved end of an unfinished pass. After every author completes, the next invocation captures a new end time and revisits `--overlap-secs` before the previous end (default: 86400), never earlier than the original `--since`. This catches delayed arrivals while retaining all accumulated history and deduplicating repeated IDs. The overlap can be increased on resume; an unfinished pass keeps its captured interval and uses the increase on its next pass. An explicit `--until` can fix the pass end for controlled runs. Timeouts, resource limits, and ambiguous capped timestamp ties stop the run without advancing that author. Coverage describes the configured relays' EOSE responses; it cannot establish absence of events on other relays or detect every undisclosed relay omission.
+
+The command retains prior-root blocks and only updates index paths touched by incoming events. It does not publish a pointer. After the previous root is already available on the destination, `htree push <new-root> --previous-root <retained-root>` uploads a DAG delta. This explicit delta mode fails if comparison nodes are unavailable instead of falling back to a whole-archive walk. Keep advertised and rollback roots readable until publication and retention checks finish.
+
+For a proven historical kind-1 event that remains in the author-kind-time index but is missing from by-ID, `nostr-index repair-id` accepts one original signed event object. It requires `--root`, `--event`, `--expected-id`, the exact input and checkpoint byte hashes (`--expected-event-sha256` and `--expected-checkpoint-sha256`), and a new `--receipt` path whose parent exists. It checks the original stored body, holds the crawl lock, applies the physical write guard (`--min-free-bytes`, default 10 GiB), and force-syncs the repaired blocks before writing a no-replace receipt. It retains old roots and leaves catch-up state, latest-root files, and publication unchanged. An operator must separately validate and record the receipt's root transition before resuming from it.
+
 ## Social Graph
 
 The daemon maintains a local social graph store. On startup it crawls follow lists (kind 3) from Nostr relays and uses follow distance to control write access to your Blossom server, without a manual allow-list for people in your social circle.

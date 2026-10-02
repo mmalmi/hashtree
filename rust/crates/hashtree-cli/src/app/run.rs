@@ -325,6 +325,7 @@ pub(crate) fn should_spawn_background_update(cli: &Cli) -> bool {
                 command.0.as_ref(),
                 NostrIndexCommands::RepairBulkProjectionProfiles { .. }
                     | NostrIndexCommands::RepairBulkProjectionEventBlobs { .. }
+                    | NostrIndexCommands::RepairId { .. }
             )
     ) && !matches!(
         &cli.command,
@@ -607,6 +608,9 @@ fn run_command(
                 &config,
                 fips_handle.as_ref(),
                 Some(Arc::clone(&nostr_cache)),
+                Some(hashtree_cli::fips_transport::open_daemon_nostr_cache(
+                    &store,
+                )?),
             )
             .await?;
             #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -653,8 +657,10 @@ fn run_command(
             if let Some(nostr_relay) = nostr_relay.clone() {
                 server = server.with_nostr_relay(nostr_relay);
             }
-            if let Some(provider) = nostr_provider {
-                server = server.with_nostr_provider(provider);
+            if let Some(provider) = &nostr_provider {
+                server = server
+                    .with_nostr_provider(provider.clone())
+                    .with_nostr_event_transport(config.nostr.event_transport);
             }
 
             if let Some(ref fips_handle) = fips_handle {
@@ -825,6 +831,12 @@ fn run_command(
 
             if let Some(ref fips_handle) = fips_handle {
                 fips_handle.shutdown().await;
+            }
+
+            // Replay workers must stop before the provider drains owned cache
+            // reads, including reads whose requesting worker was canceled.
+            if let Some(provider) = &nostr_provider {
+                provider.shutdown().await;
             }
 
             if let Some(controller) = background_services_controller {
@@ -1118,6 +1130,12 @@ fn run_command(
             }
         }),
         Commands::NostrIndex { command } => command_future!(match *command.0 {
+            NostrIndexCommands::RepairId { options } => {
+                super::nostr_index::repair_id::run(data_dir, options).await?;
+            }
+            NostrIndexCommands::CatchUp { options } => {
+                super::nostr_index::catchup::run(data_dir, options).await?;
+            }
             NostrIndexCommands::Import {
                 root,
                 events_file,
@@ -1827,11 +1845,16 @@ fn run_command(
             server,
             force,
             shallow,
+            previous_root,
         } => command_future!({
             // Resolve npub/repo or htree:// URLs to CID
             let resolved = resolve_cid_input(&cid_input).await?;
             let cid = resolved.cid.to_string();
-            push_to_blossom(&data_dir, &cid, server, force, shallow).await?;
+            let previous = match previous_root {
+                Some(input) => Some(resolve_cid_input(&input).await?.cid.to_string()),
+                None => None,
+            };
+            push_to_blossom(&data_dir, &cid, server, force, shallow, previous.as_deref()).await?;
         }),
         Commands::Storage { command } => command_future!({
             // The migration launcher is an inert rendezvous until its

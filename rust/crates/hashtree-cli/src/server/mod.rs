@@ -233,6 +233,7 @@ impl HashtreeServer {
                 socialgraph_snapshot_public: false,
                 nostr_relay: None,
                 nostr_provider: None,
+                nostr_event_transport: None,
                 nostr_relay_urls: Vec::new(),
                 tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(
@@ -381,6 +382,15 @@ impl HashtreeServer {
 
     pub fn with_nostr_provider(mut self, provider: Arc<dyn nostr_pubsub::PubsubProvider>) -> Self {
         self.state.nostr_provider = Some(provider);
+        self
+    }
+
+    /// Declare which configured transport is served by the event provider.
+    pub fn with_nostr_event_transport(
+        mut self,
+        transport: crate::config::NostrEventTransport,
+    ) -> Self {
+        self.state.nostr_event_transport = Some(transport);
         self
     }
 

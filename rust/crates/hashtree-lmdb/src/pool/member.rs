@@ -35,10 +35,11 @@ pub(super) fn validate_member_config(config: &PoolMemberConfig) -> Result<(), St
 pub(super) fn prepare_member_paths(
     config: &PoolMemberConfig,
     proposed: PoolMemberId,
+    guard: Option<&crate::PhysicalSpaceGuard>,
 ) -> Result<PoolMemberId, StoreError> {
-    let id = prepare_identity_path(&config.path, MEMBER_MARKER_NAME, proposed)?;
+    let id = prepare_identity_path(&config.path, MEMBER_MARKER_NAME, proposed, guard)?;
     if let Some(external) = config.external_blob_dir.as_ref() {
-        let external_id = prepare_identity_path(external, EXTERNAL_MARKER_NAME, id)?;
+        let external_id = prepare_identity_path(external, EXTERNAL_MARKER_NAME, id, guard)?;
         if external_id != id {
             return Err(StoreError::Other(format!(
                 "pool external path belongs to member {external_id}, expected {id}"
@@ -52,8 +53,13 @@ fn prepare_identity_path(
     path: &Path,
     marker_name: &str,
     proposed: PoolMemberId,
+    guard: Option<&crate::PhysicalSpaceGuard>,
 ) -> Result<PoolMemberId, StoreError> {
-    fs::create_dir_all(path).map_err(StoreError::Io)?;
+    if let Some(guard) = guard {
+        guard.create_dir_all(path)?;
+    } else {
+        fs::create_dir_all(path).map_err(StoreError::Io)?;
+    }
     let marker = path.join(marker_name);
     if marker.exists() {
         return read_member_marker(&marker);
@@ -68,6 +74,9 @@ fn prepare_identity_path(
             "refusing to initialize non-empty pool member path without identity marker: {}",
             path.display()
         )));
+    }
+    if let Some(guard) = guard {
+        guard.admit_file(&fs::File::open(path)?, 0, 128)?;
     }
     fs::write(&marker, format!("{proposed}\n")).map_err(StoreError::Io)?;
     Ok(proposed)
@@ -103,10 +112,20 @@ pub(super) fn open_member_store(
     id: PoolMemberId,
     config: &PoolMemberConfig,
     pinned_identity: Option<PinnedLmdbIdentity>,
+    physical_space: Option<&crate::PhysicalSpaceGuard>,
 ) -> Result<LmdbBlobStore, StoreError> {
     let external = member_external_blob_options(id, config)?;
     let map_size = usize::try_from(config.map_size_bytes)
         .map_err(|_| StoreError::Other("pool member map size exceeds usize".into()))?;
+    if let Some(guard) = physical_space {
+        return LmdbBlobStore::with_physical_space_guard(
+            &config.path,
+            map_size,
+            external,
+            pinned_identity,
+            guard.clone(),
+        );
+    }
     let opened = match pinned_identity {
         Some(identity) => LmdbBlobStore::with_exact_map_size_external_options_and_pinned_identity(
             &config.path,

@@ -13,7 +13,7 @@ LAB_REV = "cec9501659b9cf08f9600e3f14987cad6ca1e7d3"
 
 def check(receipt, revision):
     expected = {
-        "hashtree": {"source": "https://github.com/mmalmi/hashtree", "rev": revision},
+        "hashtree": {"source": "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree", "rev": revision},
         "chat": {"source": "https://github.com/irislib/iris-chat-rs", "rev": "2270f5778fecf1e2eea7d47a4c382aacad63d551"},
         "drive": {"source": "htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/iris-drive", "rev": "7cb74966ddaecf90fb91b8f36a44ecc4bbda7b02"},
     }

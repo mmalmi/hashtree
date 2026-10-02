@@ -1602,11 +1602,13 @@ fn test_cli_parses_push_force_flag() {
             server,
             force,
             shallow,
+            previous_root,
         } => {
             assert_eq!(cid, "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh");
             assert_eq!(server.as_deref(), Some("https://upload.example"));
             assert!(force);
             assert!(!shallow);
+            assert!(previous_root.is_none());
         }
         _ => panic!("expected push command"),
     }
@@ -1622,13 +1624,81 @@ fn test_cli_parses_push_shallow_flag() {
             server,
             force,
             shallow,
+            previous_root,
         } => {
             assert_eq!(cid, "abc123");
             assert_eq!(server, None);
             assert!(!force);
             assert!(shallow);
+            assert!(previous_root.is_none());
         }
         _ => panic!("expected push command"),
+    }
+}
+
+#[test]
+fn test_cli_parses_retained_root_delta_push_and_rejects_shallow() {
+    let cli = Cli::parse_from([
+        "htree",
+        "push",
+        "new-root",
+        "--previous-root",
+        "retained-root",
+        "--force",
+    ]);
+    match cli.command {
+        Commands::Push {
+            previous_root,
+            force,
+            shallow,
+            ..
+        } => {
+            assert_eq!(previous_root.as_deref(), Some("retained-root"));
+            assert!(force);
+            assert!(!shallow);
+        }
+        _ => panic!("expected push command"),
+    }
+    assert!(Cli::try_parse_from([
+        "htree",
+        "push",
+        "new-root",
+        "--previous-root",
+        "retained-root",
+        "--shallow",
+    ])
+    .is_err());
+}
+
+#[test]
+fn test_cli_parses_nostr_index_catchup_with_optional_until() {
+    let cli = Cli::parse_from([
+        "htree",
+        "nostr-index",
+        "catch-up",
+        "--root",
+        "exact-root",
+        "--authors-file",
+        "authors.txt",
+        "--since",
+        "100",
+        "--relay",
+        "wss://relay.example",
+        "--kind",
+        "1",
+        "--kind",
+        "5",
+        "--max-authors-per-run",
+        "16",
+    ]);
+    match cli.command {
+        Commands::NostrIndex { command } => {
+            assert!(matches!(
+                *command.0,
+                super::args::NostrIndexCommands::CatchUp { .. }
+            ));
+        }
+        _ => panic!("expected nostr-index catch-up"),
     }
 }
 

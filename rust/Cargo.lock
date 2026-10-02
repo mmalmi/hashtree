@@ -3239,7 +3239,7 @@ dependencies = [
 
 [[package]]
 name = "git-remote-htree"
-version = "0.2.89"
+version = "0.2.90"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3559,7 +3559,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.150"
+version = "0.2.152"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3654,7 +3654,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-core"
-version = "0.2.89"
+version = "0.2.91"
 dependencies = [
  "aes-gcm",
  "async-trait",
@@ -3676,7 +3676,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded"
-version = "0.2.92"
+version = "0.2.93"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3715,7 +3715,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fips-transport"
-version = "0.4.20"
+version = "0.4.22"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3780,7 +3780,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-heed"
-version = "0.20.5-hashtree.1"
+version = "0.20.5-hashtree.2"
 dependencies = [
  "bitflags 2.13.0",
  "byteorder",
@@ -3798,7 +3798,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-index"
-version = "0.2.84"
+version = "0.2.85"
 dependencies = [
  "async-trait",
  "futures",
@@ -3809,7 +3809,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-lmdb"
-version = "0.2.88"
+version = "0.2.89"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3827,7 +3827,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-lmdb-master-sys"
-version = "0.2.6-hashtree.1"
+version = "0.2.6-hashtree.2"
 dependencies = [
  "bindgen 0.71.1",
  "cc",
@@ -3852,7 +3852,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr"
-version = "0.2.88"
+version = "0.2.89"
 dependencies = [
  "async-trait",
  "futures",
@@ -3876,7 +3876,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr-pubsub"
-version = "0.2.85"
+version = "0.2.86"
 dependencies = [
  "async-trait",
  "hashtree-core",
@@ -3888,7 +3888,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr-social-graph-heed"
-version = "0.1.3-hashtree.2"
+version = "0.1.3-hashtree.3"
 dependencies = [
  "hashtree-heed",
  "nostr-social-graph",
@@ -3898,7 +3898,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-resolver"
-version = "0.2.85"
+version = "0.2.86"
 dependencies = [
  "async-trait",
  "futures",
@@ -3940,7 +3940,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-updater"
-version = "0.2.86"
+version = "0.2.87"
 dependencies = [
  "async-trait",
  "flate2",
@@ -5295,9 +5295,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.5.6"
+version = "0.5.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "10b6b1f7fad00ad33630d30ca11af8aa5d128387877146dfd1a4bbd46c3af38e"
+checksum = "ec4813ba84441fef50c30468041f9f171de30459862c1299b03a3754455159f6"
 dependencies = [
  "async-trait",
  "nostr",
@@ -5311,9 +5311,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-relay"
-version = "0.1.11"
+version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8641200920d163b2d82c34e6f15605cff93a0546e3e0087fce8f3bddaa2329ca"
+checksum = "027e2ec1493bc6082e3279d7ad2bfa3cdd1717d0597cb724dd09ded904686f76"
 dependencies = [
  "async-trait",
  "nostr-pubsub",
@@ -5488,9 +5488,9 @@ dependencies = [
 
 [[package]]
 name = "nvpn-fips-core"
-version = "0.4.83"
+version = "0.4.90"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c073fb7b277e60bcbdeac60c05e3cb7c39df7ab2144af4de5f0f7b332d16b0c"
+checksum = "b9c80263ab8e6c63291676daaef08b7cd3eaade822f0f0ffe54124f9c182b189"
 dependencies = [
  "base64 0.22.1",
  "bluer",
@@ -5525,7 +5525,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-socks",
- "tokio-tungstenite 0.26.2",
+ "tokio-tungstenite 0.29.0",
  "tracing",
  "tun",
  "uuid",
@@ -5558,9 +5558,9 @@ checksum = "7d5078996e38a6e568e2783b93601dc55eb96bb3df0fa1c4307cdab80b85ab97"
 
 [[package]]
 name = "nvpn-fips-tcp-endpoint"
-version = "0.2.18"
+version = "0.2.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26ae8eb058e45ee32577ffbf6b968b2b328b50d09fbc38c333bf53a02105ffe0"
+checksum = "e645e9828becdafa05bb7af969e446239dea1dbeb48409d7574ab64198b74eee"
 dependencies = [
  "nvpn-fips-core",
  "nvpn-fips-tcp",
@@ -8173,6 +8173,8 @@ dependencies = [
  "hashtree-updater",
  "log",
  "nostr",
+ "nostr-pubsub",
+ "nostr-pubsub-relay",
  "serde",
  "serde_json",
  "tauri",
@@ -8506,8 +8508,12 @@ checksum = "edc5f74e248dc973e0dbb7b74c7e0d6fcc301c694ff50049504004ef4d0cdcd9"
 dependencies = [
  "futures-util",
  "log",
+ "rustls",
+ "rustls-pki-types",
  "tokio",
+ "tokio-rustls",
  "tungstenite 0.24.0",
+ "webpki-roots 0.26.11",
 ]
 
 [[package]]
@@ -8524,6 +8530,22 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tungstenite 0.26.2",
+ "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "tokio-tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f72a05e828585856dacd553fba484c242c46e391fb0e58917c942ee9202915c"
+dependencies = [
+ "futures-util",
+ "log",
+ "rustls",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tungstenite 0.29.0",
  "webpki-roots 0.26.11",
 ]
 
@@ -8888,6 +8910,8 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.8.6",
+ "rustls",
+ "rustls-pki-types",
  "sha1 0.10.6",
  "thiserror 1.0.69",
  "utf-8",
@@ -8910,6 +8934,24 @@ dependencies = [
  "sha1 0.10.6",
  "thiserror 2.0.18",
  "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.29.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c01152af293afb9c7c2a57e4b559c5620b421f6d133261c60dd2d0cdb38e6b8"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http 1.4.1",
+ "httparse",
+ "log",
+ "rand 0.9.4",
+ "rustls",
+ "rustls-pki-types",
+ "sha1 0.10.6",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

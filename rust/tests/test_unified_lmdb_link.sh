@@ -3,12 +3,20 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rust_dir="$(cd "${script_dir}/.." && pwd)"
+core_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/crates/hashtree-core/Cargo.toml")"
+: "${core_version:?missing hashtree-core package version}"
 git_remote_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/crates/git-remote-htree/Cargo.toml")"
 : "${git_remote_version:?missing git-remote-htree package version}"
 blossom_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/crates/hashtree-blossom/Cargo.toml")"
 : "${blossom_version:?missing hashtree-blossom package version}"
 lmdb_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/crates/hashtree-lmdb/Cargo.toml")"
 : "${lmdb_version:?missing hashtree-lmdb package version}"
+lmdb_master_sys_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/vendor/lmdb-master-sys/Cargo.toml")"
+: "${lmdb_master_sys_version:?missing hashtree-lmdb-master-sys package version}"
+heed_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/vendor/heed/Cargo.toml")"
+: "${heed_version:?missing hashtree-heed package version}"
+social_graph_heed_version="$(awk -F '"' '/^version = / { print $2; exit }' "${rust_dir}/vendor/nostr-social-graph-heed/Cargo.toml")"
+: "${social_graph_heed_version:?missing hashtree-nostr-social-graph-heed package version}"
 
 assert_one_lmdb_implementation() {
     local tree_file=$1
@@ -32,18 +40,18 @@ assert_one_lmdb_implementation() {
             sort -u
     )"
 
-    if [[ "$sys_packages" != "hashtree-lmdb-master-sys v0.2.6-hashtree.1" ]]; then
+    if [[ "$sys_packages" != "hashtree-lmdb-master-sys v${lmdb_master_sys_version}" ]]; then
         echo "${scope} must resolve exactly one hardened native LMDB package; found:" >&2
         printf '%s\n' "${sys_packages:-<none>}" >&2
         return 1
     fi
-    if [[ "$heed_packages" != "hashtree-heed v0.20.5-hashtree.1" ]]; then
+    if [[ "$heed_packages" != "hashtree-heed v${heed_version}" ]]; then
         echo "${scope} must resolve exactly one heed wrapper; found:" >&2
         printf '%s\n' "${heed_packages:-<none>}" >&2
         return 1
     fi
     if [[ "$social_graph_packages" != \
-        "hashtree-nostr-social-graph-heed v0.1.3-hashtree.2" ]]; then
+        "hashtree-nostr-social-graph-heed v${social_graph_heed_version}" ]]; then
         echo "${scope} resolved an unexpected social-graph LMDB adapter:" >&2
         printf '%s\n' "${social_graph_packages:-<none>}" >&2
         return 1
@@ -84,10 +92,10 @@ CARGO_TARGET_DIR="$package_target" cargo package \
 package_dir="$downstream_dir/packages"
 mkdir -p "$package_dir"
 for archive in \
-    hashtree-lmdb-master-sys-0.2.6-hashtree.1.crate \
-    hashtree-heed-0.20.5-hashtree.1.crate \
-    hashtree-nostr-social-graph-heed-0.1.3-hashtree.2.crate \
-    hashtree-core-0.2.89.crate \
+    "hashtree-lmdb-master-sys-${lmdb_master_sys_version}.crate" \
+    "hashtree-heed-${heed_version}.crate" \
+    "hashtree-nostr-social-graph-heed-${social_graph_heed_version}.crate" \
+    "hashtree-core-${core_version}.crate" \
     "hashtree-lmdb-${lmdb_version}.crate" \
     "hashtree-blossom-${blossom_version}.crate" \
     "git-remote-htree-${git_remote_version}.crate"
@@ -106,16 +114,16 @@ publish = false
 
 [dependencies]
 hashtree-lmdb = { path = "${package_dir}/hashtree-lmdb-${lmdb_version}" }
-heed = { package = "hashtree-heed", path = "${package_dir}/hashtree-heed-0.20.5-hashtree.1" }
-nostr-social-graph-heed = { package = "hashtree-nostr-social-graph-heed", path = "${package_dir}/hashtree-nostr-social-graph-heed-0.1.3-hashtree.2" }
+heed = { package = "hashtree-heed", path = "${package_dir}/hashtree-heed-${heed_version}" }
+nostr-social-graph-heed = { package = "hashtree-nostr-social-graph-heed", path = "${package_dir}/hashtree-nostr-social-graph-heed-${social_graph_heed_version}" }
 git-remote-htree = { path = "${package_dir}/git-remote-htree-${git_remote_version}" }
 
 [patch.crates-io]
 hashtree-blossom = { path = "${package_dir}/hashtree-blossom-${blossom_version}" }
-hashtree-core = { path = "${package_dir}/hashtree-core-0.2.89" }
-hashtree-heed = { path = "${package_dir}/hashtree-heed-0.20.5-hashtree.1" }
+hashtree-core = { path = "${package_dir}/hashtree-core-${core_version}" }
+hashtree-heed = { path = "${package_dir}/hashtree-heed-${heed_version}" }
 hashtree-lmdb = { path = "${package_dir}/hashtree-lmdb-${lmdb_version}" }
-hashtree-lmdb-master-sys = { path = "${package_dir}/hashtree-lmdb-master-sys-0.2.6-hashtree.1" }
+hashtree-lmdb-master-sys = { path = "${package_dir}/hashtree-lmdb-master-sys-${lmdb_master_sys_version}" }
 EOF
 cat >"$downstream_dir/src/main.rs" <<'EOF'
 use hashtree_lmdb::LmdbBlobStore;
@@ -150,10 +158,10 @@ downstream_tree="$downstream_dir/dependency-tree.txt"
 cargo tree --manifest-path "$downstream_dir/Cargo.toml" --prefix none >"$downstream_tree"
 assert_one_lmdb_implementation "$downstream_tree" "downstream"
 for extracted_package in \
-    "$package_dir/hashtree-lmdb-master-sys-0.2.6-hashtree.1" \
-    "$package_dir/hashtree-heed-0.20.5-hashtree.1" \
-    "$package_dir/hashtree-nostr-social-graph-heed-0.1.3-hashtree.2" \
-    "$package_dir/hashtree-core-0.2.89" \
+    "$package_dir/hashtree-lmdb-master-sys-${lmdb_master_sys_version}" \
+    "$package_dir/hashtree-heed-${heed_version}" \
+    "$package_dir/hashtree-nostr-social-graph-heed-${social_graph_heed_version}" \
+    "$package_dir/hashtree-core-${core_version}" \
     "$package_dir/hashtree-lmdb-${lmdb_version}" \
     "$package_dir/hashtree-blossom-${blossom_version}" \
     "$package_dir/git-remote-htree-${git_remote_version}"

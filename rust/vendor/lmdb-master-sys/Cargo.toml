@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "hashtree-lmdb-master-sys"
-version = "0.2.6-hashtree.1"
+version = "0.2.6-hashtree.2"
 authors = [
     "Kerollmops <clement@meilisearch.com>",
     "Dan Burkert <dan@danburkert.com>",

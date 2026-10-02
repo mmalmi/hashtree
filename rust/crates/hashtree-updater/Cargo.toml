@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-updater"
-version = "0.2.86"
+version = "0.2.87"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -17,11 +17,15 @@ secure-nostr-blossom = [
   "nostr-pubsub",
 ]
 nostr-pubsub = [
+  "dep:async-trait",
+  "dep:tokio",
   "dep:nostr-pubsub",
   "hashtree-resolver/nostr",
 ]
 
 [dependencies]
+async-trait = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
 hashtree-blossom = { workspace = true, optional = true }
 hashtree-core.workspace = true
 hashtree-resolver.workspace = true

@@ -33,6 +33,9 @@ pub use config::Config;
 pub use error::{Error, Result};
 pub use updater::{CheckedUpdate, InstallOverrides, UpdaterContext};
 
+use hashtree_updater::NostrEventSubscriber;
+use std::sync::Arc;
+
 use tauri::{
     plugin::{Builder as PluginBuilder, TauriPlugin},
     Manager, Runtime,
@@ -40,6 +43,8 @@ use tauri::{
 
 pub(crate) struct PluginState {
     pub(crate) config: Config,
+    pub(crate) provider: Option<Arc<dyn NostrEventSubscriber>>,
+    pub(crate) resolver: Arc<tokio::sync::OnceCell<hashtree_updater::PubsubRootResolver>>,
 }
 
 /// Convenience accessor for the plugin's `UpdaterContext` from a Tauri app
@@ -50,17 +55,32 @@ pub trait HashtreeUpdaterExt<R: Runtime> {
 
 impl<R: Runtime, T: Manager<R>> HashtreeUpdaterExt<R> for T {
     fn hashtree_updater(&self) -> UpdaterContext {
-        let state = self.state::<PluginState>();
-        let pkg = self.app_handle().package_info();
-        UpdaterContext::new(state.config.clone(), pkg.version.to_string())
+        updater::context_from_app(self.app_handle())
     }
 }
 
 pub fn init<R: Runtime>() -> TauriPlugin<R, Config> {
+    build_plugin(None)
+}
+
+/// Share the application's pubsub transport and relay policy with the updater.
+pub fn init_with_provider<R: Runtime>(
+    provider: Arc<dyn NostrEventSubscriber>,
+) -> TauriPlugin<R, Config> {
+    build_plugin(Some(provider))
+}
+
+fn build_plugin<R: Runtime>(
+    provider: Option<Arc<dyn NostrEventSubscriber>>,
+) -> TauriPlugin<R, Config> {
     PluginBuilder::<R, Config>::new("hashtree-updater")
-        .setup(|app, api| {
+        .setup(move |app, api| {
             let config = api.config().clone();
-            app.manage(PluginState { config });
+            app.manage(PluginState {
+                config,
+                provider,
+                resolver: Arc::default(),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

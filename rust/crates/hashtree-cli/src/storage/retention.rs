@@ -539,35 +539,7 @@ impl HashtreeStore {
     /// every index node while avoiding millions of unnecessary event reads.
     pub fn retain_nostr_root(&self, root: &Cid, apply: bool) -> Result<RootRetentionReport> {
         let retention = self.active_retention_protection()?;
-        let tree = HashTree::new(HashTreeConfig::new(self.store_arc()));
-        let mut reachable = sync_block_on(async {
-            let mut reachable = HashSet::new();
-            let mut stack = vec![(root.clone(), "root".to_string())];
-            while let Some((cid, path)) = stack.pop() {
-                if !reachable.insert(cid.hash) {
-                    continue;
-                }
-                let node = tree
-                    .get_tree_node_by_cid(&cid)
-                    .await
-                    .map_err(|error| anyhow::anyhow!("read retained root DAG: {error}"))?
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "retained directory node {} is missing at {path}",
-                            to_hex(&cid.hash)
-                        )
-                    })?;
-                for link in node.links {
-                    if link.link_type.is_directory_like() {
-                        let name = link.name.as_deref().unwrap_or("<unnamed>");
-                        stack.push((link.to_cid(), format!("{path}/{name}")));
-                    } else {
-                        reachable.insert(link.hash);
-                    }
-                }
-            }
-            Ok::<_, anyhow::Error>(reachable)
-        })?;
+        let mut reachable = self.nostr_index_hashes(root)?;
         reachable.extend(retention.hashes().iter().copied());
 
         let rtxn = self.env.read_txn()?;
@@ -623,6 +595,39 @@ impl HashtreeStore {
             deleted_hashes: deleted,
             logical_bytes_before: stats_before.total_bytes,
             logical_bytes_after: stats_after.total_bytes,
+        })
+    }
+
+    /// Reachable blocks of an event index, including raw event-value blobs.
+    pub(crate) fn nostr_index_hashes(&self, root: &Cid) -> Result<HashSet<Hash>> {
+        let tree = HashTree::new(HashTreeConfig::new(self.store_arc()));
+        sync_block_on(async {
+            let mut reachable = HashSet::new();
+            let mut stack = vec![(root.clone(), "root".to_string())];
+            while let Some((cid, path)) = stack.pop() {
+                if !reachable.insert(cid.hash) {
+                    continue;
+                }
+                let node = tree
+                    .get_tree_node_by_cid(&cid)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("read retained root DAG: {error}"))?
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "retained directory node {} is missing at {path}",
+                            to_hex(&cid.hash)
+                        )
+                    })?;
+                for link in node.links {
+                    if link.link_type.is_directory_like() {
+                        let name = link.name.as_deref().unwrap_or("<unnamed>");
+                        stack.push((link.to_cid(), format!("{path}/{name}")));
+                    } else {
+                        reachable.insert(link.hash);
+                    }
+                }
+            }
+            Ok::<_, anyhow::Error>(reachable)
         })
     }
 

@@ -4,15 +4,15 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
-use hashtree_cli::config::ensure_keys_string;
-use hashtree_cli::{
-    Config, FetchConfig, Fetcher, HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver,
-};
+use hashtree_cli::config::NostrEventTransport;
+use hashtree_cli::fips_transport::{start_daemon_fips_transport, DaemonFipsHandle};
+use hashtree_cli::{Config, FetchConfig, Fetcher, HashtreeStore, NostrKeys};
 use hashtree_core::store::slice_blob_range;
 use hashtree_core::{Hash, HashTree, HashTreeConfig, Store, StoreError};
 use hashtree_updater::{
     install, AssetKind, DownloadEvent, DownloadOptions, HashtreeUpdater, InstallTarget,
-    UpdateAsset, UpdateCheckOptions, UpdateRef, UpdateTarget,
+    NostrEventSubscriber, PubsubRootResolver, UpdateAsset, UpdateCheckOptions, UpdateRef,
+    UpdateTarget,
 };
 
 /// `Store` adapter that backs reads with a `Fetcher` so unknown chunks are
@@ -87,24 +87,43 @@ impl Store for FetchingStore {
 
 async fn build_updater(
     data_dir: &Path,
-) -> Result<HashtreeUpdater<NostrRootResolver, FetchingStore>> {
+) -> Result<(
+    HashtreeUpdater<PubsubRootResolver, FetchingStore>,
+    Option<DaemonFipsHandle>,
+)> {
     let store = Arc::new(HashtreeStore::new(data_dir)?);
     let fetcher = Arc::new(Fetcher::new(FetchConfig::default()));
-    let fetching_store = Arc::new(FetchingStore::new(store, fetcher));
-    let tree = HashTree::new(HashTreeConfig::new(fetching_store));
-
     let config = Config::load()?;
-    let (nsec_str, _) = ensure_keys_string()?;
-    let keys = NostrKeys::parse(&nsec_str).context("Failed to parse nsec")?;
-    let resolver_config = NostrResolverConfig {
-        relays: config.nostr.relays.clone(),
-        resolve_timeout: Duration::from_secs(10),
-        secret_key: Some(keys),
+    if !config.nostr.enabled {
+        bail!("update discovery is disabled by the application transport settings");
+    }
+    let keys = NostrKeys::generate();
+    // The updater uses the same configured transport policy as the daemon.
+    let fips = if config.nostr.event_transport == NostrEventTransport::FipsLocalOnly {
+        start_daemon_fips_transport(&config, &keys, store.clone(), Vec::new()).await?
+    } else {
+        None
     };
-    let resolver = NostrRootResolver::new(resolver_config)
-        .await
-        .context("Failed to create Nostr resolver")?;
-    Ok(HashtreeUpdater::new(resolver, tree))
+    let provider: Arc<dyn NostrEventSubscriber> = match config.nostr.event_transport {
+        NostrEventTransport::FipsLocalOnly => Arc::new(
+            fips.as_ref()
+                .and_then(|handle| handle.pubsub_client.as_ref())
+                .context("FIPS update discovery requires the configured FIPS transport")?
+                .fresh_subscriber(),
+        ),
+        NostrEventTransport::Relay => {
+            let relays = config.nostr.active_relays();
+            if relays.is_empty() {
+                bail!("update discovery requires a configured pubsub transport");
+            }
+            Arc::new(nostr_pubsub_relay::RelayEventBus::new(relays, Duration::from_secs(10)).await?)
+        }
+    };
+    let tree = HashTree::new(HashTreeConfig::new(Arc::new(FetchingStore::new(
+        store, fetcher,
+    ))));
+    let resolver = PubsubRootResolver::new(provider, Duration::from_secs(10));
+    Ok((HashtreeUpdater::new(resolver, tree), fips))
 }
 
 fn build_check_options(
@@ -162,7 +181,7 @@ pub(crate) async fn run_install(
     archive_entry: Option<String>,
     only_if_newer: bool,
 ) -> Result<()> {
-    let updater = build_updater(data_dir).await?;
+    let (updater, _fips) = build_updater(data_dir).await?;
     let options = build_check_options(&reference, current_version.clone(), target, manifest_path)?;
     let check = updater.check(options).await?;
 
@@ -370,7 +389,7 @@ pub(crate) fn spawn_detached_bg_check(data_dir: &Path) {
 /// the cache file, exits.
 pub(crate) async fn run_bg_check(data_dir: &Path) -> Result<()> {
     let config = Config::load().unwrap_or_default();
-    let updater = build_updater(data_dir).await?;
+    let (updater, _fips) = build_updater(data_dir).await?;
     let options = build_check_options(
         super::args::HTREE_SELF_REFERENCE,
         env!("CARGO_PKG_VERSION").to_string(),

@@ -4,8 +4,11 @@
 //! depend on or talk to an external FIPS daemon.
 
 mod blob_resolver;
+mod durable_cache;
+mod retained_provider;
 pub(crate) use blob_resolver::read_daemon_blob;
 use blob_resolver::{BlockingStoreRoute, DaemonInboundBlobRoute};
+pub use retained_provider::DaemonNostrProvider;
 
 use crate::config::{Config, NostrEventTransport};
 #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -44,6 +47,7 @@ type DaemonBlobTransport = TcpBlobTransport<StorageRouter>;
 pub type DaemonNostrCache = HashtreeNostrBoundedEventCache<StorageRouter>;
 
 const DAEMON_SAME_HOST_PROVIDER_PRIORITY: i16 = 100;
+const DAEMON_MAX_PROVIDER_ATTEMPTS: usize = 4;
 const DAEMON_NOSTR_CACHE_EVENTS: usize = 4_096;
 const BLOB_RESOLVER_REPLY_MARGIN: Duration = Duration::from_secs(1);
 
@@ -194,6 +198,7 @@ pub async fn start_daemon_fips_transport(
 fn daemon_fips_pubsub_required(config: &Config) -> bool {
     config.nostr.event_transport == NostrEventTransport::FipsLocalOnly
         || config.nostr.decentralized_pubsub_enabled()
+        || !config.nostr.retained_roots.is_empty()
 }
 
 async fn bind_daemon_blob_resolver(
@@ -239,17 +244,21 @@ async fn bind_daemon_blob_resolver(
         .iter()
         .filter_map(|peer| PeerIdentity::from_npub(&peer.npub).ok())
         .collect();
-    if !peer_identities.is_empty() {
-        let max_provider_attempts = peer_identities.len().min(4);
-        let fips_route =
-            FipsBlobRoute::explicit(transport.clone(), peer_identities, max_provider_attempts)
-                .map_err(anyhow::Error::msg)
-                .context("Failed to configure the daemon FIPS blob route")?;
-        routes.push(BlobRouteEntry::new(
-            "configured-fips-peers",
-            Arc::new(MeshForwardingRoute::new(Arc::new(fips_route))),
-        ));
-    }
+    let fips_route = FipsBlobRoute::discovered_and_explicit(
+        endpoint.native_endpoint.clone(),
+        transport.clone(),
+        peer_identities,
+        DAEMON_MAX_PROVIDER_ATTEMPTS,
+    )
+    .map_err(anyhow::Error::msg)
+    .context("Failed to configure the daemon FIPS blob route")?;
+    // Keep the route installed even before a provider appears. Its live
+    // capability snapshot discovers later arrivals and deduplicates peers
+    // already present in the application configuration.
+    routes.push(BlobRouteEntry::new(
+        "fips-blob-providers",
+        Arc::new(MeshForwardingRoute::new(Arc::new(fips_route))),
+    ));
     resolver
         .set_routes(routes)
         .await
@@ -276,6 +285,10 @@ pub fn new_daemon_nostr_cache(store: Arc<StorageRouter>) -> Arc<DaemonNostrCache
     )
 }
 
+pub fn open_daemon_nostr_cache(store: &HashtreeStore) -> Result<Arc<DaemonNostrCache>> {
+    durable_cache::open(store.base_path())
+}
+
 struct AllowDaemonPubsubRoutes;
 
 #[async_trait::async_trait]
@@ -299,13 +312,21 @@ pub async fn start_daemon_nostr_provider(
     config: &Config,
     fips_handle: Option<&DaemonFipsHandle>,
     cache: Option<Arc<DaemonNostrCache>>,
-) -> Result<Option<Arc<dyn nostr_pubsub::PubsubProvider>>> {
+    retained_cache: Option<Arc<DaemonNostrCache>>,
+) -> Result<Option<Arc<DaemonNostrProvider>>> {
     let mut router = NostrPubsubRouter::new(Arc::new(AllowDaemonPubsubRoutes));
-    if let Some(cache) = cache {
+    if let Some(cache) = &cache {
         let route = cache
             .source_route("hashtree-local-cache")
             .context("Failed to configure Hashtree Nostr cache route")?;
-        router = router.with_query_source(RouterQuerySource::new(route, cache));
+        router = router.with_query_source(RouterQuerySource::new(route, Arc::clone(cache)));
+    }
+
+    if let Some(cache) = &retained_cache {
+        let route = cache
+            .source_route("hashtree-retained-heads")
+            .context("Failed to configure retained signed heads")?;
+        router = router.with_query_source(RouterQuerySource::new(route, cache.clone()));
     }
 
     let router = match config.nostr.event_transport {
@@ -353,7 +374,35 @@ pub async fn start_daemon_nostr_provider(
                 .with_live_source(RouterLiveSource::new(route, client))
         }
     };
-    Ok(Some(Arc::new(router)))
+    let Some(cache) = retained_cache else {
+        return Ok(Some(Arc::new(DaemonNostrProvider::new(
+            Arc::new(router),
+            None,
+            None,
+            Vec::new(),
+        ))));
+    };
+    let client = fips_handle.and_then(|handle| handle.pubsub_client.clone());
+    if let Some(client) = &client {
+        let source: Arc<dyn nostr_pubsub::EventBus> = cache.clone();
+        client.set_replay_source(Some(source))?;
+    }
+    let intake = match retained_provider::start_intake(config, cache.clone(), client.clone()).await
+    {
+        Ok(intake) => intake,
+        Err(error) => {
+            if let Some(client) = &client {
+                client.set_replay_source(None)?;
+            }
+            return Err(error);
+        }
+    };
+    Ok(Some(Arc::new(DaemonNostrProvider::new(
+        Arc::new(router),
+        Some(cache),
+        client,
+        intake,
+    ))))
 }
 
 #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -560,6 +609,8 @@ fn normalized_discovery_scope(scope: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    mod local_discovery;
+
     use super::*;
     use hashtree_core::Store;
     #[cfg(feature = "experimental-decentralized-pubsub")]
@@ -609,7 +660,7 @@ mod tests {
         let mut config = Config::default();
         config.nostr.event_transport = NostrEventTransport::FipsLocalOnly;
 
-        let error = start_daemon_nostr_provider(&config, None, None)
+        let error = start_daemon_nostr_provider(&config, None, None, None)
             .await
             .err()
             .expect("missing local FIPS provider must fail");
@@ -711,7 +762,7 @@ fips_trusted_raters = ["invalid-key"]"#,
             "the daemon must own discovery and one bounded peer reputation subscription"
         );
         let provider =
-            start_daemon_nostr_provider(&config, Some(&daemon), Some(Arc::clone(&cache)))
+            start_daemon_nostr_provider(&config, Some(&daemon), Some(Arc::clone(&cache)), None)
                 .await
                 .unwrap()
                 .expect("FIPS root provider");

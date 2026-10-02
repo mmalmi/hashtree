@@ -30,6 +30,8 @@ use hashtree_cli::socialgraph::{self, SocialGraphBackend, SocialGraphCrawler};
 use hashtree_cli::{Config, HashtreeStore};
 
 mod bulk_projection;
+pub(crate) mod catchup;
+pub(crate) mod repair_id;
 pub(crate) use bulk_projection::{
     BulkEventBlobRepairOptions, BulkProfileRepairOptions, BulkProjectionAuditOptions,
     BulkTrancheAppendOptions, BulkTrancheBuildOptions, BulkTrancheFreezeOptions,

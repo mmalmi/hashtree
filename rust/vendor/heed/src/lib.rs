@@ -71,6 +71,7 @@ mod iterator;
 mod mdb;
 mod reserved_space;
 mod txn;
+mod write_admission;
 
 use std::ffi::CStr;
 use std::{error, fmt, io, mem, result};
@@ -94,6 +95,7 @@ pub use self::mdb::flags::{DatabaseFlags, EnvFlags, PutFlags};
 pub use self::reserved_space::ReservedSpace;
 pub use self::traits::{BoxedError, BytesDecode, BytesEncode, Comparator, LexicographicComparator};
 pub use self::txn::{RoTxn, RwTxn};
+pub use self::write_admission::WriteAdmission;
 
 /// The underlying LMDB library version information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -6,6 +6,10 @@ on:
       tag:
         description: 'Tag to release (e.g. v0.2.3)'
         required: true
+      library_preparation:
+        description: 'Verify a library-prep-v* tag without creating a product release'
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,6 +26,21 @@ jobs:
       sha: ${{ steps.commit.outputs.sha }}
       reuse: ${{ steps.evidence.outputs.reuse }}
     steps:
+      - name: Validate release mode
+        shell: bash
+        env:
+          LIBRARY_PREPARATION: ${{ inputs.library_preparation }}
+        run: |
+          set -euo pipefail
+          if [[ "$LIBRARY_PREPARATION" == true ]]; then
+            pattern='^library-prep-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+          elif [[ "$LIBRARY_PREPARATION" == false ]]; then
+            pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
+          else
+            exit 1
+          fi
+          [[ "$RELEASE_TAG" =~ $pattern ]] || { echo 'Release tag does not match the selected mode' >&2; exit 1; }
+
       - name: Checkout release tag
         uses: actions/checkout@v4
         with:
@@ -59,6 +78,7 @@ jobs:
 
   mesh-resource:
     name: Relayless recovery and resource budgets
+    if: ${{ !inputs.library_preparation }}
     needs: source-ci
     uses: irislib/iris-stack/.github/workflows/product-lab.yml@cec9501659b9cf08f9600e3f14987cad6ca1e7d3
     with:
@@ -463,7 +483,7 @@ jobs:
 
   release:
     name: Create Release
-    if: ${{ !cancelled() && needs.source-ci.result == 'success' && needs.build.result == 'success' && needs.mesh-resource.result == 'success' }}
+    if: ${{ !inputs.library_preparation && !cancelled() && needs.source-ci.result == 'success' && needs.build.result == 'success' && needs.mesh-resource.result == 'success' }}
     needs:
       - source-ci
       - build

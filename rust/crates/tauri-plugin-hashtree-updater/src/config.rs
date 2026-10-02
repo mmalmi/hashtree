@@ -16,8 +16,8 @@ pub struct Config {
     /// Default install destination. Apps that override `kind` per-platform
     /// should leave this empty and pass a destination at install time.
     pub destination: Option<PathBuf>,
-    /// Nostr relays for resolving the mutable release root. If empty, falls
-    /// back to the resolver's default relay set.
+    /// Explicit relay provider when no application pubsub provider is supplied.
+    /// Empty means no relay connections.
     pub relays: Vec<String>,
     /// Blossom servers to download asset chunks from. If empty, the
     /// resolver/keys' configured defaults are used.

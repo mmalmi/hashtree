@@ -148,6 +148,16 @@ pub(crate) async fn collect_incremental_cids_for_push(
     previous_root_cid: Cid,
     fetcher: Option<&Fetcher>,
 ) -> Result<Vec<Cid>> {
+    collect_incremental_cids(store, root_cid, previous_root_cid, fetcher, false).await
+}
+
+async fn collect_incremental_cids(
+    store: &HashtreeStore,
+    root_cid: Cid,
+    previous_root_cid: Cid,
+    fetcher: Option<&Fetcher>,
+    require_previous_nodes: bool,
+) -> Result<Vec<Cid>> {
     let mut cids_to_push = Vec::new();
     let mut visited_new = HashSet::new();
     let mut collected = HashSet::new();
@@ -172,9 +182,19 @@ pub(crate) async fn collect_incremental_cids_for_push(
             continue;
         };
 
+        if require_previous_nodes {
+            if let Some(old_cid) = old_cid.as_ref() {
+                ensure_local_blob_for_push(store, fetcher, old_cid)
+                    .await
+                    .context("previous DAG is unavailable for a bounded delta push")?;
+            }
+        }
         let old_node = match old_cid.as_ref() {
             Some(old_cid) => match node_for_push(&tree, old_cid, blob_size).await {
                 Ok(old_node) => old_node,
+                Err(err) if require_previous_nodes => {
+                    return Err(err).context("previous DAG is unreadable for a bounded delta push");
+                }
                 Err(err) => {
                     tracing::warn!(
                         "Failed to inspect previous Blossom DAG node {}; uploading changed subtree: {}",
@@ -300,9 +320,14 @@ pub async fn push_to_blossom(
     server_override: Option<String>,
     force_upload: bool,
     shallow: bool,
+    previous_root: Option<&str>,
 ) -> Result<()> {
     use hashtree_blossom::BlossomClient;
     use nostr::Keys;
+
+    if shallow && previous_root.is_some() {
+        anyhow::bail!("a DAG delta cannot be combined with a shallow push");
+    }
 
     let (nsec_str, _) = ensure_keys_string()?;
     let keys = Keys::parse(&nsec_str).context("Failed to parse nsec")?;
@@ -326,6 +351,20 @@ pub async fn push_to_blossom(
     let cids_to_push = if shallow {
         ensure_local_blob_for_push(store.as_ref(), Some(fetcher.as_ref()), &root_cid).await?;
         vec![root_cid]
+    } else if let Some(previous_root) = previous_root {
+        let previous = parse_root_cid(previous_root)?;
+        ensure_local_blob_for_push(store.as_ref(), Some(fetcher.as_ref()), &previous).await?;
+        println!("Collecting blocks changed since the retained previous root...");
+        // The caller must already retain the previous DAG on this server. A
+        // collection error aborts this push rather than restarting a full scan.
+        collect_incremental_cids(
+            store.as_ref(),
+            root_cid,
+            previous,
+            Some(fetcher.as_ref()),
+            true,
+        )
+        .await?
     } else {
         println!("Collecting blocks...");
         collect_cids_for_push(store.as_ref(), root_cid, Some(fetcher.as_ref())).await?
@@ -771,6 +810,45 @@ mod tests {
         assert!(err
             .to_string()
             .contains("missing local blob while pushing DAG"));
+    }
+
+    #[tokio::test]
+    async fn explicit_delta_fails_when_a_previous_comparison_subtree_is_missing() {
+        let tmp = tempdir().expect("tempdir");
+        let store = HashtreeStore::with_options(tmp.path(), None, 32 * 1024 * 1024).expect("store");
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+        let old_child = tree.put_directory(vec![]).await.expect("old child");
+        let old_root = tree
+            .put_directory(vec![
+                DirEntry::from_cid("subtree", &old_child).with_link_type(LinkType::Dir)
+            ])
+            .await
+            .expect("old root");
+        let leaf = tree.put_blob(b"new event").await.expect("leaf");
+        let new_child = tree
+            .put_directory(vec![DirEntry::new("event", leaf).with_size(9)])
+            .await
+            .expect("new child");
+        let new_root = tree
+            .put_directory(vec![
+                DirEntry::from_cid("subtree", &new_child).with_link_type(LinkType::Dir)
+            ])
+            .await
+            .expect("new root");
+        store
+            .router()
+            .delete_local_only(&old_child.hash)
+            .expect("remove old subtree");
+
+        let error =
+            super::collect_incremental_cids(&store, new_root.clone(), old_root.clone(), None, true)
+                .await
+                .expect_err("explicit deltas must not silently expand to a full traversal");
+        assert!(error.to_string().contains("previous DAG is unavailable"));
+        let fallback = collect_incremental_cids_for_push(&store, new_root, old_root, None)
+            .await
+            .expect("existing background behavior remains available");
+        assert_eq!(fallback.len(), 3);
     }
 
     #[tokio::test]

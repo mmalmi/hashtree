@@ -16,6 +16,8 @@ mod product;
 mod progress;
 #[cfg(feature = "nostr-pubsub")]
 mod pubsub;
+#[cfg(feature = "nostr-pubsub")]
+mod pubsub_resolver;
 mod reference;
 mod target;
 mod update_policy;
@@ -30,6 +32,8 @@ pub use manifest::{
     infer_kind_from_name, infer_target_from_name, AssetKind, PublishedAt, UpdateAsset,
     UpdateManifest,
 };
+#[cfg(feature = "nostr-pubsub")]
+pub use nostr_pubsub::NostrEventSubscriber;
 pub use product::{
     archive_extension_for_target, current_archive_target, dedupe_nonempty, display_manifest_tag,
     download_product_selection, env_csv, platform_app_asset_suffixes,
@@ -42,11 +46,15 @@ pub use product::{
 #[cfg(feature = "secure-nostr-blossom")]
 pub use product::{
     build_secure_nostr_blossom_updater, build_secure_nostr_blossom_updater_with_events,
-    SecureNostrBlossomConfig, SecureNostrBlossomSelection, SecureNostrBlossomUpdater,
+    build_secure_pubsub_blossom_updater, SecureNostrBlossomConfig, SecureNostrBlossomSelection,
+    SecureNostrBlossomUpdater, SecurePubsubBlossomConfig, SecurePubsubBlossomSelection,
+    SecurePubsubBlossomUpdater,
 };
 pub use progress::{DownloadCallback, DownloadEvent};
 #[cfg(feature = "nostr-pubsub")]
 pub use pubsub::UpdateEventCache;
+#[cfg(feature = "nostr-pubsub")]
+pub use pubsub_resolver::PubsubRootResolver;
 pub use reference::UpdateRef;
 pub use target::UpdateTarget;
 pub use update_policy::UpdateAutoCheckPolicy;

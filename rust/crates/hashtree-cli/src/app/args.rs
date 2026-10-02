@@ -281,6 +281,9 @@ pub(crate) enum Commands {
         /// Push only the root blob, not the full reachable DAG
         #[arg(long)]
         shallow: bool,
+        /// Upload changed DAG blocks relative to a root already retained by this server
+        #[arg(long, conflicts_with = "shallow")]
+        previous_root: Option<String>,
     },
 
     /// Get information about a CID
@@ -1190,6 +1193,16 @@ pub(crate) struct SocialGraphIndexArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum NostrIndexCommands {
+    /// Restore one proven missing by-ID entry without advancing catch-up state
+    RepairId {
+        #[command(flatten)]
+        options: super::nostr_index::repair_id::RepairIdArgs,
+    },
+    /// Resume the missing time interval into an exact existing archive root
+    CatchUp {
+        #[command(flatten)]
+        options: super::nostr_index::catchup::CatchupArgs,
+    },
     /// Import signed Nostr events into the local hashtree-backed index
     Import {
         /// Stored event index root to append to (nhash or raw CID; defaults to latest local index root)

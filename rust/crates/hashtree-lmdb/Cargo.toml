@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-lmdb"
-version = "0.2.88"
+version = "0.2.89"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -10,7 +10,7 @@ description = "LMDB-backed content-addressed blob storage for hashtree"
 
 [dependencies]
 hashtree-core.workspace = true
-heed = { package = "hashtree-heed", version = "=0.20.5-hashtree.1", path = "../../vendor/heed", features = ["read-txn-no-tls"] }
+heed = { package = "hashtree-heed", version = "=0.20.5-hashtree.2", path = "../../vendor/heed", features = ["read-txn-no-tls"] }
 async-trait.workspace = true
 page_size = "0.6"
 serde.workspace = true
