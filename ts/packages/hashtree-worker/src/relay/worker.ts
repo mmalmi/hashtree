@@ -486,13 +486,13 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
 
       // Lifecycle
       case 'init':
-        await handleInit(msg.id, msg.config, msg.p2pProviderEnabled === true);
+        await handleInit(msg.id, msg.config, msg.p2pProviderEnabled === true, msg.p2pPeerListSupported !== false);
         break;
       case 'close':
         await handleClose(msg.id);
         break;
       case 'setP2PProviderState':
-        p2pPeerRoutes.setEnabled(msg.enabled);
+        p2pPeerRoutes.setEnabled(msg.enabled, msg.peerListSupported !== false);
         respond({ type: 'void', id: msg.id });
         break;
       case 'setIdentity':
@@ -736,10 +736,10 @@ function respondWithTransfer(msg: WorkerResponse, transfer: Transferable[]) {
 // Lifecycle Handlers
 // ============================================================================
 
-async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean) {
+async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean, peerListSupported = true) {
   try {
     _config = cfg;
-    p2pPeerRoutes.setEnabled(hasP2PProvider);
+    p2pPeerRoutes.setEnabled(hasP2PProvider, peerListSupported);
     blossomBandwidthTracker.reset();
     emitBlossomBandwidthSnapshot();
 

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.16 - 2026-10-02
+
+- Worker 0.4.8 supports aggregate peer providers that own discovery, preserving
+  cancellation and errors while a file request waits for an eligible provider.
+- Add encrypted local-only files and privacy-checked peer reads with explicit
+  source selection. Missing or denied content remains distinct from read errors.
+- FIPS transport 0.4.19 supports authenticated inbound serving with the original
+  hop limit and request deadline, plus response upload limits. Outgoing reads
+  retain their local cache and selected peer sources.
+
 ## @hashtree/fips-transport 0.4.18 - 2026-10-02
 
 - List explicit blob providers without waiting for unrelated capability probes.

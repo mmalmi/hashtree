@@ -58,6 +58,8 @@ export async function createBrowserHashtreeFipsProvider(options) {
     const provider = createFipsWorkerP2PProvider({
         node,
         localStore: options.localStore,
+        serveBlob: options.serveBlob,
+        getUploadLimitBytesPerSecond: options.getUploadLimitBytesPerSecond,
         requestTimeoutMs: options.requestTimeoutMs,
         providerRoutes: options.providerRoutes,
         allowIncomingPeer: options.allowIncomingPeer,

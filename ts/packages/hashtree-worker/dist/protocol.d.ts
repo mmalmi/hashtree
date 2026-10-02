@@ -88,6 +88,7 @@ export type WorkerRequest = {
     id: string;
     config: WorkerConfig;
     p2pProviderEnabled?: boolean;
+    p2pPeerListSupported?: boolean;
 } | {
     type: 'close';
     id: string;
@@ -95,6 +96,12 @@ export type WorkerRequest = {
     type: 'setP2PProviderState';
     id: string;
     enabled: boolean;
+    peerListSupported?: boolean;
+} | {
+    type: 'putFile';
+    id: string;
+    data: Uint8Array;
+    upload?: boolean;
 } | {
     type: 'putBlob';
     id: string;

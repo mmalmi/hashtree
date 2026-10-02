@@ -38,7 +38,10 @@ export type FipsWorkerNode = FipsDatagramEndpoint;
 export interface FipsWorkerP2PProviderOptions {
   node: FipsWorkerNode;
   localStore: Store;
+  /** Inbound only. HTL 0 permits local content only; do not forward upstream. */
+  serveBlob?: (hash: Hash, peerId: string, signal: AbortSignal, htl: number) => Promise<Uint8Array | null>;
   requestTimeoutMs?: number;
+  getUploadLimitBytesPerSecond?: () => number | null;
   /** Authenticated capability routes or explicitly configured Hashtree peers. */
   providerRoutes?: FipsBlobRouteSource;
   /** Authenticated adjacent identities to probe before admitting as blob providers. */
@@ -62,6 +65,8 @@ export class FipsWorkerP2PProvider implements HashtreeWorkerP2PProvider {
     this.transport = new TcpBlobTransport({
       endpoint: options.node,
       localStore: options.localStore,
+      serveBlob: options.serveBlob,
+      getUploadLimitBytesPerSecond: options.getUploadLimitBytesPerSecond,
       timeoutMs: options.requestTimeoutMs,
       allowIncomingPeer: options.allowIncomingPeer,
     });

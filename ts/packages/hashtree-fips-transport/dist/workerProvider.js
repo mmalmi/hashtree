@@ -17,6 +17,8 @@ export class FipsWorkerP2PProvider {
         this.transport = new TcpBlobTransport({
             endpoint: options.node,
             localStore: options.localStore,
+            serveBlob: options.serveBlob,
+            getUploadLimitBytesPerSecond: options.getUploadLimitBytesPerSecond,
             timeoutMs: options.requestTimeoutMs,
             allowIncomingPeer: options.allowIncomingPeer,
         });

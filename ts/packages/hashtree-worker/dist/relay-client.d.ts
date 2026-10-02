@@ -14,6 +14,7 @@ export declare class RelayWorkerClient {
     private workerReady;
     private p2pProvider;
     private p2pProviderEnabledAtInit;
+    private p2pPeerListSupportedAtInit;
     private initPromise;
     private initPending;
     private pendingRequests;

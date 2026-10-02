@@ -319,4 +319,44 @@ describe('RelayWorkerClient', () => {
 
     await client.close();
   });
+
+  it('advertises aggregate capability and preserves an undefined fetch peer', async () => {
+    const worker = new FakeRelayWorker();
+    const client = new RelayWorkerClient((class {
+      constructor() { return worker; }
+    }) as unknown as new () => Worker, { relays: [], pubkey: '11'.repeat(32) });
+    const fetch = vi.fn(async () => null);
+    client.setP2PProvider({ fetch });
+    try {
+      await client.init();
+      expect(worker.messages[0]).toMatchObject({
+        type: 'init', p2pProviderEnabled: true, p2pPeerListSupported: false,
+      });
+      worker.emit({ type: 'p2pFetch', requestId: 'aggregate', hashHex: 'ab'.repeat(32), htl: 4 });
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith('ab'.repeat(32), undefined, 4));
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('replays a listing capability change while relay initialization is pending', async () => {
+    const worker = new DelayedReadyRelayWorker();
+    const client = new RelayWorkerClient((class {
+      constructor() { return worker; }
+    }) as unknown as new () => Worker, { relays: [], pubkey: '11'.repeat(32) });
+    client.setP2PProvider({ fetch: async () => null, listPeerIds: () => ['peer'] });
+    const initializing = client.init();
+    client.setP2PProvider({ fetch: async () => null });
+    worker.emit({ type: 'ready' });
+    await initializing;
+    try {
+      expect(worker.messages.filter((message) => message.type === 'setP2PProviderState'))
+        .toMatchObject([{ enabled: true, peerListSupported: false }]);
+      client.setP2PProvider({ fetch: async () => null, listPeerIds: () => ['peer'] });
+      expect(worker.messages.at(-1)).toMatchObject({ enabled: true, peerListSupported: true });
+    } finally {
+      await client.close();
+    }
+  });
+
 });

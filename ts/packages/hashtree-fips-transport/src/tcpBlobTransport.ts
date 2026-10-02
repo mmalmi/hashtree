@@ -1,3 +1,4 @@
+import { UploadRateLimiter } from './uploadRateLimiter.js';
 import { FipsTcpEndpoint, State, type ConnectionId, type FipsDatagramEndpoint } from '@fips/tcp';
 import {
   BLOB_DEFAULT_HTL,
@@ -24,7 +25,12 @@ export const TCP_BLOB_MAX_BYTES = 16 * 1024 * 1024;
 export interface TcpBlobTransportOptions {
   endpoint: FipsDatagramEndpoint;
   localStore: Store;
+  /** Optional inbound-only loader after authenticating and admitting the requesting peer. */
+  /** Inbound only. HTL 0 permits local content only; do not forward upstream. */
+  serveBlob?: (hash: Hash, peerId: string, signal: AbortSignal, htl: number) => Promise<Uint8Array | null>;
   timeoutMs?: number;
+  /** Global inbound response bandwidth; null or zero leaves uploads unlimited. */
+  getUploadLimitBytesPerSecond?: () => number | null;
   /** Authorize the authenticated FIPS identity before serving a blob request. */
   allowIncomingPeer?: (peerId: string) => boolean | Promise<boolean>;
 }
@@ -36,9 +42,12 @@ export class TcpBlobTransport {
   private readonly timer: ReturnType<typeof setInterval>;
   private pumping = false;
   private closed = false;
+  private readonly serving = new Set<AbortController>();
+  private readonly uploadRateLimiter: UploadRateLimiter;
 
   constructor(private readonly options: TcpBlobTransportOptions) {
     this.timeoutMs = options.timeoutMs ?? 5_500;
+    this.uploadRateLimiter = new UploadRateLimiter({ bytesPerSecond: options.getUploadLimitBytesPerSecond?.() });
     this.tcp = new FipsTcpEndpoint(options.endpoint, TCP_BLOB_SERVICE_PORT, {
       sendBuffer: 1024 * 1024,
       receiveBuffer: 0xffff,
@@ -93,6 +102,7 @@ export class TcpBlobTransport {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
+    for (const controller of this.serving) controller.abort(new Error('TCP/FIPS transport is closed'));
     clearInterval(this.timer);
     await this.tcp.dispose();
   }
@@ -157,13 +167,26 @@ export class TcpBlobTransport {
       return;
     }
     const deadline = Date.now() + this.timeoutMs;
-    const request = await this.readExact(connection, REQUEST_BYTES, deadline);
-    const { hash } = decodeTcpBlobRequest(request);
-    const data = await this.verifiedGet(hash);
-    const header = encodeTcpBlobResponseHeader(Boolean(data), data?.byteLength ?? 0);
-    await this.writeAll(connection, header, deadline);
-    if (data) await this.writeAll(connection, data, deadline);
-    await this.tcp.close(connection).catch(() => undefined);
+    const controller = new AbortController();
+    this.serving.add(controller);
+    const timeout = setTimeout(() => controller.abort(new Error('TCP/FIPS serving timed out')), this.timeoutMs);
+    try {
+      const request = await this.readExact(connection, REQUEST_BYTES, deadline);
+      const { hash, htl } = decodeTcpBlobRequest(request);
+      if (this.closed) controller.abort(new Error('TCP/FIPS transport is closed'));
+      controller.signal.throwIfAborted();
+      const data = await withServingAbort(this.options.serveBlob
+        ? this.options.serveBlob(hash, peerId, controller.signal, htl)
+        : this.options.localStore.get(hash), controller.signal);
+      if (data && !bytesEqual(await sha256(data), hash)) throw new Error('local blob hash mismatch');
+      const header = encodeTcpBlobResponseHeader(Boolean(data), data?.byteLength ?? 0);
+      await this.writeAll(connection, header, deadline, true);
+      if (data) await this.writeAll(connection, data, deadline, true);
+      await this.tcp.close(connection).catch(() => undefined);
+    } finally {
+      clearTimeout(timeout);
+      this.serving.delete(controller);
+    }
   }
 
   private async verifiedGet(hash: Hash): Promise<Uint8Array | null> {
@@ -181,11 +204,28 @@ export class TcpBlobTransport {
     throw new Error('TCP/FIPS connect timed out');
   }
 
-  private async writeAll(connection: ConnectionId, data: Uint8Array, deadline: number): Promise<void> {
+  private async writeAll(connection: ConnectionId, data: Uint8Array, deadline: number, response = false): Promise<void> {
     let offset = 0;
     while (offset < data.byteLength && Date.now() < deadline) {
-      const end = Math.min(offset + IO_CHUNK_BYTES, data.byteLength);
-      const accepted = await this.tcp.write(connection, data.subarray(offset, end));
+      if (response && this.closed) throw new Error('TCP/FIPS transport is closed');
+      const limited = response && this.options.getUploadLimitBytesPerSecond !== undefined;
+      if (limited) this.uploadRateLimiter.setBytesPerSecond(this.options.getUploadLimitBytesPerSecond!());
+      const capacity = limited ? this.uploadRateLimiter.getBytesPerSecond() : null;
+      const end = Math.min(offset + Math.min(IO_CHUNK_BYTES, capacity || IO_CHUNK_BYTES), data.byteLength);
+      const size = end - offset;
+      if (limited) {
+        const reservation = this.uploadRateLimiter.reserve(size);
+        if (!reservation.allowed) {
+          await sleep(Math.min(reservation.delayMs, POLL_INTERVAL_MS, deadline - Date.now()));
+          continue;
+        }
+      }
+      let accepted = 0;
+      try {
+        accepted = await this.tcp.write(connection, data.subarray(offset, end));
+      } finally {
+        if (limited) this.uploadRateLimiter.refund(size - accepted);
+      }
       offset += accepted;
       if (accepted === 0) await sleep(POLL_INTERVAL_MS);
     }
@@ -292,4 +332,23 @@ function checkHtl(htl: number): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+
+function withServingAbort<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+    pending.then((value) => {
+      signal.removeEventListener('abort', abort);
+      resolve(value);
+    }, (error) => {
+      signal.removeEventListener('abort', abort);
+      reject(error);
+    });
+    if (signal.aborted) {
+      signal.removeEventListener('abort', abort);
+      abort();
+    }
+  });
 }

@@ -7,7 +7,7 @@ Runs hashtree storage operations in a Web Worker to keep the main thread free. H
 ## Install
 
 ```bash
-npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-worker-0.4.3.tgz
+npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.16/hashtree-worker-0.4.8.tgz
 ```
 
 The npm registry version is older than this runtime archive. With npm 12+, add
@@ -65,6 +65,24 @@ await client.close();
 
 There is no direct Hashtree WebRTC signaling or data-channel stack in this
 package. `@fips/transport-webrtc` is the browser WebRTC underlay.
+
+## Aggregate providers and local files
+
+A provider may omit `listPeerIds` when its `fetch(hashHex, peerId, htl)` already
+owns discovery. The worker then calls it with an undefined peer ID under the
+existing read deadline. Keep a pending or failed discovery distinct from an
+explicit missing-file result.
+
+Use `client.putFile(data, { upload: false })` to create an encrypted local file
+without uploading it. Upload defaults to false. The returned secret `nhash`
+allows readers to decrypt the file; peer serving exposes only its ciphertext.
+`putBlob(data, mimeType, false)` remains a raw local operation and does not grant
+peer access.
+
+`client.getBlobForPeer(hashHex, { sourceIds: ['blossom'] })` limits a privacy-checked
+peer read to local authorized content and the configured Blossom source. An
+empty source list permits only authorized local content. Denied or missing
+content returns null; operational failures reject the promise.
 
 ## Relay Worker Client
 

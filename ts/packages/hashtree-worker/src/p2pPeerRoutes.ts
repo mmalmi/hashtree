@@ -11,7 +11,7 @@ const DEFAULT_PEER_LIST_CACHE_MS = 1_500;
 const MAX_P2P_PEERS = 32;
 const P2P_ROUTE_TIMEOUT_MS = 20_000;
 
-/** One composite route over the exact identities advertised by its configured provider. */
+/** One route over listed peers, or an aggregate provider that owns peer discovery. */
 export class P2PPeerRoutes implements BlobRoute {
   readonly id = 'p2p';
   private peerIds: string[] = [];
@@ -20,6 +20,7 @@ export class P2PPeerRoutes implements BlobRoute {
   private refreshedAt = 0;
   private inflight: Promise<string[]> | null = null;
   private generation = 0;
+  private peerListSupported = true;
 
   constructor(
     private readonly bridge: P2PBridge,
@@ -35,7 +36,8 @@ export class P2PPeerRoutes implements BlobRoute {
 
   isAvailable = (): boolean => this.bridge.isEnabled();
 
-  setEnabled(enabled: boolean): void {
+  setEnabled(enabled: boolean, peerListSupported = true): void {
+    this.peerListSupported = peerListSupported;
     this.generation += 1;
     this.peerIds = [];
     this.peerRoutes.clear();
@@ -47,6 +49,7 @@ export class P2PPeerRoutes implements BlobRoute {
 
   async read(request: BlobRequest, context?: BlobRouteContext) {
     if (context?.signal?.aborted) throw new Error('P2P blob request was cancelled');
+    if (!this.peerListSupported) return this.bridge.fetch(request, undefined, context?.signal);
     const peerIds = await this.peerList();
     if (context?.signal?.aborted) throw new Error('P2P blob request was cancelled');
     if (peerIds.length === 0) return BLOB_NO_RESULT;
@@ -54,7 +57,7 @@ export class P2PPeerRoutes implements BlobRoute {
   }
 
   async peerList(): Promise<string[]> {
-    if (!this.bridge.isEnabled()) return [];
+    if (!this.bridge.isEnabled() || !this.peerListSupported) return [];
     if (this.peerIds.length > 0 && Date.now() - this.refreshedAt < this.cacheMs) return [...this.peerIds];
 
     const generation = this.generation;

@@ -5,7 +5,8 @@ export type P2PFetchHandler = (hashHex: string, peerId?: string, htl?: number) =
 export type P2PPeerListHandler = () => string[] | Promise<string[]>;
 export interface WorkerP2PProvider {
     fetch: P2PFetchHandler;
-    listPeerIds: P2PPeerListHandler;
+    /** Omit when fetch owns discovery and accepts an undefined peer ID. */
+    listPeerIds?: P2PPeerListHandler;
 }
 export declare class HashtreeWorkerClient {
     private readonly workerFactory;
@@ -40,6 +41,13 @@ export declare class HashtreeWorkerClient {
         hashHex: string;
         nhash: string;
     }>;
+    /** Store an encrypted, peer-shareable file locally; uploading is opt-in. */
+    putFile(data: Uint8Array, options?: {
+        upload?: boolean;
+    }): Promise<{
+        hashHex: string;
+        nhash: string;
+    }>;
     putBlock(data: Uint8Array, options?: {
         hashHex?: string;
         mimeType?: string;
@@ -71,7 +79,9 @@ export declare class HashtreeWorkerClient {
         size?: number;
         source?: BlobSource;
     }>;
-    getBlobForPeer(hashHex: string): Promise<Uint8Array | null>;
+    getBlobForPeer(hashHex: string, options?: {
+        sourceIds?: readonly string[];
+    }): Promise<Uint8Array | null>;
     setBlossomServers(servers: BlossomServerConfig[]): Promise<void>;
     registerMediaPort(port: MessagePort): Promise<void>;
     setStorageMaxBytes(maxBytes: number): Promise<void>;

@@ -1,4 +1,4 @@
-import { type Store } from '@hashtree/core';
+import { type Hash, type Store } from '@hashtree/core';
 import type { FipsDatagramEndpoint } from '@fips/tcp';
 import { TcpBlobTransport } from './tcpBlobTransport.js';
 export declare const HASHTREE_BLOB_CAPABILITY = "hashtree.blob/1";
@@ -24,7 +24,10 @@ export type FipsWorkerNode = FipsDatagramEndpoint;
 export interface FipsWorkerP2PProviderOptions {
     node: FipsWorkerNode;
     localStore: Store;
+    /** Inbound only. HTL 0 permits local content only; do not forward upstream. */
+    serveBlob?: (hash: Hash, peerId: string, signal: AbortSignal, htl: number) => Promise<Uint8Array | null>;
     requestTimeoutMs?: number;
+    getUploadLimitBytesPerSecond?: () => number | null;
     /** Authenticated capability routes or explicitly configured Hashtree peers. */
     providerRoutes?: FipsBlobRouteSource;
     /** Authenticated adjacent identities to probe before admitting as blob providers. */

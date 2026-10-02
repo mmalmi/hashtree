@@ -1,3 +1,4 @@
+import { UploadRateLimiter } from './uploadRateLimiter.js';
 import { FipsTcpEndpoint, State } from '@fips/tcp';
 import { BLOB_DEFAULT_HTL, BLOB_MAX_HTL, sha256, } from '@hashtree/core';
 export const TCP_BLOB_SERVICE_PORT = 39_018;
@@ -21,9 +22,12 @@ export class TcpBlobTransport {
     timer;
     pumping = false;
     closed = false;
+    serving = new Set();
+    uploadRateLimiter;
     constructor(options) {
         this.options = options;
         this.timeoutMs = options.timeoutMs ?? 5_500;
+        this.uploadRateLimiter = new UploadRateLimiter({ bytesPerSecond: options.getUploadLimitBytesPerSecond?.() });
         this.tcp = new FipsTcpEndpoint(options.endpoint, TCP_BLOB_SERVICE_PORT, {
             sendBuffer: 1024 * 1024,
             receiveBuffer: 0xffff,
@@ -73,6 +77,8 @@ export class TcpBlobTransport {
         if (this.closed)
             return;
         this.closed = true;
+        for (const controller of this.serving)
+            controller.abort(new Error('TCP/FIPS transport is closed'));
         clearInterval(this.timer);
         await this.tcp.dispose();
     }
@@ -133,14 +139,30 @@ export class TcpBlobTransport {
             return;
         }
         const deadline = Date.now() + this.timeoutMs;
-        const request = await this.readExact(connection, REQUEST_BYTES, deadline);
-        const { hash } = decodeTcpBlobRequest(request);
-        const data = await this.verifiedGet(hash);
-        const header = encodeTcpBlobResponseHeader(Boolean(data), data?.byteLength ?? 0);
-        await this.writeAll(connection, header, deadline);
-        if (data)
-            await this.writeAll(connection, data, deadline);
-        await this.tcp.close(connection).catch(() => undefined);
+        const controller = new AbortController();
+        this.serving.add(controller);
+        const timeout = setTimeout(() => controller.abort(new Error('TCP/FIPS serving timed out')), this.timeoutMs);
+        try {
+            const request = await this.readExact(connection, REQUEST_BYTES, deadline);
+            const { hash, htl } = decodeTcpBlobRequest(request);
+            if (this.closed)
+                controller.abort(new Error('TCP/FIPS transport is closed'));
+            controller.signal.throwIfAborted();
+            const data = await withServingAbort(this.options.serveBlob
+                ? this.options.serveBlob(hash, peerId, controller.signal, htl)
+                : this.options.localStore.get(hash), controller.signal);
+            if (data && !bytesEqual(await sha256(data), hash))
+                throw new Error('local blob hash mismatch');
+            const header = encodeTcpBlobResponseHeader(Boolean(data), data?.byteLength ?? 0);
+            await this.writeAll(connection, header, deadline, true);
+            if (data)
+                await this.writeAll(connection, data, deadline, true);
+            await this.tcp.close(connection).catch(() => undefined);
+        }
+        finally {
+            clearTimeout(timeout);
+            this.serving.delete(controller);
+        }
     }
     async verifiedGet(hash) {
         const data = await this.options.localStore.get(hash);
@@ -158,11 +180,32 @@ export class TcpBlobTransport {
         }
         throw new Error('TCP/FIPS connect timed out');
     }
-    async writeAll(connection, data, deadline) {
+    async writeAll(connection, data, deadline, response = false) {
         let offset = 0;
         while (offset < data.byteLength && Date.now() < deadline) {
-            const end = Math.min(offset + IO_CHUNK_BYTES, data.byteLength);
-            const accepted = await this.tcp.write(connection, data.subarray(offset, end));
+            if (response && this.closed)
+                throw new Error('TCP/FIPS transport is closed');
+            const limited = response && this.options.getUploadLimitBytesPerSecond !== undefined;
+            if (limited)
+                this.uploadRateLimiter.setBytesPerSecond(this.options.getUploadLimitBytesPerSecond());
+            const capacity = limited ? this.uploadRateLimiter.getBytesPerSecond() : null;
+            const end = Math.min(offset + Math.min(IO_CHUNK_BYTES, capacity || IO_CHUNK_BYTES), data.byteLength);
+            const size = end - offset;
+            if (limited) {
+                const reservation = this.uploadRateLimiter.reserve(size);
+                if (!reservation.allowed) {
+                    await sleep(Math.min(reservation.delayMs, POLL_INTERVAL_MS, deadline - Date.now()));
+                    continue;
+                }
+            }
+            let accepted = 0;
+            try {
+                accepted = await this.tcp.write(connection, data.subarray(offset, end));
+            }
+            finally {
+                if (limited)
+                    this.uploadRateLimiter.refund(size - accepted);
+            }
             offset += accepted;
             if (accepted === 0)
                 await sleep(POLL_INTERVAL_MS);
@@ -258,5 +301,22 @@ function checkHtl(htl) {
 }
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
+}
+function withServingAbort(pending, signal) {
+    return new Promise((resolve, reject) => {
+        const abort = () => reject(signal.reason);
+        signal.addEventListener('abort', abort, { once: true });
+        pending.then((value) => {
+            signal.removeEventListener('abort', abort);
+            resolve(value);
+        }, (error) => {
+            signal.removeEventListener('abort', abort);
+            reject(error);
+        });
+        if (signal.aborted) {
+            signal.removeEventListener('abort', abort);
+            abort();
+        }
+    });
 }
 //# sourceMappingURL=tcpBlobTransport.js.map

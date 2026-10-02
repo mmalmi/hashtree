@@ -317,8 +317,8 @@ function nextRootWatchId() {
     rootWatchCounter += 1;
     return `root_${Date.now()}_${rootWatchCounter}`;
 }
-function setP2PProviderEnabled(enabled) {
-    p2pPeerRoutes.setEnabled(enabled);
+function setP2PProviderEnabled(enabled, peerListSupported = true) {
+    p2pPeerRoutes.setEnabled(enabled, peerListSupported);
 }
 function toBlobSource(sourceId) {
     return sourceId === 'idb'
@@ -366,9 +366,12 @@ async function hasBlobData(hashHex, options = {}) {
     }
     return { available: false };
 }
-async function loadPeerBlobData(hashHex) {
+async function loadPeerBlobData(hashHex, sourceIds) {
+    const readSourceIds = sourceIds
+        ? PEER_SHARED_READ_SOURCE_IDS.filter((sourceId) => sourceIds.includes(sourceId))
+        : PEER_SHARED_READ_SOURCE_IDS;
     const trustedHash = shouldServeHashToPeer(hashHex, peerShareableHashes);
-    const loaded = await loadBlobData(hashHex, trustedHash ? {} : { sourceIds: PEER_SHARED_READ_SOURCE_IDS });
+    const loaded = await loadBlobData(hashHex, trustedHash ? { sourceIds } : { sourceIds: readSourceIds });
     if (!loaded) {
         return null;
     }
@@ -378,7 +381,7 @@ async function loadPeerBlobData(hashHex) {
     }
     const readSourceResult = await loadBlobData(hashHex, {
         skipPrimary: true,
-        sourceIds: PEER_SHARED_READ_SOURCE_IDS,
+        sourceIds: readSourceIds,
     });
     if (readSourceResult) {
         markEncryptedHashes([hashHex], peerShareableHashes);
@@ -903,9 +906,9 @@ function registerMediaPort(port) {
         });
     };
 }
-async function init(config, hasP2PProvider = false) {
+async function init(config, hasP2PProvider = false, peerListSupported = true) {
     resetState();
-    p2pPeerRoutes.setEnabled(hasP2PProvider);
+    p2pPeerRoutes.setEnabled(hasP2PProvider, peerListSupported);
     const storeName = config.storeName || DEFAULT_STORE_NAME;
     const maxBytes = config.storageMaxBytes || DEFAULT_STORAGE_MAX_BYTES;
     probeIntervalMs = config.connectivityProbeIntervalMs || DEFAULT_CONNECTIVITY_PROBE_INTERVAL_MS;
@@ -1135,12 +1138,12 @@ function respondBlobStored(id, fileCid, upload) {
 async function handleRequest(req, nostrSubscribe) {
     switch (req.type) {
         case 'init': {
-            await init(req.config, req.p2pProviderEnabled === true);
+            await init(req.config, req.p2pProviderEnabled === true, req.p2pPeerListSupported !== false);
             respond({ type: 'ready', id: req.id });
             return;
         }
         case 'setP2PProviderState': {
-            setP2PProviderEnabled(req.enabled);
+            setP2PProviderEnabled(req.enabled, req.peerListSupported !== false);
             respond({ type: 'void', id: req.id });
             return;
         }
@@ -1149,13 +1152,14 @@ async function handleRequest(req, nostrSubscribe) {
             respond({ type: 'void', id: req.id });
             return;
         }
+        case 'putFile':
         case 'putBlob': {
             if (!storage || !blossom || !tree) {
                 respond({ type: 'error', id: req.id, error: 'Worker not initialized' });
                 return;
             }
             let fileCid;
-            if (req.upload === false) {
+            if (req.type === 'putBlob' && req.upload === false) {
                 const hash = await tree.putBlob(req.data);
                 fileCid = { hash };
             }
@@ -1165,7 +1169,7 @@ async function handleRequest(req, nostrSubscribe) {
                 assertEncryptedUploadCid(fileCid);
                 await markEncryptedTreeHashesAsPeerShareable(fileCid);
             }
-            respondBlobStored(req.id, fileCid, req.upload !== false);
+            respondBlobStored(req.id, fileCid, req.type === 'putFile' ? req.upload === true : req.upload !== false);
             return;
         }
         case 'putBlock': {
@@ -1262,7 +1266,7 @@ async function handleRequest(req, nostrSubscribe) {
             let loaded;
             try {
                 loaded = req.forPeer
-                    ? await loadPeerBlobData(req.hashHex)
+                    ? await loadPeerBlobData(req.hashHex, req.sourceIds)
                     : await loadBlobData(req.hashHex, {
                         sourceIds: req.sourceIds,
                         skipPrimary: req.skipPrimary,
@@ -1277,9 +1281,7 @@ async function handleRequest(req, nostrSubscribe) {
                 respond({
                     type: 'blob',
                     id: req.id,
-                    error: req.forPeer
-                        ? 'Refusing to serve blob to peer because it is not reachable from a shared read source'
-                        : 'Blob not found',
+                    ...(req.forPeer ? {} : { error: 'Blob not found' }),
                 });
                 return;
             }

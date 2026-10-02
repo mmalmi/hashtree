@@ -64,9 +64,9 @@ export type WorkerRequest =
   | { type: 'cancelNostrQuery'; id: string; requestId: string }
   | { type: 'query'; id: string; filters: NostrFilter[]; options?: Omit<RuntimeQueryOptions, 'signal'> }
   // Lifecycle
-  | { type: 'init'; id: string; config: WorkerConfig; p2pProviderEnabled?: boolean }
+  | { type: 'init'; id: string; config: WorkerConfig; p2pProviderEnabled?: boolean; p2pPeerListSupported?: boolean }
   | { type: 'close'; id: string }
-  | { type: 'setP2PProviderState'; id: string; enabled: boolean }
+  | { type: 'setP2PProviderState'; id: string; enabled: boolean; peerListSupported?: boolean }
   | { type: 'setIdentity'; id: string; pubkey: string; nsec?: string }
 
   // Store operations (low-level hash-based)
