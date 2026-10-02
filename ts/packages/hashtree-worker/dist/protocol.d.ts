@@ -115,11 +115,13 @@ export type WorkerRequest = {
     hashHex?: string;
     mimeType?: string;
     upload?: boolean;
+    peerShare?: boolean;
 } | {
     type: 'putBlocks';
     id: string;
     blocks: RawBlockInput[];
     upload?: boolean;
+    peerShare?: boolean;
 } | {
     type: 'beginPutBlobStream';
     id: string;

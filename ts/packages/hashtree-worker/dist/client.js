@@ -304,6 +304,7 @@ export class HashtreeWorkerClient {
         }
         return { hashHex: res.hashHex, nhash: res.nhash };
     }
+    /** Store raw bytes; peerShare explicitly permits peers to read those unchanged bytes. */
     async putBlock(data, options = {}) {
         const res = await this.request({
             type: 'putBlock',
@@ -311,17 +312,20 @@ export class HashtreeWorkerClient {
             hashHex: options.hashHex,
             mimeType: options.mimeType,
             upload: options.upload,
+            peerShare: options.peerShare,
         }, PUT_BLOB_TIMEOUT_MS);
         if (res.type !== 'blockStored') {
             throw new Error('Unexpected response for putBlock');
         }
         return res.block;
     }
+    /** Store raw blocks; peerShare authorizes only this batch after every hash validates. */
     async putBlocks(blocks, options = {}) {
         const res = await this.request({
             type: 'putBlocks',
             blocks,
             upload: options.upload,
+            peerShare: options.peerShare,
         }, PUT_BLOB_TIMEOUT_MS);
         if (res.type !== 'blocksStored') {
             throw new Error('Unexpected response for putBlocks');

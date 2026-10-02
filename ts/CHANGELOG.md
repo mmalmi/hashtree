@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.17 - 2026-10-02
+
+- FIPS transport 0.4.20 preserves explicitly configured blob routes when the
+  same peer also passes automatic discovery. Local-only routes and requests
+  remain local-only.
+- Worker 0.4.9 adds explicit peer sharing for raw block writes without changing
+  their content identifiers. Permission persists across restarts and applies
+  only to the supplied, successfully verified blocks; ordinary cache writes
+  remain private.
+
 ## TypeScript runtime 0.5.16 - 2026-10-02
 
 - Worker 0.4.8 supports aggregate peer providers that own discovery, preserving

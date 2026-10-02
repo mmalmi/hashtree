@@ -111,7 +111,9 @@ export class FipsWorkerP2PProvider implements HashtreeWorkerP2PProvider {
     // Listing already admitted routes must not wait for unrelated service probes.
     // Fetches still await discovery so their fallback set is not incomplete.
     if (waitForDiscovery || explicit.length === 0) await this.discoverProviders();
-    const discovered = [...this.probed].filter(([, status]) => status.available)
+    // A service probe adds providers; it must not replace an explicit route policy.
+    const configured = new Set(explicit.map(({ peerId }) => peerId.trim()));
+    const discovered = [...this.probed].filter(([peerId, status]) => status.available && !configured.has(peerId))
       .map(([peerId]) => ({ peerId, htl: 0 }));
     return normalizeRoutes([...explicit, ...discovered]);
   }

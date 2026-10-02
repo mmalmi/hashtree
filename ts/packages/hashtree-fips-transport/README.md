@@ -10,7 +10,7 @@ Install the FIPS peers from their immutable release archives alongside this
 package. These two peers are not yet available in the npm registry:
 
 ```bash
-npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.16/hashtree-fips-transport-0.4.19.tgz \
+npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.17/hashtree-fips-transport-0.4.20.tgz \
   https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.48/fips-core-0.0.48.tgz \
   https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.48/fips-transport-webrtc-0.0.51.tgz
 ```
@@ -89,6 +89,10 @@ serve decrypted files through the blob interface.
 The discovery scope is configurable for isolated deployments, but applications
 should normally stay on `fips-overlay-v1` so they share the generic FIPS transit
 fabric rather than creating an application-specific discovery fabric.
+
+Explicit worker `providerRoutes` retain their forwarding policy when the same
+peer passes automatic service discovery. Discovered-only peers and explicitly
+local-only routes stay local-only, as do requests with an explicit HTL of zero.
 
 ## Controlled inbound serving
 
