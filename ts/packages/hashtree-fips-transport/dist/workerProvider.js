@@ -41,7 +41,7 @@ export class FipsWorkerP2PProvider {
     async listPeerIds() {
         if (this.closed)
             return [];
-        return (await this.routes()).map((route) => route.peerId);
+        return (await this.routes(false)).map((route) => route.peerId);
     }
     close() {
         if (this.closed)
@@ -49,10 +49,13 @@ export class FipsWorkerP2PProvider {
         this.closed = true;
         void this.transport.close();
     }
-    async routes() {
+    async routes(waitForDiscovery = true) {
         const source = this.options.providerRoutes;
         const explicit = source ? (typeof source === 'function' ? await source() : source) : [];
-        await this.discoverProviders();
+        // Listing already admitted routes must not wait for unrelated service probes.
+        // Fetches still await discovery so their fallback set is not incomplete.
+        if (waitForDiscovery || explicit.length === 0)
+            await this.discoverProviders();
         const discovered = [...this.probed].filter(([, status]) => status.available)
             .map(([peerId]) => ({ peerId, htl: 0 }));
         return normalizeRoutes([...explicit, ...discovered]);
