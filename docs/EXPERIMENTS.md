@@ -2,6 +2,36 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-10-02 - Bounded Catch-up Fetch Pipeline
+
+The CLI overlaps two author fetches while preserving one ordered writer. The
+writer, fetched results and active requests together occupy at most two author
+slots. A slot is reused only after its blocks are synced and its checkpoint is
+persisted. Each slot keeps its own relay connections and capacity cache; a
+required relay can therefore see two connections and two independent bounded
+capacity probes per pass. Fetch failures remain errors, and successful earlier
+authors can still reach their durable checkpoints before the error is returned.
+
+Network jobs run on the existing Tokio worker pool. The CLI's storage work stays
+on its calling thread, so a long synchronous append does not stop a prefetched
+query from consuming timely relay replies. Owned jobs are aborted and drained on
+ordinary failure; dropping the coordinator aborts them on cancellation. There
+are no detached writer jobs or additional result queues.
+
+The focused fixtures cover out-of-order results, backpressure, source reuse,
+writer and fetch failures, cancellation, and a synchronous writer phase longer
+than the next query's deadline. The signed local-relay integration fixture
+compares overlapping fetches with one-author invocations under the same frozen
+policy. Test execution and any measured speedup belong to the integration gate;
+no live throughput improvement is claimed before that measurement.
+
+Per-author `fetch_ms` can overlap the preceding author's append. `elapsed_ms`
+includes any wait for the preceding author to commit, so summing these values no
+longer measures process duration. Compare actual invocation wall times and
+processed author/event counts. The two-slot bound limits accepted event payload
+to twice the per-author cap, not total RSS: parsing, event clones and index
+structures need additional memory.
+
 ## 2026-10-02 - Catch-up Timestamp Ties and Append Costs
 
 The catch-up pagination guard treated a two-event history at one timestamp as

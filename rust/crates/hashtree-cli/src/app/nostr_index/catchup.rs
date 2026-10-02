@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 
 use super::{cid_to_nhash, parse_root_text, persist_json_atomic, CrawlStateLock, INDEX_DIR};
 
+mod pipeline;
 mod relay;
 
 #[derive(clap::Args, Debug)]
@@ -138,7 +139,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
-    let mut state = CatchupState::prepare(saved, policy, args.until, now)?;
+    let state = CatchupState::prepare(saved, policy, args.until, now)?;
     let config = Config::load()?;
     let store = Arc::new(HashtreeStore::with_catchup_physical_space(
         &data_dir,
@@ -158,7 +159,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         .validate_index_root(Some(&base_root))
         .await
         .context("validate original catchup base root")?;
-    let mut root = parse_root_text(&state.root).context("parse catchup checkpoint root")?;
+    let root = parse_root_text(&state.root).context("parse catchup checkpoint root")?;
     event_store
         .validate_index_root(Some(&root))
         .await
@@ -169,71 +170,97 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         .max_authors_per_run
         .map(|count| state.next_author.saturating_add(count).min(authors.len()))
         .unwrap_or(authors.len());
-    let mut source = relay::RelaySource::new(
-        state.policy.fetch_timeout_secs,
-        state.policy.max_bytes_per_author,
-    );
-    while state.next_author < end {
-        let author_started = Instant::now();
-        let author = &authors[state.next_author];
-        let events = fetch_catchup_author(
-            &mut source,
-            &state.policy,
-            author,
-            state.pass_since,
-            state.pass_until,
-        )
-        .await?;
-        let fetch_ms = author_started.elapsed().as_millis();
-        let received = events.len() as u64;
-        let append_started = Instant::now();
-        let report = event_store
-            .build_with_superseded_nodes(Some(&root), events)
-            .await
-            .with_context(|| {
-                format!(
-                    "append catchup author {} ({author}); {}",
-                    state.next_author,
-                    store.physical_space_status()
+    let authors = Arc::new(authors);
+    let policy = Arc::new(state.policy.clone());
+    let pass_since = state.pass_since;
+    let pass_until = state.pass_until;
+    let sources = std::array::from_fn(|_| {
+        relay::RelaySource::new(policy.fetch_timeout_secs, policy.max_bytes_per_author)
+    });
+    let (_, state) = pipeline::run(
+        sources,
+        state.next_author..end,
+        |mut source, ordinal| {
+            let authors = authors.clone();
+            let policy = policy.clone();
+            async move {
+                let started = Instant::now();
+                let events = fetch_catchup_author(
+                    &mut source,
+                    &policy,
+                    &authors[ordinal],
+                    pass_since,
+                    pass_until,
                 )
-            })?;
-        let append_ms = append_started.elapsed().as_millis();
-        let next_root = report
-            .root
-            .context("catchup writer discarded its nonempty base root")?;
-        let validate_started = Instant::now();
-        event_store.validate_index_root(Some(&next_root)).await?;
-        let validate_ms = validate_started.elapsed().as_millis();
-        let sync_started = Instant::now();
-        store.force_sync().context("force-sync catchup blocks")?;
-        let sync_ms = sync_started.elapsed().as_millis();
-        let checkpoint_started = Instant::now();
-        let mut next = state.clone();
-        next.root = cid_to_nhash(&next_root)?;
-        next.next_author += 1;
-        next.events_received = next.events_received.saturating_add(received);
-        store.admit_checkpoint_write(&state_file, serde_json::to_vec(&next)?.len() + 1)?;
-        persist_json_atomic(&state_file, &next, "Nostr catchup checkpoint")?;
-        state = next;
-        root = next_root;
-        // Do not delete superseded nodes: published roots and rollback readers
-        // may still depend on them. Publication owns eventual root-aware GC.
-        eprintln!(
-            "Nostr catchup checkpoint: authors={}/{} interval={}..{} events_received={} author_events={} fetch_ms={} append_ms={} validate_ms={} sync_ms={} checkpoint_ms={} elapsed_ms={}",
-            state.next_author,
-            authors.len(),
-            state.pass_since,
-            state.pass_until,
-            state.events_received,
-            received,
-            fetch_ms,
-            append_ms,
-            validate_ms,
-            sync_ms,
-            checkpoint_started.elapsed().as_millis(),
-            author_started.elapsed().as_millis()
-        );
-    }
+                .await
+                .map_err(anyhow::Error::from);
+                let fetch_ms = started.elapsed().as_millis();
+                (source, events.map(|events| (events, fetch_ms, started)))
+            }
+        },
+        (root, state),
+        |(root, state), ordinal, (events, fetch_ms, author_started)| {
+            let author = &authors[ordinal];
+            let store = &store;
+            let event_store = &event_store;
+            let state_file = &state_file;
+            let author_count = authors.len();
+            async move {
+                // Fetches may finish out of order, but there is exactly one
+                // writer and its next author must match the saved frontier.
+                anyhow::ensure!(ordinal == state.next_author, "catchup author order changed");
+                let received = events.len() as u64;
+                let append_started = Instant::now();
+                let report = event_store
+                    .build_with_superseded_nodes(Some(&root), events)
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "append catchup author {} ({author}); {}",
+                            state.next_author,
+                            store.physical_space_status()
+                        )
+                    })?;
+                let append_ms = append_started.elapsed().as_millis();
+                let next_root = report
+                    .root
+                    .context("catchup writer discarded its nonempty base root")?;
+                let validate_started = Instant::now();
+                event_store.validate_index_root(Some(&next_root)).await?;
+                let validate_ms = validate_started.elapsed().as_millis();
+                let sync_started = Instant::now();
+                store.force_sync().context("force-sync catchup blocks")?;
+                let sync_ms = sync_started.elapsed().as_millis();
+                let checkpoint_started = Instant::now();
+                let mut next = state.clone();
+                next.root = cid_to_nhash(&next_root)?;
+                next.next_author += 1;
+                next.events_received = next.events_received.saturating_add(received);
+                store.admit_checkpoint_write(&state_file, serde_json::to_vec(&next)?.len() + 1)?;
+                persist_json_atomic(&state_file, &next, "Nostr catchup checkpoint")?;
+                let state = next;
+                // Do not delete superseded nodes: published roots and rollback readers
+                // may still depend on them. Publication owns eventual root-aware GC.
+                eprintln!(
+                    "Nostr catchup checkpoint: authors={}/{} interval={}..{} events_received={} author_events={} fetch_ms={} append_ms={} validate_ms={} sync_ms={} checkpoint_ms={} elapsed_ms={}",
+                    state.next_author,
+                    author_count,
+                    state.pass_since,
+                    state.pass_until,
+                    state.events_received,
+                    received,
+                    fetch_ms,
+                    append_ms,
+                    validate_ms,
+                    sync_ms,
+                    checkpoint_started.elapsed().as_millis(),
+                    author_started.elapsed().as_millis()
+                );
+                Ok((next_root, state))
+            }
+        },
+    )
+    .await?;
     println!(
         "{}",
         serde_json::json!({

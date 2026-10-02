@@ -550,12 +550,20 @@ async fn cli_capacity_probe_is_cached_and_excludes_witness_events_from_author_in
     let temp = TempDir::new().unwrap();
     let alice = Keys::generate();
     let bob = Keys::generate();
+    let carol = Keys::generate();
+    let dave = Keys::generate();
     let witness = Keys::generate();
     let old = event(&alice, 1, "retained archive");
     let root = import(&temp, &old);
     std::fs::write(
         temp.path().join("authors.txt"),
-        format!("{}\n{}\n", alice.public_key(), bob.public_key()),
+        format!(
+            "{}\n{}\n{}\n{}\n",
+            alice.public_key(),
+            bob.public_key(),
+            carol.public_key(),
+            dave.public_key()
+        ),
     )
     .unwrap();
     let incoming = vec![
@@ -563,6 +571,10 @@ async fn cli_capacity_probe_is_cached_and_excludes_witness_events_from_author_in
         event(&alice, 20, "alice two"),
         event(&bob, 30, "bob one"),
         event(&bob, 30, "bob two"),
+        event(&carol, 40, "carol one"),
+        event(&carol, 40, "carol two"),
+        event(&dave, 50, "dave one"),
+        event(&dave, 50, "dave two"),
     ];
     // These are the first three results of the author-free page, but their
     // author is not eligible for this run. They prove capacity, not coverage.
@@ -579,29 +591,29 @@ async fn cli_capacity_probe_is_cached_and_excludes_witness_events_from_author_in
             .output()
             .unwrap(),
     );
-    assert_eq!(completed["next_author"], 2);
+    assert_eq!(completed["next_author"], 4);
     assert_eq!(completed["complete"], true);
     assert_eq!(
-        completed["events_received"], 4,
+        completed["events_received"], 8,
         "probe events must not count as author results"
     );
     assert_eq!(completed["pass_until"], 100);
     assert_eq!(
         *relay.capacity_filters.lock().unwrap(),
-        vec![json!({"kinds": [1, 5], "since": 10, "until": 100, "limit": 4})],
-        "one cached probe must retain the exact pass/kinds/limit and omit authors",
+        vec![json!({"kinds": [1, 5], "since": 10, "until": 100, "limit": 4}); 2],
+        "each of two source workers reuses its exact pass/kinds/limit probe across two authors",
     );
     assert!(
         relay.count_filters.lock().unwrap().is_empty(),
         "observed capacity above the unsaturated tie must avoid unavailable COUNT"
     );
-    assert_eq!(relay.connections.load(Ordering::Relaxed), 1);
+    assert_eq!(relay.connections.load(Ordering::Relaxed), 2);
     let next_root = completed["root"].as_str().unwrap();
     assert_eq!(query_id_count(&temp, &root, &[old.id.to_hex()]), 1);
     let wanted = std::iter::once(old.id.to_hex())
         .chain(incoming.iter().map(|event| event.id.to_hex()))
         .collect::<Vec<_>>();
-    assert_eq!(query_id_count(&temp, next_root, &wanted), 5);
+    assert_eq!(query_id_count(&temp, next_root, &wanted), 9);
     let excluded = witnesses
         .iter()
         .map(|event| event.id.to_hex())
