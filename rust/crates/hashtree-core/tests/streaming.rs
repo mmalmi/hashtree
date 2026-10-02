@@ -246,7 +246,7 @@ async fn assert_stream_preserves_tree_shaped_blobs(encrypted: bool) {
 
         // A raw pack leaf began with MessagePack [[], 4]. A valid-looking
         // [[], 1] must also remain bytes instead of becoming an empty file.
-        let mut leaf = vec![0; 32];
+        let mut leaf = [0; 32];
         leaf[..3].copy_from_slice(&[0x92, 0x90, node_type]);
         let mut data = leaf.repeat(5);
         data.extend_from_slice(b"tail");
