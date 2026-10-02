@@ -93,6 +93,10 @@ export type WorkerRequest =
       hash: Uint8Array;
       key?: Uint8Array;
       visibility: TreeVisibility;
+      /** Remote hydration preserves its original timestamp and cannot force a newer root out. */
+      source?: 'local-write' | 'remote';
+      /** Original Unix seconds; required for remote hydration. */
+      updatedAt?: number;
       labels?: string[];
       encryptedKey?: string;
       keyId?: string;
