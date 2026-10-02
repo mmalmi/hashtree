@@ -47,6 +47,7 @@ type DaemonBlobTransport = TcpBlobTransport<StorageRouter>;
 pub type DaemonNostrCache = HashtreeNostrBoundedEventCache<StorageRouter>;
 
 const DAEMON_SAME_HOST_PROVIDER_PRIORITY: i16 = 100;
+const DAEMON_MAX_PROVIDER_ATTEMPTS: usize = 4;
 const DAEMON_NOSTR_CACHE_EVENTS: usize = 4_096;
 const BLOB_RESOLVER_REPLY_MARGIN: Duration = Duration::from_secs(1);
 
@@ -243,17 +244,21 @@ async fn bind_daemon_blob_resolver(
         .iter()
         .filter_map(|peer| PeerIdentity::from_npub(&peer.npub).ok())
         .collect();
-    if !peer_identities.is_empty() {
-        let max_provider_attempts = peer_identities.len().min(4);
-        let fips_route =
-            FipsBlobRoute::explicit(transport.clone(), peer_identities, max_provider_attempts)
-                .map_err(anyhow::Error::msg)
-                .context("Failed to configure the daemon FIPS blob route")?;
-        routes.push(BlobRouteEntry::new(
-            "configured-fips-peers",
-            Arc::new(MeshForwardingRoute::new(Arc::new(fips_route))),
-        ));
-    }
+    let fips_route = FipsBlobRoute::discovered_and_explicit(
+        endpoint.native_endpoint.clone(),
+        transport.clone(),
+        peer_identities,
+        DAEMON_MAX_PROVIDER_ATTEMPTS,
+    )
+    .map_err(anyhow::Error::msg)
+    .context("Failed to configure the daemon FIPS blob route")?;
+    // Keep the route installed even before a provider appears. Its live
+    // capability snapshot discovers later arrivals and deduplicates peers
+    // already present in the application configuration.
+    routes.push(BlobRouteEntry::new(
+        "fips-blob-providers",
+        Arc::new(MeshForwardingRoute::new(Arc::new(fips_route))),
+    ));
     resolver
         .set_routes(routes)
         .await
@@ -604,6 +609,8 @@ fn normalized_discovery_scope(scope: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    mod local_discovery;
+
     use super::*;
     use hashtree_core::Store;
     #[cfg(feature = "experimental-decentralized-pubsub")]

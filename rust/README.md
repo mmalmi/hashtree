@@ -159,6 +159,11 @@ The daemon acts as a local Blossom server. Remote blob reads use the canonical
 may use UDP, FIPS WebRTC, or another underlay. Git operations automatically use
 the daemon when running.
 
+The daemon also advertises its blob service through FIPS same-host rendezvous
+and reads from discovered local providers without a configured peer list.
+Discovered and configured providers share one bounded, deduplicated route;
+forwarded misses still consume the ordinary mesh hop budget.
+
 ## Git Remote Helper
 
 Push/pull git repos via hashtree:
