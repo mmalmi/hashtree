@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## @hashtree/fips-transport 0.4.18 - 2026-10-02
+
+- List explicit blob providers without waiting for unrelated capability probes.
+  Fetches still await discovery to preserve their fallback providers.
+
 ## TypeScript runtime 0.5.12 - 2026-09-30
 
 - Update the FIPS file transport to the shared runtime with authenticated
