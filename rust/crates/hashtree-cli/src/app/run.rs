@@ -604,13 +604,18 @@ fn run_command(
             .await?;
             let nostr_cache =
                 hashtree_cli::fips_transport::new_daemon_nostr_cache(store.store_arc());
+            let retained_nostr_cache = if pool_audit_read_only {
+                None
+            } else {
+                Some(hashtree_cli::fips_transport::open_daemon_nostr_cache(
+                    &store,
+                )?)
+            };
             let nostr_provider = hashtree_cli::fips_transport::start_daemon_nostr_provider(
                 &config,
                 fips_handle.as_ref(),
                 Some(Arc::clone(&nostr_cache)),
-                Some(hashtree_cli::fips_transport::open_daemon_nostr_cache(
-                    &store,
-                )?),
+                retained_nostr_cache,
             )
             .await?;
             #[cfg(feature = "experimental-decentralized-pubsub")]

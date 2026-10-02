@@ -382,6 +382,10 @@ async fn real_start_resolves_external_root_without_pool_audit_writes() -> Result
     assert_audit_rejection(client.get(format!("{base}/ws")).send().await?).await?;
 
     target.stop();
+    assert!(
+        !target_data.join("nostr-pubsub-heads").exists(),
+        "audit serving must not open the retained-head writer"
+    );
     let after = durable_file_snapshot(&target_data);
     assert_eq!(
         after, before,
