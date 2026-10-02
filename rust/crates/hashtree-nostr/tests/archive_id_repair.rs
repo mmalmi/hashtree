@@ -59,9 +59,24 @@ async fn projections(
 #[tokio::test]
 async fn verified_reappend_repairs_only_missing_id_and_retains_every_prior_root() {
     let keys = Keys::parse(&format!("{:064x}", 1)).unwrap();
-    let historical = (1..=48)
+    let mut historical = (1..=48)
         .map(|at| signed_note(&keys, at))
         .collect::<Vec<_>>();
+    // Populate both replaceable projections as well, so the exported fixture
+    // satisfies the publisher's unchanged requirement for all nine indexes.
+    for (kind, created_at) in [(0u16, 49), (3, 50), (30023, 51)] {
+        let event = EventBuilder::new(Kind::from(kind), "synthetic retained metadata")
+            .custom_created_at(Timestamp::from_secs(created_at))
+            .tags([Tag::parse(["d", "fixture-article"]).unwrap()])
+            .sign_with_keys(&keys)
+            .unwrap();
+        historical.push(
+            VerifiedEvent::try_from(event)
+                .unwrap()
+                .to_stored_event()
+                .into_stored(),
+        );
+    }
     let target = historical[23].clone();
     let backing = Arc::new(MemoryStore::new());
     let store = NostrEventStore::with_options(
