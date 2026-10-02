@@ -7,7 +7,7 @@ Runs hashtree storage operations in a Web Worker to keep the main thread free. H
 ## Install
 
 ```bash
-npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.17/hashtree-worker-0.4.9.tgz
+npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.18/hashtree-worker-0.4.10.tgz
 ```
 
 The npm registry version is older than this runtime archive. With npm 12+, add
@@ -116,6 +116,14 @@ const stop = client.onTreeRootUpdate((update) => {
   console.log(update.treeName, update.visibility);
 });
 ```
+
+When bridging a resolved or persisted root through the `setTreeRootCache` protocol
+message, send `source: 'remote'` with its original `updatedAt` Unix timestamp in
+seconds. This preserves replacement ordering across cache hydration and offline
+restarts. Current local edits use `source: 'local-write'`; omitting `source` keeps
+that existing local-write behavior. Remote timestamps must be nonnegative safe
+integers. Hydration does not verify an event signature; the caller remains
+responsible for accepting only trusted root observations.
 
 ## Browser Runtime Defaults
 

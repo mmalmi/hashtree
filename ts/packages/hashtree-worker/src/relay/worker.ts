@@ -541,21 +541,7 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         await handleResolveRoot(msg.id, msg.npub, msg.path);
         break;
       case 'setTreeRootCache':
-        await handleSetTreeRootCache(
-          msg.id,
-          msg.npub,
-          msg.treeName,
-          msg.hash,
-          msg.key,
-          msg.visibility,
-          msg.labels,
-          {
-            encryptedKey: msg.encryptedKey,
-            keyId: msg.keyId,
-            selfEncryptedKey: msg.selfEncryptedKey,
-            selfEncryptedLinkKey: msg.selfEncryptedLinkKey,
-          },
-        );
+        await handleSetTreeRootCache(msg);
         break;
       case 'getTreeRootInfo':
         await handleGetTreeRootInfo(msg.id, msg.npub, msg.treeName);
@@ -1188,31 +1174,27 @@ async function handleResolveRoot(id: string, npub: string, path?: string) {
 }
 
 async function handleSetTreeRootCache(
-  id: string,
-  npub: string,
-  treeName: string,
-  hash: Uint8Array,
-  key: Uint8Array | undefined,
-  visibility: 'public' | 'link-visible' | 'private',
-  labels?: string[],
-  metadata?: {
-    encryptedKey?: string;
-    keyId?: string;
-    selfEncryptedKey?: string;
-    selfEncryptedLinkKey?: string;
-  },
+  message: Extract<WorkerRequest, { type: 'setTreeRootCache' }>,
 ) {
+  const { id, npub, treeName, hash, key, visibility, source, updatedAt } = message;
   try {
+    if (source !== undefined && source !== 'local-write' && source !== 'remote') {
+      throw new Error('Invalid tree root cache source');
+    }
+    if ((source === 'remote' || updatedAt !== undefined)
+      && (!Number.isSafeInteger(updatedAt) || updatedAt < 0)) {
+      throw new Error('Tree root cache requires a nonnegative integer timestamp');
+    }
     await setCachedRoot(npub, treeName, { hash, key }, visibility, {
-      labels,
-      encryptedKey: metadata?.encryptedKey,
-      keyId: metadata?.keyId,
-      selfEncryptedKey: metadata?.selfEncryptedKey,
-      selfEncryptedLinkKey: metadata?.selfEncryptedLinkKey,
-      // This message comes from the page's local-write registry. It is the
-      // authoritative root for immediate same-origin /htree reads and must not
-      // lose to a relay event solely because both landed in the same second.
-      force: true,
+      updatedAt,
+      labels: message.labels,
+      encryptedKey: message.encryptedKey,
+      keyId: message.keyId,
+      selfEncryptedKey: message.selfEncryptedKey,
+      selfEncryptedLinkKey: message.selfEncryptedLinkKey,
+      // Local writes remain authoritative for immediate reads. Hydrating a
+      // remote root must retain its event time and normal replacement order.
+      force: source !== 'remote',
     });
     respond({ type: 'void', id });
   } catch (err) {
