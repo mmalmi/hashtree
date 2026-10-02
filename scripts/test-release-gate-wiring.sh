@@ -13,6 +13,7 @@ reject() {
 
 bash rust/tests/test_publish_plan.sh
 node --test rust/scripts/release_ci_evidence.test.mjs
+python3 -B rust/tests/test_unified_lmdb_link_versions.py
 python3 scripts/tests/test_mesh_release.py
 
 # A clean checkout must resolve every non-workspace Rust dependency without

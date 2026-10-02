@@ -1,6 +1,39 @@
 # Changelog
 
-## Unreleased
+## 0.2.152 - 2026-10-02
+
+- Add per-environment physical write admission for LMDB catch-up, preserving
+  the last committed checkpoint and retained history when capacity is refused.
+- Publish the matching vendor cohort: hashtree-lmdb-master-sys
+  0.2.6-hashtree.2, hashtree-heed 0.20.5-hashtree.2, and
+  hashtree-nostr-social-graph-heed 0.1.3-hashtree.3. Require the same Heed
+  version from hashtree-lmdb 0.2.89 and the CLI.
+
+- Fail B-tree mutations when existing nodes or values are unavailable, instead
+  of replacing them with incomplete content, using hashtree-index 0.2.85.
+- Repair one verified missing event-ID entry without advancing the retained
+  catch-up checkpoint or publishing a new root.
+- Overlap two bounded author fetches while preserving ordered durable writes.
+- Add opt-in best-effort catch-up with per-source failure tracking and immutable
+  coverage receipts; strict catch-up remains the default.
+- Discover other local Hashtree providers through the shared FIPS service
+  advertisements, including when an anchor does not serve blocks itself.
+- Preserve blob link types while streaming files with Hashtree core 0.2.91.
+- Retain signed release heads in a bounded Hashtree event index across daemon
+  restarts, and replay retained heads through the application-owned Nostr
+  Pubsub provider when they leave the in-memory event cache.
+- Preserve the committed index on failed writes and keep its writer lease
+  until replay workers and owned cache reads finish during daemon shutdown.
+- Publish the event-index helpers in hashtree-nostr 0.2.89 and checkpoint
+  support in hashtree-nostr-pubsub 0.2.86; require both from the CLI.
+- Update hashtree-fips-transport to 0.4.22 with nvpn-fips-core 0.4.90 and
+  nvpn-fips-tcp-endpoint 0.2.23, and require nostr-pubsub-fips 0.5.13.
+  Query deadlines are unchanged.
+- Prevent raw LMDB writes from evicting stored blocks when no cache-size
+  limit is configured, using hashtree-lmdb 0.2.89.
+- Include git-remote-htree 0.2.90 with the same LMDB fix and require it
+  from this CLI.
+- Require this CLI from hashtree-embedded 0.2.93.
 
 ## 0.2.151 - 2026-10-01
 

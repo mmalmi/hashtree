@@ -1,10 +1,61 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { findReusableCiRun, requiredCiJobs } from './release_ci_evidence.mjs';
 
 const repository = 'example/hashtree';
 const sha = 'a'.repeat(40);
+
+test('library preparation and product release require distinct tags', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /library_preparation:\n(?:[^\n]*\n)*?        type: boolean\n        default: false/);
+  const script = workflow.match(/- name: Validate release mode[\s\S]*?        run: \|\n((?:          [^\n]*\n)+)/)?.[1];
+  assert.ok(script, 'validate the mode before resolving or building the tag');
+  for (const [mode, tag, accepted] of [
+    ['true', 'library-prep-v0.2.152', true],
+    ['false', 'v0.2.152', true],
+    ['false', 'v0.2.152-rc.1', true],
+    ['true', 'v0.2.152', false],
+    ['false', 'library-prep-v0.2.152', false],
+    ['false', '', false],
+    ['yes', 'v0.2.152', false],
+    ['true', 'library-prep-master', false],
+    ['false', 'v0.2.152; exit 0', false],
+  ]) {
+    const result = spawnSync('bash', ['-c', script], {
+      env: { ...process.env, RELEASE_TAG: tag, LIBRARY_PREPARATION: mode },
+      encoding: 'utf8',
+    });
+    assert.equal(result.status === 0, accepted, `${mode}:${tag}: ${result.stderr}`);
+  }
+});
+
+test('preparation cannot run product mesh or create a release', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8');
+  const condition = job => {
+    const body = workflow.match(new RegExp(`\\n  ${job}:\\n([\\s\\S]*?)(?=\\n  [\\w-]+:|$)`))?.[1];
+    const expression = body?.match(/\n    if: \$\{\{ (.+) \}\}/)?.[1];
+    assert.ok(expression, `${job} requires an explicit condition`);
+    return new Function('inputs', 'needs', 'cancelled',
+      `return (${expression.replace(/needs\.([\w-]+)/g, "needs['$1']")});`);
+  };
+  const mesh = condition('mesh-resource');
+  const release = condition('release');
+  const needs = Object.fromEntries(['source-ci', 'build', 'mesh-resource'].map(name => [name, { result: 'success' }]));
+  assert.equal(mesh({ library_preparation: true }, needs, () => false), false);
+  assert.equal(mesh({ library_preparation: false }, needs, () => false), true);
+  assert.equal(release({ library_preparation: true }, needs, () => false), false);
+  assert.equal(release({ library_preparation: false }, needs, () => false), true);
+  assert.equal(release({ library_preparation: false }, needs, () => true), false);
+  for (const job of Object.keys(needs)) {
+    for (const result of ['failure', 'skipped', 'cancelled']) {
+      needs[job].result = result;
+      assert.equal(release({ library_preparation: false }, needs, () => false), false);
+    }
+    needs[job].result = 'success';
+  }
+});
 
 function fixture() {
   const workflow = { id: 12, path: '.github/workflows/ci.yml', state: 'active' };
@@ -50,6 +101,16 @@ test('reuses all successful jobs from the exact push commit and latest attempt',
   ]);
   f.run.head_branch = 'master';
   assert.equal((await f.select()).id, 34);
+});
+
+test('requires every canonical CI job, including documentation', async () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8');
+  const canonicalJobs = [...workflow.matchAll(/^    name: (.+)$/gm)].map(match => match[1]);
+  assert.equal(canonicalJobs.length, 10);
+  assert.deepEqual([...requiredCiJobs].sort(), canonicalJobs.sort());
+  const f = fixture();
+  f.jobs.splice(f.jobs.findIndex(job => job.name === 'TypeScript Documentation'), 1);
+  assert.equal(await f.select(), null);
 });
 
 for (const [description, mutate] of [

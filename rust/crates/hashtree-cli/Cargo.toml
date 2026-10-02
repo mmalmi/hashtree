@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-cli"
-version = "0.2.151"
+version = "0.2.152"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -20,7 +20,7 @@ required-features = ["git-remote-wrapper"]
 
 [dependencies]
 # Git remote helper
-git-remote-htree = { version = "=0.2.89", path = "../git-remote-htree" }
+git-remote-htree = { version = "=0.2.90", path = "../git-remote-htree" }
 
 # Core hashtree crates
 hashtree-core.workspace = true
