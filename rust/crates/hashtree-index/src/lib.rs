@@ -292,7 +292,7 @@ impl<S: Store> BTree<S> {
         let Some(root) = root else {
             return Ok(0);
         };
-        self.count_links_recursive(root.clone()).await
+        self.count_links_recursive(root.clone(), false).await
     }
 
     /// Exhaustively validate every node in a CID-link B-tree.
@@ -591,7 +591,7 @@ impl<S: Store> BTree<S> {
         parallel_children: bool,
     ) -> BTreeFuture<'a, Vec<BuiltNode>> {
         Box::pin(async move {
-            let entries = sort_entries(self.tree.list_directory(&node).await?);
+            let entries = sort_entries(self.tree.list_directory_required(&node).await?);
             if is_leaf_node(&entries) {
                 return self.update_string_leaf(entries, changes).await;
             }
@@ -707,9 +707,12 @@ impl<S: Store> BTree<S> {
             if entry.link_type != LinkType::Blob {
                 continue;
             }
-            let Some(data) = self.tree.get(&entry_cid(&entry), None).await? else {
-                continue;
-            };
+            let cid = entry_cid(&entry);
+            let data = self
+                .tree
+                .get(&cid, None)
+                .await?
+                .ok_or_else(|| HashTreeError::MissingChunk(hex::encode(cid.hash)))?;
             final_entries.insert(unescape_key(&entry.name), String::from_utf8(data)?);
         }
         for (key, value) in changes {
@@ -972,7 +975,7 @@ impl<S: Store> BTree<S> {
         parallel_children: bool,
     ) -> BTreeFuture<'a, LinkNodeUpdate> {
         Box::pin(async move {
-            let entries = sort_entries(self.tree.list_directory(&node).await?);
+            let entries = sort_entries(self.tree.list_directory_required(&node).await?);
             let mut update = if is_leaf_node(&entries) {
                 LinkNodeUpdate {
                     nodes: self.update_link_leaf(entries, changes).await?,
@@ -1269,7 +1272,7 @@ impl<S: Store> BTree<S> {
         value: InsertValue,
     ) -> BTreeFuture<'a, InsertResult> {
         Box::pin(async move {
-            let entries = self.tree.list_directory(&node).await?;
+            let entries = self.tree.list_directory_required(&node).await?;
             if is_leaf_node(&entries) {
                 return self.insert_into_leaf(node, entries, key, value).await;
             }
@@ -1295,22 +1298,21 @@ impl<S: Store> BTree<S> {
             };
 
             let new_node = self
-                .tree
-                .set_entry(&node, &[], &escaped_key, &entry_cid, size, link_type)
+                .set_node_entry(&node, &escaped_key, &entry_cid, size, link_type)
                 .await?;
 
-            let new_entries = self.tree.list_directory(&new_node).await?;
+            let new_entries = self.tree.list_directory_required(&new_node).await?;
             if new_entries.len() > self.max_keys {
                 return Ok(InsertResult {
                     cid: new_node,
-                    count: count_link_entries_or_subtrees(self, &new_entries).await?,
+                    count: count_link_entries_or_subtrees(self, &new_entries, true).await?,
                     split: Some(self.split_leaf(new_entries).await?),
                 });
             }
 
             Ok(InsertResult {
                 cid: new_node,
-                count: count_link_entries_or_subtrees(self, &new_entries).await?,
+                count: count_link_entries_or_subtrees(self, &new_entries, true).await?,
                 split: None,
             })
         })
@@ -1330,24 +1332,14 @@ impl<S: Store> BTree<S> {
             let result = self.insert_recursive(child_cid, key, value).await?;
 
             let mut new_node = self
-                .tree
-                .set_entry(
-                    &node,
-                    &[],
-                    &child_name,
-                    &result.cid,
-                    result.count,
-                    LinkType::Dir,
-                )
+                .set_node_entry(&node, &child_name, &result.cid, result.count, LinkType::Dir)
                 .await?;
 
             if let Some(split) = result.split {
-                new_node = self.tree.remove_entry(&new_node, &[], &child_name).await?;
+                new_node = self.remove_node_entry(&new_node, &child_name).await?;
                 new_node = self
-                    .tree
-                    .set_entry(
+                    .set_node_entry(
                         &new_node,
-                        &[],
                         &escape_key(&split.left_first_key),
                         &split.left,
                         split.left_count,
@@ -1355,10 +1347,8 @@ impl<S: Store> BTree<S> {
                     )
                     .await?;
                 new_node = self
-                    .tree
-                    .set_entry(
+                    .set_node_entry(
                         &new_node,
-                        &[],
                         &escape_key(&split.right_first_key),
                         &split.right,
                         split.right_count,
@@ -1367,18 +1357,18 @@ impl<S: Store> BTree<S> {
                     .await?;
             }
 
-            let new_entries = self.tree.list_directory(&new_node).await?;
+            let new_entries = self.tree.list_directory_required(&new_node).await?;
             if new_entries.len() > self.max_keys {
                 return Ok(InsertResult {
                     cid: new_node,
-                    count: count_link_entries_or_subtrees(self, &new_entries).await?,
+                    count: count_link_entries_or_subtrees(self, &new_entries, true).await?,
                     split: Some(self.split_internal(new_entries).await?),
                 });
             }
 
             Ok(InsertResult {
                 cid: new_node,
-                count: count_link_entries_or_subtrees(self, &new_entries).await?,
+                count: count_link_entries_or_subtrees(self, &new_entries, true).await?,
                 split: None,
             })
         })
@@ -1417,8 +1407,8 @@ impl<S: Store> BTree<S> {
             right,
             left_first_key: unescape_key(&left_entries[0].name),
             right_first_key: unescape_key(&right_entries[0].name),
-            left_count: count_link_entries_or_subtrees(self, left_entries).await?,
-            right_count: count_link_entries_or_subtrees(self, right_entries).await?,
+            left_count: count_link_entries_or_subtrees(self, left_entries, true).await?,
+            right_count: count_link_entries_or_subtrees(self, right_entries, true).await?,
         })
     }
 
@@ -1486,17 +1476,55 @@ impl<S: Store> BTree<S> {
         Ok(self.tree.put_directory(dir_entries).await?)
     }
 
+    // B-tree nodes already have an immutable identity. Generic directory edits
+    // permit absent directories, so use strict reads even for mutation reloads.
+    async fn set_node_entry(
+        &self,
+        node: &Cid,
+        name: &str,
+        cid: &Cid,
+        size: u64,
+        link_type: LinkType,
+    ) -> Result<Cid, BTreeError> {
+        let entry = DirEntry::from_cid(name, cid)
+            .with_size(size)
+            .with_link_type(link_type);
+        self.edit_node_entry(node, name, Some(entry)).await
+    }
+
+    async fn remove_node_entry(&self, node: &Cid, name: &str) -> Result<Cid, BTreeError> {
+        self.edit_node_entry(node, name, None).await
+    }
+
+    async fn edit_node_entry(
+        &self,
+        node: &Cid,
+        name: &str,
+        entry: Option<DirEntry>,
+    ) -> Result<Cid, BTreeError> {
+        let mut entries = self
+            .tree
+            .list_directory_required(node)
+            .await?
+            .into_iter()
+            .filter(|existing| existing.name != name)
+            .map(tree_entry_to_dir_entry)
+            .collect::<Vec<_>>();
+        entries.extend(entry);
+        Ok(self.tree.put_directory(entries).await?)
+    }
+
     fn delete_recursive<'a>(&'a self, root: Cid, key: String) -> BTreeFuture<'a, Option<Cid>> {
         Box::pin(async move {
-            let entries = self.tree.list_directory(&root).await?;
+            let entries = self.tree.list_directory_required(&root).await?;
             if is_leaf_node(&entries) {
                 let escaped = escape_key(&key);
                 if !entries.iter().any(|entry| entry.name == escaped) {
                     return Ok(Some(root));
                 }
 
-                let new_root = self.tree.remove_entry(&root, &[], &escaped).await?;
-                let new_entries = self.tree.list_directory(&new_root).await?;
+                let new_root = self.remove_node_entry(&root, &escaped).await?;
+                let new_entries = self.tree.list_directory_required(&new_root).await?;
                 if new_entries.is_empty() {
                     return Ok(None);
                 }
@@ -1508,8 +1536,8 @@ impl<S: Store> BTree<S> {
             let new_child = self.delete_recursive(entry_cid(&child), key).await?;
 
             let Some(new_child) = new_child else {
-                let new_root = self.tree.remove_entry(&root, &[], &child_name).await?;
-                let new_entries = self.tree.list_directory(&new_root).await?;
+                let new_root = self.remove_node_entry(&root, &child_name).await?;
+                let new_entries = self.tree.list_directory_required(&new_root).await?;
                 if new_entries.is_empty() {
                     return Ok(None);
                 }
@@ -1524,15 +1552,14 @@ impl<S: Store> BTree<S> {
             }
 
             let updated = self
-                .tree
-                .set_entry(
+                .set_node_entry(
                     &root,
-                    &[],
                     &child_name,
                     &new_child,
                     count_link_entries_or_subtrees(
                         self,
-                        &self.tree.list_directory(&new_child).await?,
+                        &self.tree.list_directory_required(&new_child).await?,
+                        true,
                     )
                     .await?,
                     LinkType::Dir,
@@ -1769,10 +1796,14 @@ impl<S: Store> BTree<S> {
         })
     }
 
-    fn count_links_recursive<'a>(&'a self, node: Cid) -> BTreeFuture<'a, u64> {
+    fn count_links_recursive<'a>(&'a self, node: Cid, required: bool) -> BTreeFuture<'a, u64> {
         Box::pin(async move {
-            let entries = self.tree.list_directory(&node).await?;
-            count_link_entries_or_subtrees(self, &entries).await
+            let entries = if required {
+                self.tree.list_directory_required(&node).await?
+            } else {
+                self.tree.list_directory(&node).await?
+            };
+            count_link_entries_or_subtrees(self, &entries, required).await
         })
     }
 
@@ -2061,6 +2092,7 @@ fn stored_link_subtree_count(entry: &TreeEntry) -> Option<u64> {
 async fn count_link_entries_or_subtrees<S: Store>(
     btree: &BTree<S>,
     entries: &[TreeEntry],
+    required: bool,
 ) -> Result<u64, BTreeError> {
     if is_leaf_node(entries) {
         return Ok(count_link_entries(entries));
@@ -2070,7 +2102,11 @@ async fn count_link_entries_or_subtrees<S: Store>(
     for entry in entries {
         count += match stored_link_subtree_count(entry) {
             Some(child_count) => child_count,
-            None => btree.count_links_recursive(entry_cid(entry)).await?,
+            None => {
+                btree
+                    .count_links_recursive(entry_cid(entry), required)
+                    .await?
+            }
         };
     }
     Ok(count)
