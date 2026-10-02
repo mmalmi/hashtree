@@ -314,11 +314,13 @@ signed root event to the daemon's loopback `POST /api/nostr/events` endpoint. A 
 network is not proof that the release tree is empty. Explicit `"relay"` mode continues
 to use the configured Nostr relays.
 
-Keep the publishing daemon online so late FIPS consumers can fetch the announcement.
-Its bounded FIPS cache can evict announcements while it is running, and this handoff
-adds no durable replay after restarts. Retained dissemination of the signed release
-root, including eviction and restart recovery, is a rollout prerequisite for FIPS-only
-releases. Verify the release from a separate FIPS consumer before rollout.
+The daemon retains accepted public root events in a separate, durable Hashtree index
+and serves them to FIPS consumers after reconnects and restarts. This index is
+independent of the disposable blob cache and holds at most 4,096 events. Configure
+`nostr.retained_roots` with the author/tree keys to follow through open subscriptions
+and periodic reconciliation. Keep a provider online for late consumers, and verify
+the release from a separate FIPS consumer, including after cache eviction and a
+daemon restart, before rollout.
 
 Publish the canonical repo release and mirror the same staged files to GitHub in one step:
 
