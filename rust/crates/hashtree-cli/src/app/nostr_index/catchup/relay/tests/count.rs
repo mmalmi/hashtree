@@ -3,6 +3,8 @@ use super::*;
 #[derive(Clone)]
 enum Reply {
     Exact,
+    CloseAfterEose,
+    Reset(usize),
     Payload(Value),
     Closed,
     WrongId,
@@ -13,6 +15,8 @@ enum Reply {
 struct CountRelay {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
+    connections: Arc<AtomicUsize>,
+    close_after_eose: Arc<tokio::sync::Notify>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -21,10 +25,16 @@ impl CountRelay {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("ws://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let connections = Arc::new(AtomicUsize::new(0));
+        let connected = connections.clone();
+        let close_after_eose = Arc::new(tokio::sync::Notify::new());
+        let close_signal = close_after_eose.clone();
         let observed = requests.clone();
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
+                connected.fetch_add(1, Ordering::SeqCst);
                 let (events, reply, requests) = (events.clone(), reply.clone(), observed.clone());
+                let close_signal = close_signal.clone();
                 tokio::spawn(async move {
                     let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
                     while let Some(Ok(Message::Text(raw))) = socket.next().await {
@@ -71,10 +81,28 @@ impl CountRelay {
                             {
                                 return;
                             }
+                            if matches!(reply, Reply::CloseAfterEose) {
+                                close_signal.notified().await;
+                                let _ = socket.close(None).await;
+                                return;
+                            }
                             continue;
                         }
+                        if let Reply::Reset(bytes) = reply {
+                            if bytes > 0 {
+                                let _ = socket
+                                    .send(Message::Text(
+                                        json!(["NOTICE", "x".repeat(bytes)]).to_string(),
+                                    ))
+                                    .await;
+                            }
+                            return;
+                        }
                         let response = match &reply {
-                            Reply::Exact => json!(["COUNT",request[1],{"count":matching.len()}]),
+                            Reply::Exact | Reply::CloseAfterEose => {
+                                json!(["COUNT",request[1],{"count":matching.len()}])
+                            }
+                            Reply::Reset(_) => unreachable!(),
                             Reply::Payload(value) => json!(["COUNT", request[1], value]),
                             Reply::Closed => json!(["CLOSED", request[1], "unsupported"]),
                             Reply::WrongId | Reply::Flood => {
@@ -105,6 +133,8 @@ impl CountRelay {
         Self {
             url,
             requests,
+            connections,
+            close_after_eose,
             task,
         }
     }
@@ -114,6 +144,76 @@ impl Drop for CountRelay {
     fn drop(&mut self) {
         self.task.abort();
     }
+}
+
+#[tokio::test]
+async fn count_reconnects_after_normal_eose_close_without_refetching_events() {
+    let keys = Keys::generate();
+    let relay = CountRelay::new(
+        vec![event(&keys, 20, "a"), event(&keys, 20, "b")],
+        2,
+        Reply::CloseAfterEose,
+    )
+    .await;
+    let mut source = RelaySource::new(2, 65536);
+    let events = source.query(&relay.url, &query(&keys)).await.unwrap();
+    assert_eq!(events.len(), 2);
+    assert!(source.sockets.contains_key(&relay.url));
+    relay.close_after_eose.notify_one();
+    assert_eq!(
+        source.exact_count(&relay.url, &query(&keys)).await.unwrap(),
+        Some(2)
+    );
+    let requests = relay.requests.lock().unwrap();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request[0] == "REQ")
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request[0] == "COUNT")
+            .count(),
+        1
+    );
+    assert_eq!(relay.connections.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn count_reconnects_at_most_once_with_shared_deadline_and_wire_budget() {
+    let relay = CountRelay::new(vec![], 2, Reply::Reset(0)).await;
+    let mut source = RelaySource::new(2, 65536);
+    assert!(source
+        .exact_count(&relay.url, &query(&Keys::generate()))
+        .await
+        .is_err());
+    assert_eq!(relay.connections.load(Ordering::SeqCst), 2);
+    assert!(source.sockets.is_empty());
+    {
+        let requests = relay.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0][2], requests[1][2]);
+        assert_ne!(requests[0][1], requests[1][1]);
+    }
+    let relay = CountRelay::new(vec![], 2, Reply::Reset(0)).await;
+    source.timeout = Duration::from_millis(50);
+    let error = source
+        .exact_count(&relay.url, &query(&Keys::generate()))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("timeout before COUNT"));
+    assert_eq!(relay.connections.load(Ordering::SeqCst), 1);
+    let relay = CountRelay::new(vec![], 2, Reply::Reset(3000)).await;
+    let mut source = RelaySource::new(2, 0);
+    let error = source
+        .exact_count(&relay.url, &query(&Keys::generate()))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("byte budget"));
+    assert_eq!(relay.connections.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
