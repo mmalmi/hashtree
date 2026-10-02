@@ -279,7 +279,7 @@ fn sorted_filters(mut filters: Vec<Value>) -> Vec<Value> {
 
 fn fixture() -> (Vec<String>, Vec<Event>, Vec<Event>) {
     let keys = (1..=3)
-        .map(|key| Keys::parse(format!("{key:064x}")).unwrap())
+        .map(|key| Keys::parse(&format!("{key:064x}")).unwrap())
         .collect::<Vec<_>>();
     let authors = keys.iter().map(|keys| keys.public_key().to_hex()).collect();
     let historical = keys
