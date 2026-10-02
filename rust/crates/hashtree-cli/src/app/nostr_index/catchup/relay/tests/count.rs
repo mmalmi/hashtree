@@ -324,6 +324,7 @@ async fn complete_ties_pass_but_hidden_capped_ties_remain_incomplete() {
         let relay = CountRelay::new(events, 2, Reply::Exact).await;
         let policy = CatchupPolicy {
             base_root: "unused".into(),
+            source_mode: Default::default(),
             authors_sha256: "unused".into(),
             author_count: 1,
             initial_since: 10,

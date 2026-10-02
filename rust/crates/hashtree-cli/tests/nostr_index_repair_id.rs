@@ -140,8 +140,10 @@ impl Fixture {
         drop(store);
         let state = CatchupState {
             version: 2,
+            coverage_head: None,
             policy: CatchupPolicy {
                 base_root: root_text(&original),
+                source_mode: Default::default(),
                 authors_sha256: hash(keys.public_key().to_hex().as_bytes()),
                 author_count: 2,
                 initial_since: 100,

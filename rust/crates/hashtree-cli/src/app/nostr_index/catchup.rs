@@ -6,13 +6,15 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use hashtree_cli::{Config, HashtreeStore};
 use hashtree_nostr::catchup::{
-    fetch_catchup_author, CatchupPolicy, CatchupState, DEFAULT_CATCHUP_OVERLAP_SECS,
+    fetch_catchup_author_with_coverage, CatchupPolicy, CatchupRunSources, CatchupSourceMode,
+    CatchupState, DEFAULT_CATCHUP_OVERLAP_SECS,
 };
 use hashtree_nostr::{NostrEventStore, NostrEventStoreOptions};
 use sha2::{Digest, Sha256};
 
 use super::{cid_to_nhash, parse_root_text, persist_json_atomic, CrawlStateLock, INDEX_DIR};
 
+mod coverage;
 mod pipeline;
 mod relay;
 
@@ -33,7 +35,10 @@ pub(crate) struct CatchupArgs {
     /// Revisit this many seconds before the previous pass end for late arrivals.
     #[arg(long, default_value_t = DEFAULT_CATCHUP_OVERLAP_SECS)]
     overlap_secs: u64,
-    /// Required source relay (repeatable); every source must complete.
+    /// Source completion policy. Best-effort advances with at least one complete source.
+    #[arg(long, default_value = "strict", value_parser = ["strict", "best-effort"])]
+    source_mode: String,
+    /// Source relay (repeatable); strict requires every source to complete.
     #[arg(long = "relay", required = true)]
     relays: Vec<String>,
     /// Kind to retain (repeatable). Include kind 5 for deletion events.
@@ -98,6 +103,11 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
     let base_root = parse_root_text(&args.root).context("parse exact catchup base root")?;
     let policy = CatchupPolicy {
         base_root: cid_to_nhash(&base_root)?,
+        source_mode: if args.source_mode == "best-effort" {
+            CatchupSourceMode::BestEffort
+        } else {
+            CatchupSourceMode::Strict
+        },
         authors_sha256: hex::encode(Sha256::digest(&author_bytes)),
         author_count: authors.len(),
         initial_since: args.since,
@@ -136,6 +146,10 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).context("read catchup checkpoint"),
     };
+    let coverage_directory = data_dir.join(INDEX_DIR).join("catchup-coverage");
+    if let Some(saved) = &saved {
+        coverage::validate_head(&coverage_directory, saved, &authors)?;
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
@@ -174,6 +188,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
     let policy = Arc::new(state.policy.clone());
     let pass_since = state.pass_since;
     let pass_until = state.pass_until;
+    let run_sources = CatchupRunSources::default();
     let sources = std::array::from_fn(|_| {
         relay::RelaySource::new(policy.fetch_timeout_secs, policy.max_bytes_per_author)
     });
@@ -183,11 +198,13 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         |mut source, ordinal| {
             let authors = authors.clone();
             let policy = policy.clone();
+            let run_sources = run_sources.clone();
             async move {
                 let started = Instant::now();
-                let events = fetch_catchup_author(
+                let events = fetch_catchup_author_with_coverage(
                     &mut source,
                     &policy,
+                    &run_sources,
                     &authors[ordinal],
                     pass_since,
                     pass_until,
@@ -199,20 +216,21 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
             }
         },
         (root, state),
-        |(root, state), ordinal, (events, fetch_ms, author_started)| {
+        |(root, state), ordinal, (fetched, fetch_ms, author_started)| {
             let author = &authors[ordinal];
             let store = &store;
             let event_store = &event_store;
             let state_file = &state_file;
+            let coverage_directory = &coverage_directory;
             let author_count = authors.len();
             async move {
                 // Fetches may finish out of order, but there is exactly one
                 // writer and its next author must match the saved frontier.
                 anyhow::ensure!(ordinal == state.next_author, "catchup author order changed");
-                let received = events.len() as u64;
+                let received = fetched.events.len() as u64;
                 let append_started = Instant::now();
                 let report = event_store
-                    .build_with_superseded_nodes(Some(&root), events)
+                    .build_with_superseded_nodes(Some(&root), fetched.events)
                     .await
                     .with_context(|| {
                         format!(
@@ -236,8 +254,12 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                 next.root = cid_to_nhash(&next_root)?;
                 next.next_author += 1;
                 next.events_received = next.events_received.saturating_add(received);
-                store.admit_checkpoint_write(&state_file, serde_json::to_vec(&next)?.len() + 1)?;
-                persist_json_atomic(&state_file, &next, "Nostr catchup checkpoint")?;
+                if state.policy.source_mode == CatchupSourceMode::BestEffort {
+                    next = coverage::commit(store,coverage_directory,state_file,&state,next,author,fetched.sources)?;
+                } else {
+                    store.admit_checkpoint_write(&state_file, serde_json::to_vec(&next)?.len() + 1)?;
+                    persist_json_atomic(&state_file, &next, "Nostr catchup checkpoint")?;
+                }
                 let state = next;
                 // Do not delete superseded nodes: published roots and rollback readers
                 // may still depend on them. Publication owns eventual root-aware GC.
@@ -261,18 +283,20 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         },
     )
     .await?;
-    println!(
-        "{}",
-        serde_json::json!({
-            "format": "hashtree/nostr-index-catchup@2",
-            "root": state.root,
-            "pass_since": state.pass_since,
-            "pass_until": state.pass_until,
-            "next_author": state.next_author,
-            "author_count": authors.len(),
-            "events_received": state.events_received,
-            "complete": state.complete(),
-        })
-    );
+    let mut output = serde_json::json!({
+        "format": "hashtree/nostr-index-catchup@2",
+        "root": state.root,
+        "pass_since": state.pass_since,
+        "pass_until": state.pass_until,
+        "next_author": state.next_author,
+        "author_count": authors.len(),
+        "events_received": state.events_received,
+        "complete": state.complete(),
+    });
+    if state.policy.source_mode == CatchupSourceMode::BestEffort {
+        output["coverage_head"] = serde_json::json!(state.coverage_head);
+        output["source_mode"] = serde_json::json!(state.policy.source_mode);
+    }
+    println!("{output}");
     Ok(())
 }

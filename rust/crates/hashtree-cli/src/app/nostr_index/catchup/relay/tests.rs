@@ -293,6 +293,7 @@ async fn later_relay_reconnect_does_not_refetch_completed_source() {
     .await;
     let policy = CatchupPolicy {
         base_root: "unused".into(),
+        source_mode: Default::default(),
         authors_sha256: "unused".into(),
         author_count: 1,
         initial_since: 10,

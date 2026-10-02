@@ -1,13 +1,33 @@
 //! Bounded temporal catchup into an existing event index.
 //!
-//! Coverage is relative to the required source relays. A relay's EOSE is not a
-//! claim that no other relay has older or later-arriving events.
+//! Coverage is source-relative. Strict mode requires every configured relay;
+//! optional best-effort mode records missing sources and requires at least one
+//! completed relay per author. EOSE never claims global completeness.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::StoredNostrEvent;
+
+mod best_effort;
+pub use best_effort::{
+    fetch_catchup_author_with_coverage, CatchupAuthorResult, CatchupRunSources,
+    CatchupSourceCoverage, CatchupSourceStatus,
+};
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CatchupSourceMode {
+    #[default]
+    Strict,
+    BestEffort,
+}
+impl CatchupSourceMode {
+    fn is_strict(&self) -> bool {
+        *self == Self::Strict
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -31,6 +51,8 @@ pub struct CatchupPolicy {
     #[serde(default = "default_overlap_secs")]
     pub overlap_secs: u64,
     pub relays: Vec<String>,
+    #[serde(default, skip_serializing_if = "CatchupSourceMode::is_strict")]
+    pub source_mode: CatchupSourceMode,
     pub kinds: Vec<u16>,
     pub page_size: usize,
     pub max_pages_per_author: usize,
@@ -50,17 +72,24 @@ pub struct CatchupState {
     pub pass_until: u64,
     pub next_author: usize,
     pub events_received: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub coverage_head: Option<String>,
 }
 
 impl CatchupState {
     /// Resume the exact captured window, or start the next window only after
-    /// every author and every configured source completed the previous one.
+    /// every author satisfied the configured source policy in the previous one.
     pub fn prepare(
         saved: Option<Self>,
         policy: CatchupPolicy,
         requested_until: Option<u64>,
         now: u64,
     ) -> Result<Self> {
+        if policy.source_mode == CatchupSourceMode::BestEffort && policy.relays.len() > 64 {
+            return Err(CatchupError(
+                "best-effort catchup supports at most 64 sources".into(),
+            ));
+        }
         if policy.author_count == 0
             || policy.relays.is_empty()
             || policy.kinds.is_empty()
@@ -77,6 +106,12 @@ impl CatchupState {
         }
         if let Some(mut state) = saved {
             let previous = &state.policy;
+            if previous.source_mode == CatchupSourceMode::BestEffort && *previous != policy {
+                return Err(CatchupError(
+                    "best-effort coverage requires exact policy; explicit migration required"
+                        .into(),
+                ));
+            }
             if policy.overlap_secs < previous.overlap_secs
                 || policy.page_size < previous.page_size
                 || policy.max_pages_per_author < previous.max_pages_per_author
@@ -100,6 +135,16 @@ impl CatchupState {
                 return Err(CatchupError(
                     "catchup policy changed; refusing to reuse coverage".into(),
                 ));
+            }
+            if state.coverage_head.as_ref().is_some_and(|head| {
+                head.len() != 64
+                    || head
+                        .bytes()
+                        .any(|b| !b.is_ascii_digit() && !(b'a'..=b'f').contains(&b))
+            }) || (policy.source_mode == CatchupSourceMode::Strict
+                && state.coverage_head.is_some())
+            {
+                return Err(CatchupError("invalid catchup coverage head".into()));
             }
             state.policy = policy.clone();
             if state.next_author > policy.author_count
@@ -149,6 +194,7 @@ impl CatchupState {
                 policy,
                 next_author: 0,
                 events_received: 0,
+                coverage_head: None,
             })
         }
     }

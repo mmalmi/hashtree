@@ -14,6 +14,7 @@ use nostr::{EventBuilder, Keys, Kind, Timestamp};
 fn policy() -> CatchupPolicy {
     CatchupPolicy {
         base_root: "exact-original-root".into(),
+        source_mode: Default::default(),
         authors_sha256: "ordered-authors".into(),
         author_count: 2,
         initial_since: 10,

@@ -137,6 +137,7 @@ async fn later_gateway_recovery_does_not_refetch_a_completed_relay() {
     let second = gateway(vec![event(&keys, 30, "second")], vec![(503, None)]).await;
     let policy = CatchupPolicy {
         base_root: "unused".into(),
+        source_mode: Default::default(),
         authors_sha256: "unused".into(),
         author_count: 1,
         initial_since: 10,
