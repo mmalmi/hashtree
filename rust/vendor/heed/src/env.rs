@@ -34,7 +34,9 @@ use crate::database::DatabaseOpenOptions;
 use crate::mdb::error::mdb_result;
 use crate::mdb::ffi;
 use crate::mdb::lmdb_flags::AllDatabaseFlags;
-use crate::{Database, EnvFlags, Error, Result, RoCursor, RoTxn, RwTxn, Unspecified, WriteAdmission};
+use crate::{
+    Database, EnvFlags, Error, Result, RoCursor, RoTxn, RwTxn, Unspecified, WriteAdmission,
+};
 
 /// The list of opened environments, the value is an optional environment, it is None
 /// when someone asks to close the environment, closing is a two-phase step, to make sure
@@ -230,7 +232,10 @@ pub struct EnvOpenOptions {
     max_readers: Option<u32>,
     max_dbs: Option<u32>,
     flags: EnvFlags,
-    #[cfg_attr(feature = "serde", serde(default, skip_serializing_if = "Option::is_none"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, skip_serializing_if = "Option::is_none")
+    )]
     write_admission: Option<WriteAdmission>,
 }
 
