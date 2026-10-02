@@ -444,7 +444,7 @@ async fn cli_partial_index_write_failure_keeps_checkpoint_and_emits_no_receipt()
         let backing = store.store_arc();
         assert!(backing.delete(&fixture.tag_root.hash).await.unwrap());
         store.force_sync().unwrap();
-        backing.stats().await.count
+        backing.stats().unwrap().count
     };
     let output = run(fixture.repair_default()).await;
     assert!(
@@ -461,7 +461,7 @@ async fn cli_partial_index_write_failure_keeps_checkpoint_and_emits_no_receipt()
     let store = fixture.store();
     let backing = store.store_arc();
     assert!(
-        backing.stats().await.count > before_count,
+        backing.stats().unwrap().count > before_count,
         "failure occurs after a copy-on-write by-ID path was written"
     );
     assert!(backing
