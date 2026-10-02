@@ -118,7 +118,7 @@ fn hot_tags(index: usize) -> Vec<Vec<String>> {
 
 fn fixture() -> (Vec<StoredNostrEvent>, Vec<StoredNostrEvent>) {
     let keys = (1..=16)
-        .map(|n| Keys::parse(format!("{n:064x}")).unwrap())
+        .map(|n| Keys::parse(&format!("{n:064x}")).unwrap())
         .collect::<Vec<_>>();
     let mut historical = (0..2048)
         .map(|i| {
