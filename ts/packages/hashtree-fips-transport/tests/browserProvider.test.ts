@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const fake = vi.hoisted(() => ({
   webRtcOptions: undefined as Record<string, unknown> | undefined,
+  providerOptions: undefined as Record<string, unknown> | undefined,
 }));
 
 vi.mock('@fips/core', () => ({
@@ -28,12 +29,15 @@ vi.mock('@fips/transport-websocket', () => ({
 }));
 
 vi.mock('../src/workerProvider.js', () => ({
-  createFipsWorkerP2PProvider: () => ({
+  createFipsWorkerP2PProvider: (options: Record<string, unknown>) => {
+    fake.providerOptions = options;
+    return {
     close: vi.fn(),
     discoverProviders: vi.fn(),
     fetch: vi.fn(),
     listPeerIds: vi.fn(() => []),
-  }),
+    };
+  },
 }));
 
 import { createBrowserHashtreeFipsProvider } from '../src/browserProvider.js';
@@ -41,6 +45,7 @@ import { createBrowserHashtreeFipsProvider } from '../src/browserProvider.js';
 describe('browser Hashtree FIPS provider', () => {
   afterEach(() => {
     fake.webRtcOptions = undefined;
+    fake.providerOptions = undefined;
     vi.unstubAllGlobals();
   });
 
@@ -48,15 +53,20 @@ describe('browser Hashtree FIPS provider', () => {
     vi.stubGlobal('WebSocket', class {});
     vi.stubGlobal('RTCPeerConnection', class {});
     const allowIncomingPeer = vi.fn((peerId: string) => peerId === 'allowed-peer');
+    const serveBlob = vi.fn(async () => null);
+    const getUploadLimitBytesPerSecond = () => 1024;
 
     const provider = await createBrowserHashtreeFipsProvider({
       relays: ['wss://relay.example'],
       localStore: new MemoryStore(),
       identity: identity(),
       allowIncomingPeer,
+      serveBlob,
+      getUploadLimitBytesPerSecond,
     });
 
     expect(fake.webRtcOptions?.allowIncomingPeer).toBe(allowIncomingPeer);
+    expect(fake.providerOptions).toMatchObject({ allowIncomingPeer, serveBlob, getUploadLimitBytesPerSecond });
     await provider.stop();
   });
 });

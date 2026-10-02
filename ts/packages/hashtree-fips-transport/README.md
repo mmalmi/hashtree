@@ -10,7 +10,7 @@ Install the FIPS peers from their immutable release archives alongside this
 package. These two peers are not yet available in the npm registry:
 
 ```bash
-npm install @hashtree/fips-transport \
+npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.16/hashtree-fips-transport-0.4.19.tgz \
   https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.48/fips-core-0.0.48.tgz \
   https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.48/fips-transport-webrtc-0.0.51.tgz
 ```
@@ -89,3 +89,18 @@ serve decrypted files through the blob interface.
 The discovery scope is configurable for isolated deployments, but applications
 should normally stay on `fips-overlay-v1` so they share the generic FIPS transit
 fabric rather than creating an application-specific discovery fabric.
+
+## Controlled inbound serving
+
+`serveBlob(hash, peerId, signal, htl)` optionally supplies an incoming response
+from an application-authorized source. It runs after peer admission, receives
+the authenticated peer identity and the existing request's cancellation signal,
+and must honor HTL 0 as local-only. Returned bytes are hash-verified. Return null
+only for a confirmed miss or denied read; throw for incomplete or failed reads.
+The hook does not replace the local store used by outgoing requests.
+
+`getUploadLimitBytesPerSecond` optionally supplies a dynamic global response
+limit. Null or zero means unlimited. Header and body writes share a one-second
+bucket; partial writes refund unused capacity. Responses larger than the bucket
+progress in smaller chunks within the original request deadline. Closing the
+transport aborts pending serving callbacks and response writers.

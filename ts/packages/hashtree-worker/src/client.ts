@@ -29,7 +29,8 @@ export type P2PFetchHandler = (
 export type P2PPeerListHandler = () => string[] | Promise<string[]>;
 export interface WorkerP2PProvider {
   fetch: P2PFetchHandler;
-  listPeerIds: P2PPeerListHandler;
+  /** Omit when fetch owns discovery and accepts an undefined peer ID. */
+  listPeerIds?: P2PPeerListHandler;
 }
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -73,6 +74,7 @@ export class HashtreeWorkerClient {
     }
 
     const providerEnabledAtInit = this.p2pFetchHandler !== null;
+    const peerListSupportedAtInit = this.p2pPeerListHandler !== null;
     this.initPromise = new Promise<void>((resolve, reject) => {
       if (!this.worker) {
         reject(new Error('Failed to create worker'));
@@ -89,7 +91,8 @@ export class HashtreeWorkerClient {
         resolve: (message) => {
           if (message.type === 'ready') {
             this.workerReady = true;
-            if ((this.p2pFetchHandler !== null) !== providerEnabledAtInit) {
+            if ((this.p2pFetchHandler !== null) !== providerEnabledAtInit
+              || (this.p2pPeerListHandler !== null) !== peerListSupportedAtInit) {
               this.notifyP2PProviderState();
             }
             resolve();
@@ -106,6 +109,7 @@ export class HashtreeWorkerClient {
         id,
         config: this.config,
         p2pProviderEnabled: providerEnabledAtInit,
+        p2pPeerListSupported: peerListSupportedAtInit,
       } as WorkerRequest);
     });
 
@@ -370,6 +374,15 @@ export class HashtreeWorkerClient {
     return { hashHex: res.hashHex, nhash: res.nhash };
   }
 
+  /** Store an encrypted, peer-shareable file locally; uploading is opt-in. */
+  async putFile(data: Uint8Array, options: { upload?: boolean } = {}): Promise<{ hashHex: string; nhash: string }> {
+    const res = await this.request({ type: 'putFile', data, upload: options.upload === true }, PUT_BLOB_TIMEOUT_MS);
+    if (res.type !== 'blobStored' || !res.hashHex || !res.nhash) {
+      throw new Error('Failed to store encrypted file');
+    }
+    return { hashHex: res.hashHex, nhash: res.nhash };
+  }
+
   async putBlock(
     data: Uint8Array,
     options: { hashHex?: string; mimeType?: string; upload?: boolean } = {},
@@ -487,15 +500,19 @@ export class HashtreeWorkerClient {
     return { available: res.available, size: res.size, source: res.source };
   }
 
-  async getBlobForPeer(hashHex: string): Promise<Uint8Array | null> {
-    const res = await this.request({ type: 'getBlob', hashHex, forPeer: true });
+  async getBlobForPeer(
+    hashHex: string,
+    options: { sourceIds?: readonly string[] } = {},
+  ): Promise<Uint8Array | null> {
+    const res = await this.request({
+      type: 'getBlob', hashHex, forPeer: true,
+      sourceIds: options.sourceIds ? [...options.sourceIds] : undefined,
+    });
     if (res.type !== 'blob') {
       throw new Error('Unexpected response for getBlobForPeer');
     }
-    if (res.error || !res.data) {
-      return null;
-    }
-    return res.data;
+    if (res.error) throw new Error(res.error);
+    return res.data ?? null;
   }
 
   async setBlossomServers(servers: BlossomServerConfig[]): Promise<void> {
@@ -675,15 +692,14 @@ export class HashtreeWorkerClient {
 
   setP2PPeerListHandler(handler: P2PPeerListHandler | null): void {
     this.p2pPeerListHandler = handler;
+    this.notifyP2PProviderState();
   }
 
   setP2PProvider(provider: WorkerP2PProvider | null): void {
     this.p2pFetchHandler = provider
       ? (hashHex, peerId, htl) => provider.fetch(hashHex, peerId, htl)
       : null;
-    this.p2pPeerListHandler = provider
-      ? () => provider.listPeerIds()
-      : null;
+    this.p2pPeerListHandler = provider?.listPeerIds?.bind(provider) ?? null;
     this.notifyP2PProviderState();
   }
 
@@ -693,6 +709,7 @@ export class HashtreeWorkerClient {
       type: 'setP2PProviderState',
       id: generateRequestId(),
       enabled: this.p2pFetchHandler !== null,
+      peerListSupported: this.p2pPeerListHandler !== null,
     } as WorkerRequest);
   }
 

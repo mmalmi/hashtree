@@ -7,6 +7,7 @@ export class RelayWorkerClient {
     workerReady = false;
     p2pProvider = null;
     p2pProviderEnabledAtInit = false;
+    p2pPeerListSupportedAtInit = false;
     initPromise = null;
     initPending = null;
     pendingRequests = new Map();
@@ -29,6 +30,7 @@ export class RelayWorkerClient {
             throw err instanceof Error ? err : new Error(String(err));
         }
         this.p2pProviderEnabledAtInit = this.p2pProvider !== null;
+        this.p2pPeerListSupportedAtInit = this.p2pProvider?.listPeerIds !== undefined;
         this.initPromise = new Promise((resolve, reject) => {
             if (!this.worker) {
                 reject(new Error('Failed to create worker'));
@@ -49,6 +51,7 @@ export class RelayWorkerClient {
                 id: this.nextRequestId('worker_init'),
                 config: this.config,
                 p2pProviderEnabled: this.p2pProviderEnabledAtInit,
+                p2pPeerListSupported: this.p2pPeerListSupportedAtInit,
             });
         });
         return this.initPromise;
@@ -68,7 +71,8 @@ export class RelayWorkerClient {
             const message = event.data;
             if (message.type === 'ready') {
                 this.workerReady = true;
-                if ((this.p2pProvider !== null) !== this.p2pProviderEnabledAtInit) {
+                if ((this.p2pProvider !== null) !== this.p2pProviderEnabledAtInit
+                    || (this.p2pProvider?.listPeerIds !== undefined) !== this.p2pPeerListSupportedAtInit) {
                     this.notifyP2PProviderState();
                 }
                 if (this.initPending) {
@@ -174,7 +178,7 @@ export class RelayWorkerClient {
             return;
         const id = this.nextRequestId('p2p_peer_list_result');
         try {
-            const peerIds = await this.p2pProvider?.listPeerIds() ?? [];
+            const peerIds = await this.p2pProvider?.listPeerIds?.() ?? [];
             this.worker.postMessage({
                 type: 'p2pPeerListResult',
                 id,
@@ -440,6 +444,7 @@ export class RelayWorkerClient {
             type: 'setP2PProviderState',
             id: this.nextRequestId('p2p_provider_state'),
             enabled: this.p2pProvider !== null,
+            peerListSupported: this.p2pProvider?.listPeerIds !== undefined,
         });
     }
     async setBlossomServers(servers) {

@@ -9,7 +9,12 @@ export declare const TCP_BLOB_MAX_BYTES: number;
 export interface TcpBlobTransportOptions {
     endpoint: FipsDatagramEndpoint;
     localStore: Store;
+    /** Optional inbound-only loader after authenticating and admitting the requesting peer. */
+    /** Inbound only. HTL 0 permits local content only; do not forward upstream. */
+    serveBlob?: (hash: Hash, peerId: string, signal: AbortSignal, htl: number) => Promise<Uint8Array | null>;
     timeoutMs?: number;
+    /** Global inbound response bandwidth; null or zero leaves uploads unlimited. */
+    getUploadLimitBytesPerSecond?: () => number | null;
     /** Authorize the authenticated FIPS identity before serving a blob request. */
     allowIncomingPeer?: (peerId: string) => boolean | Promise<boolean>;
 }
@@ -21,6 +26,8 @@ export declare class TcpBlobTransport {
     private readonly timer;
     private pumping;
     private closed;
+    private readonly serving;
+    private readonly uploadRateLimiter;
     constructor(options: TcpBlobTransportOptions);
     get(hash: Hash, peerIds: readonly string[], htl?: number): Promise<Uint8Array | null>;
     close(): Promise<void>;

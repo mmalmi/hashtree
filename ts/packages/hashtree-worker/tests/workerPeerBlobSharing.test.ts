@@ -411,7 +411,6 @@ describe('worker peer blob sharing', () => {
     expect(await waitForBlobResponse('blob-1-after-restart')).toEqual({
       type: 'blob',
       id: 'blob-1-after-restart',
-      error: 'Refusing to serve blob to peer because it is not reachable from a shared read source',
     });
   });
 
@@ -444,7 +443,6 @@ describe('worker peer blob sharing', () => {
     expect(await waitForBlobResponse('blob-2')).toEqual({
       type: 'blob',
       id: 'blob-2',
-      error: 'Refusing to serve blob to peer because it is not reachable from a shared read source',
     });
   });
 
@@ -491,7 +489,6 @@ describe('worker peer blob sharing', () => {
     expect(await waitForBlobResponse('private-after-restart')).toEqual({
       type: 'blob',
       id: 'private-after-restart',
-      error: 'Refusing to serve blob to peer because it is not reachable from a shared read source',
     });
   });
 
@@ -802,4 +799,45 @@ describe('worker peer blob sharing', () => {
       source: 'idb',
     });
   });
+
+  it('uses aggregate capability at init and after provider state changes', async () => {
+    const { attachHashtreeWorker } = await import('../src/worker.js');
+    const ctx = globalThis.self as FakeWorkerGlobal;
+    attachHashtreeWorker(ctx);
+    const data = new Uint8Array([31, 32, 33]);
+    const hashHex = hashHexForData(data);
+    let release: (() => void) | undefined;
+    peerFetchResponder.handle = (target, requestId, requestedHash, peerId) => {
+      expect(requestedHash).toBe(hashHex);
+      expect(peerId).toBeUndefined();
+      release = () => target.dispatch({ type: 'p2pFetchResult', id: 'result', requestId, data });
+    };
+    try {
+      ctx.dispatch({ type: 'init', id: 'aggregate-init', p2pProviderEnabled: true,
+        p2pPeerListSupported: false, config: { relays: [], blossomServers: [] } });
+      await flush();
+      ctx.dispatch({ type: 'getBlob', id: 'aggregate-read', hashHex, sources: ['p2p'] });
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      expect(postMessageMock.mock.calls.some(([message]) => message.type === 'p2pPeerList')).toBe(false);
+      expect(postMessageMock.mock.calls.some(([message]) => message.id === 'aggregate-read')).toBe(false);
+      release!();
+      expect(await waitForBlobResponse('aggregate-read')).toMatchObject({ data, source: 'p2p' });
+
+      idbDataByHash.clear();
+      ctx.dispatch({ type: 'setP2PProviderState', id: 'listed', enabled: true, peerListSupported: true });
+      ctx.dispatch({ type: 'getBlob', id: 'listed-read', hashHex, sources: ['p2p'] });
+      await waitForBlobResponse('listed-read');
+      expect(postMessageMock.mock.calls.some(([message]) => message.type === 'p2pPeerList')).toBe(true);
+      release = undefined;
+      ctx.dispatch({ type: 'setP2PProviderState', id: 'aggregate', enabled: true, peerListSupported: false });
+      ctx.dispatch({ type: 'getBlob', id: 'aggregate-again', hashHex, sources: ['p2p'] });
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      release!();
+      expect(await waitForBlobResponse('aggregate-again')).toMatchObject({ data, source: 'p2p' });
+    } finally {
+      ctx.dispatch({ type: 'close', id: 'aggregate-close' });
+      await flush();
+    }
+  });
+
 });

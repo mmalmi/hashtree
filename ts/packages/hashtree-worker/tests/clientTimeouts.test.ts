@@ -387,4 +387,50 @@ describe('HashtreeWorkerClient timeouts', () => {
       .toMatchObject([{ message: { enabled: true } }]);
     await client.close();
   });
+
+  it('advertises an aggregate provider at init and forwards an undefined peer', async () => {
+    const worker = new FakeWorker();
+    const client = new HashtreeWorkerClient((class {
+      constructor() { return worker; }
+    }) as unknown as new () => Worker);
+    const fetch = vi.fn(async () => new Uint8Array([1]));
+    client.setP2PProvider({ fetch });
+    try {
+      await client.init();
+      expect(worker.postedMessages[0].message).toMatchObject({
+        type: 'init', p2pProviderEnabled: true, p2pPeerListSupported: false,
+      });
+      worker.emitMessage({ type: 'p2pFetch', requestId: 'aggregate', hashHex: 'ab'.repeat(32), htl: 4 });
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledWith('ab'.repeat(32), undefined, 4));
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('replays a listing capability change during init and when handlers change', async () => {
+    const worker = new DelayedReadyWorker();
+    const client = new HashtreeWorkerClient((class {
+      constructor() { return worker; }
+    }) as unknown as new () => Worker);
+    client.setP2PProvider({ fetch: async () => null, listPeerIds: () => ['peer'] });
+    const initializing = client.init();
+    const init = worker.postedMessages[0].message;
+    client.setP2PProvider({ fetch: async () => null });
+    if (init.type !== 'init') throw new Error('Expected init');
+    worker.emitMessage({ type: 'ready', id: init.id });
+    await initializing;
+    try {
+      client.setP2PPeerListHandler(() => ['peer']);
+      client.setP2PPeerListHandler(null);
+      expect(worker.postedMessages.filter(({ message }) => message.type === 'setP2PProviderState'))
+        .toMatchObject([
+          { message: { enabled: true, peerListSupported: false } },
+          { message: { enabled: true, peerListSupported: true } },
+          { message: { enabled: true, peerListSupported: false } },
+        ]);
+    } finally {
+      await client.close();
+    }
+  });
+
 });

@@ -1,5 +1,5 @@
 import { FipsNostrPubsubClient, FipsNostrPubsubEventSource, type FipsNostrPubsubClientOptions, type RuntimeSource } from 'nostr-pubsub';
-import { fromHex, toHex, type Store } from '@hashtree/core';
+import { fromHex, toHex, type Hash, type Store } from '@hashtree/core';
 import {
   FipsNode,
   identityFromSecretKey,
@@ -26,6 +26,9 @@ const DEFAULT_STUN_SERVERS = [
 interface BrowserHashtreeFipsProviderBaseOptions {
   relays: readonly string[];
   localStore: Store;
+  /** Serve authorized incoming requests without changing outgoing local-cache reads. */
+  /** Inbound only. HTL 0 permits local content only; do not forward upstream. */
+  serveBlob?: (hash: Hash, peerId: string, signal: AbortSignal, htl: number) => Promise<Uint8Array | null>;
   discoveryApp?: string;
   stunServers?: readonly string[];
   /** Explicit authenticated first-adjacency seeds used to bootstrap WebRTC negotiation. */
@@ -35,6 +38,7 @@ interface BrowserHashtreeFipsProviderBaseOptions {
   relayConnectTimeoutMs?: number;
   iceGatherTimeoutMs?: number;
   requestTimeoutMs?: number;
+  getUploadLimitBytesPerSecond?: () => number | null;
   /** Authenticated capability routes or explicitly configured remote Hashtree peers. */
   providerRoutes?: FipsBlobRouteSource;
   /** Reject unsolicited WebRTC offers before creating a peer connection or FIPS link. */
@@ -111,6 +115,8 @@ export async function createBrowserHashtreeFipsProvider(
   const provider = createFipsWorkerP2PProvider({
     node,
     localStore: options.localStore,
+    serveBlob: options.serveBlob,
+    getUploadLimitBytesPerSecond: options.getUploadLimitBytesPerSecond,
     requestTimeoutMs: options.requestTimeoutMs,
     providerRoutes: options.providerRoutes,
     allowIncomingPeer: options.allowIncomingPeer,

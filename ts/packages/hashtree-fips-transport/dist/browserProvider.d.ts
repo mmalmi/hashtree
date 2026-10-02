@@ -1,5 +1,5 @@
 import { type FipsNostrPubsubClientOptions, type RuntimeSource } from 'nostr-pubsub';
-import { type Store } from '@hashtree/core';
+import { type Hash, type Store } from '@hashtree/core';
 import { FipsNode, type FipsIdentity, type Logger } from '@fips/core';
 import { WebRtcTransport, type WebRtcTransportConfig } from '@fips/transport-webrtc';
 import { WebSocketTransport } from '@fips/transport-websocket';
@@ -7,6 +7,9 @@ import { type FipsBlobRouteSource, type HashtreeWorkerP2PProvider } from './work
 interface BrowserHashtreeFipsProviderBaseOptions {
     relays: readonly string[];
     localStore: Store;
+    /** Serve authorized incoming requests without changing outgoing local-cache reads. */
+    /** Inbound only. HTL 0 permits local content only; do not forward upstream. */
+    serveBlob?: (hash: Hash, peerId: string, signal: AbortSignal, htl: number) => Promise<Uint8Array | null>;
     discoveryApp?: string;
     stunServers?: readonly string[];
     /** Explicit authenticated first-adjacency seeds used to bootstrap WebRTC negotiation. */
@@ -16,6 +19,7 @@ interface BrowserHashtreeFipsProviderBaseOptions {
     relayConnectTimeoutMs?: number;
     iceGatherTimeoutMs?: number;
     requestTimeoutMs?: number;
+    getUploadLimitBytesPerSecond?: () => number | null;
     /** Authenticated capability routes or explicitly configured remote Hashtree peers. */
     providerRoutes?: FipsBlobRouteSource;
     /** Reject unsolicited WebRTC offers before creating a peer connection or FIPS link. */

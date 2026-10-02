@@ -99,9 +99,10 @@ export interface RootResolveOptions {
 }
 
 export type WorkerRequest =
-  | { type: 'init'; id: string; config: WorkerConfig; p2pProviderEnabled?: boolean }
+  | { type: 'init'; id: string; config: WorkerConfig; p2pProviderEnabled?: boolean; p2pPeerListSupported?: boolean }
   | { type: 'close'; id: string }
-  | { type: 'setP2PProviderState'; id: string; enabled: boolean }
+  | { type: 'setP2PProviderState'; id: string; enabled: boolean; peerListSupported?: boolean }
+  | { type: 'putFile'; id: string; data: Uint8Array; upload?: boolean }
   | { type: 'putBlob'; id: string; data: Uint8Array; mimeType?: string; upload?: boolean }
   | { type: 'putBlock'; id: string; data: Uint8Array; hashHex?: string; mimeType?: string; upload?: boolean }
   | { type: 'putBlocks'; id: string; blocks: RawBlockInput[]; upload?: boolean }
