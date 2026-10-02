@@ -173,6 +173,16 @@ pub struct CatchupQuery {
 pub trait CatchupSource {
     async fn query(&mut self, relay: &str, query: &CatchupQuery) -> Result<Vec<StoredNostrEvent>>;
 
+    /// Largest unique, verified EOSE page observed from this relay under the
+    /// supplied pass interval, kinds and limit. May omit the author in at most
+    /// one bounded probe; probe events must not enter the author's results.
+    /// Zero means unavailable. Failures must remain errors, not capacity zero.
+    /// This is an observed uniform-cap heuristic, not proof against a source
+    /// that applies different caps to different filters or hides events.
+    async fn observed_capacity(&mut self, _relay: &str, _query: &CatchupQuery) -> Result<usize> {
+        Ok(0)
+    }
+
     /// An unbounded-by-limit count for the exact filter, when the source can
     /// supply one without marking it approximate. None means unavailable.
     /// Like EOSE, this is evidence from that source, not global completeness.
@@ -231,34 +241,64 @@ pub async fn fetch_catchup_author(
             if lower == upper
                 && (saturated || (events.len() > 1 && events.len() >= observed_broad_capacity))
             {
-                // A small author's entire history can be a timestamp tie.
-                // Its size alone cannot distinguish completion from a relay
-                // cap. Ask the same source for its count without a limit;
-                // unavailable, mismatching or approximate counts never clear
-                // this guard. Count requests share the author's page budget.
-                if pages >= policy.max_pages_per_author {
-                    return Err(CatchupError(format!(
-                        "author {author}, relay {relay}: page budget exhausted before timestamp count; coverage incomplete"
-                    )));
-                }
-                pages += 1;
-                let count = source.exact_count(relay, &query).await.map_err(|err| {
-                    CatchupError(format!(
-                        "author {author}, relay {relay}, timestamp {lower} count: {err}"
-                    ))
-                })?;
                 let unique = events
                     .iter()
                     .map(|event| &event.id)
                     .collect::<BTreeSet<_>>()
                     .len();
-                if count != Some(unique) {
-                    let reason = if saturated {
-                        "saturated"
-                    } else {
-                        "ambiguous capped"
+                if !saturated {
+                    // An author's complete history can be a small tie. Its
+                    // size alone is not an observed relay cap. A larger page
+                    // from this same source disproves a uniform cap that low.
+                    if pages >= policy.max_pages_per_author {
+                        return Err(CatchupError(format!(
+                            "author {author}, relay {relay}: page budget exhausted before capacity probe; coverage incomplete"
+                        )));
+                    }
+                    pages += 1;
+                    let capacity_query = CatchupQuery {
+                        since,
+                        until,
+                        ..query.clone()
                     };
-                    return Err(CatchupError(format!("author {author}, relay {relay}: {reason} timestamp {lower}; coverage incomplete")));
+                    let capacity = source
+                        .observed_capacity(relay, &capacity_query)
+                        .await
+                        .map_err(|err| {
+                            CatchupError(format!(
+                                "author {author}, relay {relay}, capacity probe: {err}"
+                            ))
+                        })?;
+                    if capacity > policy.page_size {
+                        return Err(CatchupError(format!(
+                            "author {author}, relay {relay}: capacity exceeded requested limit"
+                        )));
+                    }
+                    observed_broad_capacity = observed_broad_capacity.max(capacity);
+                }
+                if saturated || unique >= observed_broad_capacity {
+                    // Full requested-page ties always need an unbounded count.
+                    // Both probes and counts share the author's page budget,
+                    // including calls served from a source's capacity cache.
+                    if pages >= policy.max_pages_per_author {
+                        return Err(CatchupError(format!(
+                            "author {author}, relay {relay}: page budget exhausted before timestamp count; coverage incomplete"
+                        )));
+                    }
+                    pages += 1;
+                    let count = source.exact_count(relay, &query).await.map_err(|err| {
+                        CatchupError(format!(
+                            "author {author}, relay {relay}, timestamp {lower} count: {err}"
+                        ))
+                    })?;
+                    if count != Some(unique) {
+                        let reason = if saturated {
+                            "saturated"
+                        } else {
+                            "ambiguous capped"
+                        };
+                        return Err(CatchupError(format!("author {author}, relay {relay}: {reason} timestamp {lower}; coverage incomplete")));
+                    }
                 }
             }
             let oldest = events.iter().map(|event| event.created_at).min();

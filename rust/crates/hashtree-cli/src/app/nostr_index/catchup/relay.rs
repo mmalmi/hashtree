@@ -17,6 +17,7 @@ use tokio_tungstenite::{
 };
 
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+mod capacity;
 mod count;
 const MAX_EVENT_BYTES: usize = 1024 * 1024;
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
@@ -107,6 +108,7 @@ pub(super) struct RelaySource {
     sequence: u64,
     timeout: Duration,
     max_bytes: usize,
+    capacities: BTreeMap<capacity::Key, usize>,
 }
 
 impl RelaySource {
@@ -116,6 +118,7 @@ impl RelaySource {
             sequence: 0,
             timeout: Duration::from_secs(timeout_secs),
             max_bytes,
+            capacities: BTreeMap::new(),
         }
     }
 
@@ -139,18 +142,22 @@ impl RelaySource {
         relay: &str,
         query: &CatchupQuery,
         budget: &mut QueryBudget,
+        filter_author: bool,
     ) -> std::result::Result<CompletedPage, QueryFailure> {
         self.ensure_connected(relay).await?;
         self.sequence += 1;
         let subscription = format!("catchup-{}", self.sequence);
         let socket = self.sockets.get_mut(relay).expect("connected source");
+        let mut filter = serde_json::json!({
+            "kinds": query.kinds, "since": query.since,
+            "until": query.until, "limit": query.limit,
+        });
+        if filter_author {
+            filter["authors"] = serde_json::json!([query.author]);
+        }
         socket
             .send(Message::Text(
-                serde_json::json!(["REQ", subscription, {
-                    "authors": [query.author], "kinds": query.kinds,
-                    "since": query.since, "until": query.until, "limit": query.limit,
-                }])
-                .to_string(),
+                serde_json::json!(["REQ", subscription, filter]).to_string(),
             ))
             .await
             .map_err(|err| QueryFailure::transport("send REQ", err))?;
@@ -221,7 +228,7 @@ impl RelaySource {
                     event
                         .verify()
                         .map_err(|err| CatchupError(format!("event verification: {err}")))?;
-                    if event.pubkey.to_hex() != query.author
+                    if (filter_author && event.pubkey.to_hex() != query.author)
                         || event.created_at.as_secs() < query.since
                         || event.created_at.as_secs() > query.until
                         || !query.kinds.contains(&event.kind.as_u16())
@@ -282,17 +289,21 @@ impl RelaySource {
     }
 }
 
-impl CatchupSource for RelaySource {
-    async fn exact_count(&mut self, relay: &str, query: &CatchupQuery) -> Result<Option<usize>> {
-        self.count(relay, query).await
-    }
-
-    async fn query(&mut self, relay: &str, query: &CatchupQuery) -> Result<Vec<StoredNostrEvent>> {
+impl RelaySource {
+    async fn query_page(
+        &mut self,
+        relay: &str,
+        query: &CatchupQuery,
+        filter_author: bool,
+    ) -> Result<Vec<StoredNostrEvent>> {
         let deadline = Instant::now() + self.timeout;
         let mut budget = QueryBudget::default();
         let result = tokio::time::timeout_at(deadline, async {
             for attempt in 0..=1 {
-                match self.query_inner(relay, query, &mut budget).await {
+                match self
+                    .query_inner(relay, query, &mut budget, filter_author)
+                    .await
+                {
                     Ok(page) => return Ok(page),
                     Err(failure) => {
                         self.sockets.remove(relay);
@@ -324,6 +335,18 @@ impl CatchupSource for RelaySource {
                 Err(error)
             }
         }
+    }
+}
+
+impl CatchupSource for RelaySource {
+    async fn exact_count(&mut self, relay: &str, query: &CatchupQuery) -> Result<Option<usize>> {
+        self.count(relay, query).await
+    }
+    async fn observed_capacity(&mut self, relay: &str, query: &CatchupQuery) -> Result<usize> {
+        self.capacity(relay, query).await
+    }
+    async fn query(&mut self, relay: &str, query: &CatchupQuery) -> Result<Vec<StoredNostrEvent>> {
+        self.query_page(relay, query, true).await
     }
 }
 

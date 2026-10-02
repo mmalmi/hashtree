@@ -47,9 +47,10 @@ impl CountRelay {
                         let mut matching = events
                             .iter()
                             .filter(|event| {
-                                event.pubkey.to_hex() == filter["authors"][0].as_str().unwrap()
-                                    && event.created_at.as_secs()
-                                        >= filter["since"].as_u64().unwrap()
+                                filter.get("authors").is_none_or(|authors| {
+                                    event.pubkey.to_hex() == authors[0].as_str().unwrap()
+                                }) && event.created_at.as_secs()
+                                    >= filter["since"].as_u64().unwrap()
                                     && event.created_at.as_secs()
                                         <= filter["until"].as_u64().unwrap()
                                     && filter["kinds"]

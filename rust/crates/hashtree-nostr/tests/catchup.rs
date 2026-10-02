@@ -47,6 +47,9 @@ struct Source {
     counts_available: bool,
     count_override: Option<usize>,
     count_requests: Vec<(String, CatchupQuery)>,
+    capacities: BTreeMap<String, usize>,
+    capacity_error: Option<String>,
+    capacity_requests: Vec<(String, CatchupQuery)>,
 }
 
 impl CatchupSource for Source {
@@ -92,6 +95,15 @@ impl CatchupSource for Source {
                 .collect::<std::collections::BTreeSet<_>>()
                 .len()
         })))
+    }
+
+    async fn observed_capacity(&mut self, relay: &str, query: &CatchupQuery) -> Result<usize> {
+        self.capacity_requests
+            .push((relay.to_owned(), query.clone()));
+        if let Some(error) = &self.capacity_error {
+            return Err(CatchupError(error.clone()));
+        }
+        Ok(self.capacities.get(relay).copied().unwrap_or(0))
     }
 }
 
@@ -411,6 +423,165 @@ async fn matching_count_is_required_and_hidden_tied_ids_stay_incomplete() {
 }
 
 #[tokio::test]
+async fn larger_verified_source_capacity_resolves_small_tie_without_importing_probe_events() {
+    let keys = Keys::generate();
+    let other = Keys::generate();
+    let mut source = Source::default();
+    let expected = vec![
+        event(&keys, 20, "first", Kind::TextNote),
+        event(&keys, 20, "second", Kind::TextNote),
+    ];
+    let mut available = expected.clone();
+    available.push(event(&other, 30, "capacity only", Kind::TextNote));
+    source.events.insert("relay-a".into(), available);
+    source.capacities.insert("relay-a".into(), 3);
+    let fetched =
+        fetch_catchup_author(&mut source, &policy(), &keys.public_key().to_hex(), 10, 100)
+            .await
+            .unwrap();
+    assert_eq!(fetched.len(), 2);
+    assert!(expected
+        .iter()
+        .all(|event| fetched.iter().any(|actual| actual.id == event.id)));
+    assert!(fetched
+        .iter()
+        .all(|event| event.pubkey == keys.public_key().to_hex()));
+    assert!(source.count_requests.is_empty());
+    assert_eq!(
+        source.capacity_requests,
+        vec![(
+            "relay-a".into(),
+            CatchupQuery {
+                author: keys.public_key().to_hex(),
+                kinds: policy().kinds,
+                since: 10,
+                until: 100,
+                limit: 4,
+            }
+        )]
+    );
+}
+
+#[tokio::test]
+async fn observed_uniform_cap_does_not_clear_hidden_tied_ids() {
+    let keys = Keys::generate();
+    let mut source = Source {
+        cap: Some(2),
+        ..Default::default()
+    };
+    source.capacities.insert("relay-a".into(), 2);
+    source.events.insert(
+        "relay-a".into(),
+        (0..3)
+            .map(|i| event(&keys, 20, &i.to_string(), Kind::TextNote))
+            .collect(),
+    );
+    let error = fetch_catchup_author(&mut source, &policy(), &keys.public_key().to_hex(), 10, 100)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("ambiguous capped timestamp 20"));
+    assert_eq!(source.capacity_requests.len(), 1);
+    assert_eq!(source.count_requests.len(), 1);
+}
+
+#[tokio::test]
+async fn observed_capacity_is_independent_for_every_required_source() {
+    let keys = Keys::generate();
+    let mut source = Source::default();
+    let events = vec![
+        event(&keys, 20, "first", Kind::TextNote),
+        event(&keys, 20, "second", Kind::TextNote),
+    ];
+    for relay in ["relay-a", "relay-b"] {
+        source.events.insert(relay.into(), events.clone());
+    }
+    source.capacities.insert("relay-a".into(), 3);
+    source.capacities.insert("relay-b".into(), 2);
+    let error = fetch_catchup_author(&mut source, &policy(), &keys.public_key().to_hex(), 10, 100)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("relay-b: ambiguous capped"));
+    assert_eq!(source.capacity_requests.len(), 2);
+    assert_eq!(source.count_requests.len(), 1);
+    assert_eq!(source.count_requests[0].0, "relay-b");
+
+    source.capacities.insert("relay-b".into(), 3);
+    source.failed_relay = Some("relay-b".into());
+    let error = fetch_catchup_author(&mut source, &policy(), &keys.public_key().to_hex(), 10, 100)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("relay-b"));
+    assert!(error.to_string().contains("before EOSE"));
+}
+
+#[tokio::test]
+async fn capacity_probe_budget_and_failures_remain_incomplete() {
+    let keys = Keys::generate();
+    let mut source = Source::default();
+    source.capacities.insert("relay-a".into(), 3);
+    source.events.insert(
+        "relay-a".into(),
+        vec![
+            event(&keys, 20, "first", Kind::TextNote),
+            event(&keys, 20, "second", Kind::TextNote),
+        ],
+    );
+    let mut limited = policy();
+    limited.max_pages_per_author = 2;
+    let error = fetch_catchup_author(&mut source, &limited, &keys.public_key().to_hex(), 10, 100)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("page budget exhausted before capacity probe"));
+    assert!(source.capacity_requests.is_empty());
+    assert!(source.count_requests.is_empty());
+
+    for failure in [
+        "missing EOSE",
+        "invalid signature",
+        "invalid JSON",
+        "byte budget exhausted",
+    ] {
+        source.capacity_error = Some(failure.into());
+        let error =
+            fetch_catchup_author(&mut source, &policy(), &keys.public_key().to_hex(), 10, 100)
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("capacity probe"));
+        assert!(error.to_string().contains(failure));
+        assert!(source.count_requests.is_empty());
+    }
+    source.capacity_error = None;
+    source.capacities.insert("relay-a".into(), 5);
+    let error = fetch_catchup_author(&mut source, &policy(), &keys.public_key().to_hex(), 10, 100)
+        .await
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("capacity exceeded requested limit"));
+}
+
+#[tokio::test]
+async fn full_requested_page_tie_still_requires_count_even_with_larger_capacity() {
+    let keys = Keys::generate();
+    let mut source = Source::default();
+    source.capacities.insert("relay-a".into(), 9);
+    source.events.insert(
+        "relay-a".into(),
+        (0..4)
+            .map(|i| event(&keys, 20, &i.to_string(), Kind::TextNote))
+            .collect(),
+    );
+    let error = fetch_catchup_author(&mut source, &policy(), &keys.public_key().to_hex(), 10, 100)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("saturated timestamp 20"));
+    assert!(source.capacity_requests.is_empty());
+    assert_eq!(source.count_requests.len(), 1);
+}
+
+#[tokio::test]
 async fn timestamp_counts_share_page_budget_and_never_skip_a_required_source() {
     let keys = Keys::generate();
     let mut source = Source {
@@ -424,7 +595,7 @@ async fn timestamp_counts_share_page_budget_and_never_skip_a_required_source() {
             .collect(),
     );
     let mut limited = policy();
-    limited.max_pages_per_author = 2;
+    limited.max_pages_per_author = 3;
     let error = fetch_catchup_author(&mut source, &limited, &keys.public_key().to_hex(), 10, 100)
         .await
         .unwrap_err();

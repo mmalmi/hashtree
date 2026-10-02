@@ -10,6 +10,7 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio_tungstenite::{accept_hdr_async, tungstenite::protocol::CloseFrame};
 
+mod capacity;
 mod count;
 mod gateway;
 
@@ -397,7 +398,7 @@ async fn completed_eose_survives_failed_close_and_discards_unhealthy_socket() {
     .await;
     let mut source = RelaySource::new(2, 65536);
     let page = source
-        .query_inner(&relay.url, &query(&keys), &mut QueryBudget::default())
+        .query_inner(&relay.url, &query(&keys), &mut QueryBudget::default(), true)
         .await
         .unwrap();
     // Closing locally makes the next application-data write deterministically

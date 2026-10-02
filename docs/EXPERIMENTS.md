@@ -4,13 +4,35 @@ This file records performance and behavior experiments without identifying data.
 
 ## 2026-10-02 - Catch-up Timestamp Ties and Append Costs
 
-An archive catch-up repeatedly stopped on an author whose two returned events
-shared a timestamp. The existing conservative pagination rule could not
-distinguish that complete small history from an undisclosed relay result cap.
-A matching, non-approximate relay count can resolve that ambiguity without
-skipping the timestamp or removing a required source. Unsupported, approximate,
-malformed, timed-out or mismatched counts still leave coverage incomplete.
-Counts, like EOSE, are source-reported evidence, not proof of global completeness.
+The catch-up pagination guard treated a two-event history at one timestamp as
+an observed relay cap of two. When the relay did not provide COUNT, that author
+could remain incomplete even after both its broad and exact-second queries
+returned the complete pair with EOSE.
+
+For an ambiguous tie below the requested page limit, the source can now supply
+the largest unique, signature-verified EOSE page observed under the same frozen
+pass interval, kinds and requested limit. It may make one bounded query without
+the author filter to obtain that measurement. The measurement is local to that
+relay; another relay's events or declared maximum limit cannot substitute for
+it. Capacity calls consume the existing page budget even when cached, and probe
+events never enter the author's result or archive append.
+
+A tied pair below a verified three-event capacity no longer looks saturated.
+A uniform hidden cap of two still leaves that pair ambiguous and requires a
+matching same-source COUNT. A tie filling the requested limit always requires
+COUNT, regardless of other observed capacities. Signature, filter, EOSE,
+deadline, byte/event limits, required-source coverage, checkpoint durability and
+retention checks remain in force; probe failures remain incomplete coverage.
+
+This is a source-relative observed uniform-cap heuristic. It does not prove
+completeness against a relay that applies filter-dependent caps, omits events,
+or otherwise misrepresents its data. COUNT is likewise source-reported evidence,
+and an unmarked estimate is not a mathematical completeness proof.
+
+Focused regressions cover the complete pair, a hidden third event under a
+uniform cap, independent required sources, the exact frozen probe filter,
+probe/count page budgets, probe errors, and full-limit ties. Test execution is
+recorded by the integration gate; no throughput improvement is claimed here.
 
 A deterministic optimized Rust fixture separately compared appends to an
 order-64 historical tree. It used 2,051 historical events and 1,573 incoming

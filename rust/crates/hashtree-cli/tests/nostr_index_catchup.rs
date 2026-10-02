@@ -19,6 +19,9 @@ struct Relay {
     connections: Arc<AtomicUsize>,
     event_page_cap: Arc<AtomicUsize>,
     count_filters: Arc<Mutex<Vec<Value>>>,
+    capacity_filters: Arc<Mutex<Vec<Value>>>,
+    count_supported: Arc<AtomicBool>,
+    count_silent: Arc<AtomicBool>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -32,6 +35,9 @@ impl Relay {
         let connections = Arc::new(AtomicUsize::new(0));
         let event_page_cap = Arc::new(AtomicUsize::new(usize::MAX));
         let count_filters = Arc::new(Mutex::new(Vec::new()));
+        let capacity_filters = Arc::new(Mutex::new(Vec::new()));
+        let count_supported = Arc::new(AtomicBool::new(true));
+        let count_silent = Arc::new(AtomicBool::new(false));
         let state = (
             events.clone(),
             fail_author.clone(),
@@ -39,11 +45,23 @@ impl Relay {
             connections.clone(),
             event_page_cap.clone(),
             count_filters.clone(),
+            capacity_filters.clone(),
+            count_supported.clone(),
+            count_silent.clone(),
         );
         let task = tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
-                let (events, fail_author, omit_eose, connections, event_page_cap, count_filters) =
-                    state.clone();
+                let (
+                    events,
+                    fail_author,
+                    omit_eose,
+                    connections,
+                    event_page_cap,
+                    count_filters,
+                    capacity_filters,
+                    count_supported,
+                    count_silent,
+                ) = state.clone();
                 connections.fetch_add(1, Ordering::Relaxed);
                 tokio::spawn(async move {
                     let mut socket = accept_async(stream).await.unwrap();
@@ -54,8 +72,10 @@ impl Relay {
                         }
                         let subscription = &message[1];
                         let filter = &message[2];
-                        let author = filter["authors"][0].as_str().unwrap();
-                        if fail_author.lock().unwrap().as_deref() == Some(author) {
+                        let author = filter["authors"][0].as_str();
+                        if author.is_some_and(|author| {
+                            fail_author.lock().unwrap().as_deref() == Some(author)
+                        }) {
                             let _ = socket.close(None).await;
                             return;
                         }
@@ -64,7 +84,7 @@ impl Relay {
                             .unwrap()
                             .iter()
                             .filter(|event| {
-                                event.pubkey.to_hex() == author
+                                author.is_none_or(|author| event.pubkey.to_hex() == author)
                                     && filter["kinds"].as_array().unwrap().iter().any(|kind| {
                                         kind.as_u64() == Some(u64::from(event.kind.as_u16()))
                                     })
@@ -79,17 +99,25 @@ impl Relay {
                             // The count describes the complete exact filter before
                             // the simulated relay's lower EVENT result cap.
                             count_filters.lock().unwrap().push(filter.clone());
+                            if count_silent.load(Ordering::Relaxed) {
+                                continue;
+                            }
+                            let response = if count_supported.load(Ordering::Relaxed) {
+                                json!(["COUNT", subscription, {"count": matched.len()}])
+                            } else {
+                                json!(["CLOSED", subscription, "unsupported: COUNT unavailable"])
+                            };
                             if socket
-                                .send(Message::Text(
-                                    json!(["COUNT", subscription, {"count": matched.len()}])
-                                        .to_string(),
-                                ))
+                                .send(Message::Text(response.to_string()))
                                 .await
                                 .is_err()
                             {
                                 return;
                             }
                             continue;
+                        }
+                        if author.is_none() {
+                            capacity_filters.lock().unwrap().push(filter.clone());
                         }
                         matched.sort_by_key(|event| std::cmp::Reverse(event.created_at));
                         matched.truncate(
@@ -127,6 +155,9 @@ impl Relay {
             connections,
             event_page_cap,
             count_filters,
+            capacity_filters,
+            count_supported,
+            count_silent,
             task,
         }
     }
@@ -396,7 +427,6 @@ fn query_id_count(temp: &TempDir, root: &str, ids: &[String]) -> u64 {
 async fn cli_exact_count_completes_same_second_pair_and_retains_history() {
     let temp = TempDir::new().unwrap();
     let keys = Keys::generate();
-    let other = Keys::generate();
     let old = event(&keys, 1, "retained archive");
     let first = event(&keys, 20, "first tied post");
     let second = event(&keys, 20, "second tied post");
@@ -415,7 +445,6 @@ async fn cli_exact_count_completes_same_second_pair_and_retains_history() {
         first.clone(),
         second.clone(),
         wrong_kind,
-        event(&other, 20, "different author"),
         event(&keys, 200, "outside pass"),
     ])
     .await;
@@ -504,6 +533,140 @@ async fn cli_exact_count_detects_hidden_tied_event_and_preserves_exact_checkpoin
         vec![
             json!({"authors": [bob.public_key().to_hex()], "kinds": [1, 5], "since": 30, "until": 30})
         ],
+    );
+    assert_eq!(query_id_count(&temp, &root, &[old.id.to_hex()]), 1);
+    assert_eq!(
+        query_id_count(
+            &temp,
+            first["root"].as_str().unwrap(),
+            &[old.id.to_hex(), ready.id.to_hex()]
+        ),
+        2
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_capacity_probe_is_cached_and_excludes_witness_events_from_author_index() {
+    let temp = TempDir::new().unwrap();
+    let alice = Keys::generate();
+    let bob = Keys::generate();
+    let witness = Keys::generate();
+    let old = event(&alice, 1, "retained archive");
+    let root = import(&temp, &old);
+    std::fs::write(
+        temp.path().join("authors.txt"),
+        format!("{}\n{}\n", alice.public_key(), bob.public_key()),
+    )
+    .unwrap();
+    let incoming = vec![
+        event(&alice, 20, "alice one"),
+        event(&alice, 20, "alice two"),
+        event(&bob, 30, "bob one"),
+        event(&bob, 30, "bob two"),
+    ];
+    // These are the first three results of the author-free page, but their
+    // author is not eligible for this run. They prove capacity, not coverage.
+    let witnesses = vec![
+        event(&witness, 80, "witness one"),
+        event(&witness, 81, "witness two"),
+        event(&witness, 82, "witness three"),
+    ];
+    let relay = Relay::new(incoming.iter().chain(&witnesses).cloned().collect()).await;
+    relay.count_silent.store(true, Ordering::Relaxed);
+    let completed = success(
+        catchup(&temp, &root, &relay)
+            .args(["--until", "100"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(completed["next_author"], 2);
+    assert_eq!(completed["complete"], true);
+    assert_eq!(
+        completed["events_received"], 4,
+        "probe events must not count as author results"
+    );
+    assert_eq!(completed["pass_until"], 100);
+    assert_eq!(
+        *relay.capacity_filters.lock().unwrap(),
+        vec![json!({"kinds": [1, 5], "since": 10, "until": 100, "limit": 4})],
+        "one cached probe must retain the exact pass/kinds/limit and omit authors",
+    );
+    assert!(
+        relay.count_filters.lock().unwrap().is_empty(),
+        "observed capacity above the unsaturated tie must avoid unavailable COUNT"
+    );
+    assert_eq!(relay.connections.load(Ordering::Relaxed), 1);
+    let next_root = completed["root"].as_str().unwrap();
+    assert_eq!(query_id_count(&temp, &root, &[old.id.to_hex()]), 1);
+    let wanted = std::iter::once(old.id.to_hex())
+        .chain(incoming.iter().map(|event| event.id.to_hex()))
+        .collect::<Vec<_>>();
+    assert_eq!(query_id_count(&temp, next_root, &wanted), 5);
+    let excluded = witnesses
+        .iter()
+        .map(|event| event.id.to_hex())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        query_id_count(&temp, next_root, &excluded),
+        0,
+        "capacity-only witness events must never enter the author index"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_uniform_cap_with_unavailable_count_preserves_exact_checkpoint() {
+    let temp = TempDir::new().unwrap();
+    let alice = Keys::generate();
+    let bob = Keys::generate();
+    let witness = Keys::generate();
+    let old = event(&alice, 1, "archive");
+    let ready = event(&alice, 20, "durable prior author");
+    let root = import(&temp, &old);
+    std::fs::write(
+        temp.path().join("authors.txt"),
+        format!("{}\n{}\n", alice.public_key(), bob.public_key()),
+    )
+    .unwrap();
+    let relay = Relay::new(vec![
+        ready.clone(),
+        event(&bob, 30, "tie one"),
+        event(&bob, 30, "tie two"),
+        event(&bob, 30, "hidden third event"),
+        event(&witness, 80, "witness one"),
+        event(&witness, 81, "witness two"),
+        event(&witness, 82, "witness three"),
+    ])
+    .await;
+    relay.event_page_cap.store(2, Ordering::Relaxed);
+    relay.count_supported.store(false, Ordering::Relaxed);
+    let first = success(
+        catchup(&temp, &root, &relay)
+            .args(["--until", "100", "--max-authors-per-run", "1"])
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(first["next_author"], 1);
+    let state_file = temp.path().join("data/nostr-index/catchup-state.json");
+    let saved = std::fs::read(&state_file).unwrap();
+    let failed = catchup(&temp, &root, &relay).output().unwrap();
+    let error = String::from_utf8_lossy(&failed.stderr);
+    assert!(!failed.status.success());
+    assert!(
+        error.contains("ambiguous capped timestamp 30") && error.contains("coverage incomplete"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&state_file).unwrap(), saved);
+    assert_eq!(checkpoint(&temp)["root"], first["root"]);
+    assert_eq!(checkpoint(&temp)["next_author"], 1);
+    assert_eq!(
+        *relay.capacity_filters.lock().unwrap(),
+        vec![json!({"kinds": [1, 5], "since": 10, "until": 100, "limit": 4})]
+    );
+    assert_eq!(
+        *relay.count_filters.lock().unwrap(),
+        vec![
+            json!({"authors": [bob.public_key().to_hex()], "kinds": [1, 5], "since": 30, "until": 30})
+        ]
     );
     assert_eq!(query_id_count(&temp, &root, &[old.id.to_hex()]), 1);
     assert_eq!(
