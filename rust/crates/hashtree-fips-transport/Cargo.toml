@@ -17,9 +17,9 @@ webrtc = ["webrtc-endpoint"]
 
 [dependencies]
 async-trait.workspace = true
-nvpn-fips-core = { version = "=0.4.90" }
+nvpn-fips-core = { version = "=0.4.91" }
 nvpn-fips-tcp = { version = "=0.2.2" }
-nvpn-fips-tcp-endpoint = { version = "=0.2.23" }
+nvpn-fips-tcp-endpoint = { version = "=0.2.24" }
 hashtree-core = { version = "0.2.86", path = "../hashtree-core" }
 hex = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
