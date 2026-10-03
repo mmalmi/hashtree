@@ -294,7 +294,14 @@ async fn cli_restarts_failed_author_then_continues_time_without_losing_history()
     .await;
     let first = success(
         catchup(&temp, &root, &relay)
-            .args(["--until", "100", "--max-authors-per-run", "1"])
+            .args([
+                "--until",
+                "100",
+                "--max-authors-per-run",
+                "1",
+                "--read-cache-mib",
+                "0",
+            ])
             .output()
             .unwrap(),
     );
@@ -315,7 +322,10 @@ async fn cli_restarts_failed_author_then_continues_time_without_losing_history()
         "failed author must not advance root or coverage"
     );
     *relay.fail_author.lock().unwrap() = None;
-    let completed = success(catchup(&temp, &root, &relay).output().unwrap());
+    // Enabling the cache on resume is operational tuning, not a policy change.
+    let completed_output = catchup(&temp, &root, &relay).output().unwrap();
+    assert!(String::from_utf8_lossy(&completed_output.stderr).contains("read_cache_hits="));
+    let completed = success(completed_output);
     assert_eq!(completed["complete"], true);
     assert_eq!(
         completed["pass_until"], 100,

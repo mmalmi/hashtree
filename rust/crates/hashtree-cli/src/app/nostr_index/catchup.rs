@@ -16,6 +16,7 @@ use super::{cid_to_nhash, parse_root_text, persist_json_atomic, CrawlStateLock, 
 
 mod coverage;
 mod pipeline;
+mod read_cache;
 mod relay;
 
 #[derive(clap::Args, Debug)]
@@ -59,6 +60,9 @@ pub(crate) struct CatchupArgs {
     fetch_timeout_secs: u64,
     #[arg(long, default_value_t = 256)]
     index_commit_batch_size: usize,
+    /// Immutable read-cache payload budget in MiB (0 disables; not resume policy).
+    #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u16).range(0..=256))]
+    read_cache_mib: u16,
     /// Physical free-space floor checked at each local write (not resume policy).
     #[arg(long, default_value_t = 10 * 1024 * 1024 * 1024u64)]
     min_free_bytes: u64,
@@ -161,8 +165,12 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         config.storage.max_size_gb * 1024 * 1024 * 1024,
         args.min_free_bytes,
     ).with_context(|| format!("open catch-up storage: physical-space floor={} metadata_margin=16777216 max_write_quantum=67108864", args.min_free_bytes))?);
-    let event_store = NostrEventStore::with_options(
+    let read_cache = Arc::new(read_cache::CatchupReadCache::new(
         store.store_arc(),
+        usize::from(args.read_cache_mib) * 1024 * 1024,
+    ));
+    let event_store = NostrEventStore::with_options(
+        read_cache.clone(),
         NostrEventStoreOptions {
             index_commit_batch_size: Some(state.policy.index_commit_batch_size),
             ..Default::default()
@@ -220,6 +228,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
             let author = &authors[ordinal];
             let store = &store;
             let event_store = &event_store;
+            let read_cache = &read_cache;
             let state_file = &state_file;
             let coverage_directory = &coverage_directory;
             let author_count = authors.len();
@@ -263,8 +272,9 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                 let state = next;
                 // Do not delete superseded nodes: published roots and rollback readers
                 // may still depend on them. Publication owns eventual root-aware GC.
+                let (read_hits, read_misses, cache_bytes, cache_entries) = read_cache.read_stats();
                 eprintln!(
-                    "Nostr catchup checkpoint: authors={}/{} interval={}..{} events_received={} author_events={} fetch_ms={} append_ms={} validate_ms={} sync_ms={} checkpoint_ms={} elapsed_ms={}",
+                    "Nostr catchup checkpoint: authors={}/{} interval={}..{} events_received={} author_events={} fetch_ms={} append_ms={} validate_ms={} sync_ms={} checkpoint_ms={} elapsed_ms={} read_cache_hits={} read_cache_misses={} read_cache_bytes={} read_cache_entries={}",
                     state.next_author,
                     author_count,
                     state.pass_since,
@@ -276,7 +286,11 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                     validate_ms,
                     sync_ms,
                     checkpoint_started.elapsed().as_millis(),
-                    author_started.elapsed().as_millis()
+                    author_started.elapsed().as_millis(),
+                    read_hits,
+                    read_misses,
+                    cache_bytes,
+                    cache_entries
                 );
                 Ok((next_root, state))
             }

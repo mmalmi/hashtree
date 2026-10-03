@@ -2,6 +2,36 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-10-03 - Bounded Catch-up Immutable Read Cache
+
+Catch-up now shares a positive-only immutable blob cache across index commits
+and author checkpoints. Its default payload budget is 64 MiB with at most 16,384
+entries; `--read-cache-mib` permits 0 (disabled) through 256 MiB without changing
+the saved catch-up policy. Only successful reads whose bytes match their content
+hash enter the cache. Missing, failed and corrupt reads are not reused. Writes,
+including optimistic batches, still reach the guarded backing store. Explicit
+deletion invalidates affected entries; this private wrapper is used only by the
+single append writer, without concurrent garbage collection.
+
+A deterministic fixture exercises the real `NostrEventStore` append path with
+256 signed notes, order 8 and 16-event commits. After seeding 128 notes, appending
+the remaining notes in eight batches required 586 backing reads with the cache
+disabled and 377 with it enabled: **35.7% fewer backing reads**. Both modes
+produced the exact same content-addressed root, and every note remained readable
+from its appropriate original or final root. This measures read calls in memory,
+not production wall time or disk bytes; the small fanout deliberately exercises
+multiple tree levels. Production fanout, 256-event commit size, fetch concurrency,
+physical-space guards, block syncing, coverage and checkpoint order are unchanged.
+
+Per-author checkpoint logs include cumulative cache hits, misses, payload bytes
+and entry count. Compare counter deltas and invocation wall time for a live
+acceptance trial, alongside author/event counts and existing fetch/append timing.
+The byte limit excludes bounded LRU metadata and transient returned byte copies.
+The 41 catch-up unit tests and 16 local-relay CLI integration tests passed on
+macOS, including cache-disabled checkpoint resume with the cache enabled,
+repair-witness recovery, source failure and exact historical retention. Linux
+physical-space fixtures and live throughput remain deployment acceptance gates.
+
 ## 2026-10-02 - Bounded Catch-up Fetch Pipeline
 
 The CLI overlaps two author fetches while preserving one ordered writer. The
