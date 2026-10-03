@@ -1,9 +1,9 @@
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { sha256, toHex } from '@hashtree/core';
+import { fromHex, HashTree, MemoryStore, sha256, toHex } from '@hashtree/core';
 import { HashtreeWorkerClient } from '../src/client.js';
 import { IdbBlobStorage } from '../src/capabilities/idbStorage.js';
-import { attachHashtreeWorker } from '../src/worker.js';
+import { attachHashtreeWorker, type HashtreeWorkerRuntime } from '../src/worker.js';
 import type { WorkerRequest, WorkerResponse } from '../src/protocol.js';
 
 class InProcessWorker {
@@ -11,6 +11,7 @@ class InProcessWorker {
   onerror = null;
   readonly requests: WorkerRequest[] = [];
   readonly responses: WorkerResponse[] = [];
+  runtime: HashtreeWorkerRuntime | null = null;
   private listener: EventListener | null = null;
   private readonly detach = attachHashtreeWorker({
     postMessage: (message) => {
@@ -19,6 +20,8 @@ class InProcessWorker {
     },
     addEventListener: (_type, listener) => { this.listener = listener as EventListener; },
     removeEventListener: () => { this.listener = null; },
+  }, {
+    handleExtensionRequest: (_request, runtime) => { this.runtime = runtime; return false; },
   });
   postMessage(message: WorkerRequest) {
     this.requests.push(message);
@@ -74,6 +77,69 @@ afterEach(async () => {
 });
 
 describe('worker peer-serving source scope', () => {
+  it.each(['p2p', 'blossom'] as const)('keeps a verified %s download peer-readable after the source disappears and worker restarts', async (source) => {
+    const hash = toHex(await sha256(payload));
+    if (source === 'blossom') upstream = payload;
+    else client.setP2PProvider({ fetch: async () => payload });
+    await expect(client.getBlob(hash, { sourceIds: [source] })).resolves.toEqual({ data: payload, source });
+    await expect(storage.get(hash)).resolves.toEqual(payload);
+    upstream = null;
+    client.setP2PProvider(null);
+    await expect(client.getBlobForPeer(hash, { sourceIds: [] })).resolves.toEqual(payload);
+    await restartWorker();
+    await expect(client.getBlobForPeer(hash, { sourceIds: [] })).resolves.toEqual(payload);
+  });
+
+  it('persists sharing for every downloaded encrypted tree block, without sharing local raw blocks', async () => {
+    const privateBlock = await client.putBlock(payload);
+    const originStore = new MemoryStore();
+    const origin = new HashTree({ store: originStore, chunkSize: 64 });
+    const contents = Uint8Array.from({ length: 256 }, (_, index) => index);
+    const { cid } = await origin.putFile(contents);
+    client.setP2PProvider({ fetch: (hashHex) => originStore.get(fromHex(hashHex)) });
+    await expect(worker.runtime!.tree!.readFile(cid)).resolves.toEqual(contents);
+    const blocks = [];
+    for await (const block of origin.walkBlocks(cid)) blocks.push(block);
+    expect(blocks.length).toBeGreaterThan(1);
+    client.setP2PProvider(null);
+    await restartWorker();
+    for (const block of blocks) {
+      const hash = toHex(block.hash);
+      await expect(client.getBlobForPeer(hash, { sourceIds: [] })).resolves.toEqual(await originStore.get(block.hash));
+    }
+    await expect(client.getBlobForPeer(privateBlock.hashHex, { sourceIds: [] })).resolves.toBeNull();
+    const remoteStore = new MemoryStore();
+    remoteStore.get = (hash) => client.getBlobForPeer(toHex(hash), { sourceIds: [] });
+    await expect(new HashTree({ store: remoteStore }).readFile(cid)).resolves.toEqual(contents);
+  });
+
+  it.each(['miss', 'corrupt', 'timeout'] as const)('does not authorize private local bytes after a remote %s', async (outcome) => {
+    const block = await client.putBlock(payload);
+    client.setP2PProvider({ fetch: async () => {
+      if (outcome === 'timeout') throw new DOMException('Peer timed out', 'TimeoutError');
+      return outcome === 'miss' ? null : new Uint8Array([99]);
+    } });
+    await expect(client.getBlob(block.hashHex, { sourceIds: ['p2p'], skipPrimary: true }))
+      .rejects.toThrow(outcome === 'miss' ? /not found/i : outcome === 'timeout' ? /incomplete|timed out/i : /wrong hash/i);
+    await expect(storage.get(block.hashHex)).resolves.toEqual(payload);
+    await expect(client.getBlobForPeer(block.hashHex, { sourceIds: [] })).resolves.toBeNull();
+    await restartWorker();
+    await expect(client.getBlobForPeer(block.hashHex, { sourceIds: [] })).resolves.toBeNull();
+  });
+
+  it.each(['putByHashTrusted', 'authorizePeerSharing'] as const)('still returns verified network bytes when %s fails, without an unsafe grant', async (method) => {
+    const hash = toHex(await sha256(payload));
+    client.setP2PProvider({ fetch: async () => payload });
+    const write = vi.spyOn(IdbBlobStorage.prototype, method)
+      .mockRejectedValue(new DOMException('Cache full', 'QuotaExceededError'));
+    try {
+      await expect(client.getBlob(hash, { sourceIds: ['p2p'] })).resolves.toEqual({ data: payload, source: 'p2p' });
+      await expect(client.getBlobForPeer(hash, { sourceIds: [] })).resolves.toBeNull();
+    } finally { write.mockRestore(); }
+    await restartWorker();
+    await expect(client.getBlobForPeer(hash, { sourceIds: [] })).resolves.toBeNull();
+  });
+
   it('refuses an untrusted local block without treating denial as an operational error', async () => {
     const hash = toHex(await sha256(payload));
     await storage.putByHash(hash, payload);

@@ -365,7 +365,7 @@ describe('worker peer blob sharing', () => {
     delete globalThis.self;
   });
 
-  it('serves a remotely verified peer blob only for the current worker session', async () => {
+  it('keeps a remotely verified peer blob available after worker restart', async () => {
     const { attachHashtreeWorker } = await import('../src/worker.js');
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
@@ -411,6 +411,8 @@ describe('worker peer blob sharing', () => {
     expect(await waitForBlobResponse('blob-1-after-restart')).toEqual({
       type: 'blob',
       id: 'blob-1-after-restart',
+      data: blobData,
+      source: 'idb',
     });
   });
 

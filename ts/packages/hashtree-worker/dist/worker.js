@@ -297,11 +297,12 @@ async function markEncryptedTreeHashesAsPeerShareable(id) {
     }
     await authorizePeerSharing(hashes);
 }
-async function authorizePeerSharing(hashes) {
-    if (!storage)
+async function authorizePeerSharing(hashes, targetStorage = storage) {
+    if (!targetStorage)
         throw new Error('Worker storage not initialized');
-    await storage.authorizePeerSharing(hashes);
-    markEncryptedHashes(hashes, peerShareableHashes);
+    await targetStorage.authorizePeerSharing(hashes);
+    if (targetStorage === storage)
+        markEncryptedHashes(hashes, peerShareableHashes);
 }
 async function emitConnectivityUpdate() {
     if (!blossom)
@@ -335,6 +336,7 @@ function toBlobSource(sourceId) {
 async function loadBlobData(hashHex, options = {}) {
     if (!blobRouter)
         return null;
+    const targetStorage = storage;
     const result = await blobRouter.getDetailed(fromHex(hashHex), toRouterOptions(options));
     if (!result) {
         emitDiagnostic('debug', 'mesh', 'blob-load-miss', 'Blob was not available from any source', {
@@ -344,6 +346,21 @@ async function loadBlobData(hashHex, options = {}) {
         return null;
     }
     const source = toBlobSource(result.routeId);
+    // The router verified these raw bytes against the requested hash. Persist
+    // their remote provenance before returning so a reloaded cache can serve
+    // them too. A local cache hit alone must never authorize private raw puts.
+    if (source !== 'idb' && targetStorage) {
+        try {
+            await targetStorage.putByHashTrusted(hashHex, result.data);
+            await authorizePeerSharing([hashHex], targetStorage);
+        }
+        catch (error) {
+            // A full/unavailable cache must not turn a valid network read into a miss.
+            emitDiagnostic('warn', 'storage', 'blob-cache-write-failed', 'Could not persist downloaded blob', {
+                error: getErrorMessage(error),
+            });
+        }
+    }
     emitDiagnostic('debug', 'mesh', 'blob-load-hit', 'Loaded blob through the blob router', {
         hashHex: hashHex.slice(0, 16),
         source,
@@ -381,7 +398,6 @@ async function loadPeerBlobData(hashHex, sourceIds) {
         return null;
     }
     if (trustedHash || loaded.sourceId !== 'idb') {
-        markEncryptedHashes([hashHex], peerShareableHashes);
         return loaded;
     }
     const readSourceResult = await loadBlobData(hashHex, {
@@ -389,7 +405,6 @@ async function loadPeerBlobData(hashHex, sourceIds) {
         sourceIds: readSourceIds,
     });
     if (readSourceResult) {
-        markEncryptedHashes([hashHex], peerShareableHashes);
         emitDiagnostic('debug', 'mesh', 'peer-blob-share-enabled', 'Allowing peer blob after verifying it is reachable from a read source', {
             hashHex: hashHex.slice(0, 16),
             source: readSourceResult.source,
@@ -456,16 +471,15 @@ function createBlobRouter(primary) {
         p2pPeerRoutes,
         blossomRoute,
     ], {
-        cache: primary,
         requestTimeoutMs: BLOB_READ_TIMEOUT_MS,
         hedgeDelayMs: ROUTE_HEDGE_DELAY_MS,
         maxInFlight: 2,
     });
 }
-function createRoutedStore(primary, router) {
+function createRoutedStore(primary) {
     return {
         put: (hash, data) => primary.put(hash, data),
-        get: (hash) => router.get(hash, ['idb']),
+        get: async (hash) => (await loadBlobData(toHex(hash)))?.data ?? null,
         has: (hash) => primary.has(hash),
         delete: (hash) => primary.delete(hash),
     };
@@ -934,7 +948,7 @@ async function init(config, hasP2PProvider = false, peerListSupported = true) {
         publishBlossomBandwidth(stats);
     });
     blobRouter = createBlobRouter(primaryStore);
-    routedStore = createRoutedStore(primaryStore, blobRouter);
+    routedStore = createRoutedStore(primaryStore);
     tree = new HashTree({ store: routedStore });
     mediaTree = tree;
     publishBlossomBandwidth(blossom.getBandwidthStats());
