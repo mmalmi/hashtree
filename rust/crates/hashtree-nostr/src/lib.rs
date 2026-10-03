@@ -459,6 +459,7 @@ pub struct NostrEventStore<S: Store> {
     tree: HashTree<S>,
     index: BTree<S>,
     options: NostrEventStoreOptions,
+    index_write_buffer_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -943,7 +944,17 @@ impl<S: Store> NostrEventStore<S> {
             tree: HashTree::new(HashTreeConfig::new(Arc::clone(&store))),
             index,
             options,
+            index_write_buffer_bytes: 0,
         }
+    }
+
+    /// Retain at most this payload threshold between append index projections.
+    /// A single projection may exceed it, just as with per-projection flushing.
+    /// Every event commit still flushes unconditionally before returning its
+    /// root. Zero preserves the default per-projection flush behavior.
+    pub fn with_index_write_buffer_bytes(mut self, bytes: usize) -> Self {
+        self.index_write_buffer_bytes = bytes;
+        self
     }
 
     pub fn encode_event(&self, event: &StoredNostrEvent) -> Result<Vec<u8>, NostrEventStoreError> {
@@ -1620,7 +1631,10 @@ impl<S: Store> NostrEventStore<S> {
         root: Option<&Cid>,
         events: Vec<StoredNostrEvent>,
     ) -> Result<NostrEventBuildReport, NostrEventStoreError> {
-        let buffered_store = Arc::new(BufferedStore::new_optimistic(Arc::clone(&self.store)));
+        let buffered_store = Arc::new(
+            BufferedStore::new_optimistic(Arc::clone(&self.store))
+                .with_flush_threshold(self.index_write_buffer_bytes),
+        );
         let buffered_writer =
             NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone());
         let mut obsolete_event_cids = Vec::new();

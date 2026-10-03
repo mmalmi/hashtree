@@ -97,6 +97,13 @@ pub trait Store: Send + Sync {
         Ok(0)
     }
 
+    /// Flush at an intermediate memory boundary. Buffered stores may retain a
+    /// bounded amount between boundaries; callers must still explicitly flush
+    /// all pending writes before returning a committed root.
+    async fn flush_pending_if_needed(&self) -> Result<usize, StoreError> {
+        self.flush_pending().await
+    }
+
     /// Retrieve data by hash
     /// Returns data or None if not found
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError>;
@@ -208,17 +215,20 @@ pub enum StoreError {
 struct BufferedStoreInner {
     pending: HashMap<Hash, Vec<u8>>,
     order: Vec<Hash>,
+    pending_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct BufferedStoreOptions {
     check_base_on_put: bool,
+    flush_threshold_bytes: usize,
 }
 
 impl Default for BufferedStoreOptions {
     fn default() -> Self {
         Self {
             check_base_on_put: true,
+            flush_threshold_bytes: 0,
         }
     }
 }
@@ -241,6 +251,7 @@ impl<S: Store> BufferedStore<S> {
             base,
             BufferedStoreOptions {
                 check_base_on_put: false,
+                flush_threshold_bytes: 0,
             },
         )
     }
@@ -253,6 +264,15 @@ impl<S: Store> BufferedStore<S> {
         }
     }
 
+    /// Coalesce intermediate flush hints below this payload threshold. This
+    /// bounds retention between hints, not within one caller operation; an
+    /// operation may exceed the threshold. `flush` and `flush_pending` always
+    /// flush everything, including below-threshold writes.
+    pub fn with_flush_threshold(mut self, bytes: usize) -> Self {
+        self.options.flush_threshold_bytes = bytes;
+        self
+    }
+
     pub async fn flush(&self) -> Result<usize, StoreError> {
         let items = {
             let mut inner = self.inner.write().unwrap();
@@ -261,6 +281,7 @@ impl<S: Store> BufferedStore<S> {
             }
 
             let order = std::mem::take(&mut inner.order);
+            inner.pending_bytes = 0;
             let mut items = Vec::with_capacity(order.len());
             for hash in order {
                 if let Some(data) = inner.pending.remove(&hash) {
@@ -297,6 +318,7 @@ impl<S: Store> Store for BufferedStore<S> {
             return Ok(false);
         }
         inner.order.push(hash);
+        inner.pending_bytes += data.len();
         inner.pending.insert(hash, data);
         Ok(true)
     }
@@ -313,6 +335,13 @@ impl<S: Store> Store for BufferedStore<S> {
 
     async fn flush_pending(&self) -> Result<usize, StoreError> {
         BufferedStore::flush(self).await
+    }
+
+    async fn flush_pending_if_needed(&self) -> Result<usize, StoreError> {
+        if self.inner.read().unwrap().pending_bytes < self.options.flush_threshold_bytes {
+            return Ok(0);
+        }
+        self.flush().await
     }
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
@@ -366,11 +395,12 @@ impl<S: Store> Store for BufferedStore<S> {
     async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
         let removed = {
             let mut inner = self.inner.write().unwrap();
-            let removed = inner.pending.remove(hash).is_some();
-            if removed {
+            let removed = inner.pending.remove(hash);
+            if let Some(bytes) = &removed {
+                inner.pending_bytes -= bytes.len();
                 inner.order.retain(|queued| queued != hash);
             }
-            removed
+            removed.is_some()
         };
 
         if removed {
@@ -817,6 +847,58 @@ mod tests {
 
         assert_eq!(base.regular_batches.load(Ordering::Relaxed), 0);
         assert_eq!(base.optimistic_batches.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn threshold_coalesces_hints_but_explicit_flush_never_defers_writes() {
+        let base = Arc::new(OptimisticBatchStore::default());
+        let buffered = BufferedStore::new_optimistic(base.clone()).with_flush_threshold(8);
+        let first = vec![1; 4];
+        let second = vec![2; 4];
+        let h1 = sha256(&first);
+        let h2 = sha256(&second);
+        buffered.put(h1, first.clone()).await.unwrap();
+        assert!(!buffered.put(h1, first.clone()).await.unwrap());
+        assert_eq!(buffered.flush_pending_if_needed().await.unwrap(), 0);
+        assert_eq!(buffered.get(&h1).await.unwrap(), Some(first));
+        assert!(!base.has(&h1).await.unwrap());
+        buffered.put(h2, second.clone()).await.unwrap();
+        buffered.delete(&h1).await.unwrap();
+        assert_eq!(buffered.flush_pending_if_needed().await.unwrap(), 0);
+        assert_eq!(buffered.inner.read().unwrap().pending_bytes, 4);
+        buffered.put(h1, vec![1; 4]).await.unwrap();
+        assert_eq!(buffered.flush_pending_if_needed().await.unwrap(), 2);
+        assert_eq!(buffered.inner.read().unwrap().pending_bytes, 0);
+        assert_eq!(base.optimistic_batches.load(Ordering::Relaxed), 1);
+        assert_eq!(base.get(&h2).await.unwrap(), Some(second));
+
+        let tiny = vec![3];
+        let h3 = sha256(&tiny);
+        buffered.put(h3, tiny.clone()).await.unwrap();
+        assert_eq!(buffered.flush_pending().await.unwrap(), 1);
+        assert_eq!(base.get(&h3).await.unwrap(), Some(tiny));
+        assert_eq!(base.regular_batches.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn threshold_does_not_leave_large_operations_pending_after_a_hint() {
+        let base = Arc::new(MemoryStore::new());
+        let buffered = BufferedStore::new(base.clone()).with_flush_threshold(8);
+        let bytes = vec![9; 16];
+        let hash = sha256(&bytes);
+        buffered.put(hash, bytes.clone()).await.unwrap();
+        assert_eq!(buffered.flush_pending_if_needed().await.unwrap(), 1);
+        assert_eq!(base.get(&hash).await.unwrap(), Some(bytes));
+        assert_eq!(buffered.inner.read().unwrap().pending_bytes, 0);
+
+        let ordinary = BufferedStore::new(base.clone());
+        let hash = sha256(&[5]);
+        ordinary.put(hash, vec![5]).await.unwrap();
+        assert_eq!(ordinary.flush_pending_if_needed().await.unwrap(), 1);
+        assert!(
+            base.has(&hash).await.unwrap(),
+            "default hints remain unconditional"
+        );
     }
 
     #[tokio::test]

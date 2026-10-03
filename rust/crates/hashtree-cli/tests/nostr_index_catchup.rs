@@ -301,6 +301,8 @@ async fn cli_restarts_failed_author_then_continues_time_without_losing_history()
                 "1",
                 "--read-cache-mib",
                 "0",
+                "--index-write-buffer-mib",
+                "0",
             ])
             .output()
             .unwrap(),
@@ -322,7 +324,8 @@ async fn cli_restarts_failed_author_then_continues_time_without_losing_history()
         "failed author must not advance root or coverage"
     );
     *relay.fail_author.lock().unwrap() = None;
-    // Enabling the cache on resume is operational tuning, not a policy change.
+    // Enabling read reuse and write coalescing on resume is operational tuning,
+    // not a policy change.
     let completed_output = catchup(&temp, &root, &relay).output().unwrap();
     assert!(String::from_utf8_lossy(&completed_output.stderr).contains("read_cache_hits="));
     let completed = success(completed_output);

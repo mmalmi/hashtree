@@ -368,7 +368,7 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
     }
 
     async fn flush_index_writes(&self) -> Result<(), CollectionError> {
-        self.store.flush_pending().await.map_err(|err| {
+        self.store.flush_pending_if_needed().await.map_err(|err| {
             CollectionError::HashTree(hashtree_core::HashTreeError::Store(err.to_string()))
         })?;
         Ok(())

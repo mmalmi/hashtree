@@ -2,6 +2,48 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-10-04 - Catch-up Projection Write Coalescing
+
+Catch-up previously flushed every independent index projection separately inside
+each 256-event commit. A PoolStore batch includes pending-location catalog work,
+member writes and verification, and stored-location catalog work. Small separate
+batches repeat those transactions even though no intermediate projection root is
+published.
+
+The CLI now coalesces projection writes using an 8 MiB payload threshold. It
+checks the threshold after each projection and unconditionally flushes at the
+end of every event commit. Event payload flushing, physical-space admission,
+256-event commit size, syncing before author checkpoints, repair behavior and
+historical-root retention remain unchanged. `--index-write-buffer-mib 0`
+restores per-projection flushing; the allowed range is 0 through 64 MiB and is
+runtime tuning outside the saved policy identity. Other library callers retain
+their previous default unless they explicitly opt in.
+
+This is a threshold between projections, not a hard total-memory cap: a single
+projection can exceed it, as it could before. Additional retained payload
+between projections is below the threshold; metadata, allocator overhead and
+the currently constructed projection add to process memory. Explicit flushes
+never defer writes, including when the pending bytes are below the threshold.
+
+The signed production-path fixture uses 2,051 historical events and 1,573
+incoming items, including duplicate notes, overlapping timestamps, wide tag
+replacement and tombstones. With order 32 and 256-event commits, backing write
+batches fell from **65 to 14 (78.5% fewer)**. Both modes produced the exact same
+content-addressed final root and retained exactly 4,625 new blobs containing
+11,244,096 payload bytes. Historical projections and bodies remained readable
+directly from the backing store. Refusing either a threshold flush or the final
+coalesced write returns an error before the next 256-event batch begins, instead
+of an uncommitted root; retry from the preserved historical root succeeds.
+
+These are in-memory operation and payload counts, not filesystem allocation or
+measured live throughput. Checkpoint logs expose cumulative `store_write_calls`
+and `store_submitted_write_bytes` for subsequent live comparison; submitted
+bytes include duplicates and do not measure physical disk writes.
+All 408 core/collection/Nostr tests and 57 catch-up CLI tests passed on macOS;
+two existing vector-generation helpers were ignored. The final boundary tests
+also verify unconditional payload and index flushing for each of seven event
+commits. Linux physical-space gates and live throughput remain rollout gates.
+
 ## 2026-10-03 - Bounded Catch-up Immutable Read Cache
 
 Catch-up now shares a positive-only immutable blob cache across index commits

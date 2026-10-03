@@ -63,6 +63,10 @@ pub(crate) struct CatchupArgs {
     /// Immutable read-cache payload budget in MiB (0 disables; not resume policy).
     #[arg(long, default_value_t = 64, value_parser = clap::value_parser!(u16).range(0..=256))]
     read_cache_mib: u16,
+    /// Coalesce index projection writes below this MiB threshold (0 disables).
+    /// Runtime tuning only; every event commit still flushes before checkpointing.
+    #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(0..=64))]
+    index_write_buffer_mib: u16,
     /// Physical free-space floor checked at each local write (not resume policy).
     #[arg(long, default_value_t = 10 * 1024 * 1024 * 1024u64)]
     min_free_bytes: u64,
@@ -175,7 +179,8 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
             index_commit_batch_size: Some(state.policy.index_commit_batch_size),
             ..Default::default()
         },
-    );
+    )
+    .with_index_write_buffer_bytes(usize::from(args.index_write_buffer_mib) * 1024 * 1024);
     // An unreadable supplied root is fatal. Never silently start an empty index.
     event_store
         .validate_index_root(Some(&base_root))
@@ -273,8 +278,9 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                 // Do not delete superseded nodes: published roots and rollback readers
                 // may still depend on them. Publication owns eventual root-aware GC.
                 let (read_hits, read_misses, cache_bytes, cache_entries) = read_cache.read_stats();
+                let (write_calls, submitted_write_bytes) = read_cache.write_stats();
                 eprintln!(
-                    "Nostr catchup checkpoint: authors={}/{} interval={}..{} events_received={} author_events={} fetch_ms={} append_ms={} validate_ms={} sync_ms={} checkpoint_ms={} elapsed_ms={} read_cache_hits={} read_cache_misses={} read_cache_bytes={} read_cache_entries={}",
+                    "Nostr catchup checkpoint: authors={}/{} interval={}..{} events_received={} author_events={} fetch_ms={} append_ms={} validate_ms={} sync_ms={} checkpoint_ms={} elapsed_ms={} read_cache_hits={} read_cache_misses={} read_cache_bytes={} read_cache_entries={} store_write_calls={} store_submitted_write_bytes={}",
                     state.next_author,
                     author_count,
                     state.pass_since,
@@ -290,7 +296,9 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                     read_hits,
                     read_misses,
                     cache_bytes,
-                    cache_entries
+                    cache_entries,
+                    write_calls,
+                    submitted_write_bytes
                 );
                 Ok((next_root, state))
             }

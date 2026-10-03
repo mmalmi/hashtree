@@ -34,6 +34,7 @@ struct RecordingStore {
     historical: Arc<MemoryStore>,
     appended: MemoryStore,
     metrics: Metrics,
+    fail_flush_on: AtomicU64,
 }
 
 impl RecordingStore {
@@ -42,6 +43,7 @@ impl RecordingStore {
             historical,
             appended: MemoryStore::new(),
             metrics: Metrics::default(),
+            fail_flush_on: AtomicU64::new(0),
         }
     }
 }
@@ -68,7 +70,10 @@ impl Store for RecordingStore {
     }
 
     async fn put_many_optimistic(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
-        self.metrics.flushes.fetch_add(1, Ordering::Relaxed);
+        let ordinal = self.metrics.flushes.fetch_add(1, Ordering::Relaxed) + 1;
+        if self.fail_flush_on.load(Ordering::Relaxed) == ordinal {
+            return Err(StoreError::Other("bounded write refusal".into()));
+        }
         self.put_many(items).await
     }
 
@@ -322,6 +327,134 @@ fn catchup_append_fanout_and_commit_matrix_preserves_every_projection() {
                 );
                 println!("catchup-throughput {row}");
             }
+        }
+    });
+}
+
+#[test]
+fn catchup_coalesces_projection_writes_without_changing_any_root_or_retained_blob() {
+    block_on(async {
+        let (historical, incoming) = fixture();
+        let backing = Arc::new(MemoryStore::new());
+        let previous = NostrEventStore::new(backing.clone())
+            .build(None, historical.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let old_projections = projections(backing.clone(), &previous).await;
+        let mut rows = Vec::new();
+        let mut roots = Vec::new();
+        for threshold in [0, 8 * 1024 * 1024] {
+            let measured = Arc::new(RecordingStore::new(backing.clone()));
+            let writer = NostrEventStore::with_options(
+                measured.clone(),
+                NostrEventStoreOptions {
+                    index_commit_batch_size: Some(256),
+                    ..Default::default()
+                },
+            )
+            .with_index_write_buffer_bytes(threshold);
+            let root = writer
+                .build(Some(&previous), incoming.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            let m = &measured.metrics;
+            rows.push((
+                m.flushes.load(Ordering::Relaxed),
+                m.inserted_blobs.load(Ordering::Relaxed),
+                m.inserted_bytes.load(Ordering::Relaxed),
+            ));
+            roots.push(root.clone());
+            // Inspect the backing store directly, after the writer returns:
+            // there must be no hidden unflushed bytes required by either root.
+            let reader = NostrEventStore::new(measured.clone());
+            reader.validate_index_root(Some(&root)).await.unwrap();
+            assert_eq!(
+                projections(measured.clone(), &previous).await,
+                old_projections
+            );
+            let expected = projections(measured.clone(), &root).await;
+            assert!(expected["by-id"].len() > historical.len());
+            for event in &historical {
+                assert!(reader
+                    .get_by_id(Some(&previous), &event.id)
+                    .await
+                    .unwrap()
+                    .is_some());
+            }
+        }
+        assert_eq!(
+            roots[0], roots[1],
+            "buffering cannot alter any content-addressed projection"
+        );
+        assert_eq!(rows[0].1, rows[1].1, "same retained blob count");
+        assert_eq!(rows[0].2, rows[1].2, "same retained payload bytes");
+        assert_eq!(
+            rows[1].0, 14,
+            "seven commits must each flush payloads and their final indexes"
+        );
+        eprintln!(
+            "catchup-write-coalescing baseline={:?} coalesced={:?}",
+            rows[0], rows[1]
+        );
+        assert!(
+            rows[1].0 * 2 < rows[0].0,
+            "must eliminate over half of backing write batches"
+        );
+    });
+}
+
+#[test]
+fn coalesced_append_flush_failures_do_not_return_an_uncommitted_root() {
+    block_on(async {
+        let (historical, incoming) = fixture();
+        let backing = Arc::new(MemoryStore::new());
+        let previous = NostrEventStore::new(backing.clone())
+            .build(None, historical[..8].to_vec())
+            .await
+            .unwrap()
+            .unwrap();
+        let old_projections = projections(backing.clone(), &previous).await;
+        for threshold in [1, 8 * 1024 * 1024] {
+            let measured = Arc::new(RecordingStore::new(backing.clone()));
+            // Payloads flush first. Refuse either the first projection's
+            // threshold flush or the commit's unconditional final index flush.
+            measured.fail_flush_on.store(2, Ordering::Relaxed);
+            let writer = NostrEventStore::with_options(
+                measured.clone(),
+                NostrEventStoreOptions {
+                    index_commit_batch_size: Some(256),
+                    ..Default::default()
+                },
+            )
+            .with_index_write_buffer_bytes(threshold);
+            let error = writer
+                .build(Some(&previous), incoming[..512].to_vec())
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("bounded write refusal"));
+            assert_eq!(measured.metrics.flushes.load(Ordering::Relaxed), 2);
+            assert_eq!(
+                measured.metrics.inserted_blobs.load(Ordering::Relaxed),
+                256,
+                "refusal in the first commit must stop before the next event batch"
+            );
+            assert_eq!(
+                projections(measured.clone(), &previous).await,
+                old_projections
+            );
+            measured.fail_flush_on.store(0, Ordering::Relaxed);
+            let next = writer
+                .build(Some(&previous), incoming[..512].to_vec())
+                .await
+                .unwrap()
+                .unwrap();
+            NostrEventStore::new(measured.clone())
+                .validate_index_root(Some(&next))
+                .await
+                .unwrap();
+            assert_eq!(projections(measured, &previous).await, old_projections);
         }
     });
 }

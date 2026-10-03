@@ -26,6 +26,8 @@ pub(super) struct CatchupReadCache<S: Store> {
     cache: Mutex<Cache>,
     hits: AtomicU64,
     misses: AtomicU64,
+    write_calls: AtomicU64,
+    submitted_write_bytes: AtomicU64,
 }
 
 impl<S: Store> CatchupReadCache<S> {
@@ -39,6 +41,8 @@ impl<S: Store> CatchupReadCache<S> {
             }),
             hits: AtomicU64::new(0),
             misses: AtomicU64::new(0),
+            write_calls: AtomicU64::new(0),
+            submitted_write_bytes: AtomicU64::new(0),
         }
     }
 
@@ -51,6 +55,20 @@ impl<S: Store> CatchupReadCache<S> {
             cache.bytes,
             cache.entries.len(),
         )
+    }
+
+    /// Attempted backing writes, not inserted payload or physical disk bytes.
+    pub(super) fn write_stats(&self) -> (u64, u64) {
+        (
+            self.write_calls.load(Ordering::Relaxed),
+            self.submitted_write_bytes.load(Ordering::Relaxed),
+        )
+    }
+
+    fn record_write(&self, bytes: usize) {
+        self.write_calls.fetch_add(1, Ordering::Relaxed);
+        self.submitted_write_bytes
+            .fetch_add(bytes as u64, Ordering::Relaxed);
     }
 
     fn forget(&self, hashes: &[Hash]) {
@@ -96,14 +114,17 @@ impl<S: Store> Store for CatchupReadCache<S> {
         Ok(result)
     }
     async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
+        self.record_write(data.len());
         self.forget(&[hash]);
         self.base.put(hash, data).await
     }
     async fn put_many(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
+        self.record_write(items.iter().map(|(_, data)| data.len()).sum());
         self.forget(&items.iter().map(|(hash, _)| *hash).collect::<Vec<_>>());
         self.base.put_many(items).await
     }
     async fn put_many_optimistic(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
+        self.record_write(items.iter().map(|(_, data)| data.len()).sum());
         self.forget(&items.iter().map(|(hash, _)| *hash).collect::<Vec<_>>());
         self.base.put_many_optimistic(items).await
     }
