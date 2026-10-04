@@ -1,5 +1,11 @@
 # Changelog
 
+## hashtree-fips-transport 0.4.26 - 2026-10-04
+
+- Require FIPS core 0.4.94 and TCP endpoint 0.2.29 for bounded concurrent
+  discovery. Keep blob protocol behavior and transport defaults unchanged.
+- Align the workspace with nostr-pubsub-fips 0.5.18.
+
 ## 0.2.152 - 2026-10-02
 
 - Add per-environment physical write admission for LMDB catch-up, preserving
