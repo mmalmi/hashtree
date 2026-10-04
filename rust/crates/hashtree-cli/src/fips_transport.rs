@@ -153,6 +153,7 @@ pub async fn start_daemon_fips_transport(
         let options = FipsPubsubClientOptions {
             query_timeout: request_timeout,
             routed_peers: config.nostr.fips_pubsub_peers.clone(),
+            max_inbound_routed_peers: config.nostr.fips_pubsub_max_inbound_routed_peers,
             max_frame_bytes: config
                 .nostr
                 .decentralized_pubsub_max_event_bytes
@@ -164,15 +165,21 @@ pub async fn start_daemon_fips_transport(
             .reputation
             .trusted_raters
             .extend(config.nostr.fips_trusted_raters.iter().cloned());
-        Some(Arc::new(
-            FipsPubsubClient::start_with_reputation(
-                endpoint.native_endpoint.clone(),
-                options,
-                policy,
-            )
-            .await
-            .context("Failed to start FIPS Nostr pubsub provider")?,
-        ))
+        match FipsPubsubClient::start_with_reputation(
+            endpoint.native_endpoint.clone(),
+            options,
+            policy,
+        )
+        .await
+        {
+            Ok(client) => Some(Arc::new(client)),
+            Err(error) => {
+                // Validation can reject an explicit public-provider limit after
+                // the endpoint has bound its sockets. Do not leave it running.
+                let _ = endpoint.native_endpoint.shutdown().await;
+                return Err(error).context("Failed to start FIPS Nostr pubsub provider");
+            }
+        }
     } else {
         None
     };
@@ -199,6 +206,7 @@ fn daemon_fips_pubsub_required(config: &Config) -> bool {
     config.nostr.event_transport == NostrEventTransport::FipsLocalOnly
         || config.nostr.decentralized_pubsub_enabled()
         || !config.nostr.retained_roots.is_empty()
+        || config.nostr.fips_pubsub_max_inbound_routed_peers > 0
 }
 
 async fn bind_daemon_blob_resolver(
@@ -610,6 +618,7 @@ fn normalized_discovery_scope(scope: &str) -> String {
 #[cfg(test)]
 mod tests {
     mod local_discovery;
+    mod public_provider;
 
     use super::*;
     use hashtree_core::Store;
@@ -1219,7 +1228,6 @@ fips_trusted_raters = ["invalid-key"]"#,
         (endpoint, addr.to_string())
     }
 
-    #[cfg(feature = "experimental-decentralized-pubsub")]
     fn reserve_udp_addr() -> String {
         let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         socket.local_addr().unwrap().to_string()
