@@ -36,6 +36,10 @@ incoming notes. Six cold-preparation safety cases and four alternating
 baseline/candidate/candidate/baseline runs passed. Background storage activity
 continued. Each cell below contains the two measured append times:
 
+The measured path includes the deployed legacy author-ID reconciliation before
+append. Canonical direct-build diagnostics omit that step and require separate
+timing qualification.
+
 | Storage / tags per note | Previous (seconds) | Combined (seconds) |
 | --- | --- | --- |
 | Warm / 0 | 0.587, 0.600 | 0.277, 0.304 |
