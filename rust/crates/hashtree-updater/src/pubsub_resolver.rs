@@ -5,7 +5,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use hashtree_core::Cid;
 use hashtree_resolver::{nostr::NostrRootResolver, Event, ResolverError, RootResolver, ToBech32};
-use nostr_pubsub::{EventSourceKind, NostrEventSubscriber, NostrEventSubscription};
+use nostr_pubsub::{
+    EventSourceKind, NostrEventSubscriber, NostrEventSubscription, SubscriptionDeliveryStatus,
+};
 use tokio::sync::mpsc;
 
 use crate::UpdateEventCache;
@@ -123,13 +125,20 @@ impl RootResolver for PubsubRootResolver {
         // Keep observing for the whole window: the first reply need not be the
         // newest release, and an early quiet interval says nothing about peers.
         tokio::time::sleep_until(deadline).await;
-        subscription
-            .0
-            .take()
-            .unwrap()
-            .close()
-            .await
-            .map_err(network)?;
+        let subscription = subscription.0.take().unwrap();
+        // Snapshot before our own close so an orderly end to the window does
+        // not look like premature delivery failure. Keep authenticated roots
+        // as rollback watermarks even when this observation was incomplete.
+        let delivery_status = subscription.delivery_status();
+        subscription.close().await.map_err(network)?;
+        if matches!(
+            delivery_status,
+            Some(SubscriptionDeliveryStatus::Closed | SubscriptionDeliveryStatus::Lagged)
+        ) {
+            return Err(ResolverError::Network(format!(
+                "Update check inconclusive: peer observation interrupted for {key}"
+            )));
+        }
         let roots = self.roots.lock().map_err(network)?;
         match roots.get(key).and_then(UpdateEventCache::latest) {
             Some(event) if *observed.lock().map_err(network)? == Some(event.as_event().id) => {

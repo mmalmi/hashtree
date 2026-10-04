@@ -2,7 +2,7 @@
 
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use std::time::Duration;
 
@@ -15,7 +15,7 @@ use hashtree_updater::{
 };
 use nostr_pubsub::{
     EventBus, EventSource, Filter, InMemoryEventBus, NostrEventHandler, NostrEventSubscriber,
-    NostrEventSubscription, VerifiedEvent,
+    NostrEventSubscription, SubscriptionDeliveryStatus, VerifiedEvent,
 };
 use nostr_sdk::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp, ToBech32};
 use tokio::sync::Notify;
@@ -25,6 +25,7 @@ struct SharedProvider {
     bus: InMemoryEventBus,
     started: Notify,
     closed: Arc<AtomicUsize>,
+    status: Arc<Mutex<Option<SubscriptionDeliveryStatus>>>,
 }
 
 #[async_trait]
@@ -39,6 +40,7 @@ impl NostrEventSubscriber for SharedProvider {
         Ok(Box::new(Subscription {
             inner: subscription,
             closed: self.closed.clone(),
+            status: self.status.clone(),
         }))
     }
 }
@@ -46,12 +48,21 @@ impl NostrEventSubscriber for SharedProvider {
 struct Subscription {
     inner: Box<dyn NostrEventSubscription>,
     closed: Arc<AtomicUsize>,
+    status: Arc<Mutex<Option<SubscriptionDeliveryStatus>>>,
 }
 
 #[async_trait]
 impl NostrEventSubscription for Subscription {
+    fn delivery_status(&self) -> Option<SubscriptionDeliveryStatus> {
+        *self.status.lock().unwrap()
+    }
+
     async fn close(self: Box<Self>) -> nostr_pubsub::Result<()> {
         self.inner.close().await?;
+        let mut status = self.status.lock().unwrap();
+        if *status == Some(SubscriptionDeliveryStatus::Active) {
+            *status = Some(SubscriptionDeliveryStatus::Closed);
+        }
         self.closed.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -207,6 +218,45 @@ async fn cached_only_wrong_author_and_disconnected_provider_are_inconclusive() {
         .to_string()
         .contains("inconclusive"));
     assert_eq!(provider.closed.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn interrupted_delivery_cannot_confirm_a_partial_peer_observation() {
+    for status in [
+        SubscriptionDeliveryStatus::Active,
+        SubscriptionDeliveryStatus::Closed,
+        SubscriptionDeliveryStatus::Lagged,
+    ] {
+        let provider = Arc::new(SharedProvider::default());
+        *provider.status.lock().unwrap() = Some(SubscriptionDeliveryStatus::Active);
+        let keys = Keys::generate();
+        let key = format!("{}/release", keys.public_key().to_bech32().unwrap());
+        let cid = Cid::public([9; 32]);
+        let event = signed_root(&keys, "release", 1, &cid);
+        let resolver = PubsubRootResolver::new(provider.clone(), Duration::from_millis(25));
+        let (result, ()) = tokio::join!(resolver.resolve(&key), async {
+            provider.started.notified().await;
+            announce(
+                &provider.bus,
+                event.clone(),
+                EventSource::peer("fresh-peer"),
+            )
+            .await;
+            *provider.status.lock().unwrap() = Some(status);
+        });
+        if status == SubscriptionDeliveryStatus::Active {
+            assert_eq!(result.unwrap(), Some(cid));
+            assert_eq!(
+                *provider.status.lock().unwrap(),
+                Some(SubscriptionDeliveryStatus::Closed),
+                "the resolver's own close must follow its health snapshot"
+            );
+        } else {
+            assert!(result.unwrap_err().to_string().contains("inconclusive"));
+        }
+        assert_eq!(resolver.latest_event(&key).await.unwrap(), Some(event));
+        assert_eq!(provider.closed.load(Ordering::SeqCst), 1);
+    }
 }
 
 #[test]
