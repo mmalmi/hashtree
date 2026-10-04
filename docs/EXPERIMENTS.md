@@ -2,6 +2,60 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-10-04 - Coalesce Append Payloads with Projection Writes
+
+The incremental Nostr writer flushed event payloads separately before constructing
+their index projections, even when an 8 MiB write buffer was enabled. The signed
+seven-commit fixture reproduced fourteen backing-store batches. The payload
+flush is now an intermediate threshold hint: small payloads can share the next
+projection or final batch. The final flush still precedes a returned root, and
+the crawler validates and synchronizes that root before saving its checkpoint.
+A zero threshold retains unconditional flushing. Initial builds and repair
+paths are outside this change.
+
+This intentionally changes internal failure timing and which unreferenced blobs
+may remain after a failed commit. It does not acknowledge a root or advance a
+checkpoint on failure. The existing buffer threshold covers retained payloads
+and index nodes together; as before, one stage can exceed the threshold before
+the next hint.
+
+The source-bound RED test reached the expected fourteen-versus-seven assertion
+after root and blob checks. With the change, all four focused Nostr cases, two
+guarded Pool cases and two buffer cases passed. The seven-commit fixture now
+uses seven batches, retaining the same 4,625 new blobs and 11,244,096 bytes.
+Tests cover default/initial-build behavior, read refusal, threshold/final and
+partial write refusal, uncached retry, replacements, tombstones, and exact
+history/content after reopening the database. Six actual CLI catch-up cases
+and the isolated filesystem-full checkpoint/resume case also passed.
+The exact release binary repeated those checks and passed the legacy repair
+interoperability witness.
+
+Matched native Linux test binaries used the same diagnostic markers, dependency
+lock, one CPU, production no-readahead setting, 8,192 historical events and 49
+incoming notes. Six cold-preparation safety cases and four alternating
+baseline/candidate/candidate/baseline runs passed. Background storage activity
+continued. Each cell below contains the two measured append times:
+
+| Storage / tags per note | Previous (seconds) | Combined (seconds) |
+| --- | --- | --- |
+| Warm / 0 | 0.587, 0.600 | 0.277, 0.304 |
+| Warm / 32 | 0.902, 0.831 | 0.638, 0.756 |
+| Cold / 0 | 3.633, 3.535 | 2.734, 7.572 |
+| Cold / 32 | 4.119, 5.195 | 4.511, 4.387 |
+
+Backing write calls fell from two to one for the untagged append and three to
+two for the tagged append. Attributed physical writes fell consistently:
+approximately 21.0% / 10.9% in the warm untagged/tagged cases and 11.4% / 5.4%
+in the cold cases. Cold physical reads stayed at 7,745,536 / 24,518,656 bytes.
+Roots, retained history and logical stored bytes matched across both versions.
+
+Warm append times improved in both repetitions. Cold latency remains
+inconclusive: the slow candidate run already spent 2.846 seconds in unchanged
+existing-ID lookups before reaching the changed flush, while other runs spent
+roughly 0.2–0.3 seconds there. Shared-storage latency therefore remains a material
+limit on interpreting the timing results. This supports fewer transactions and
+physical writes, not a general cold-crawl speedup claim.
+
 ## 2026-10-04 - Qualify Cold Pool Read Attribution
 
 The diagnostic fixture is now available behind the CLI's explicit

@@ -948,8 +948,8 @@ impl<S: Store> NostrEventStore<S> {
         }
     }
 
-    /// Retain at most this payload threshold between append index projections.
-    /// A single projection may exceed it, just as with per-projection flushing.
+    /// Retain event payloads and index nodes up to this threshold between append
+    /// write stages. A single stage may exceed it before the next flush hint.
     /// Every event commit still flushes unconditionally before returning its
     /// root. Zero preserves the default per-projection flush behavior.
     pub fn with_index_write_buffer_bytes(mut self, bytes: usize) -> Self {
@@ -1743,9 +1743,12 @@ impl<S: Store> NostrEventStore<S> {
             let indexed_events = buffered_writer
                 .put_prepared_event_blobs_parallel(prepared_events)
                 .await?;
-            buffered_store.flush_pending_if_needed().await.map_err(|err| {
-                NostrEventStoreError::HashTree(HashTreeError::Store(err.to_string()))
-            })?;
+            buffered_store
+                .flush_pending_if_needed()
+                .await
+                .map_err(|err| {
+                    NostrEventStoreError::HashTree(HashTreeError::Store(err.to_string()))
+                })?;
             if !indexed_events.is_empty() {
                 let mut collection = buffered_writer.collection_writer_from_manifest(&manifest);
                 collection

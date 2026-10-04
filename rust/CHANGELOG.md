@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- Coalesce buffered append payloads with index writes while preserving the final
+  flush and checkpoint sync. A signed seven-commit fixture now uses seven write
+  batches instead of fourteen. Matched Linux tests reduced physical writes by
+  5–21% and improved warm append times; cold latency remains inconclusive under
+  shared storage load. See the payload coalescing entry in `docs/EXPERIMENTS.md`.
+
 ## hashtree-fips-transport 0.4.26 - 2026-10-04
 
 - Require FIPS core 0.4.94 and TCP endpoint 0.2.29 for bounded concurrent
