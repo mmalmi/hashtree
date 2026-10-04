@@ -112,4 +112,9 @@ as loose objects, and checks the full upload without trusting the old tree.
 Force pushes, deletions, multiple updates, and `force_upload` are rejected.
 An up-to-date ref remains a no-op; the option does not force an update.
 
+For a full content re-upload, set `force_upload = true` under `[blossom]` in
+the publisher's configuration. An ordinary push then uploads full local history
+even if the branch tip is unchanged. Fast-forward checks still apply, and other
+remote refs are preserved.
+
 Part of [hashtree-rs](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree).

@@ -1066,7 +1066,8 @@ impl RemoteHelper {
         force_push: bool,
         remote_tip_sha: Option<&str>,
     ) -> Option<String> {
-        if force_push {
+        // Content repair needs full history even when the published tip is unchanged.
+        if force_push || self.config.blossom.force_upload {
             return None;
         }
 
@@ -1793,7 +1794,7 @@ impl RemoteHelper {
         force_push: bool,
         remote_tip_sha: Option<&str>,
     ) -> Result<()> {
-        if !force_push && remote_tip_sha == Some(sha) {
+        if !force_push && !self.config.blossom.force_upload && remote_tip_sha == Some(sha) {
             debug!(
                 "Skipping push for {} because remote tip already equals {}",
                 dst_ref, sha

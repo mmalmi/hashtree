@@ -3,6 +3,88 @@ use crate::git::object::{GitObject, ObjectType};
 use std::io::Read;
 
 #[test]
+fn force_upload_repairs_unchanged_tip_from_local_history() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (home, repo, _, master, dev) = create_repo_with_diverged_master_and_dev();
+    let _home = HomeGuard::set(home.path());
+    let _cwd = CwdGuard::set(repo.path());
+    let _git_dir = EnvGuard::clear("GIT_DIR");
+    let _mode = EnvGuard::clear("HTREE_GIT_REBUILD_FROM_LOCAL");
+    let data = TempDir::new().unwrap();
+    let _data = EnvGuard::set("HTREE_DATA_DIR", data.path().to_str().unwrap());
+    let blossom = CountingBlossomServer::new();
+    let mut config = Config::default();
+    config.nostr.relays.clear();
+    config.blossom.read_servers = vec![blossom.base_url().to_string()];
+    config.blossom.write_servers = config.blossom.read_servers.clone();
+    config.blossom.force_upload = true;
+    config.server.bind_address = blossom.base_url().trim_start_matches("http://").to_string();
+    let keys = nostr::Keys::generate();
+    let mut helper = RemoteHelper::new(
+        &keys.public_key().to_hex(),
+        "test-repo",
+        Some(hex::encode(keys.secret_key().to_secret_bytes())),
+        None,
+        false,
+        config.clone(),
+    )
+    .unwrap();
+    let refs = HashMap::from([
+        ("refs/heads/master".to_string(), master.clone()),
+        ("refs/heads/dev".to_string(), dev.clone()),
+        ("refs/tags/retained".to_string(), dev.clone()),
+    ]);
+    let expected = helper
+        .list_objects_for_shas(&[master.clone(), dev], &[])
+        .unwrap()
+        .into_iter()
+        .collect::<HashSet<_>>();
+    assert_eq!(
+        helper.handle_command("list for-push").unwrap().unwrap(),
+        vec![String::new()]
+    );
+    // Existing refs are readable, but this publisher and server have none of
+    // their objects. Re-uploading the same tip must reconstruct full history.
+    helper
+        .nostr
+        .force_fetch_refs_success_for_test(refs.clone(), None, None);
+    helper
+        .queue_push("refs/heads/master:refs/heads/master")
+        .unwrap();
+    let result = helper.execute_push().unwrap().unwrap();
+    // No relay is configured: exercise the real upload before the metadata gate.
+    assert!(
+        blossom.get_upload_request_count() + blossom.get_batch_upload_request_count() > 0,
+        "{result:?}"
+    );
+    assert_eq!(blossom.get_upload_check_request_count(), 0);
+    let root = helper.storage.get_root_cid().unwrap().unwrap();
+
+    let fresh_data = TempDir::new().unwrap();
+    let _fresh_data = EnvGuard::set("HTREE_DATA_DIR", fresh_data.path().to_str().unwrap());
+    let fresh = create_test_helper_with_config(config).unwrap();
+    let fetched =
+        block_on_result(fresh.fetch_git_objects_async(&hex::encode(root.hash), root.key.as_ref()))
+            .unwrap();
+    assert_eq!(
+        fetched
+            .into_iter()
+            .map(|(oid, _)| oid)
+            .collect::<HashSet<_>>(),
+        expected
+    );
+    let fetched_refs = block_on_result(
+        fresh
+            .nostr
+            .fetch_refs_from_hashtree(&hex::encode(root.hash), root.key.as_ref()),
+    )
+    .unwrap();
+    for (name, value) in refs {
+        assert_eq!(fetched_refs.get(&name), Some(&value));
+    }
+}
+
+#[test]
 fn git_storage_upload_includes_chunked_objects_and_multilevel_descendants() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let home = TempDir::new().unwrap();
