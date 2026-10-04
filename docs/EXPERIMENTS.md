@@ -2,6 +2,119 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-10-04 - Reject the Small-Update Parallelism Candidate
+
+An experimental candidate lowered the B-tree parallel-update trigger from 256
+to 32 changes. It was not accepted for integration or deployment. The existing maximum of four workers, commit size, write coalescing,
+cache bounds and archive format remain unchanged. This affects both link and
+string indexes. Regression checks compare 31, 32, 49 and 256 link changes with
+single-worker results, including exact roots, superseded nodes and readable old
+roots; a 49-change string update checks the same root and history behavior.
+They observe actual worker threads and at most four simultaneous reads, without
+requiring multiple available CPU cores. The 32-change check fails with the old
+trigger and passes with the candidate.
+
+All 458 index/core/collection/Nostr library tests and 42 CLI catch-up tests pass;
+two pre-existing library tests remain ignored. An optimized native Linux screen
+then compared fresh processes and disposable Pools under a one-core CPU quota,
+2 GiB memory-high and 4 GiB memory-max. A small harness imports the unchanged
+production cache and diagnostic modules, linking the actual index, Nostr and
+Pool crates. Both builds have identical dependency locks and fixture sources.
+
+| Backend | Incoming tags | Existing trigger | Candidate trigger |
+| --- | ---: | ---: | ---: |
+| MemoryStore | 0 | 16.704 ms | 13.161 ms |
+| MemoryStore | 32 | 114.230 ms | 132.499 ms |
+| LMDB Pool | 0 | 734.910 ms | 365.179 ms |
+| LMDB Pool | 32 | 950.564 ms | 1,128.262 ms |
+
+This first pair is mixed: the tag-rich Pool append is 18.7% slower, despite
+identical roots, retained history/signatures, cache counters and submitted I/O.
+No competing compiler was sampled. Peak memory is about 338 MiB in both runs,
+with no memory-high/max/OOM events or swap use. Total CPU usage is 6.952 versus
+6.941 seconds; quota throttling is 139 versus 201 milliseconds. These are whole
+fixture resource measurements, not append-only costs. The warm, compact fixture
+does not reproduce production read pressure or reclaim.
+
+Backing-write calls account for 708 versus 345 milliseconds in tag-free appends
+and 871 versus 1,054 milliseconds in tag-rich appends. Thus almost all of the
+observed Pool timing difference is in write-call time, while this scheduling
+change does not reduce submitted write work. One pair does not establish a
+causal speedup or slowdown. A reversed-pair attempt detected another compiler
+during its first run and was excluded; its baseline half was not run.
+
+The candidate is not accepted for deployment: the Linux screen provides no
+reliable overall improvement, and the earlier macOS debug results do not
+justify rollout. Production remains unchanged. Any follow-up needs a clean
+comparison and representative storage pressure rather than a larger claim
+from the current synthetic measurements.
+
+## 2026-10-04 - Attribute Small Catch-up Appends to Index and Pool Work
+
+A diagnostic-only fixture uses the production append, reconciliation, 64 MiB
+read cache, 256-event commits and 8 MiB write coalescing. It adds 49 signed notes
+from a new author to one fixed tree containing 8,192 signed historical notes.
+Incoming notes have either no tags or 32 tags each. The historical notes have
+eight tags each; incoming timestamps are interleaved with historical timestamps.
+MemoryStore and a disposable, physically guarded LMDB Pool produce identical
+roots. Every old projection, all nine final projections and every retained event
+signature are checked against the original tree and an independent rebuild.
+
+Test-local storage wrappers record reads, bytes, writes and elapsed time. Reads
+of known projection roots mark intervals without adding production hooks.
+An interval includes work until the following root read, including intervening
+flushes and final manifest work. Backing-write time is also recorded separately;
+summed read latency can overlap on parallel workers. Pool-internal catalog,
+member and verification reads are included in Pool call time but are not counted
+as cache misses. This is not a physical disk-throughput measurement.
+
+| Incoming tags per event | Backing cache misses | Written blobs | Submitted write bytes | Pool append |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 228 | 494 | 1,353,792 | 1.219 s |
+| 32 | 1,686 | 3,407 | 12,656,597 | 6.175 s |
+
+The tag projection accounts for 1,459 of the 1,686 misses in the tag-rich case.
+All observed misses are first reads of distinct hashes; there are no backing
+read-after-write calls or `has` calls in either case. Reconciliation restores
+and scans zero note IDs. This reproduces substantial index fan-out for a small
+event count, without an unbounded author-history scan. Increasing the cache
+would not eliminate these first reads in this fixture. Few backing write calls
+still represent thousands of per-blob Pool operations.
+
+A temporary one-line comparison lowered the B-tree parallel-update trigger
+from 256 changes to 32, retaining the existing maximum of four workers. These
+are scoped operating-system threads, not merely concurrently polled futures;
+Pool reads remain synchronous within each worker. The production source was
+restored after the comparison.
+
+| Backend | Incoming tags | Existing trigger | Trial trigger | Lower wall time |
+| --- | ---: | ---: | ---: | ---: |
+| MemoryStore | 0 | 0.926 s | 0.600 s | 35.3% |
+| LMDB Pool | 0 | 1.219 s | 0.853 s | 30.1% |
+| MemoryStore | 32 | 4.223 s | 3.646 s | 13.7% |
+| LMDB Pool | 32 | 6.175 s | 5.658 s | 8.4% |
+
+Output root hashes, read/hit counts, submitted blob counts/bytes and all history
+and signature checks match between triggers. The trial overlaps small projection
+updates; it does not reduce their I/O volume. The large tag projection already
+uses parallel workers under the original trigger, limiting the total benefit.
+
+These are individual paired macOS debug-build observations with warm OS caches,
+compact synthetic historical trees and no production-like memory reclaim or
+single-core quota. They do not predict cold production latency or justify a
+deployment. The smallest follow-up candidate is the lower trigger with the same
+four-worker bound, subject to a representative disposable Linux Pool trial and
+working-set measurements. No native runtime setting or deployed source changed.
+
+The diagnostic fixture is retained as experiment evidence and is not installed
+in the canonical test suite. In a checkout containing it, reproduce with
+`cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --bin htree append_io_attribution_49_events -- --nocapture`.
+It retains a 10 GiB physical free-space floor for its temporary Pool and takes
+about four minutes in this debug configuration. Setup, signing, seed copying,
+full projection comparison and retained-signature verification are excluded
+from the reported append times. The diagnostic test itself passed with both
+triggers; formatting and the restored production-source hash were checked.
+
 ## 2026-10-04 - Catch-up Projection Write Coalescing
 
 Catch-up previously flushed every independent index projection separately inside
