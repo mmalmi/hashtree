@@ -2,6 +2,79 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-10-04 - Qualify Cold Pool Read Attribution
+
+The diagnostic fixture is now available behind the CLI's explicit
+`archive-io-diagnostics` test feature. It is excluded from ordinary test runs:
+cold admission requires an isolated Linux process, a real filesystem and a
+controlled resource window. Production code and the 256-change parallel-update
+trigger are unchanged.
+
+Native Linux qualification passed six mapping/eviction safety cases, each in a
+fresh process, followed by the 8,192-history-event cold Pool fixture. It appends
+49 signed events with either zero or 32 tags, using the production 64 MiB cache,
+256-event commits and 8 MiB write coalescing. Warm/cold pairs produce identical
+roots, all nine logical projections, retained history/signatures, cache counters
+and submitted write work.
+
+That qualification used the deployed legacy append lineage, which includes
+repair reconciliation. Canonical catch-up directly calls `build`; its integrated
+fixture follows that actual path and labels rows `canonical-direct-build`.
+The qualified mapping/eviction modules are unchanged, but canonical cold timings
+and counters require their own Linux run. Do not mix either lineage's receipts
+or import legacy repair runtime code merely to compile this diagnostic.
+The source-linked canonical harness passes all nine local tests, including the
+four complete warm append cases and retained-signature verification. Its
+diagnostic-disabled mode retains only the four original cache tests.
+
+The first fixture version failed correctly: reopening its evicted Pool warmed
+80 of 652 catalog pages, exceeding its original 10% admission limit. The corrected
+setup records the reopen footprint, syncs the quiescent synthetic Pool, drops
+resident pages from the exact owned file mappings and requests file-only cache
+eviction. Both catalog and member must have **zero resident pages** immediately
+before a cold append; warm controls require at least 95%. File preparation
+rejects symlinks and multiply linked files. Mapping reset requires the held
+file's exact device/inode, one read-only shared mapping, offset zero, aligned
+bounds and at most 2 GiB. Tests preserve the same mapped bytes and unrelated
+file residency, and reject writable or ambiguous mappings. No global cache
+drop, production data or other process mapping is used.
+
+| Incoming tags | Backing gets | Logical returned bytes | Cold storage read bytes | Warm storage read bytes |
+| --- | ---: | ---: | ---: | ---: |
+| 0 | 237 | 1,293,913 | 45,838,336 | 0 |
+| 32 | 1,599 | 11,058,618 | 45,838,336 | 0 |
+
+Both cold cases admitted `[0, 0]` resident pages and recorded 89,528 input
+blocks during actual get calls. Reopen had warmed 80 catalog pages and 2,844 or
+3,100 member pages before the reset. The 45,838,336-byte cold read equals the
+combined catalog and member file lengths. Most get latency occurred in the four
+reconciliation reads and existing-event lookups, before later tag updates.
+The synthetic process used default read-ahead, while the live writer was
+independently verified to have `HTREE_LMDB_NO_READ_AHEAD=1`. The whole-file reads
+therefore do not establish a production read-path bug. The next bounded test
+must use the same frozen legacy binary with that existing flag set, record its
+effective environment and preserve all cold-admission/correctness checks. Do
+not change the live setting or claim an optimization from mismatched modes.
+
+This qualification is **not** an accepted performance comparison: another VM
+was compiling on the shared host. Timings and throughput differences cannot be
+attributed to a candidate. File eviction also does not clear controller caches
+or reproduce production archive size, fragmentation and memory reclaim.
+
+Per-projection process I/O measures non-overlapping intervals; per-thread fault
+and block counters surround actual get/write calls, including reads internal to
+Pool writes. First-hash and repeated-read time are separate. Reopen/setup,
+checkpoint sync, rebuild and signature validation are excluded from append
+timing. Unsupported OS counters are unavailable rather than reported as zero.
+
+Run `cargo test --manifest-path rust/Cargo.toml -p hashtree-cli --bin htree
+--features archive-io-diagnostics append_io_cold_pool_first_reads -- --nocapture`
+on Linux in a fresh process after the mapping/eviction helper checks. Keep a
+10 GiB fixture free-space floor, the separate host floor, one-core quota,
+2 GiB memory-high and 4 GiB maximum, and record interference/resource evidence.
+The default history size is 8,192; only 32,768 is accepted as an optional larger
+case via `HTREE_APPEND_IO_HISTORY`. Do not expand before the default gates pass.
+
 ## 2026-10-04 - Reject the Small-Update Parallelism Candidate
 
 An experimental candidate lowered the B-tree parallel-update trigger from 256
