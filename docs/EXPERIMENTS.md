@@ -51,10 +51,31 @@ combined catalog and member file lengths. Most get latency occurred in the four
 reconciliation reads and existing-event lookups, before later tag updates.
 The synthetic process used default read-ahead, while the live writer was
 independently verified to have `HTREE_LMDB_NO_READ_AHEAD=1`. The whole-file reads
-therefore do not establish a production read-path bug. The next bounded test
-must use the same frozen legacy binary with that existing flag set, record its
-effective environment and preserve all cold-admission/correctness checks. Do
-not change the live setting or claim an optimization from mismatched modes.
+therefore do not establish a production read-path bug.
+
+A second qualification reused the exact frozen legacy binary in fresh processes
+with that flag explicitly set. All seven Linux checks passed again, including
+zero-page cold admission and unchanged warm/cold roots, history and logical I/O.
+
+| Incoming tags | Total cold storage reads | Get-call input blocks | Write-call input blocks |
+| --- | ---: | ---: | ---: |
+| 0 | 7,745,536 bytes | 7,632 | 7,496 |
+| 32 | 24,518,656 bytes | 37,032 | 10,856 |
+
+The whole-file pattern disappeared with production's existing mode. In addition
+to reads serving gets, internal write operations accounted for about 3.84 MB and
+5.56 MB of cold input. Single-run wall times remain unsuitable for a speedup
+claim on the shared host; no production setting was changed.
+
+The next focused candidate is bounded parallel traversal of independent
+existing-ID lookup branches. Those lookups currently await each touched subtree
+serially, and the cold parity fixture attributes 53/55 gets to that stage.
+This is a hypothesis, not an implemented optimization: preserve the 256-change
+update trigger and all write behavior; retain exact lookup results, errors and
+read set, cap workers, and drain every worker before returning. Require a quiet
+one-core no-read-ahead comparison with identical archive roots/history and no
+memory-pressure regression before considering deployment. Do not remove member
+metadata or corruption checks merely to avoid their reads.
 
 This qualification is **not** an accepted performance comparison: another VM
 was compiling on the shared host. Timings and throughput differences cannot be
