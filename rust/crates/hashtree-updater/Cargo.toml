@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-updater"
-version = "0.2.87"
+version = "0.2.88"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -27,7 +27,7 @@ nostr-pubsub = [
 async-trait = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 hashtree-blossom = { workspace = true, optional = true }
-hashtree-core.workspace = true
+hashtree-core = { version = "0.2.89", path = "../hashtree-core" }
 hashtree-resolver.workspace = true
 nostr-pubsub = { workspace = true, optional = true }
 semver.workspace = true

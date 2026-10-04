@@ -6,6 +6,11 @@ follow the base date. A later date follows every revision of the previous day.
 
 Rust helpers for app updates published through hashtree.
 
+With the `nostr-pubsub` feature, checks observe signed roots for the full update
+window. Delivery that closes early or lags makes the check inconclusive;
+authenticated roots remain rollback watermarks for later checks. Updater 0.2.88
+requires nostr-pubsub 0.1.16 and supports Hashtree core 0.2.89.
+
 Apps bake a release reference such as:
 
 ```text

@@ -8,6 +8,13 @@
   5–21% and improved warm append times; cold latency remains inconclusive under
   shared storage load. See the payload coalescing entry in `docs/EXPERIMENTS.md`.
 
+## hashtree-updater 0.2.88 - 2026-10-04
+
+- Report update checks as inconclusive when shared pubsub delivery closes early
+  or lags, while retaining authenticated roots as rollback watermarks.
+- Require nostr-pubsub 0.1.16 for delivery status and retain compatibility with
+  published Hashtree core 0.2.89.
+
 ## hashtree-fips-transport 0.4.26 - 2026-10-04
 
 - Require FIPS core 0.4.94 and TCP endpoint 0.2.29 for bounded concurrent
