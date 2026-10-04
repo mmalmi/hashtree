@@ -46,6 +46,7 @@ struct Counts {
 struct Trace {
     enabled: bool,
     projections: bool,
+    existing_by_id_reads: usize,
     phase: String,
     started: Instant,
     roots: HashMap<Hash, &'static str>,
@@ -59,6 +60,7 @@ impl Trace {
         Self {
             enabled: false,
             projections: false,
+            existing_by_id_reads: 0,
             phase: "off".into(),
             started: Instant::now(),
             roots: roots(manifest)
@@ -97,6 +99,19 @@ impl Trace {
         }
     }
     fn read(&mut self, hash: &Hash) -> String {
+        // This fixture appends notes only: the first by-id root read resolves
+        // existing IDs, and the second begins its projection update. A buffered
+        // payload batch need not reach the backing store between those reads.
+        if self.enabled
+            && !self.projections
+            && self.phase == "existing-lookups"
+            && self.roots.get(hash) == Some(&"by-id")
+        {
+            self.existing_by_id_reads += 1;
+            if self.existing_by_id_reads == 2 {
+                self.projections = true;
+            }
+        }
         if self.enabled && self.projections {
             if let Some(name) = self.roots.get(hash).copied() {
                 if name != self.phase {
@@ -348,6 +363,12 @@ async fn measure<S: Store>(
         t.enabled = false;
     }
     let phases = trace.lock().unwrap().phases.clone();
+    assert!(
+        phases
+            .get("by-id")
+            .is_some_and(|phase| phase.logical_gets > 0),
+        "projection markers must not depend on a separate payload flush"
+    );
     let (hits, misses, bytes, entries) = cache.read_stats();
     assert_eq!(misses, phases.values().map(|v| v.backing_gets).sum::<u64>());
     assert_eq!(
