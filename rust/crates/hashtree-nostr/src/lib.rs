@@ -1743,7 +1743,7 @@ impl<S: Store> NostrEventStore<S> {
             let indexed_events = buffered_writer
                 .put_prepared_event_blobs_parallel(prepared_events)
                 .await?;
-            buffered_store.flush().await.map_err(|err| {
+            buffered_store.flush_pending_if_needed().await.map_err(|err| {
                 NostrEventStoreError::HashTree(HashTreeError::Store(err.to_string()))
             })?;
             if !indexed_events.is_empty() {
