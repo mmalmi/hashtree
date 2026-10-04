@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -35,6 +35,8 @@ struct RecordingStore {
     appended: MemoryStore,
     metrics: Metrics,
     fail_flush_on: AtomicU64,
+    partial_write_before_failure: AtomicU64,
+    fail_read: Mutex<Option<Hash>>,
 }
 
 impl RecordingStore {
@@ -44,6 +46,8 @@ impl RecordingStore {
             appended: MemoryStore::new(),
             metrics: Metrics::default(),
             fail_flush_on: AtomicU64::new(0),
+            partial_write_before_failure: AtomicU64::new(0),
+            fail_read: Mutex::new(None),
         }
     }
 }
@@ -72,6 +76,10 @@ impl Store for RecordingStore {
     async fn put_many_optimistic(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
         let ordinal = self.metrics.flushes.fetch_add(1, Ordering::Relaxed) + 1;
         if self.fail_flush_on.load(Ordering::Relaxed) == ordinal {
+            let partial = self.partial_write_before_failure.load(Ordering::Relaxed) as usize;
+            for (hash, data) in items.into_iter().take(partial) {
+                self.put(hash, data).await?;
+            }
             return Err(StoreError::Other("bounded write refusal".into()));
         }
         self.put_many(items).await
@@ -79,6 +87,9 @@ impl Store for RecordingStore {
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         self.metrics.gets.fetch_add(1, Ordering::Relaxed);
+        if *self.fail_read.lock().unwrap() == Some(*hash) {
+            return Err(StoreError::Other("projection read refusal".into()));
+        }
         match self.appended.get(hash).await? {
             Some(bytes) => Ok(Some(bytes)),
             None => self.historical.get(hash).await,
@@ -391,8 +402,8 @@ fn catchup_coalesces_projection_writes_without_changing_any_root_or_retained_blo
         assert_eq!(rows[0].1, rows[1].1, "same retained blob count");
         assert_eq!(rows[0].2, rows[1].2, "same retained payload bytes");
         assert_eq!(
-            rows[1].0, 14,
-            "seven commits must each flush payloads and their final indexes"
+            rows[1].0, 7,
+            "seven commits must each durably flush their payloads and indexes together"
         );
         eprintln!(
             "catchup-write-coalescing baseline={:?} coalesced={:?}",
@@ -416,11 +427,30 @@ fn coalesced_append_flush_failures_do_not_return_an_uncommitted_root() {
             .unwrap()
             .unwrap();
         let old_projections = projections(backing.clone(), &previous).await;
-        for threshold in [1, 8 * 1024 * 1024] {
+        let reference = Arc::new(RecordingStore::new(backing.clone()));
+        let expected = NostrEventStore::with_options(
+            reference,
+            NostrEventStoreOptions {
+                index_commit_batch_size: Some(256),
+                ..Default::default()
+            },
+        )
+        .build(Some(&previous), incoming[..512].to_vec())
+        .await
+        .unwrap()
+        .unwrap();
+        for (threshold, failure, partial, retained) in [
+            (1, 2, 0, 256),
+            (8 * 1024 * 1024, 1, 0, 0),
+            (8 * 1024 * 1024, 1, 17, 17),
+        ] {
             let measured = Arc::new(RecordingStore::new(backing.clone()));
-            // Payloads flush first. Refuse either the first projection's
-            // threshold flush or the commit's unconditional final index flush.
-            measured.fail_flush_on.store(2, Ordering::Relaxed);
+            // Small thresholds still flush payloads first. With coalescing,
+            // reject the first commit's combined flush, including a partial write.
+            measured.fail_flush_on.store(failure, Ordering::Relaxed);
+            measured
+                .partial_write_before_failure
+                .store(partial, Ordering::Relaxed);
             let writer = NostrEventStore::with_options(
                 measured.clone(),
                 NostrEventStoreOptions {
@@ -434,10 +464,10 @@ fn coalesced_append_flush_failures_do_not_return_an_uncommitted_root() {
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("bounded write refusal"));
-            assert_eq!(measured.metrics.flushes.load(Ordering::Relaxed), 2);
+            assert_eq!(measured.metrics.flushes.load(Ordering::Relaxed), failure);
             assert_eq!(
                 measured.metrics.inserted_blobs.load(Ordering::Relaxed),
-                256,
+                retained,
                 "refusal in the first commit must stop before the next event batch"
             );
             assert_eq!(
@@ -450,11 +480,89 @@ fn coalesced_append_flush_failures_do_not_return_an_uncommitted_root() {
                 .await
                 .unwrap()
                 .unwrap();
+            assert_eq!(next, expected, "retry must reproduce the successful root");
             NostrEventStore::new(measured.clone())
                 .validate_index_root(Some(&next))
                 .await
                 .unwrap();
             assert_eq!(projections(measured, &previous).await, old_projections);
+        }
+    });
+}
+
+#[test]
+fn coalesced_projection_failure_keeps_the_old_root_and_retry_needs_no_cache() {
+    block_on(async {
+        let (historical, incoming) = fixture();
+        let seed = Arc::new(MemoryStore::new());
+        let old = NostrEventStore::new(seed.clone())
+            .build(None, historical[..16].to_vec())
+            .await
+            .unwrap()
+            .unwrap();
+        let old_rows = projections(seed.clone(), &old).await;
+        let tag_root = NostrEventStore::new(seed.clone())
+            .get_manifest(Some(&old))
+            .await
+            .unwrap()
+            .by_tag
+            .unwrap();
+        let store = Arc::new(RecordingStore::new(seed));
+        *store.fail_read.lock().unwrap() = Some(tag_root.hash);
+        let error = NostrEventStore::new(store.clone())
+            .with_index_write_buffer_bytes(8 * 1024 * 1024)
+            .build(Some(&old), incoming[..16].to_vec())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("projection read refusal"));
+        assert_eq!(
+            store.metrics.flushes.load(Ordering::Relaxed),
+            0,
+            "projection failure must not force the deferred payload batch to storage"
+        );
+        *store.fail_read.lock().unwrap() = None;
+        assert_eq!(projections(store.clone(), &old).await, old_rows);
+        let next = NostrEventStore::new(store.clone())
+            .with_index_write_buffer_bytes(8 * 1024 * 1024)
+            .build(Some(&old), incoming[..16].to_vec())
+            .await
+            .unwrap()
+            .unwrap();
+        let reader = NostrEventStore::new(store.clone());
+        reader.validate_index_root(Some(&next)).await.unwrap();
+        for event in &incoming[..16] {
+            assert_eq!(
+                reader.get_by_id(Some(&next), &event.id).await.unwrap(),
+                Some(event.clone())
+            );
+        }
+        assert_eq!(projections(store, &old).await, old_rows);
+    });
+}
+
+#[test]
+fn coalescing_does_not_change_initial_build_flushes_or_blobs() {
+    block_on(async {
+        let (historical, _) = fixture();
+        let mut expected = None;
+        for threshold in [0, 8 * 1024 * 1024] {
+            let store = Arc::new(RecordingStore::new(Arc::new(MemoryStore::new())));
+            let root = NostrEventStore::new(store.clone())
+                .with_index_write_buffer_bytes(threshold)
+                .build(None, historical[..16].to_vec())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut blobs = BTreeMap::new();
+            for hash in store.appended.keys() {
+                blobs.insert(hash, store.appended.get(&hash).await.unwrap().unwrap());
+            }
+            let result = (root, store.metrics.flushes.load(Ordering::Relaxed), blobs);
+            if let Some(expected) = &expected {
+                assert_eq!(&result, expected);
+            } else {
+                expected = Some(result);
+            }
         }
     });
 }
