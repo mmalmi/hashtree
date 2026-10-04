@@ -318,9 +318,28 @@ The daemon retains accepted public root events in a separate, durable Hashtree i
 and serves them to FIPS consumers after reconnects and restarts. This index is
 independent of the disposable blob cache and holds at most 4,096 events. Configure
 `nostr.retained_roots` with the author/tree keys to follow through open subscriptions
-and periodic reconciliation. Keep a provider online for late consumers, and verify
+and periodic reconciliation. A public provider can explicitly set
+`nostr.fips_pubsub_max_inbound_routed_peers = 16` to serve authenticated clients routed
+through transit peers without listing each client identity. The default is `0`
+(closed), even when roots are retained. These slots are reserved within the
+adapter's total 64-peer budget; configured pubsub peers must fit the remainder.
+Idle admissions expire. This setting grants no social trust and does not make
+the provider dial unknown clients. Keep a provider online for late consumers, and verify
 the release from a separate FIPS consumer, including after cache eviction and a
 daemon restart, before rollout.
+
+Public-provider releases also require the concurrent admission gate:
+`python3 scripts/test_public_provider_admission.py --transit /path/to/discovery_transit_fixture --transit-sha256 <sha256> --output ../work/provider-admission`.
+Build the FIPS core `discovery_transit_fixture` example from a source revision
+containing the per-ingress, per-origin discovery fix. The gate keeps Hashtree's
+locked provider/client libraries unchanged and uses that separate transit process
+with the normal two-second discovery limit. Sixteen fresh routed clients must
+receive the exact retained event within eight seconds, a seventeenth must be
+denied, and the admitted clients must still read successfully. It repeats after a
+provider restart and records binary hashes, elapsed time, and peak resident memory.
+The ordinary tests retain a single-client replay/restart check; enabling the
+`public-provider-stress` feature requires `HTREE_TEST_TRANSIT_BIN`, never silently
+skips the concurrent gate, and does not change production behavior.
 
 Publish the canonical repo release and mirror the same staged files to GitHub in one step:
 

@@ -21,8 +21,19 @@ async fn old_relay_head_is_retained_without_resigning_or_broad_intake() -> Resul
         None,
     )
     .sign_with_keys(&keys)?;
+    let wrong_author = NostrRootResolver::root_event_builder(
+        "releases/selected",
+        &hashtree_core::Cid::public([5; 32]),
+        None,
+    )
+    .sign_with_keys(&nostr::Keys::generate())?;
     assert!(!publisher.send_event(&event).await?.success.is_empty());
     assert!(!publisher.send_event(&unrelated).await?.success.is_empty());
+    assert!(!publisher
+        .send_event(&wrong_author)
+        .await?
+        .success
+        .is_empty());
     publisher.shutdown().await;
     let temp = tempfile::tempdir()?;
     let cache = super::super::durable_cache::open(temp.path())?;

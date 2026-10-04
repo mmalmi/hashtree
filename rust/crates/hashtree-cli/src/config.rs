@@ -361,6 +361,11 @@ pub struct NostrConfig {
     /// not imply pubsub support. The adapter validates and bounds this roster.
     #[serde(default)]
     pub fips_pubsub_peers: Vec<String>,
+    /// Opt in to serving authenticated, previously unknown routed pubsub clients.
+    /// Zero keeps admission closed; retained_roots alone never enables it.
+    /// Must not exceed the adapter's total peer capacity (64 by default).
+    #[serde(default)]
+    pub fips_pubsub_max_inbound_routed_peers: usize,
     /// Public author/tree roots to retain across restarts and serve to late
     /// peers. Intake follows these exact keys on configured relays and FIPS.
     #[serde(default)]
@@ -795,6 +800,7 @@ impl Default for NostrConfig {
             archive_history_max_relay_pages: default_nostr_archive_history_max_relay_pages(),
             decentralized_pubsub: false,
             fips_pubsub_peers: Vec::new(),
+            fips_pubsub_max_inbound_routed_peers: 0,
             retained_roots: Vec::new(),
             fips_trusted_raters: Vec::new(),
             decentralized_pubsub_max_event_bytes:
@@ -1452,6 +1458,21 @@ chunk_target_bytes = 65536
         };
 
         assert!(nostr.active_relays().is_empty());
+    }
+
+    #[test]
+    fn retained_roots_do_not_implicitly_open_routed_pubsub_admission() {
+        assert_eq!(
+            NostrConfig::default().fips_pubsub_max_inbound_routed_peers,
+            0
+        );
+        let closed: NostrConfig =
+            toml::from_str("retained_roots = ['author/releases/app']").unwrap();
+        assert_eq!(closed.fips_pubsub_max_inbound_routed_peers, 0);
+        let open: NostrConfig =
+            toml::from_str("fips_pubsub_max_inbound_routed_peers = 16").unwrap();
+        let roundtrip: NostrConfig = toml::from_str(&toml::to_string(&open).unwrap()).unwrap();
+        assert_eq!(roundtrip.fips_pubsub_max_inbound_routed_peers, 16);
     }
 
     #[test]

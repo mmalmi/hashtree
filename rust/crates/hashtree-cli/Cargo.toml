@@ -116,6 +116,8 @@ fuse = ["dep:hashtree-fuse", "dep:fuser"]
 fips-webrtc = ["hashtree-fips-transport/webrtc-endpoint"]
 git-remote-wrapper = []
 experimental-decentralized-pubsub = []
+# Explicit release gate using a separately built fixed-core transit process.
+public-provider-stress = []
 
 [dev-dependencies]
 tempfile.workspace = true
