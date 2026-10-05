@@ -40,6 +40,11 @@ cargo install hashtree-cli git-remote-htree    # CLI and Git helper
 - Rust [development](rust/README.md#development) and [releases](rust/README.md#releases)
 - [npm publishing](ts/PUBLISHING.md)
 
+## Built on Hashtree
+
+- [Haps](https://haps.hashtree.cc) — a package manager with Nostr publisher
+  identities, content-addressed packages, and social-graph discovery.
+
 ## License
 
 MIT
