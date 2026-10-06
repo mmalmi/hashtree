@@ -2,12 +2,6 @@
 
 ## Unreleased
 
-- Coalesce buffered append payloads with index writes while preserving the final
-  flush and checkpoint sync. A signed seven-commit fixture now uses seven write
-  batches instead of fourteen. Matched Linux tests reduced physical writes by
-  5–21% and improved warm append times; cold latency remains inconclusive under
-  shared storage load. See the payload coalescing entry in `docs/EXPERIMENTS.md`.
-
 ## hashtree-core 0.2.91 - 2026-10-06
 
 - Enable automatic ARM SHA-256 and AES-GCM acceleration through updated
@@ -32,7 +26,17 @@
   discovery. Keep blob protocol behavior and transport defaults unchanged.
 - Align the workspace with nostr-pubsub-fips 0.5.18.
 
-## 0.2.152 - 2026-10-02
+## 0.2.152 - 2026-10-06
+
+- Accelerate ARM encrypted imports and reads with Hashtree core 0.2.91 while
+  preserving stored data compatibility and portable software fallbacks. The
+  matched local durable import benchmark improved by 4.77x; see the core entry
+  and `docs/EXPERIMENTS.md` for conditions and limits.
+- Coalesce buffered append payloads with index writes while preserving the final
+  flush and checkpoint sync. A signed seven-commit fixture now uses seven write
+  batches instead of fourteen. Matched Linux tests reduced physical writes by
+  5–21% and improved warm append times; cold latency remains inconclusive under
+  shared storage load. See the payload coalescing entry in `docs/EXPERIMENTS.md`.
 
 - Add per-environment physical write admission for LMDB catch-up, preserving
   the last committed checkpoint and retained history when capacity is refused.
@@ -58,8 +62,8 @@
   until replay workers and owned cache reads finish during daemon shutdown.
 - Publish the event-index helpers in hashtree-nostr 0.2.89 and checkpoint
   support in hashtree-nostr-pubsub 0.2.86; require both from the CLI.
-- Update hashtree-fips-transport to 0.4.22 with nvpn-fips-core 0.4.90 and
-  nvpn-fips-tcp-endpoint 0.2.23, and require nostr-pubsub-fips 0.5.13.
+- Update hashtree-fips-transport to 0.4.26 with nvpn-fips-core 0.4.94 and
+  nvpn-fips-tcp-endpoint 0.2.29, and require nostr-pubsub-fips 0.5.19.
   Query deadlines are unchanged.
 - Prevent raw LMDB writes from evicting stored blocks when no cache-size
   limit is configured, using hashtree-lmdb 0.2.89.
