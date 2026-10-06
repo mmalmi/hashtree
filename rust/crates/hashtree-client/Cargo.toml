@@ -1,0 +1,29 @@
+[package]
+name = "hashtree-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Verified Hashtree reads through a local daemon or standalone Nostr and Blossom clients"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+futures.workspace = true
+hashtree-core = { version = "0.2.90", path = "../hashtree-core" }
+hashtree-config.workspace = true
+hashtree-fs.workspace = true
+hashtree-resolver = { workspace = true, features = ["nostr"] }
+hex.workspace = true
+nostr.workspace = true
+percent-encoding = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+sha2.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
+toml.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "net"] }

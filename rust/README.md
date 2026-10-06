@@ -133,6 +133,7 @@ The `Store` trait is just `get(hash) → bytes` and `put(hash, bytes)`. The core
 - `hashtree-merge` - Deterministic path-based overlay merge primitives
 - `hashtree-fs` - Filesystem helpers and tree traversal
 - `hashtree-resolver` - Nostr-based tree resolution
+- [`hashtree-client`](crates/hashtree-client/README.md) - Verified daemon-assisted or standalone content reads for applications
 - `hashtree-blossom` - Blossom client/server helpers
 - `hashtree-network` - Adaptive ordering across opaque, read-only blob routes
 - `hashtree-updater` - App update discovery, platform asset selection, and install helpers backed by `npub/tree/path` release roots
