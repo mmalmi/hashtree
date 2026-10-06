@@ -63,8 +63,10 @@
 - Publish the event-index helpers in hashtree-nostr 0.2.89 and checkpoint
   support in hashtree-nostr-pubsub 0.2.86; require both from the CLI.
 - Update hashtree-fips-transport to 0.4.26 with nvpn-fips-core 0.4.94 and
-  nvpn-fips-tcp-endpoint 0.2.29, and require nostr-pubsub-fips 0.5.19.
+  nvpn-fips-tcp-endpoint 0.2.29, and require nostr-pubsub-fips 0.5.20.
   Query deadlines are unchanged.
+- Preserve in-flight pubsub responses when a physical connection becomes an
+  advertised service and when an inbound session is promoted to outgoing.
 - Prevent raw LMDB writes from evicting stored blocks when no cache-size
   limit is configured, using hashtree-lmdb 0.2.89.
 - Include git-remote-htree 0.2.90 with the same LMDB fix and require it

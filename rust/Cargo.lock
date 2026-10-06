@@ -5407,9 +5407,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.5.19"
+version = "0.5.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6e6eb38c98c4dc2e7ff0252b455f917a2a63742617d39dafa540327ce5f172c"
+checksum = "8dd7c3129c74dd4bc14182ac28174eab3b126cb5c7b401946a439b3d194cad1f"
 dependencies = [
  "async-trait",
  "nostr",
