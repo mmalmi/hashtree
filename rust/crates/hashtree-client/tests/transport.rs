@@ -61,7 +61,13 @@ async fn blob(State(state): State<Fixture>, Path(hash): Path<String>) -> Respons
     if state.corrupt {
         return b"corrupt".to_vec().into_response();
     }
-    let hash: [u8; 32] = hex::decode(hash).unwrap().try_into().unwrap();
+    let hash: [u8; 32] = hex::decode(
+        hash.strip_suffix(".bin")
+            .expect("raw block requests require .bin"),
+    )
+    .unwrap()
+    .try_into()
+    .unwrap();
     match state.store.get(&hash).await.unwrap() {
         Some(data) => data.into_response(),
         None => axum::http::StatusCode::NOT_FOUND.into_response(),

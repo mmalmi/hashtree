@@ -39,7 +39,7 @@ impl BlobStore {
         let response = self
             .http
             .get(format!(
-                "{}/{}",
+                "{}/{}.bin",
                 server.trim_end_matches('/'),
                 hex::encode(hash)
             ))
@@ -49,6 +49,11 @@ impl BlobStore {
             return Ok(None);
         }
         let response = response.error_for_status()?;
+        ensure!(
+            response.status().is_success(),
+            "unexpected Hashtree HTTP status: {}",
+            response.status()
+        );
         ensure!(
             response
                 .content_length()

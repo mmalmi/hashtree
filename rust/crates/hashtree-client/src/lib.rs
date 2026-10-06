@@ -7,7 +7,8 @@ pub use config::ClientConfig;
 pub use store::BlobStore;
 
 use anyhow::{ensure, Context, Result};
-use hashtree_core::{Cid, HashTree, HashTreeConfig};
+pub use hashtree_core::Cid;
+use hashtree_core::{HashTree, HashTreeConfig};
 use hashtree_resolver::{
     nostr::{NostrResolverConfig, NostrRootResolver},
     RootResolver,
