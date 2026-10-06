@@ -10,7 +10,7 @@ use hashtree_resolver::nostr::NostrRootResolver;
 use nostr::{nips::nip19::ToBech32, Event, Keys};
 use std::{
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc,
     },
     time::Duration,
@@ -22,6 +22,8 @@ struct Fixture {
     events: Vec<Event>,
     reads: Arc<AtomicUsize>,
     corrupt: bool,
+    primed: Arc<AtomicBool>,
+    require_prime: bool,
 }
 
 async fn ws(State(state): State<Fixture>, upgrade: WebSocketUpgrade) -> Response {
@@ -41,6 +43,9 @@ async fn ws(State(state): State<Fixture>, upgrade: WebSocketUpgrade) -> Response
                 .unwrap();
             // The client must keep observing after EOSE.
             tokio::time::sleep(Duration::from_millis(30)).await;
+            if state.require_prime && !state.primed.load(Ordering::SeqCst) {
+                continue;
+            }
             for event in &state.events {
                 if socket
                     .send(Message::Text(
@@ -78,6 +83,13 @@ async fn serve(fixture: Fixture) -> (String, tokio::task::JoinHandle<()>) {
     let app = Router::new()
         .route("/health", get(|| async { "ok" }))
         .route("/ws", get(ws))
+        .route(
+            "/api/nostr/resolve/:publisher/:tree",
+            get(|State(state): State<Fixture>| async move {
+                state.primed.store(true, Ordering::SeqCst);
+                "{\"cid\":\"untrusted daemon hint\"}"
+            }),
+        )
         .route("/:hash", get(blob))
         .with_state(fixture);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -129,6 +141,8 @@ async fn reads_the_same_signed_tree_standalone_and_through_a_daemon() -> anyhow:
         store,
         events: vec![event],
         reads: reads.clone(),
+        primed: Arc::new(AtomicBool::new(false)),
+        require_prime: false,
         corrupt: false,
     })
     .await;
@@ -178,10 +192,14 @@ async fn rejects_corrupt_blocks_and_can_use_another_verified_source() -> anyhow:
         store,
         events: vec![],
         reads: Arc::new(AtomicUsize::new(0)),
+        primed: Arc::new(AtomicBool::new(false)),
+        require_prime: false,
         corrupt: true,
     };
     let (bad, bad_task) = serve(fixture.clone()).await;
     let (good, good_task) = serve(Fixture {
+        primed: Arc::new(AtomicBool::new(false)),
+        require_prime: false,
         corrupt: false,
         ..fixture
     })
@@ -215,6 +233,8 @@ async fn local_only_never_falls_back_and_wrong_publisher_does_not_resolve() -> a
         store: Arc::new(MemoryStore::new()),
         events: vec![event],
         reads: Arc::new(AtomicUsize::new(0)),
+        primed: Arc::new(AtomicBool::new(false)),
+        require_prime: false,
         corrupt: false,
     })
     .await;
@@ -232,6 +252,37 @@ async fn local_only_never_falls_back_and_wrong_publisher_does_not_resolve() -> a
         .unwrap_err()
         .to_string()
         .contains("Timed out"));
+    task.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn cold_daemon_resolves_via_its_provider_but_only_signed_events_are_trusted(
+) -> anyhow::Result<()> {
+    let keys = Keys::generate();
+    let expected = hashtree_core::Cid::public([7; 32]);
+    let event =
+        NostrRootResolver::root_event_builder("packages", &expected, None).sign_with_keys(&keys)?;
+    let primed = Arc::new(AtomicBool::new(false));
+    let (url, task) = serve(Fixture {
+        store: Arc::new(MemoryStore::new()),
+        events: vec![event],
+        reads: Arc::new(AtomicUsize::new(0)),
+        corrupt: false,
+        primed: primed.clone(),
+        require_prime: true,
+    })
+    .await;
+    let reference = Reference::parse(&format!(
+        "htree://{}/packages",
+        keys.public_key().to_bech32()?
+    ))?;
+    let temp = tempfile::tempdir()?;
+    let mut cfg = config(Some(url), vec![], vec![]);
+    cfg.local_only = true;
+    let client = Client::new(cfg, temp.path())?;
+    assert_eq!(client.resolve(&reference).await?, expected);
+    assert!(primed.load(Ordering::SeqCst));
     task.abort();
     Ok(())
 }

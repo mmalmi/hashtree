@@ -114,6 +114,21 @@ impl Client {
     pub async fn resolve(&self, reference: &Reference) -> Result<Cid> {
         let local_result = if let Some(daemon) = self.daemon_url().await {
             let mut url = reqwest::Url::parse(daemon)?;
+            // Ask the daemon's existing event provider/peers to discover the
+            // root and cache its signed event. The returned CID is only a hint:
+            // authentication still happens through the signed relay event below.
+            // Older daemons may not implement this endpoint.
+            let (publisher, name) = reference
+                .key
+                .split_once('/')
+                .context("invalid resolver key")?;
+            let mut resolve_url = url.clone();
+            resolve_url
+                .path_segments_mut()
+                .map_err(|_| anyhow::anyhow!("invalid daemon URL"))?
+                .extend(["api", "nostr", "resolve", publisher, name]);
+            resolve_url.set_query(Some("refresh=1"));
+            let _ = self.store.http.get(resolve_url).send().await;
             url.set_scheme("ws")
                 .map_err(|_| anyhow::anyhow!("invalid local daemon URL"))?;
             url.set_path("/ws");
