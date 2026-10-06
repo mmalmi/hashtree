@@ -244,9 +244,12 @@ fn validate_pubsub(state: &CatchupState, receipt: Option<&super::pubsub::Receipt
                 && receipt.added_events <= receipt.events
                 && receipt.events <= state.policy.max_events_per_author
                 && receipt.events <= super::pubsub::MAX_REPLAY_EVENTS
-                && receipt.sources.iter().all(|(peer, count)| nostr::PublicKey::parse(peer).is_ok()
-                    && *count > 0
-                    && *count <= receipt.events)
+                && receipt
+                    .sources
+                    .iter()
+                    .all(|(peer, count)| nostr::PublicKey::parse(peer).is_ok()
+                        && *count > 0
+                        && *count <= receipt.events)
                 && receipt
                     .sources
                     .values()
