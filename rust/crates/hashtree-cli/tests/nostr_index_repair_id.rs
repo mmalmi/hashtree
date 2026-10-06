@@ -149,6 +149,7 @@ impl Fixture {
                 initial_since: 100,
                 overlap_secs: 86400,
                 relays: vec!["wss://unused.invalid".into()],
+                pubsub_peers: Vec::new(),
                 kinds: vec![1, 5],
                 page_size: 1000,
                 max_pages_per_author: 10000,

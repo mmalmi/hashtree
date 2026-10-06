@@ -83,6 +83,31 @@ htree get nhash1qqsw9hdps3pkyjm7nlg9783xazg4cnmuj8sp4wnddsa8lzku6qt457c9yzckwsv3
 
 ```
 
+## Nostr archive catch-up and P2P events
+
+`htree nostr-index catch-up` can supplement its relay sources with
+`--pubsub-peer <service-npub>` (repeatable, also accepts hex public keys). The
+indexer uses `nostr-pubsub` through the existing host-local FIPS mesh; a running
+local FIPS node must have a route to a selected pubsub service. It starts no
+additional relay discovery and does not share the daemon's signing identity.
+
+Each author/time window receives a bounded peer query alongside the relay fetch.
+Matching verified events are deduplicated and committed by the same ordered
+archive writer. Peer observations have separate receipts, including source counts
+and an event-ID commitment. Quiet peers, failed queries, and partial peer history
+never establish archive completeness or substitute for a required relay result.
+This supplements visited catch-up windows; it is not a continuous whole-network
+subscription or exhaustive peer-history crawl. Each peer query retains at most
+128 events, and the combined result must fit the existing author event/byte limits.
+
+Selected peers are part of the saved source policy. Changing them on an existing
+checkpoint is rejected and requires an explicit checkpoint migration; omitting
+`--pubsub-peer` preserves the existing relay-only checkpoint format and behavior.
+
+The libraries remain acyclic: `nostr-pubsub` defines neutral interfaces,
+`hashtree-nostr` owns indexes, and `hashtree-nostr-pubsub` adapts those indexes as
+providers. The CLI composes transport and storage.
+
 ## Git on hashtree
 
 ```bash

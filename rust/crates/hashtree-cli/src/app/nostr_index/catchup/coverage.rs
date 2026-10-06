@@ -29,6 +29,8 @@ struct Receipt {
     after_root: String,
     events_received: u64,
     sources: Vec<CatchupSourceCoverage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pubsub: Option<super::pubsub::Receipt>,
 }
 
 fn sha(bytes: &[u8]) -> String {
@@ -105,10 +107,15 @@ pub(super) fn validate_head(
     authors: &[String],
 ) -> Result<()> {
     let Some(head) = &state.coverage_head else {
+        ensure!(
+            state.policy.pubsub_peers.is_empty() || state.next_author == 0,
+            "pubsub checkpoint is missing its observation receipt"
+        );
         return Ok(());
     };
     ensure!(
-        state.policy.source_mode == CatchupSourceMode::BestEffort,
+        state.policy.source_mode == CatchupSourceMode::BestEffort
+            || !state.policy.pubsub_peers.is_empty(),
         "strict state has coverage head"
     );
     check_directory(directory)?;
@@ -141,6 +148,7 @@ pub(super) fn validate_head(
         "coverage receipt does not bind checkpoint frontier"
     );
     validate_sources(state, &receipt.sources)?;
+    validate_pubsub(state, receipt.pubsub.as_ref())?;
     Ok(())
 }
 fn validate_sources(state: &CatchupState, sources: &[CatchupSourceCoverage]) -> Result<()> {
@@ -155,6 +163,14 @@ fn validate_sources(state: &CatchupState, sources: &[CatchupSourceCoverage]) -> 
                 .any(|source| source.status == CatchupSourceStatus::Complete),
         "coverage needs all sources and one completion"
     );
+    if state.policy.source_mode == CatchupSourceMode::Strict {
+        ensure!(
+            sources
+                .iter()
+                .all(|source| source.status == CatchupSourceStatus::Complete),
+            "strict coverage needs every relay completion"
+        );
+    }
     ensure!(
         sources.iter().all(|source| match source.status {
             CatchupSourceStatus::Complete => source.error.is_none(),
@@ -168,17 +184,20 @@ fn validate_sources(state: &CatchupState, sources: &[CatchupSourceCoverage]) -> 
     Ok(())
 }
 
-pub(super) fn persist(
+fn persist_with_pubsub(
     store: &HashtreeStore,
     directory: &Path,
     before: &CatchupState,
     after: &CatchupState,
     author: &str,
     sources: Vec<CatchupSourceCoverage>,
+    pubsub: Option<super::pubsub::Receipt>,
 ) -> Result<String> {
     validate_sources(before, &sources)?;
+    validate_pubsub(before, pubsub.as_ref())?;
     ensure!(
-        before.policy.source_mode == CatchupSourceMode::BestEffort
+        (before.policy.source_mode == CatchupSourceMode::BestEffort
+            || !before.policy.pubsub_peers.is_empty())
             && after.policy == before.policy
             && after.next_author == before.next_author + 1
             && after.pass_since == before.pass_since
@@ -200,6 +219,7 @@ pub(super) fn persist(
             .checked_sub(before.events_received)
             .context("coverage event counter decreased")?,
         sources,
+        pubsub,
     };
     let mut bytes = serde_json::to_vec(&receipt)?;
     bytes.push(b'\n');
@@ -209,7 +229,7 @@ pub(super) fn persist(
     persist_bytes(store, directory, &path, &bytes)?;
     Ok(head)
 }
-pub(super) fn commit(
+pub(super) fn commit_with_pubsub(
     store: &HashtreeStore,
     directory: &Path,
     checkpoint: &Path,
@@ -217,12 +237,76 @@ pub(super) fn commit(
     mut after: CatchupState,
     author: &str,
     sources: Vec<CatchupSourceCoverage>,
+    pubsub: Option<super::pubsub::Receipt>,
 ) -> Result<CatchupState> {
-    after.coverage_head = Some(persist(store, directory, before, &after, author, sources)?);
+    after.coverage_head = Some(persist_with_pubsub(
+        store, directory, before, &after, author, sources, pubsub,
+    )?);
     store.admit_checkpoint_write(checkpoint, serde_json::to_vec(&after)?.len() + 1)?;
     super::super::persist_json_atomic(checkpoint, &after, "Nostr catchup checkpoint")?;
     Ok(after)
 }
+fn validate_pubsub(state: &CatchupState, receipt: Option<&super::pubsub::Receipt>) -> Result<()> {
+    ensure!(
+        receipt.is_some() == !state.policy.pubsub_peers.is_empty(),
+        "pubsub receipt must match source policy"
+    );
+    if let Some(receipt) = receipt {
+        ensure!(
+            is_sha(&receipt.event_ids_sha256)
+                && receipt.added_events <= receipt.events
+                && receipt.events <= state.policy.max_events_per_author
+                && receipt.sources.len() <= state.policy.pubsub_peers.len()
+                && receipt.sources.iter().all(|(peer, count)| state
+                    .policy
+                    .pubsub_peers
+                    .contains(peer)
+                    && *count > 0
+                    && *count <= receipt.events)
+                && receipt
+                    .sources
+                    .values()
+                    .try_fold(0usize, |sum, count| sum.checked_add(*count))
+                    == Some(receipt.events),
+            "invalid pubsub observation receipt"
+        );
+        if receipt.status == super::pubsub::Status::Unavailable {
+            ensure!(
+                receipt.events == 0 && receipt.event_ids_sha256 == sha(&[]),
+                "unavailable pubsub source has observations"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn persist(
+    store: &HashtreeStore,
+    directory: &Path,
+    before: &CatchupState,
+    after: &CatchupState,
+    author: &str,
+    sources: Vec<CatchupSourceCoverage>,
+) -> Result<String> {
+    persist_with_pubsub(store, directory, before, after, author, sources, None)
+}
+
+#[cfg(test)]
+fn commit(
+    store: &HashtreeStore,
+    directory: &Path,
+    checkpoint: &Path,
+    before: &CatchupState,
+    after: CatchupState,
+    author: &str,
+    sources: Vec<CatchupSourceCoverage>,
+) -> Result<CatchupState> {
+    commit_with_pubsub(
+        store, directory, checkpoint, before, after, author, sources, None,
+    )
+}
+
 fn persist_bytes(store: &HashtreeStore, directory: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
     check_directory(directory)?;
     match std::fs::symlink_metadata(path) {
@@ -282,6 +366,7 @@ mod tests {
                 initial_since: 10,
                 overlap_secs: 10,
                 relays: vec!["a".into(), "b".into()],
+                pubsub_peers: Vec::new(),
                 source_mode: CatchupSourceMode::BestEffort,
                 kinds: vec![1, 5],
                 page_size: 4,
@@ -323,6 +408,17 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn pubsub_frontier_requires_receipt_and_strict_policy_requires_all_relays() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut current = state();
+        current.policy.pubsub_peers = vec!["selected-peer".into()];
+        current.next_author = 1;
+        assert!(validate_head(temp.path(), &current, &["a".repeat(64), "b".repeat(64)]).is_err());
+        current.policy.source_mode = CatchupSourceMode::Strict;
+        assert!(validate_sources(&current, &sources()).is_err());
+    }
+
     #[test]
     fn checkpoint_write_failure_keeps_exact_previous_state_and_reuses_durable_orphan() {
         let temp = tempfile::tempdir().unwrap();

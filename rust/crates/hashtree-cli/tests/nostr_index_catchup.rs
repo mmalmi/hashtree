@@ -854,3 +854,6 @@ async fn cli_physical_capacity_stops_tag_replacement_and_resumes_exact_checkpoin
     );
     println!("capacity acceptance: floor={FLOOR}, free_after_resume={}, previous_checkpoint_preserved=true", available(&fixture));
 }
+
+#[path = "nostr_index_catchup/pubsub.rs"]
+mod pubsub;

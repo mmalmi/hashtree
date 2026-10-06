@@ -143,6 +143,7 @@ async fn later_gateway_recovery_does_not_refetch_a_completed_relay() {
         initial_since: 10,
         overlap_secs: 0,
         relays: vec![first.url.clone(), second.url.clone()],
+        pubsub_peers: Vec::new(),
         kinds: vec![1],
         page_size: 4,
         max_pages_per_author: 20,

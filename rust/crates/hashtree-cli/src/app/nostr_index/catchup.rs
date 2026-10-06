@@ -16,6 +16,7 @@ use super::{cid_to_nhash, parse_root_text, persist_json_atomic, CrawlStateLock, 
 
 mod coverage;
 mod pipeline;
+mod pubsub;
 mod read_cache;
 mod relay;
 
@@ -42,6 +43,10 @@ pub(crate) struct CatchupArgs {
     /// Source relay (repeatable); strict requires every source to complete.
     #[arg(long = "relay", required = true)]
     relays: Vec<String>,
+    /// Supplement relay catch-up from P2P services via the local FIPS mesh.
+    /// Repeatable npub/hex identities; never substitutes for relay coverage.
+    #[arg(long = "pubsub-peer")]
+    pubsub_peers: Vec<String>,
     /// Kind to retain (repeatable). Include kind 5 for deletion events.
     #[arg(long = "kind", required = true)]
     kinds: Vec<u16>,
@@ -121,6 +126,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         initial_since: args.since,
         overlap_secs: args.overlap_secs,
         relays,
+        pubsub_peers: pubsub::normalize_peers(args.pubsub_peers)?,
         kinds,
         page_size: args.page_size,
         max_pages_per_author: args.max_pages_per_author,
@@ -205,31 +211,63 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
     let sources = std::array::from_fn(|_| {
         relay::RelaySource::new(policy.fetch_timeout_secs, policy.max_bytes_per_author)
     });
-    let (_, state) = pipeline::run(
+    let pubsub_timeout =
+        std::time::Duration::from_millis(config.server.fips_request_timeout_ms.max(250))
+            .min(std::time::Duration::from_secs(policy.fetch_timeout_secs));
+    let pubsub_runtime = if policy.pubsub_peers.is_empty() {
+        None
+    } else {
+        Some(pubsub::Runtime::start(&config, policy.pubsub_peers.clone(), pubsub_timeout).await?)
+    };
+    let pipeline_result = pipeline::run(
         sources,
         state.next_author..end,
         |mut source, ordinal| {
             let authors = authors.clone();
             let policy = policy.clone();
             let run_sources = run_sources.clone();
+            let pubsub_client = pubsub_runtime.as_ref().map(|runtime| runtime.client.clone());
             async move {
                 let started = Instant::now();
-                let events = fetch_catchup_author_with_coverage(
-                    &mut source,
-                    &policy,
-                    &run_sources,
-                    &authors[ordinal],
-                    pass_since,
-                    pass_until,
-                )
-                .await
-                .map_err(anyhow::Error::from);
+                let events = async {
+                    let filter = pubsub_client
+                        .as_ref()
+                        .map(|_| pubsub::filter(&policy, &authors[ordinal], pass_since, pass_until))
+                        .transpose()?;
+                    let relay_fetch = fetch_catchup_author_with_coverage(
+                        &mut source, &policy, &run_sources, &authors[ordinal], pass_since, pass_until,
+                    );
+                    let peer_fetch = async {
+                        match (pubsub_client.as_ref(), filter.as_ref()) {
+                            (Some(client), Some(filter)) => {
+                                pubsub::query(
+                                    client.as_ref(),
+                                    filter.clone(),
+                                    pubsub_timeout + std::time::Duration::from_millis(100),
+                                ).await
+                            }
+                            _ => None,
+                        }
+                    };
+                    let (fetched, peer_report) = tokio::join!(relay_fetch, peer_fetch);
+                    // A peer result never rescues incomplete required relay coverage.
+                    let mut fetched = fetched?;
+                    let supplement = if let Some(filter) = filter {
+                        Some(pubsub::merge(&mut fetched.events, peer_report, &filter, &policy)?)
+                    } else {
+                        None
+                    };
+                    Ok::<_, anyhow::Error>((fetched, supplement))
+                }.await;
                 let fetch_ms = started.elapsed().as_millis();
-                (source, events.map(|events| (events, fetch_ms, started)))
+                (
+                    source,
+                    events.map(|(events, supplement)| (events, supplement, fetch_ms, started)),
+                )
             }
         },
         (root, state),
-        |(root, state), ordinal, (fetched, fetch_ms, author_started)| {
+        |(root, state), ordinal, (fetched, supplement, fetch_ms, author_started)| {
             let author = &authors[ordinal];
             let store = &store;
             let event_store = &event_store;
@@ -268,8 +306,13 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                 next.root = cid_to_nhash(&next_root)?;
                 next.next_author += 1;
                 next.events_received = next.events_received.saturating_add(received);
-                if state.policy.source_mode == CatchupSourceMode::BestEffort {
-                    next = coverage::commit(store,coverage_directory,state_file,&state,next,author,fetched.sources)?;
+                if state.policy.source_mode == CatchupSourceMode::BestEffort
+                    || !state.policy.pubsub_peers.is_empty()
+                {
+                    next = coverage::commit_with_pubsub(
+                        store, coverage_directory, state_file, &state, next,
+                        author, fetched.sources, supplement,
+                    )?;
                 } else {
                     store.admit_checkpoint_write(&state_file, serde_json::to_vec(&next)?.len() + 1)?;
                     persist_json_atomic(&state_file, &next, "Nostr catchup checkpoint")?;
@@ -304,7 +347,11 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
             }
         },
     )
-    .await?;
+    .await;
+    if let Some(runtime) = pubsub_runtime {
+        runtime.shutdown().await;
+    }
+    let (_, state) = pipeline_result?;
     let mut output = serde_json::json!({
         "format": "hashtree/nostr-index-catchup@2",
         "root": state.root,
@@ -315,7 +362,9 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         "events_received": state.events_received,
         "complete": state.complete(),
     });
-    if state.policy.source_mode == CatchupSourceMode::BestEffort {
+    if state.policy.source_mode == CatchupSourceMode::BestEffort
+        || !state.policy.pubsub_peers.is_empty()
+    {
         output["coverage_head"] = serde_json::json!(state.coverage_head);
         output["source_mode"] = serde_json::json!(state.policy.source_mode);
     }
