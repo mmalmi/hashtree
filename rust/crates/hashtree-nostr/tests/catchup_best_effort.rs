@@ -15,6 +15,7 @@ fn policy() -> CatchupPolicy {
         initial_since: 10,
         overlap_secs: 10,
         relays: vec!["bad".into(), "good".into()],
+        pubsub_peers: Vec::new(),
         source_mode: CatchupSourceMode::BestEffort,
         kinds: vec![1, 5],
         page_size: 4,

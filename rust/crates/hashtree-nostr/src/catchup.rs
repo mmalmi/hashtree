@@ -51,6 +51,9 @@ pub struct CatchupPolicy {
     #[serde(default = "default_overlap_secs")]
     pub overlap_secs: u64,
     pub relays: Vec<String>,
+    /// Optional P2P services. Supplemental events never establish relay coverage.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pubsub_peers: Vec<String>,
     #[serde(default, skip_serializing_if = "CatchupSourceMode::is_strict")]
     pub source_mode: CatchupSourceMode,
     pub kinds: Vec<u16>,
@@ -142,6 +145,7 @@ impl CatchupState {
                         .bytes()
                         .any(|b| !b.is_ascii_digit() && !(b'a'..=b'f').contains(&b))
             }) || (policy.source_mode == CatchupSourceMode::Strict
+                && policy.pubsub_peers.is_empty()
                 && state.coverage_head.is_some())
             {
                 return Err(CatchupError("invalid catchup coverage head".into()));

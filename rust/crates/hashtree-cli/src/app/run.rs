@@ -342,7 +342,10 @@ pub(crate) fn run() -> Result<futures::future::LocalBoxFuture<'static, Result<()
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Initialize tracing (respects RUST_LOG env var)
-    tracing_subscriber::fmt::init();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_writer(std::io::stderr)
+        .init();
 
     let cli = Cli::parse();
 
