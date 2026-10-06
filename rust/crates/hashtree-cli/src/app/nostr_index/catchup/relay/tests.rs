@@ -299,7 +299,6 @@ async fn later_relay_reconnect_does_not_refetch_completed_source() {
         initial_since: 10,
         overlap_secs: 0,
         relays: vec![first.url.clone(), second.url.clone()],
-        pubsub_peers: Vec::new(),
         kinds: vec![1],
         page_size: 4,
         max_pages_per_author: 20,

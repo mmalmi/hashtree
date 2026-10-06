@@ -1,4 +1,4 @@
-//! Optional, bounded P2P intake. Query results are observations, never coverage.
+//! Automatically discovered, bounded P2P intake. Query results are observations, never coverage.
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
@@ -8,8 +8,8 @@ use std::{
 use anyhow::{ensure, Result};
 use hashtree_cli::Config;
 use hashtree_fips_transport::{
-    bind_fips_endpoint, bind_fips_endpoint_at_local_rendezvous, BoundFipsEndpoint,
-    FipsEndpointOptions,
+    bind_fips_endpoint, bind_fips_endpoint_at_local_rendezvous, set_fips_peer_configs,
+    BoundFipsEndpoint, FipsEndpointOptions,
 };
 use hashtree_nostr::{catchup::CatchupPolicy, stored_event_from_nostr_sdk_event, StoredNostrEvent};
 use nostr::{nips::nip19::ToBech32, Filter, Keys, Kind, PublicKey, Timestamp};
@@ -37,65 +37,67 @@ pub(super) struct Receipt {
     pub event_ids_sha256: String,
 }
 
-pub(super) fn normalize_peers(peers: Vec<String>) -> Result<Vec<String>> {
-    let mut peers = peers
-        .into_iter()
-        .map(|peer| {
-            PublicKey::parse(&peer)?
-                .to_bech32()
-                .map_err(anyhow::Error::from)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    peers.sort();
-    peers.dedup();
-    ensure!(
-        peers.len() <= 16,
-        "catchup supports at most 16 pubsub peers"
-    );
-    Ok(peers)
-}
+pub(super) const MAX_PEERS: usize = 16;
+pub(super) const MAX_REPLAY_EVENTS: usize = 128;
 
-/// Uses the host's existing FIPS mesh via loopback. This process neither opens
-/// relay discovery nor reuses the daemon's signing identity or storage writer.
+/// Join the ordinary FIPS network with an ephemeral identity. The native
+/// endpoint keeps relay discovery open; pubsub discovers authenticated peers
+/// and local services itself, without a separate provider roster.
 pub(super) struct Runtime {
     endpoint: BoundFipsEndpoint,
     pub client: Arc<FipsPubsubClient>,
 }
 
 impl Runtime {
-    pub async fn start(config: &Config, peers: Vec<String>, timeout: Duration) -> Result<Self> {
-        let peers = normalize_peers(peers)?;
-        let peer_count = peers.len();
-        ensure!(
-            peer_count > 0,
-            "pubsub intake requires at least one selected peer"
-        );
+    pub async fn start(config: &Config, relays: &[String], timeout: Duration) -> Result<Self> {
         let mut options = FipsEndpointOptions::new(Keys::generate().secret_key().to_bech32()?);
-        options.enable_udp = false;
-        options.enable_webrtc = false;
-        options.enable_lan_discovery = false;
-        options.share_local_candidates = false;
+        options.enable_udp = config.server.enable_fips_udp;
+        options.enable_webrtc = config.server.enable_fips_webrtc;
+        options.enable_lan_discovery = config.server.enable_fips_lan_discovery;
+        options.share_local_candidates = config.server.enable_fips_lan_discovery;
         options.enable_local_rendezvous = true;
+        options.ethernet_interfaces = config.server.fips_ethernet_interfaces.clone();
         options.discovery_scope = config.server.fips_discovery_scope.clone();
+        // An explicit discovery relay list stays authoritative. Otherwise use
+        // the archive's relay sources, without silently adding public relays.
+        options.relays = config
+            .server
+            .fips_relays
+            .clone()
+            .unwrap_or_else(|| relays.to_vec());
+        options.open_discovery_max_pending = MAX_PEERS;
+        options.webrtc_max_connections = MAX_PEERS;
+        options.webrtc_auto_connect = options.enable_webrtc;
+        let seed_urls = config.server.resolved_fips_websocket_seed_urls();
+        if !seed_urls.is_empty() {
+            options.websocket = Some(hashtree_fips_transport::WebSocketConfig {
+                seed_urls,
+                ..Default::default()
+            });
+        }
+        // Use an ephemeral socket, not the daemon's listening address/port.
         let endpoint = if let Some(addr) = config.server.fips_local_rendezvous_addr.as_ref() {
             bind_fips_endpoint_at_local_rendezvous(options, addr.parse()?).await?
         } else {
             bind_fips_endpoint(options).await?
         };
+        let peers = hashtree_cli::fips_transport::daemon_fips_peer_configs(config, Vec::new());
+        if !peers.is_empty() {
+            if let Err(error) = set_fips_peer_configs(&endpoint.native_endpoint, peers).await {
+                let _ = endpoint.native_endpoint.shutdown().await;
+                return Err(error.into());
+            }
+        }
         let client = FipsPubsubClient::start(
             endpoint.native_endpoint.clone(),
             FipsPubsubClientOptions {
-                // routed_peers is additive. Fill every outgoing slot with a
-                // selected identity so discovered services cannot receive author
-                // filters or spend query/dedup budgets before our source checks.
-                max_connected_peers: peer_count,
-                max_inbound_routed_peers: 0,
-                fanout: FipsPubsubClientOptions::default().fanout.min(peer_count),
-                routed_peers: peers,
+                max_connected_peers: MAX_PEERS,
+                // Reserve only part of the peer budget for inbound sessions.
+                max_inbound_routed_peers: MAX_PEERS / 4,
                 query_timeout: timeout,
                 max_active_subscriptions: 4,
                 // At most 128 wire frames (under 8 MiB of payload) per replay/query.
-                max_replay_events: 128,
+                max_replay_events: MAX_REPLAY_EVENTS,
                 ..Default::default()
             },
         )
@@ -169,21 +171,17 @@ pub(super) fn merge(
         });
     };
     ensure!(
-        report.events.len() <= policy.max_events_per_author.saturating_add(1),
+        report.events.len() <= MAX_REPLAY_EVENTS
+            && report.events.len() <= policy.max_events_per_author.saturating_add(1),
         "pubsub event budget exhausted"
     );
     let mut peer_events = BTreeMap::new();
     let mut peer_bytes = 0usize;
     let mut sources = BTreeMap::new();
     for entry in report.events {
-        // A local transit daemon may also offer its own history. Only explicitly
-        // selected, authenticated service identities belong to this intake policy.
-        if entry.source.kind != nostr_pubsub::EventSourceKind::FipsEndpoint
-            || !policy
-                .pubsub_peers
-                .iter()
-                .any(|peer| peer == entry.source.id.as_str())
-        {
+        // Source identity is provenance, not an admission roster. The FIPS
+        // client authenticates the peer and VerifiedEvent verifies the author.
+        if entry.source.kind != nostr_pubsub::EventSourceKind::FipsEndpoint {
             continue;
         }
         let event = entry.event.as_event();
@@ -242,4 +240,7 @@ pub(super) fn merge(
 mod tests;
 
 #[cfg(test)]
-mod selection_tests;
+mod discovery_tests;
+
+#[cfg(test)]
+mod relay_discovery_tests;

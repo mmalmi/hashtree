@@ -330,7 +330,6 @@ async fn complete_ties_pass_but_hidden_capped_ties_remain_incomplete() {
             initial_since: 10,
             overlap_secs: 0,
             relays: vec![relay.url.clone()],
-            pubsub_peers: Vec::new(),
             kinds: vec![1],
             page_size: 4,
             max_pages_per_author: 20,

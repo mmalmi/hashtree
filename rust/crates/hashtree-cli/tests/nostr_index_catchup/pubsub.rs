@@ -6,7 +6,7 @@ use nostr_pubsub::{EventBus, EventRetentionPolicy, EventSource, VerifiedEvent};
 use nostr_pubsub_fips::FipsPubsubClient;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn cli_indexes_peer_only_event_and_preserves_relay_coverage_and_resume_identity() {
+async fn cli_discovers_peers_automatically_and_keeps_relay_intake_and_resume() {
     let temp = TempDir::new().unwrap();
     let alice = Keys::generate();
     let old = event(&alice, 1, "archive");
@@ -60,11 +60,11 @@ async fn cli_indexes_peer_only_event_and_preserves_relay_coverage_and_resume_ide
     }
     publisher.set_replay_source(Some(cache)).unwrap();
     std::fs::write(temp.path().join("config/config.toml"), format!(
-        "[storage]\nmax_size_gb = 1\nevict_orphans = false\n[server]\nfips_discovery_scope = {scope:?}\nfips_local_rendezvous_addr = {addr:?}\nfips_request_timeout_ms = 800\n",
+        "[storage]\nmax_size_gb = 1\nevict_orphans = false\n[server]\nenable_fips_udp = false\nenable_fips_webrtc = false\nenable_fips_lan_discovery = false\nfips_relays = []\nfips_discovery_scope = {scope:?}\nfips_local_rendezvous_addr = {addr:?}\nfips_request_timeout_ms = 800\n",
         addr = addr.to_string()
     )).unwrap();
     let mut cmd = catchup(&temp, &root, &relay);
-    cmd.args(["--until", "100", "--pubsub-peer", &endpoint.local_peer_id]);
+    cmd.args(["--until", "100"]);
     let output = tokio::task::spawn_blocking(move || cmd.output().unwrap())
         .await
         .unwrap();
@@ -108,13 +108,12 @@ async fn cli_indexes_peer_only_event_and_preserves_relay_coverage_and_resume_ide
     assert!(raw.contains(&peer_only.id.to_hex()));
     assert!(raw.contains(&old.id.to_hex()));
     let before = std::fs::read(temp.path().join("data/nostr-index/catchup-state.json")).unwrap();
-    let rejected = catchup(&temp, &root, &relay)
-        .args(["--until", "100"])
-        .output()
-        .unwrap();
-    assert!(
-        !rejected.status.success(),
-        "cannot silently remove pubsub from an existing pass"
+    let mut cmd = catchup(&temp, &root, &relay);
+    cmd.args(["--until", "100"]);
+    success(
+        tokio::task::spawn_blocking(move || cmd.output().unwrap())
+            .await
+            .unwrap(),
     );
     assert_eq!(
         std::fs::read(temp.path().join("data/nostr-index/catchup-state.json")).unwrap(),
@@ -123,7 +122,7 @@ async fn cli_indexes_peer_only_event_and_preserves_relay_coverage_and_resume_ide
     // P2P delivery does not rescue a required relay that never completes.
     relay.omit_eose.store(true, Ordering::SeqCst);
     let mut cmd = catchup(&temp, &root, &relay);
-    cmd.args(["--until", "101", "--pubsub-peer", &endpoint.local_peer_id]);
+    cmd.args(["--until", "101"]);
     let rejected = tokio::task::spawn_blocking(move || cmd.output().unwrap())
         .await
         .unwrap();
@@ -135,7 +134,7 @@ async fn cli_indexes_peer_only_event_and_preserves_relay_coverage_and_resume_ide
     assert_eq!(failed["coverage_head"], saved["coverage_head"]);
     relay.omit_eose.store(false, Ordering::SeqCst);
     let mut cmd = catchup(&temp, &root, &relay);
-    cmd.args(["--until", "101", "--pubsub-peer", &endpoint.local_peer_id]);
+    cmd.args(["--until", "101"]);
     let resumed = success(
         tokio::task::spawn_blocking(move || cmd.output().unwrap())
             .await
@@ -144,6 +143,24 @@ async fn cli_indexes_peer_only_event_and_preserves_relay_coverage_and_resume_ide
     assert_eq!(resumed["next_author"], 1);
     publisher.shutdown_shared().await;
     endpoint.native_endpoint.shutdown().await.unwrap();
+    // An old relay-only checkpoint has the same policy, without an observation
+    // head. It can resume even after the discovered peer leaves the network.
+    let mut legacy = checkpoint(&temp);
+    legacy.as_object_mut().unwrap().remove("coverage_head");
+    std::fs::write(
+        temp.path().join("data/nostr-index/catchup-state.json"),
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    let mut cmd = catchup(&temp, &root, &relay);
+    cmd.args(["--until", "102"]);
+    let resumed = success(
+        tokio::task::spawn_blocking(move || cmd.output().unwrap())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(resumed["next_author"], 1);
+    assert!(checkpoint(&temp)["coverage_head"].is_string());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -161,17 +178,10 @@ async fn cli_quiet_peer_keeps_relay_events_without_peer_completeness_claim() {
     let addr = socket.local_addr().unwrap();
     drop(socket);
     std::fs::write(temp.path().join("config/config.toml"), format!(
-        "[storage]\nmax_size_gb = 1\nevict_orphans = false\n[server]\nfips_discovery_scope = \"quiet-peer-test\"\nfips_local_rendezvous_addr = {addr:?}\nfips_request_timeout_ms = 250\n", addr = addr.to_string()
+        "[storage]\nmax_size_gb = 1\nevict_orphans = false\n[server]\nenable_fips_udp = false\nenable_fips_webrtc = false\nenable_fips_lan_discovery = false\nfips_relays = []\nfips_discovery_scope = \"quiet-peer-test\"\nfips_local_rendezvous_addr = {addr:?}\nfips_request_timeout_ms = 250\n", addr = addr.to_string()
     )).unwrap();
     let mut cmd = catchup(&temp, &root, &relay);
-    cmd.args([
-        "--until",
-        "100",
-        "--source-mode",
-        "best-effort",
-        "--pubsub-peer",
-        &Keys::generate().public_key().to_bech32().unwrap(),
-    ]);
+    cmd.args(["--until", "100", "--source-mode", "best-effort"]);
     let result = success(
         tokio::task::spawn_blocking(move || cmd.output().unwrap())
             .await
@@ -193,4 +203,28 @@ async fn cli_quiet_peer_keeps_relay_events_without_peer_completeness_claim() {
     assert_eq!(receipt["pubsub"]["events"], 0);
     assert!(receipt["pubsub"]["sources"].as_object().unwrap().is_empty());
     assert_ne!(receipt["pubsub"]["status"], "complete");
+    // Failure to start the supplemental transport must not disable relay intake.
+    let path = temp.path().join("config/config.toml");
+    let config = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(path, config.replace(&addr.to_string(), "invalid-socket")).unwrap();
+    let mut cmd = catchup(&temp, &root, &relay);
+    cmd.args(["--until", "101", "--source-mode", "best-effort"]);
+    let resumed = success(
+        tokio::task::spawn_blocking(move || cmd.output().unwrap())
+            .await
+            .unwrap(),
+    );
+    assert_eq!(resumed["next_author"], 1);
+    let saved = checkpoint(&temp);
+    let head = saved["coverage_head"].as_str().unwrap();
+    let receipt: Value = serde_json::from_slice(
+        &std::fs::read(
+            temp.path()
+                .join(format!("data/nostr-index/catchup-coverage/{head}.json")),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["sources"][0]["status"], "complete");
+    assert_eq!(receipt["pubsub"]["status"], "unavailable");
 }

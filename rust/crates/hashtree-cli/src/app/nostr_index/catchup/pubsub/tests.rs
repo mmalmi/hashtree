@@ -5,10 +5,11 @@ use nostr_pubsub::{EventSource, QueryEvent, VerifiedEvent};
 fn policy() -> CatchupPolicy {
     serde_json::from_value(serde_json::json!({
         "base_root":"original", "authors_sha256":"authors", "author_count":1,
-        "pubsub_peers":["test-peer"], "initial_since":10, "overlap_secs":10, "relays":["relay"], "kinds":[1,5],
+        "initial_since":10, "overlap_secs":10, "relays":["relay"], "kinds":[1,5],
         "page_size":10, "max_pages_per_author":10, "max_events_per_author":10,
         "max_bytes_per_author":8192, "fetch_timeout_secs":1, "index_commit_batch_size":10
-    })).unwrap()
+    }))
+    .unwrap()
 }
 fn event(keys: &Keys, at: u64, content: &str) -> Event {
     EventBuilder::new(Kind::TextNote, content)
@@ -85,42 +86,35 @@ fn mismatching_peer_events_and_exhausted_union_fail_without_mutating_relays() {
     assert_eq!(events, original);
 }
 #[test]
-fn old_policy_bytes_survive_and_new_peer_selection_cannot_reuse_coverage() {
-    let mut policy = policy();
-    policy.pubsub_peers.clear();
+fn peer_discovery_is_not_part_of_relay_resume_policy() {
+    let policy = policy();
     let bytes = serde_json::to_vec(&policy).unwrap();
     assert!(!String::from_utf8(bytes.clone()).unwrap().contains("pubsub"));
     let roundtrip: CatchupPolicy = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(roundtrip, policy);
-    let state =
+    let mut state =
         hashtree_nostr::catchup::CatchupState::prepare(None, policy.clone(), Some(100), 100)
             .unwrap();
-    let mut changed = policy;
-    changed.pubsub_peers = vec![Keys::generate().public_key().to_bech32().unwrap()];
-    assert!(
-        hashtree_nostr::catchup::CatchupState::prepare(Some(state), changed, Some(100), 100)
-            .is_err()
-    );
+    state.coverage_head = Some("a".repeat(64));
+    hashtree_nostr::catchup::CatchupState::prepare(Some(state), policy, Some(100), 100).unwrap();
 }
 
 #[test]
-fn only_selected_authenticated_peer_sources_are_admitted() {
+fn any_authenticated_fips_peer_can_contribute_with_source_provenance() {
     let policy = policy();
     let keys = Keys::generate();
-    let event = event(&keys, 20, "unselected peer");
+    let event = event(&keys, 20, "discovered peer");
     let filter = filter(&policy, &keys.public_key().to_hex(), 10, 100).unwrap();
-    for source in [
-        EventSource::fips_endpoint("another-peer"),
-        EventSource::relay("test-peer"),
-    ] {
-        let mut report = report(&[event.clone()]);
-        report.events[0].source = source;
-        let mut events = Vec::new();
-        let receipt = merge(&mut events, Some(report), &filter, &policy).unwrap();
-        assert!(events.is_empty());
-        assert_eq!(receipt.events, 0);
-        assert!(receipt.sources.is_empty());
-    }
+    let mut peer_report = report(&[event.clone()]);
+    peer_report.events[0].source = EventSource::fips_endpoint("new-peer");
+    let mut events = Vec::new();
+    let receipt = merge(&mut events, Some(peer_report), &filter, &policy).unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(receipt.sources["new-peer"], 1);
+    let mut relay_report = report(&[event]);
+    relay_report.events[0].source = EventSource::relay("new-peer");
+    let receipt = merge(&mut Vec::new(), Some(relay_report), &filter, &policy).unwrap();
+    assert_eq!(receipt.events, 0, "relay coverage must stay separate");
 }
 
 #[tokio::test]
@@ -154,31 +148,4 @@ async fn failed_pubsub_query_is_unavailable_and_does_not_replace_relay_success()
     let receipt = merge(&mut events, report, &filter, &policy).unwrap();
     assert_eq!(receipt.status, Status::Unavailable);
     assert_eq!(events, before);
-}
-
-#[test]
-fn selected_peers_are_canonical_unique_and_bounded() {
-    let key = Keys::generate().public_key();
-    assert_eq!(
-        normalize_peers(vec![key.to_hex(), key.to_bech32().unwrap()]).unwrap(),
-        vec![key.to_bech32().unwrap()]
-    );
-    assert!(normalize_peers(vec!["not-a-peer".into()]).is_err());
-    assert!(normalize_peers(
-        (0..17)
-            .map(|_| Keys::generate().public_key().to_hex())
-            .collect()
-    )
-    .is_err());
-}
-
-#[tokio::test]
-async fn empty_runtime_selection_is_rejected_before_binding() {
-    let mut config = Config::default();
-    config.server.fips_local_rendezvous_addr = Some("invalid-bind-address".into());
-    let error = Runtime::start(&config, Vec::new(), Duration::from_secs(1))
-        .await
-        .err()
-        .unwrap();
-    assert!(error.to_string().contains("at least one selected peer"));
 }

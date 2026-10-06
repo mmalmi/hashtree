@@ -107,17 +107,10 @@ pub(super) fn validate_head(
     authors: &[String],
 ) -> Result<()> {
     let Some(head) = &state.coverage_head else {
-        ensure!(
-            state.policy.pubsub_peers.is_empty() || state.next_author == 0,
-            "pubsub checkpoint is missing its observation receipt"
-        );
+        // Legacy relay-only checkpoints have no observation receipt. Peer
+        // discovery is runtime state and does not alter relay resume identity.
         return Ok(());
     };
-    ensure!(
-        state.policy.source_mode == CatchupSourceMode::BestEffort
-            || !state.policy.pubsub_peers.is_empty(),
-        "strict state has coverage head"
-    );
     check_directory(directory)?;
     let bytes = read(&receipt_path(directory, head)?)?;
     ensure!(
@@ -196,9 +189,7 @@ fn persist_with_pubsub(
     validate_sources(before, &sources)?;
     validate_pubsub(before, pubsub.as_ref())?;
     ensure!(
-        (before.policy.source_mode == CatchupSourceMode::BestEffort
-            || !before.policy.pubsub_peers.is_empty())
-            && after.policy == before.policy
+        after.policy == before.policy
             && after.next_author == before.next_author + 1
             && after.pass_since == before.pass_since
             && after.pass_until == before.pass_until,
@@ -247,20 +238,13 @@ pub(super) fn commit_with_pubsub(
     Ok(after)
 }
 fn validate_pubsub(state: &CatchupState, receipt: Option<&super::pubsub::Receipt>) -> Result<()> {
-    ensure!(
-        receipt.is_some() == !state.policy.pubsub_peers.is_empty(),
-        "pubsub receipt must match source policy"
-    );
     if let Some(receipt) = receipt {
         ensure!(
             is_sha(&receipt.event_ids_sha256)
                 && receipt.added_events <= receipt.events
                 && receipt.events <= state.policy.max_events_per_author
-                && receipt.sources.len() <= state.policy.pubsub_peers.len()
-                && receipt.sources.iter().all(|(peer, count)| state
-                    .policy
-                    .pubsub_peers
-                    .contains(peer)
+                && receipt.events <= super::pubsub::MAX_REPLAY_EVENTS
+                && receipt.sources.iter().all(|(peer, count)| nostr::PublicKey::parse(peer).is_ok()
                     && *count > 0
                     && *count <= receipt.events)
                 && receipt
@@ -366,7 +350,6 @@ mod tests {
                 initial_since: 10,
                 overlap_secs: 10,
                 relays: vec!["a".into(), "b".into()],
-                pubsub_peers: Vec::new(),
                 source_mode: CatchupSourceMode::BestEffort,
                 kinds: vec![1, 5],
                 page_size: 4,
@@ -409,12 +392,11 @@ mod tests {
         .unwrap()
     }
     #[test]
-    fn pubsub_frontier_requires_receipt_and_strict_policy_requires_all_relays() {
+    fn legacy_frontier_resumes_and_strict_policy_still_requires_all_relays() {
         let temp = tempfile::tempdir().unwrap();
         let mut current = state();
-        current.policy.pubsub_peers = vec!["selected-peer".into()];
         current.next_author = 1;
-        assert!(validate_head(temp.path(), &current, &["a".repeat(64), "b".repeat(64)]).is_err());
+        validate_head(temp.path(), &current, &["a".repeat(64), "b".repeat(64)]).unwrap();
         current.policy.source_mode = CatchupSourceMode::Strict;
         assert!(validate_sources(&current, &sources()).is_err());
     }

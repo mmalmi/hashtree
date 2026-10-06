@@ -20,7 +20,6 @@ fn policy() -> CatchupPolicy {
         initial_since: 10,
         overlap_secs: 20,
         relays: vec!["relay-a".into(), "relay-b".into()],
-        pubsub_peers: Vec::new(),
         kinds: vec![1, 5],
         page_size: 4,
         max_pages_per_author: 100,

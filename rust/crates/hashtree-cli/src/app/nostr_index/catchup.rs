@@ -43,10 +43,6 @@ pub(crate) struct CatchupArgs {
     /// Source relay (repeatable); strict requires every source to complete.
     #[arg(long = "relay", required = true)]
     relays: Vec<String>,
-    /// Supplement relay catch-up from P2P services via the local FIPS mesh.
-    /// Repeatable npub/hex identities; never substitutes for relay coverage.
-    #[arg(long = "pubsub-peer")]
-    pubsub_peers: Vec<String>,
     /// Kind to retain (repeatable). Include kind 5 for deletion events.
     #[arg(long = "kind", required = true)]
     kinds: Vec<u16>,
@@ -126,7 +122,6 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         initial_since: args.since,
         overlap_secs: args.overlap_secs,
         relays,
-        pubsub_peers: pubsub::normalize_peers(args.pubsub_peers)?,
         kinds,
         page_size: args.page_size,
         max_pages_per_author: args.max_pages_per_author,
@@ -214,10 +209,16 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
     let pubsub_timeout =
         std::time::Duration::from_millis(config.server.fips_request_timeout_ms.max(250))
             .min(std::time::Duration::from_secs(policy.fetch_timeout_secs));
-    let pubsub_runtime = if policy.pubsub_peers.is_empty() {
-        None
+    let pubsub_runtime = if state.next_author < end {
+        match pubsub::Runtime::start(&config, &policy.relays, pubsub_timeout).await {
+            Ok(runtime) => Some(runtime),
+            Err(error) => {
+                tracing::warn!(%error, "P2P intake unavailable; continuing relay catch-up");
+                None
+            }
+        }
     } else {
-        Some(pubsub::Runtime::start(&config, policy.pubsub_peers.clone(), pubsub_timeout).await?)
+        None
     };
     let pipeline_result = pipeline::run(
         sources,
@@ -230,33 +231,24 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
             async move {
                 let started = Instant::now();
                 let events = async {
-                    let filter = pubsub_client
-                        .as_ref()
-                        .map(|_| pubsub::filter(&policy, &authors[ordinal], pass_since, pass_until))
-                        .transpose()?;
+                    let filter = pubsub::filter(&policy, &authors[ordinal], pass_since, pass_until)?;
                     let relay_fetch = fetch_catchup_author_with_coverage(
                         &mut source, &policy, &run_sources, &authors[ordinal], pass_since, pass_until,
                     );
                     let peer_fetch = async {
-                        match (pubsub_client.as_ref(), filter.as_ref()) {
-                            (Some(client), Some(filter)) => {
-                                pubsub::query(
-                                    client.as_ref(),
-                                    filter.clone(),
-                                    pubsub_timeout + std::time::Duration::from_millis(100),
-                                ).await
-                            }
-                            _ => None,
+                        match pubsub_client.as_ref() {
+                            Some(client) => pubsub::query(
+                                client.as_ref(),
+                                filter.clone(),
+                                pubsub_timeout + std::time::Duration::from_millis(100),
+                            ).await,
+                            None => None,
                         }
                     };
                     let (fetched, peer_report) = tokio::join!(relay_fetch, peer_fetch);
                     // A peer result never rescues incomplete required relay coverage.
                     let mut fetched = fetched?;
-                    let supplement = if let Some(filter) = filter {
-                        Some(pubsub::merge(&mut fetched.events, peer_report, &filter, &policy)?)
-                    } else {
-                        None
-                    };
+                    let supplement = Some(pubsub::merge(&mut fetched.events, peer_report, &filter, &policy)?);
                     Ok::<_, anyhow::Error>((fetched, supplement))
                 }.await;
                 let fetch_ms = started.elapsed().as_millis();
@@ -306,17 +298,10 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                 next.root = cid_to_nhash(&next_root)?;
                 next.next_author += 1;
                 next.events_received = next.events_received.saturating_add(received);
-                if state.policy.source_mode == CatchupSourceMode::BestEffort
-                    || !state.policy.pubsub_peers.is_empty()
-                {
-                    next = coverage::commit_with_pubsub(
-                        store, coverage_directory, state_file, &state, next,
-                        author, fetched.sources, supplement,
-                    )?;
-                } else {
-                    store.admit_checkpoint_write(&state_file, serde_json::to_vec(&next)?.len() + 1)?;
-                    persist_json_atomic(&state_file, &next, "Nostr catchup checkpoint")?;
-                }
+                next = coverage::commit_with_pubsub(
+                    store, coverage_directory, state_file, &state, next,
+                    author, fetched.sources, supplement,
+                )?;
                 let state = next;
                 // Do not delete superseded nodes: published roots and rollback readers
                 // may still depend on them. Publication owns eventual root-aware GC.
@@ -362,12 +347,8 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         "events_received": state.events_received,
         "complete": state.complete(),
     });
-    if state.policy.source_mode == CatchupSourceMode::BestEffort
-        || !state.policy.pubsub_peers.is_empty()
-    {
-        output["coverage_head"] = serde_json::json!(state.coverage_head);
-        output["source_mode"] = serde_json::json!(state.policy.source_mode);
-    }
+    output["coverage_head"] = serde_json::json!(state.coverage_head);
+    output["source_mode"] = serde_json::json!(state.policy.source_mode);
     println!("{output}");
     Ok(())
 }

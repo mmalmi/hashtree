@@ -213,7 +213,7 @@ fn import_events_with_external(temp: &TempDir, events: &[Event], external: bool)
     std::fs::create_dir_all(temp.path().join("config")).unwrap();
     std::fs::write(
         temp.path().join("config/config.toml"),
-        "[storage]\nmax_size_gb = 1\nevict_orphans = false\n",
+        "[storage]\nmax_size_gb = 1\nevict_orphans = false\n[server]\nenable_fips_udp = false\nenable_fips_webrtc = false\nenable_fips_lan_discovery = false\nfips_relays = []\nfips_request_timeout_ms = 250\nfips_discovery_scope = \"catchup-isolated-test\"\n",
     )
     .unwrap();
     let path = temp.path().join("events.json");
