@@ -96,7 +96,7 @@ pub fn encrypt_chk(plaintext: &[u8]) -> Result<(Vec<u8>, EncryptionKey), CryptoE
         .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
 
     let ciphertext = cipher
-        .encrypt(Nonce::from_slice(&zero_nonce), plaintext)
+        .encrypt(&Nonce::from(zero_nonce), plaintext)
         .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
 
     Ok((ciphertext, chash))
@@ -117,7 +117,7 @@ pub fn decrypt_chk(ciphertext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, Cr
         .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))?;
 
     cipher
-        .decrypt(Nonce::from_slice(&zero_nonce), ciphertext)
+        .decrypt(&Nonce::from(zero_nonce), ciphertext)
         .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))
 }
 
@@ -130,10 +130,10 @@ pub fn encrypt(plaintext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, CryptoE
 
     let mut nonce_bytes = [0u8; NONCE_SIZE];
     rand::thread_rng().fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| CryptoError::EncryptionFailed(e.to_string()))?;
 
     let mut result = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
@@ -154,11 +154,11 @@ pub fn decrypt(encrypted: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, CryptoE
     let cipher =
         Aes256Gcm::new_from_slice(key).map_err(|e| CryptoError::DecryptionFailed(e.to_string()))?;
 
-    let nonce = Nonce::from_slice(&encrypted[..NONCE_SIZE]);
+    let nonce = Nonce::try_from(&encrypted[..NONCE_SIZE]).map_err(|_| CryptoError::DataTooShort)?;
     let ciphertext = &encrypted[NONCE_SIZE..];
 
     cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))
 }
 

@@ -21,5 +21,6 @@ sha2.workspace = true
 libc = "0.2"
 
 [dev-dependencies]
+futures.workspace = true
 tempfile.workspace = true
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

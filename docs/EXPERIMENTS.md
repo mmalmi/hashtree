@@ -2,6 +2,70 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-10-06 - Automatic ARM Crypto Acceleration
+
+The core's previous SHA2 0.10 and AES-GCM 0.10 dependencies selected software
+SHA-256, AES and POLYVAL on ARM64 unless additional features and compiler flags
+were supplied. The ordinary release build did not enable those flags. The core
+now uses SHA2 0.11, AES-GCM 0.11 and HKDF 0.13, whose backends detect ARM CPU
+capabilities automatically. Existing x86 detection and portable software
+fallbacks remain available. This is a dependency update with four nonce
+constructor adaptations, without custom cryptography or new runtime settings.
+AES-GCM enables only `aes` and `alloc`; keys and random nonces continue to use
+the existing random-number source. Other crates retain their existing SHA2
+dependency. The new dependencies require Rust 1.85, now declared for the core;
+the verification below used Rust 1.99, not an independently tested minimum.
+
+The reproducible `hashtree-lmdb` example `crypto_backend_bench` measures the
+production `HashTree::put`/`get` path over MemoryStore and `put_stream`/`get`
+over a fresh disk-backed LMDB store. Each sample uses the same deterministic
+16 MiB input with distinct chunks and the default 2 MiB chunk size. LMDB import
+includes reading the source file and a final forced sync. Input generation,
+store creation and comparison of recovered bytes are outside the timers. Reads
+have warm OS caches; this is not a cold-storage or network benchmark.
+
+Matched release binaries on an Apple M4 Pro used the same example, toolchain,
+build settings and unchanged dependency versions outside the new crypto stack.
+After a crypto warm-up, the binaries ran in baseline/candidate/candidate/baseline
+order, with three fresh-store repetitions per invocation: six samples per
+version and case. Other work from this task paused during the timed runs.
+Medians are shown below; ratios are baseline time divided by candidate time.
+
+| Operation, 16 MiB | Previous ms | Updated ms | Ratio |
+| --- | ---: | ---: | ---: |
+| Memory encrypted put | 148.17 | 16.03 | 9.25x |
+| Memory encrypted get | 89.27 | 3.41 | 26.18x |
+| Durable LMDB encrypted import | 169.15 | 35.46 | 4.77x |
+| Warm LMDB encrypted get | 90.10 | 4.43 | 20.32x |
+| Memory plaintext put | 30.79 | 7.06 | 4.36x |
+| Durable LMDB plaintext import | 49.43 | 25.97 | 1.90x |
+| Memory plaintext get | 1.11 | 1.07 | 1.04x |
+| Warm LMDB plaintext get | 1.51 | 1.43 | 1.05x |
+
+All measured reads reproduced the original bytes. Plaintext and encrypted root
+identities matched across both builds and both backends. Plaintext read times
+were effectively unchanged, as expected for reads without decryption. These
+results support the backend update for CPU-bound ARM workloads; they do not
+predict WAN throughput, production Pool latency, cold-cache behavior or x86
+speedups.
+
+The optimized core suite passed 255 tests, including documentation examples
+and the existing fixed SHA-256/CHK key/ciphertext compatibility vectors; two
+existing vector-generation helpers remained ignored. The core library and
+interop tests also passed (152 tests, two ignored helpers) with SHA-256,
+SHA-512, AES and POLYVAL explicitly forced to their portable software backends.
+This verifies fallback correctness separately from the measured automatically
+accelerated build. Formatting passed. Strict Clippy on Rust 1.99 encountered
+17 `double_must_use` diagnostics from unchanged `async_trait` expansions in the
+blob-route and store traits; focused core Clippy passed with only that lint
+allowed. Those unrelated traits were left unchanged.
+
+Reproduce with `cargo run --release --locked -p hashtree-lmdb --example
+crypto_backend_bench -- 16 3` from `rust/`. For comparisons, build the same
+example against each dependency set first, then alternate the saved binaries
+without concurrent compilation. The example prints individual measurements
+and synthetic root identities so comparisons can also check byte compatibility.
+
 ## 2026-10-04 - Coalesce Append Payloads with Projection Writes
 
 The incremental Nostr writer flushed event payloads separately before constructing
