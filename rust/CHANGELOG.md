@@ -8,6 +8,17 @@
   5–21% and improved warm append times; cold latency remains inconclusive under
   shared storage load. See the payload coalescing entry in `docs/EXPERIMENTS.md`.
 
+## hashtree-core 0.2.91 - 2026-10-06
+
+- Enable automatic ARM SHA-256 and AES-GCM acceleration through updated
+  RustCrypto dependencies, retaining portable software fallbacks and identical
+  CHK keys, ciphertext and content addresses. A matched local ARM benchmark
+  improved durable encrypted imports by 4.77x; network and cold-storage gains
+  are not inferred. See `docs/EXPERIMENTS.md` for the measured conditions.
+- Preserve blob link types while streaming files and expose bounded buffered
+  store flush hints without weakening explicit final flushes.
+- Require Rust 1.85 or newer.
+
 ## hashtree-updater 0.2.88 - 2026-10-04
 
 - Report update checks as inconclusive when shared pubsub delivery closes early
