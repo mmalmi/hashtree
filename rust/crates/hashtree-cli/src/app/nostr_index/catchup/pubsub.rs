@@ -64,6 +64,12 @@ pub(super) struct Runtime {
 
 impl Runtime {
     pub async fn start(config: &Config, peers: Vec<String>, timeout: Duration) -> Result<Self> {
+        let peers = normalize_peers(peers)?;
+        let peer_count = peers.len();
+        ensure!(
+            peer_count > 0,
+            "pubsub intake requires at least one selected peer"
+        );
         let mut options = FipsEndpointOptions::new(Keys::generate().secret_key().to_bech32()?);
         options.enable_udp = false;
         options.enable_webrtc = false;
@@ -79,6 +85,12 @@ impl Runtime {
         let client = FipsPubsubClient::start(
             endpoint.native_endpoint.clone(),
             FipsPubsubClientOptions {
+                // routed_peers is additive. Fill every outgoing slot with a
+                // selected identity so discovered services cannot receive author
+                // filters or spend query/dedup budgets before our source checks.
+                max_connected_peers: peer_count,
+                max_inbound_routed_peers: 0,
+                fanout: FipsPubsubClientOptions::default().fanout.min(peer_count),
                 routed_peers: peers,
                 query_timeout: timeout,
                 max_active_subscriptions: 4,
@@ -228,3 +240,6 @@ pub(super) fn merge(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod selection_tests;

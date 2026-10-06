@@ -171,3 +171,14 @@ fn selected_peers_are_canonical_unique_and_bounded() {
     )
     .is_err());
 }
+
+#[tokio::test]
+async fn empty_runtime_selection_is_rejected_before_binding() {
+    let mut config = Config::default();
+    config.server.fips_local_rendezvous_addr = Some("invalid-bind-address".into());
+    let error = Runtime::start(&config, Vec::new(), Duration::from_secs(1))
+        .await
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("at least one selected peer"));
+}
