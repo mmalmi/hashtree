@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## hashtree-fs 0.2.83 - 2026-10-07
+
+- Prevent concurrent filesystem stores from colliding on a blob's temporary
+  file. Each writer exclusively creates its own temporary file before
+  atomically replacing the complete blob.
+- Keep failure cleanup limited to the writer's own temporary file, preserving
+  completed blobs and other writers' temporary files.
+
 ## hashtree-core 0.2.91 - 2026-10-06
 
 - Enable automatic ARM SHA-256 and AES-GCM acceleration through updated

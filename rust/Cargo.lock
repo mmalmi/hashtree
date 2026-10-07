@@ -3831,7 +3831,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-fs"
-version = "0.2.82"
+version = "0.2.83"
 dependencies = [
  "async-trait",
  "hashtree-core",
