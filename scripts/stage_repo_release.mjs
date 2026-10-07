@@ -2,6 +2,9 @@
 
 import {
   copyFileSync,
+  closeSync,
+  openSync,
+  readSync,
   existsSync,
   mkdirSync,
   readdirSync,
@@ -12,6 +15,23 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
+
+function sha256File(path) {
+  const file = openSync(path, 'r')
+  const hash = createHash('sha256')
+  const buffer = Buffer.alloc(1024 * 1024)
+  try {
+    let size
+    while ((size = readSync(file, buffer, 0, buffer.length, null)) > 0) {
+      hash.update(buffer.subarray(0, size))
+    }
+    return hash.digest('hex')
+  } finally {
+    closeSync(file)
+  }
+}
+
 import { basename, dirname, join, resolve } from 'node:path'
 import process from 'node:process'
 
@@ -275,6 +295,7 @@ export function stageRepoRelease({
       name: entry.name,
       path: entry.relativePath,
       size: statSync(destination).size,
+      sha256: sha256File(destination),
     })
   }
 

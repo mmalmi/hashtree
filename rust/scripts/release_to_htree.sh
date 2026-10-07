@@ -330,6 +330,9 @@ fi
 
 node "${STAGE_ARGS[@]}"
 
+HAPS_ARGS=(import-release "$RELEASE_STAGE_DIR" --config "$REPO_DIR/haps-release.json" --tag "$VERSION")
+haps "${HAPS_ARGS[@]}" --check
+
 release_cid="$(
     cd "$REPO_DIR"
     htree add "$RELEASE_STAGE_DIR" | awk '/^  url:/ {print $2}'
@@ -489,6 +492,7 @@ run_post_publish_install_checks() {
 refresh_gateway_release_root_cache
 run_post_publish_asset_url_gate
 run_post_publish_install_checks
+haps "${HAPS_ARGS[@]}" --publish
 
 if [ "$CARGO_PUBLISH" -eq 1 ]; then
     "${SCRIPT_DIR}/publish.sh"

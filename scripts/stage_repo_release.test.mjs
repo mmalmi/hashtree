@@ -1,4 +1,5 @@
 import test from 'node:test'
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
@@ -113,6 +114,9 @@ Changes since the previous release.
     assert.equal(existsSync(join(outputDir, 'assets', 'hashtree-aarch64-apple-darwin.tar.gz')), true)
 
     const manifest = JSON.parse(readFileSync(join(outputDir, 'release.json'), 'utf8'))
+    for (const asset of manifest.assets) {
+      assert.equal(asset.sha256, createHash('sha256').update(readFileSync(join(outputDir, asset.path))).digest('hex'))
+    }
     assert.deepEqual(
       manifest.assets.map((asset) => asset.path),
       ['assets/hashtree-aarch64-apple-darwin.tar.gz', 'install.sh'],

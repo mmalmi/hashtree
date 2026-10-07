@@ -3,13 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SOURCE_REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-README_INSTALL_CMD="$(grep -F 'curl -fsSL https://upload.iris.to/' "${SOURCE_REPO_ROOT}/README.md" | grep 'install.sh' | head -n1)"
-README_NPUB="$(printf '%s\n' "${README_INSTALL_CMD}" | grep -oE 'npub1[023456789acdefghjklmnpqrstuvwxyz]+' | head -n1)"
-
-if [ -z "${README_INSTALL_CMD}" ] || [ -z "${README_NPUB}" ]; then
-    echo "Failed to extract canonical install command from README.md" >&2
-    exit 1
-fi
+PUBLISHER_NPUB="$(node -p "require('${SOURCE_REPO_ROOT}/haps-release.json').publisher")"
+RELEASE_INSTALL_CMD="curl -fsSL https://upload.iris.to/${PUBLISHER_NPUB}/releases%2Fhashtree/latest/install.sh | sh"
 
 TMPDIR="$(mktemp -d)"
 REPO_ROOT="${TMPDIR}/hashtree-release-worktree"
@@ -162,9 +157,12 @@ case "\${1:-}" in
         echo "htree_add:\$2" >>"\${TEST_LOG_DIR}/calls.log"
         printf '  url: nhash1release\n'
         ;;
+    push)
+        echo "htree_push:\$*" >>"\${TEST_LOG_DIR}/calls.log"
+        ;;
     user)
         printf '2026-03-31T10:00:00Z INFO loading profile\n'
-        printf '${README_NPUB} (Release Owner)\n'
+        printf '${PUBLISHER_NPUB} (Release Owner)\n'
         ;;
     *)
         echo "unexpected htree command: \$*" >&2
@@ -186,6 +184,14 @@ exit 0
 EOF
 chmod +x "${TMPDIR}/bin/curl"
 
+cat >"${TMPDIR}/bin/haps" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+echo "haps:$*" >>"${TEST_LOG_DIR}/calls.log"
+[[ "$*" != *"${FAIL_HAPS_PHASE:-not-a-phase}"* ]]
+EOF
+chmod +x "${TMPDIR}/bin/haps"
+
 PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" \
     "${REPO_ROOT}/rust/scripts/release_to_htree.sh" \
     --version v0.2.3 \
@@ -194,6 +200,7 @@ PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" \
     --release-stage-dir "${TMPDIR}/release-stage" >/dev/null
 
 grep -F "htree_add:${TMPDIR}/release-stage" "${TMPDIR}/logs/calls.log" >/dev/null
+grep -E '^haps:import-release .* --publish$' "${TMPDIR}/logs/calls.log" >/dev/null
 test -f "${TMPDIR}/release-stage/release.json"
 test -f "${TMPDIR}/release-stage/notes.md"
 test -f "${TMPDIR}/release-stage/install.sh"
@@ -204,18 +211,12 @@ grep -F "## Changelog" "${TMPDIR}/release-stage/notes.md" >/dev/null
 grep -F "Added release changelog coverage to the staged repo notes." "${TMPDIR}/release-stage/notes.md" >/dev/null
 
 grep -F "publish_release:v0.2.3 nhash1release releases/hashtree" "${TMPDIR}/logs/calls.log" >/dev/null
-grep -F "publish_tap:--version v0.2.3 --release-base-url https://upload.iris.to/${README_NPUB}/releases%2Fhashtree/v0.2.3/assets --assets-dir ${TMPDIR}/out --tap-repo homebrew-hashtree" "${TMPDIR}/logs/calls.log" >/dev/null
+grep -F "publish_tap:--version v0.2.3 --release-base-url https://upload.iris.to/${PUBLISHER_NPUB}/releases%2Fhashtree/v0.2.3/assets --assets-dir ${TMPDIR}/out --tap-repo homebrew-hashtree" "${TMPDIR}/logs/calls.log" >/dev/null
 grep -F "install_matrix:" "${TMPDIR}/logs/calls.log" >/dev/null
-grep -F "curl:-fsSL --max-time 30 https://upload.iris.to/api/resolve/${README_NPUB}/releases%2Fhashtree?refresh=1" "${TMPDIR}/logs/calls.log" >/dev/null
-grep -F "curl:-fsSIL --max-time 30 https://upload.iris.to/${README_NPUB}/releases%2Fhashtree/latest/install.sh" "${TMPDIR}/logs/calls.log" >/dev/null
+grep -F "curl:-fsSL --max-time 30 https://upload.iris.to/api/resolve/${PUBLISHER_NPUB}/releases%2Fhashtree?refresh=1" "${TMPDIR}/logs/calls.log" >/dev/null
+grep -F "curl:-fsSIL --max-time 30 https://upload.iris.to/${PUBLISHER_NPUB}/releases%2Fhashtree/latest/install.sh" "${TMPDIR}/logs/calls.log" >/dev/null
 test -f "${TMPDIR}/out/install.sh"
-grep -F "BASE_URL=\"https://upload.iris.to/${README_NPUB}/releases%2Fhashtree/v0.2.3\"" "${TMPDIR}/out/install.sh" >/dev/null
-grep -F 'ASSET_BASE_URL="${BASE_URL}/assets"' "${TMPDIR}/out/install.sh" >/dev/null
-grep -F "hashtree-install: error:" "${TMPDIR}/out/install.sh" >/dev/null
-grep -F 'fetch_http=$(curl -fSL -o "$fetch_out" -w '\''%{http_code}'\'' "$fetch_url") || fetch_rc=$?' "${TMPDIR}/out/install.sh" >/dev/null
-grep -F 'tar -tzf "$archive_path" >/dev/null 2>&1 || die "downloaded file is not a valid gzip tar archive: $archive_path (download may be corrupt)"' "${TMPDIR}/out/install.sh" >/dev/null
-grep -F '[ -d "$packaged_dir" ] || die "expected directory '\''hashtree/'\'' not found in archive (archive layout may have changed)"' "${TMPDIR}/out/install.sh" >/dev/null
-grep -F './install.sh "$@"' "${TMPDIR}/out/install.sh" >/dev/null
+grep -F "BASE_URL=\"https://upload.iris.to/${PUBLISHER_NPUB}/releases%2Fhashtree/v0.2.3\"" "${TMPDIR}/out/install.sh" >/dev/null
 
 PORT_FILE="${TMPDIR}/http-port"
 SERVER_LOG="${TMPDIR}/http-server.log"
@@ -246,7 +247,7 @@ while [ ! -s "${PORT_FILE}" ]; do
     sleep 0.1
 done
 PORT="$(cat "${PORT_FILE}")"
-perl -0pi -e "s|^BASE_URL=.*$|BASE_URL=\"http://127.0.0.1:${PORT}\"|m" "${TMPDIR}/release-stage/install.sh"
+perl -0pi -e "s|^BASE_URL=.*$|BASE_URL=\"http://127.0.0.1:${PORT}\"|m; s|^ASSET_BASE_URL=.*$|ASSET_BASE_URL=\"http://127.0.0.1:${PORT}/assets\"|m" "${TMPDIR}/release-stage/install.sh"
 BOOTSTRAP_HOME="${TMPDIR}/bootstrap-home"
 BOOTSTRAP_BIN="${TMPDIR}/bootstrap-bin"
 mkdir -p "${BOOTSTRAP_HOME}"
@@ -260,8 +261,8 @@ SERVER_PID=""
 
 README_GATEWAY_ROOT="${TMPDIR}/readme-gateway"
 README_RELEASE_ROOTS=(
-    "${README_GATEWAY_ROOT}/${README_NPUB}/releases%2Fhashtree"
-    "${README_GATEWAY_ROOT}/${README_NPUB}/releases/hashtree"
+    "${README_GATEWAY_ROOT}/${PUBLISHER_NPUB}/releases%2Fhashtree"
+    "${README_GATEWAY_ROOT}/${PUBLISHER_NPUB}/releases/hashtree"
 )
 for README_RELEASE_ROOT in "${README_RELEASE_ROOTS[@]}"; do
     mkdir -p "${README_RELEASE_ROOT}/latest" "${README_RELEASE_ROOT}/v0.2.3/assets"
@@ -294,10 +295,10 @@ PORT="$(cat "${PORT_FILE}")"
 for README_RELEASE_ROOT in "${README_RELEASE_ROOTS[@]}"; do
     perl -0pi -e "s|https://upload\\.iris\\.to|http://127.0.0.1:${PORT}|g" "${README_RELEASE_ROOT}/latest/install.sh"
 done
-LOCAL_README_INSTALL_CMD="$(printf '%s\n' "${README_INSTALL_CMD}" | sed "s|https://upload.iris.to|http://127.0.0.1:${PORT}|")"
+LOCAL_RELEASE_INSTALL_CMD="$(printf '%s\n' "${RELEASE_INSTALL_CMD}" | sed "s|https://upload.iris.to|http://127.0.0.1:${PORT}|")"
 README_HOME="${TMPDIR}/readme-home"
 mkdir -p "${README_HOME}"
-env HOME="${README_HOME}" PATH="/usr/bin:/bin" /bin/bash -lc "${LOCAL_README_INSTALL_CMD}"
+env HOME="${README_HOME}" PATH="/usr/bin:/bin" /bin/bash -lc "${LOCAL_RELEASE_INSTALL_CMD}"
 test -x "${README_HOME}/.local/bin/htree"
 test -x "${README_HOME}/.local/bin/htree-cashu"
 test -x "${README_HOME}/.local/bin/git-remote-htree"
@@ -375,4 +376,20 @@ if grep -F "install_matrix:" "${TMPDIR}/logs/calls.log" >/dev/null; then
     exit 1
 fi
 
+grep -E '^haps:import-release .* --check$' "${TMPDIR}/logs/calls.log" >/dev/null
+for phase in --check --publish; do
+    : >"${TMPDIR}/logs/calls.log"
+    if PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" FAIL_HAPS_PHASE="$phase" \
+        "${REPO_ROOT}/rust/scripts/release_to_htree.sh" --version v0.2.3 \
+        --repo-dir "${SOURCE_REPO}" --output-dir "${TMPDIR}/out" \
+        --release-stage-dir "${TMPDIR}/release-stage" >/dev/null 2>&1; then
+        echo "Haps failure must fail release" >&2
+        exit 1
+    fi
+    if [ "$phase" = --check ]; then
+        ! grep -q '^htree_add:' "${TMPDIR}/logs/calls.log"
+    else
+        grep -q '^publish_release:' "${TMPDIR}/logs/calls.log"
+    fi
+done
 echo "test_release_to_htree_homebrew.sh passed"

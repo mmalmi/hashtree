@@ -443,3 +443,18 @@ workspace feature set.
 ## License
 
 MIT
+
+
+
+### Haps distribution
+
+The final local release flow also publishes desktop/CLI packages using
+`../haps-release.json` and the same verified `release.json` assets. Drafts do not
+publish Haps packages. Install Haps with the `import-release` subcommand and Python
+3.9+ on the publisher. Set `HAPS_KEY_FILE` to an existing secret-key file matching
+the public publisher pinned in the mapping (or provision the matching existing
+Haps identity). Never generate a new release identity. The flow verifies
+checksums and package layout before upload, then requires Nostr acknowledgement.
+A Haps failure fails the final release; byte-identical retries reuse the signed
+package versions. Iris Git, native updaters and Haps consume the same release
+artifacts; Android/iOS and native installer channels retain their existing gates.
