@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.21 - 2026-10-08
+
+- FIPS transport 0.4.22 uses TCP/FIPS 0.2.3, avoiding unnecessary retransmission
+  on receiver buffer-space updates and resetting stale duplicate ACK counts.
+- Update FIPS transport, Nostr pubsub adapter 0.1.8, and worker 0.4.12 to
+  nostr-pubsub 0.5.15 so their packaged dependencies use the corrected transport.
+
 ## TypeScript runtime 0.5.17 - 2026-10-02
 
 - FIPS transport 0.4.20 preserves explicitly configured blob routes when the
