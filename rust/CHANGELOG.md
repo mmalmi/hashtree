@@ -1,5 +1,12 @@
 # Changelog
 
+## hashtree-fips-transport 0.4.27 - 2026-10-08
+
+- Require TCP/FIPS 0.2.4 to avoid false fast retransmission on receiver window
+  updates and to reset stale duplicate acknowledgment counts. Keep FIPS core
+  0.4.94, TCP endpoint 0.2.29, and blob protocol behavior unchanged.
+- Align the workspace with nostr-pubsub-fips 0.5.21 for the same TCP fix.
+
 ## hashtree-fips-transport 0.4.26 - 2026-10-04
 
 - Require FIPS core 0.4.94 and TCP endpoint 0.2.29 for bounded concurrent
