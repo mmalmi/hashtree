@@ -11,11 +11,39 @@ use hashtree_core::store::{Store, StoreError, StoreStats};
 use hashtree_core::types::Hash;
 use std::collections::HashMap;
 use std::fs;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(0);
+
+fn write_blob_atomically(path: &Path, data: &[u8]) -> Result<(), StoreError> {
+    let (temp_path, mut file) = loop {
+        let id = NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::Relaxed);
+        let temp_path = path.with_extension(format!("{}.{}.tmp", std::process::id(), id));
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+        {
+            Ok(file) => break (temp_path, file),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error.into()),
+        }
+    };
+    let result = (|| {
+        file.write_all(data)?;
+        drop(file);
+        fs::rename(&temp_path, path)
+    })();
+    if result.is_err() {
+        // Only this writer's exclusively created file belongs to this operation.
+        let _ = fs::remove_file(&temp_path);
+    }
+    result.map_err(Into::into)
+}
 
 /// Filesystem-backed blob store implementing hashtree's Store trait.
 ///
@@ -178,10 +206,9 @@ impl FsBlobStore {
             fs::create_dir_all(parent)?;
         }
 
-        // Write atomically using temp file + rename
-        let temp_path = path.with_extension("tmp");
-        fs::write(&temp_path, data)?;
-        fs::rename(&temp_path, &path)?;
+        // Independent stores/processes can fetch the same block concurrently.
+        // Publish only a completed write from this writer's unique temporary file.
+        write_blob_atomically(&path, data)?;
 
         Ok(true)
     }
@@ -514,6 +541,9 @@ impl Store for FsBlobStore {
         self.pins.read().unwrap().get(&hex).copied().unwrap_or(0)
     }
 }
+
+#[cfg(test)]
+mod concurrent_writes;
 
 #[cfg(test)]
 mod tests {
