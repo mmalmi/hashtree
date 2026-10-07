@@ -1263,11 +1263,14 @@ impl RemoteHelper {
             loaded?;
         } else if let Err(e) = loaded {
             let err_str = e.to_string();
-            let is_access_error = err_str.contains("link-visible")
-                || err_str.contains("private")
-                || err_str.contains("secret key");
+            let is_access_error = e
+                .downcast_ref::<crate::nostr_client::RootObservationIncomplete>()
+                .is_none()
+                && (err_str.contains("link-visible")
+                    || err_str.contains("private")
+                    || err_str.contains("secret key"));
             let is_likely_new_repo =
-                err_str.contains("No root hash") || Self::is_repo_not_found_error(&e);
+                err_str.contains("No root hash") || Self::is_repo_unobserved_error(&e);
 
             if is_access_error {
                 debug!("Cannot access existing repo (visibility change): {}", e);

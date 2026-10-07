@@ -269,9 +269,9 @@ impl RemoteHelper {
         }
     }
 
-    fn is_repo_not_found_error(err: &anyhow::Error) -> bool {
-        let message = err.to_string();
-        message.starts_with("Repository '") && message.contains("' not found")
+    fn is_repo_unobserved_error(err: &anyhow::Error) -> bool {
+        err.downcast_ref::<crate::nostr_client::RootNotObserved>()
+            .is_some()
     }
 
     fn is_missing_root_download_error(message: &str) -> bool {
@@ -435,8 +435,10 @@ impl RemoteHelper {
             Err(err) if rebuild => {
                 return Err(err).context("local rebuild requires readable existing refs")
             }
-            Err(err) if for_push && Self::is_repo_not_found_error(&err) => {
-                debug!("Repository not found during push ref advertisement; treating as empty");
+            Err(err) if for_push && Self::is_repo_unobserved_error(&err) => {
+                debug!(
+                    "No repository root observed during push ref advertisement; treating as empty"
+                );
                 HashMap::new()
             }
             Err(err) if for_push => {

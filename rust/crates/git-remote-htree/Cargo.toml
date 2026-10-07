@@ -22,11 +22,16 @@ hashtree-core.workspace = true
 hashtree-fs.workspace = true
 hashtree-lmdb = { workspace = true, optional = true }
 hashtree-config.workspace = true
+hashtree-client = { version = "0.1.2", path = "../hashtree-client" }
+hashtree-nostr.workspace = true
+hashtree-nostr-pubsub.workspace = true
 
 # Nostr
 nostr.workspace = true
 nostr-sdk.workspace = true
 nostr-relay-pool.workspace = true
+nostr-pubsub.workspace = true
+nostr-pubsub-relay.workspace = true
 secp256k1 = { version = "0.29", features = ["global-context"] }
 
 # Blossom client

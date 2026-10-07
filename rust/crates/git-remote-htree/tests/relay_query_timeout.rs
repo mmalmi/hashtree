@@ -12,7 +12,7 @@ use std::sync::{
 use std::time::{Duration, Instant};
 
 #[test]
-fn test_fetch_refs_uses_partial_relay_results_instead_of_not_found() {
+fn test_fetch_refs_uses_partial_relay_results() {
     let good_relay = TestRelay::new();
     let hanging_relay = TestRelay::with_options(TestRelayOptions {
         // Simulate a relay that never answers hashtree-root REQ.
@@ -24,10 +24,13 @@ fn test_fetch_refs_uses_partial_relay_results_instead_of_not_found() {
     let pubkey_hex = hex::encode(keys.public_key().to_bytes());
     let secret_hex = hex::encode(keys.secret_key().to_secret_bytes());
 
+    let data = tempfile::tempdir().unwrap();
     let mut config = Config::default();
+    config.storage.data_dir = data.path().to_string_lossy().into_owned();
+    config.server.bind_address = "127.0.0.1:1".to_string();
+    config.blossom.servers.clear();
     config.nostr.relays = vec![good_relay.url(), hanging_relay.url()];
-    // Force a deterministic failure *after* event discovery. If event discovery fails,
-    // we'd get "Repository ... not found" instead.
+    // Force a deterministic content failure after signed event discovery.
     config.blossom.read_servers = vec!["http://127.0.0.1:9".to_string()];
     config.blossom.write_servers = config.blossom.read_servers.clone();
 
@@ -49,11 +52,6 @@ fn test_fetch_refs_uses_partial_relay_results_instead_of_not_found() {
         .to_string();
 
     assert!(
-        !err.contains("Repository 'relay-timeout-repro' not found"),
-        "should not report missing repo when one relay has the event; got: {}",
-        err
-    );
-    assert!(
         err.contains("Failed to download root hash"),
         "should fail after resolving event and trying blossom download; got: {}",
         err
@@ -61,10 +59,10 @@ fn test_fetch_refs_uses_partial_relay_results_instead_of_not_found() {
 }
 
 #[test]
-fn test_fetch_refs_retries_after_empty_repo_lookup_before_reporting_not_found() {
+fn test_fetch_refs_retries_after_empty_repo_lookup() {
     let flaky_relay = TestRelay::with_options(TestRelayOptions {
         // First repo lookup returns EOSE without the historical event, so the
-        // client needs to retry discovery instead of surfacing a false "not found".
+        // client needs to retry discovery.
         respond_empty_req_kinds_once: vec![KIND_HASHTREE_ROOT as u64],
         ..Default::default()
     });
@@ -73,7 +71,11 @@ fn test_fetch_refs_retries_after_empty_repo_lookup_before_reporting_not_found() 
     let pubkey_hex = hex::encode(keys.public_key().to_bytes());
     let secret_hex = hex::encode(keys.secret_key().to_secret_bytes());
 
+    let data = tempfile::tempdir().unwrap();
     let mut config = Config::default();
+    config.storage.data_dir = data.path().to_string_lossy().into_owned();
+    config.server.bind_address = "127.0.0.1:1".to_string();
+    config.blossom.servers.clear();
     config.nostr.relays = vec![flaky_relay.url()];
     config.blossom.read_servers = vec!["http://127.0.0.1:9".to_string()];
     config.blossom.write_servers = config.blossom.read_servers.clone();
@@ -96,11 +98,6 @@ fn test_fetch_refs_retries_after_empty_repo_lookup_before_reporting_not_found() 
         .to_string();
 
     assert!(
-        !err.contains("Repository 'retry-after-empty-lookup' not found"),
-        "should retry repo discovery before reporting missing repo; got: {}",
-        err
-    );
-    assert!(
         err.contains("Failed to download root hash"),
         "should fail after resolving the event and trying blossom download; got: {}",
         err
@@ -118,7 +115,11 @@ fn test_fetch_refs_discards_bad_local_daemon_root_and_retries_relays() {
     let pubkey_hex = hex::encode(keys.public_key().to_bytes());
     let secret_hex = hex::encode(keys.secret_key().to_secret_bytes());
 
+    let data = tempfile::tempdir().unwrap();
     let mut config = Config::default();
+    config.storage.data_dir = data.path().to_string_lossy().into_owned();
+    config.server.bind_address = "127.0.0.1:1".to_string();
+    config.blossom.servers.clear();
     config.nostr.relays = vec![relay.url()];
     config.blossom.read_servers = vec![fake_daemon.base_url(), "http://127.0.0.1:9".to_string()];
     config.blossom.write_servers.clear();

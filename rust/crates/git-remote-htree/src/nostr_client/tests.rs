@@ -1,5 +1,7 @@
 use super::*;
 
+mod standalone_lookup;
+
 #[test]
 fn local_only_daemon_query_outlives_its_collection_window() {
     assert_eq!(
@@ -636,7 +638,7 @@ fn test_daemon_local_relay_root_is_fallback_until_relay_checked() {
     };
     let relay = RootEventData {
         root_hash: "22".repeat(32),
-        source: RootResolveSource::Relay,
+        source: RootResolveSource::NostrEvent,
         event_created_at: Some(20),
         event_id: Some("22".repeat(32)),
         ..RootEventData::default()
@@ -727,8 +729,13 @@ fn test_fetch_refs_does_not_cache_unverified_daemon_root_when_tree_download_fail
         .unwrap();
     });
 
+    let directory = tempfile::tempdir().unwrap();
     let mut config = test_config();
+    config.storage.data_dir = directory.path().to_string_lossy().into_owned();
     config.nostr.relays.clear();
+    config.blossom.servers.clear();
+    config.blossom.read_servers.clear();
+    config.blossom.write_servers.clear();
     let mut client = NostrClient::new(TEST_PUBKEY, None, None, false, &config).unwrap();
     client.relays.clear();
     client.local_daemon_url = Some(format!("http://{}", addr));
@@ -738,7 +745,8 @@ fn test_fetch_refs_does_not_cache_unverified_daemon_root_when_tree_download_fail
     server.join().unwrap();
 
     assert!(
-        err.to_string().contains("Repository 'repo' not found")
+        err.to_string()
+            .contains("No repository root observed for 'repo'")
             || err.to_string().contains("Failed to download root hash")
             || err.to_string().contains("No servers")
     );
