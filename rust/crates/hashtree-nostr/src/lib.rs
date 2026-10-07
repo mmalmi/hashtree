@@ -1515,12 +1515,7 @@ impl<S: Store> NostrEventStore<S> {
                 superseded_nodes: Vec::new(),
             });
         }
-        events = retain_unique_latest_events(events);
-        events.sort_by(|left, right| match compare_events(left, right) {
-            x if x < 0 => std::cmp::Ordering::Less,
-            x if x > 0 => std::cmp::Ordering::Greater,
-            _ => std::cmp::Ordering::Equal,
-        });
+        events = prepare_append_events(events);
 
         let batch_size = self
             .options
@@ -3367,6 +3362,22 @@ fn trim_index_commit_allocations() {
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn trim_index_commit_allocations() {}
+
+/// Canonicalize the complete input before splitting it into durable append
+/// batches. Per-batch deduplication alone would retain obsolete replaceable
+/// versions when those versions span batch boundaries.
+pub fn prepare_append_events<I>(events: I) -> Vec<StoredNostrEvent>
+where
+    I: IntoIterator<Item = StoredNostrEvent>,
+{
+    let mut events = retain_unique_latest_events(events.into_iter().collect());
+    events.sort_by(|left, right| match compare_events(left, right) {
+        x if x < 0 => std::cmp::Ordering::Less,
+        x if x > 0 => std::cmp::Ordering::Greater,
+        _ => std::cmp::Ordering::Equal,
+    });
+    events
+}
 
 /// Coalesce duplicate IDs and replaceable coordinates using the same ordering
 /// as the event index. Apply this before an external retention count limit.

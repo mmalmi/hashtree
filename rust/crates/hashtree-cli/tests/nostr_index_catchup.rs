@@ -270,6 +270,104 @@ fn checkpoint(temp: &TempDir) -> Value {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_resumes_interrupted_batch_only_when_the_complete_input_matches() {
+    use std::{
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+    for change_input in [false, true] {
+        let temp = TempDir::new().unwrap();
+        let reference = TempDir::new().unwrap();
+        let key = Keys::generate();
+        let old = event(&key, 1, "retained history");
+        let root = import(&temp, &old);
+        assert_eq!(import(&reference, &old), root);
+        for dir in [&temp, &reference] {
+            std::fs::write(
+                dir.path().join("authors.txt"),
+                format!("{}\n", key.public_key()),
+            )
+            .unwrap();
+        }
+        let events = (10..74)
+            .map(|n| event(&key, n, &format!("new-{n}")))
+            .collect::<Vec<_>>();
+        let relay = Relay::new(events).await;
+        let mut process = catchup(&temp, &root, &relay)
+            .args(["--until", "100", "--index-commit-batch-size", "1"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let cursor_path = temp.path().join("data/nostr-index/catchup-append.json");
+        let started = Instant::now();
+        loop {
+            assert!(
+                started.elapsed() < Duration::from_secs(30),
+                "partial batch cursor deadline"
+            );
+            assert!(
+                process.try_wait().unwrap().is_none(),
+                "writer exited before interruption"
+            );
+            if let Ok(bytes) = std::fs::read(&cursor_path) {
+                let cursor: Value = serde_json::from_slice(&bytes).unwrap();
+                if cursor["next_event"].as_u64().unwrap() >= 3 {
+                    process.kill().unwrap();
+                    process.wait().unwrap();
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+        assert_eq!(checkpoint(&temp)["next_author"], 0);
+        let cursor: Value = serde_json::from_slice(&std::fs::read(&cursor_path).unwrap()).unwrap();
+        let completed = cursor["next_event"].as_u64().unwrap();
+        assert!(completed >= 3 && completed < 64);
+        if change_input {
+            relay
+                .events
+                .lock()
+                .unwrap()
+                .push(event(&key, 80, "changed source input"));
+        }
+        let output = catchup(&temp, &root, &relay)
+            .args(["--until", "100", "--index-commit-batch-size", "1"])
+            .output()
+            .unwrap();
+        let trace = String::from_utf8_lossy(&output.stderr).into_owned();
+        let actual = success(output);
+        let expected = success(
+            catchup(&reference, &root, &relay)
+                .args(["--until", "100", "--index-commit-batch-size", "1"])
+                .output()
+                .unwrap(),
+        );
+        assert_eq!(actual["root"], expected["root"]);
+        assert_eq!(checkpoint(&temp)["root"], checkpoint(&reference)["root"]);
+        assert_eq!(
+            checkpoint(&temp)["events_received"],
+            if change_input { 65 } else { 64 }
+        );
+        if change_input {
+            assert!(!trace.contains("Nostr catchup resume:"));
+        } else {
+            assert!(trace.contains(&format!(
+                "Nostr catchup resume: completed_events={completed}"
+            )));
+        }
+        assert_eq!(checkpoint(&temp)["next_author"], 1);
+        // A completed cursor must not poison the following pass.
+        success(
+            catchup(&temp, &root, &relay)
+                .args(["--until", "101", "--index-commit-batch-size", "1"])
+                .output()
+                .unwrap(),
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cli_restarts_failed_author_then_continues_time_without_losing_history() {
     let temp = TempDir::new().unwrap();
     let alice = Keys::generate();

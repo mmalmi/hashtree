@@ -9,11 +9,12 @@ use hashtree_nostr::catchup::{
     fetch_catchup_author_with_coverage, CatchupPolicy, CatchupRunSources, CatchupSourceMode,
     CatchupState, DEFAULT_CATCHUP_OVERLAP_SECS,
 };
-use hashtree_nostr::{NostrEventStore, NostrEventStoreOptions};
+use hashtree_nostr::{prepare_append_events, NostrEventStore, NostrEventStoreOptions};
 use sha2::{Digest, Sha256};
 
 use super::{cid_to_nhash, parse_root_text, persist_json_atomic, CrawlStateLock, INDEX_DIR};
 
+mod append_checkpoint;
 mod coverage;
 mod pipeline;
 mod pubsub;
@@ -159,10 +160,14 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
     if let Some(saved) = &saved {
         coverage::validate_head(&coverage_directory, saved, &authors)?;
     }
+    let append_checkpoint_file = data_dir.join(INDEX_DIR).join("catchup-append.json");
+    let append_checkpoint =
+        append_checkpoint::AppendCheckpoint::load(&append_checkpoint_file, saved.as_ref())?;
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_secs();
     let state = CatchupState::prepare(saved, policy, args.until, now)?;
+    let resume_author = state.next_author;
     let config = Config::load()?;
     let store = Arc::new(HashtreeStore::with_catchup_physical_space(
         &data_dir,
@@ -267,26 +272,47 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
             let state_file = &state_file;
             let coverage_directory = &coverage_directory;
             let author_count = authors.len();
+            let append_checkpoint = &append_checkpoint;
+            let append_checkpoint_file = &append_checkpoint_file;
             async move {
                 // Fetches may finish out of order, but there is exactly one
                 // writer and its next author must match the saved frontier.
                 anyhow::ensure!(ordinal == state.next_author, "catchup author order changed");
                 let received = fetched.events.len() as u64;
+                let events = prepare_append_events(fetched.events);
                 let append_started = Instant::now();
-                let report = event_store
-                    .build_with_superseded_nodes(Some(&root), fetched.events)
-                    .await
-                    .with_context(|| {
-                        format!(
-                            "append catchup author {} ({author}); {}",
-                            state.next_author,
-                            store.physical_space_status()
-                        )
-                    })?;
+                let resumed = append_checkpoint.as_ref().filter(|_| ordinal == resume_author);
+                let resumed = match resumed {
+                    Some(cursor) if cursor.matches(&state, &events, received)? => Some(cursor.clone()),
+                    Some(_) => {
+                        tracing::warn!("Catchup author input changed; replaying from durable author checkpoint");
+                        None
+                    }
+                    None => None,
+                };
+                let mut cursor = if let Some(cursor) = resumed {
+                    eprintln!("Nostr catchup resume: completed_events={}", cursor.next_event);
+                    cursor
+                } else {
+                    let cursor = append_checkpoint::AppendCheckpoint::new(
+                        &state, &events, received, cid_to_nhash(&root)?)?;
+                    cursor.save(store, append_checkpoint_file)?;
+                    cursor
+                };
+                let mut next_root = parse_root_text(&cursor.root)?;
+                event_store.validate_index_root(Some(&next_root)).await?;
+                let batch_size = state.policy.index_commit_batch_size;
+                while cursor.next_event < events.len() {
+                    let end = cursor.next_event.saturating_add(batch_size).min(events.len());
+                    let report = event_store.build_with_superseded_nodes(
+                        Some(&next_root), events[cursor.next_event..end].to_vec(),
+                    ).await.with_context(|| format!("append catchup author {}; {}", ordinal, store.physical_space_status()))?;
+                    next_root = report.root.context("catchup writer discarded its nonempty base root")?;
+                    cursor.root = cid_to_nhash(&next_root)?;
+                    cursor.next_event = end;
+                    cursor.save(store, append_checkpoint_file)?;
+                }
                 let append_ms = append_started.elapsed().as_millis();
-                let next_root = report
-                    .root
-                    .context("catchup writer discarded its nonempty base root")?;
                 let validate_started = Instant::now();
                 event_store.validate_index_root(Some(&next_root)).await?;
                 let validate_ms = validate_started.elapsed().as_millis();
@@ -302,6 +328,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                     store, coverage_directory, state_file, &state, next,
                     author, fetched.sources, supplement,
                 )?;
+                append_checkpoint::AppendCheckpoint::retire(append_checkpoint_file)?;
                 let state = next;
                 // Do not delete superseded nodes: published roots and rollback readers
                 // may still depend on them. Publication owns eventual root-aware GC.
