@@ -1563,6 +1563,9 @@ pub(crate) enum ReleaseCommands {
         version_path: String,
         /// CID or nhash for the release directory to publish
         cid: String,
+        /// Previous release tree CID to preserve; refuse a conflicting observed root
+        #[arg(long, value_parser = hashtree_core::Cid::parse)]
+        expected_root: Option<hashtree_core::Cid>,
         /// Publish the version and repoint the sibling draft pointer instead of latest
         #[arg(long)]
         draft: bool,

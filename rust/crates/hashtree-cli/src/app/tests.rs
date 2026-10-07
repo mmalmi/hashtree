@@ -1538,6 +1538,7 @@ fn test_cli_parses_release_publish_command() {
                     tree_name,
                     version_path,
                     cid,
+                    expected_root,
                     draft,
                     local,
                 },
@@ -1546,6 +1547,7 @@ fn test_cli_parses_release_publish_command() {
             assert_eq!(version_path, "releases/v0.2.3");
             assert_eq!(cid, "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh");
             assert!(!draft);
+            assert!(expected_root.is_none());
             assert!(local);
         }
         _ => panic!("expected release publish command"),
@@ -1571,6 +1573,7 @@ fn test_cli_parses_release_publish_draft_flag() {
                     tree_name,
                     version_path,
                     cid,
+                    expected_root,
                     draft,
                     local,
                 },
@@ -1579,9 +1582,46 @@ fn test_cli_parses_release_publish_draft_flag() {
             assert_eq!(version_path, "releases/v0.2.4-rc.1");
             assert_eq!(cid, "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh");
             assert!(draft);
+            assert!(expected_root.is_none());
             assert!(!local);
         }
         _ => panic!("expected release publish command"),
+    }
+}
+
+#[test]
+fn test_cli_parses_release_publish_expected_root() {
+    let expected = "11".repeat(32);
+    let cli = Cli::parse_from([
+        "htree",
+        "release",
+        "publish",
+        "releases/test",
+        "v2",
+        &expected,
+        "--expected-root",
+        &expected,
+    ]);
+    match cli.command {
+        Commands::Release {
+            command: ReleaseCommands::Publish { expected_root, .. },
+        } => {
+            assert_eq!(expected_root, Some(hashtree_core::Cid::public([0x11; 32])));
+        }
+        _ => panic!("expected release publish command"),
+    }
+    for invalid in ["not-a-cid", "htree://npub1test/releases/test"] {
+        assert!(Cli::try_parse_from([
+            "htree",
+            "release",
+            "publish",
+            "releases/test",
+            "v2",
+            &expected,
+            "--expected-root",
+            invalid,
+        ])
+        .is_err());
     }
 }
 

@@ -337,6 +337,12 @@ rust/scripts/publish_release.sh v<version> "$release" releases/hashtree
 
 That stores the new release under `v<version>/`, repoints `latest/` at the same CID, and leaves older versions intact.
 
+For an existing release tree, pass `htree release publish ... --expected-root <previous-root-cid>`
+with its verified previous root (a raw CID, including its key if encrypted). The command
+preserves that tree even when no announcement is observed, rejects a conflicting
+observed root, and stops if the required history cannot be read. Omitting the flag
+allows creation of a new release tree.
+
 Release announcements follow `nostr.event_transport`. For consumers using FIPS pubsub,
 set it to `"fips-local-only"` and run a local `htree` daemon with the same configuration.
 `htree release publish` resolves and hands its signed announcement to that daemon;

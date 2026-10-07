@@ -63,7 +63,11 @@ impl ReleasePublisher {
         }
     }
 
-    pub(super) async fn resolve(&self, key: &str) -> Result<(Option<Cid>, Option<Timestamp>)> {
+    pub(super) async fn resolve(
+        &self,
+        key: &str,
+        allow_unobserved_head: bool,
+    ) -> Result<(Option<Cid>, Option<Timestamp>)> {
         match self {
             Self::Relay(resolver) => Ok((resolver.resolve(key).await?, None)),
             Self::FipsDaemon { client, base, .. } => {
@@ -82,6 +86,13 @@ impl ReleasePublisher {
                     .error_for_status()?
                     .json()
                     .await?;
+                if allow_unobserved_head
+                    && root.get("cid") == Some(&serde_json::Value::Null)
+                    && root["key"].as_str() == Some(key)
+                    && root.get("error").is_none_or(serde_json::Value::is_null)
+                {
+                    return Ok((None, None));
+                }
                 let cid = root["cid"].as_str().context(
                     "No existing release root was observed through the FIPS daemon; refusing to overwrite release history. Seed the daemon with the existing signed root event before publishing",
                 )?;

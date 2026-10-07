@@ -16,7 +16,7 @@
 //!   htree gc
 //!   htree user [<nsec>]
 //!   htree publish <ref_name> <hash> [--key <key>]
-//!   htree release publish <tree_name> <version_path> <cid> [--draft] [--local]
+//!   htree release publish <tree_name> <version_path> <cid> [--expected-root <cid>] [--draft] [--local]
 //!
 //! `--draft` writes the sibling `draft` pointer; final publishes write `latest`.
 

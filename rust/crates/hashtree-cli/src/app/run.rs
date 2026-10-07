@@ -1618,6 +1618,7 @@ fn run_command(
                 tree_name,
                 version_path,
                 cid,
+                expected_root,
                 draft,
                 local,
             } => {
@@ -1628,6 +1629,7 @@ fn run_command(
                     &cid,
                     local,
                     draft,
+                    expected_root,
                 )
                 .await?;
 

@@ -51,6 +51,43 @@ fn release_daemon_url_stays_loopback() {
     assert!(daemon_url("192.0.2.1:8080").is_err());
 }
 
+#[tokio::test]
+async fn expected_root_accepts_only_explicit_empty_daemon_observations() -> Result<()> {
+    use axum::{extract::Path, routing::get, Json, Router};
+    let app = Router::new().route(
+        "/api/nostr/resolve/:pubkey/:treename",
+        get(|Path((pubkey, tree)): Path<(String, String)>| async move {
+            let key = format!("{pubkey}/{tree}");
+            Json(match tree.as_str() {
+                "empty" => serde_json::json!({"key": key, "cid": null}),
+                "failed" => serde_json::json!({"key": key, "error": "resolution failed"}),
+                "malformed" => serde_json::json!({"key": key, "cid": 42}),
+                _ => serde_json::json!({"key": "another/tree", "cid": null}),
+            })
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let base = reqwest::Url::parse(&format!("http://{}/", listener.local_addr()?))?;
+    let server = tokio::spawn(async move { axum::serve(listener, app).await });
+    let publisher = ReleasePublisher::FipsDaemon {
+        client: reqwest::Client::builder().no_proxy().build()?,
+        base,
+        keys: NostrKeys::generate(),
+        relays: Vec::new(),
+    };
+    assert!(publisher.resolve("test/empty", false).await.is_err());
+    assert_eq!(publisher.resolve("test/empty", true).await?, (None, None));
+    for tree in ["failed", "malformed", "mismatched"] {
+        assert!(publisher
+            .resolve(&format!("test/{tree}"), true)
+            .await
+            .is_err());
+    }
+    server.abort();
+    let _ = server.await;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn release_daemon_handoff_reaches_late_fips_consumer_without_relays() -> Result<()> {
     release_daemon_handoff(false).await
@@ -74,7 +111,7 @@ async fn release_daemon_handoff(restart: bool) -> Result<()> {
             .with_link_type(LinkType::File)])
         .await?;
     let old_root =
-        super::super::publish_release_root(&tree, None, "v1", &old_release, false).await?;
+        super::super::publish_release_root(&tree, None, "v1", &old_release, false, None).await?;
     let keys = NostrKeys::generate();
     let key = format!("{}/releases/test", keys.public_key().to_bech32()?);
     let prior_timestamp = Timestamp::from_secs(Timestamp::now().as_secs() + 1);
@@ -128,14 +165,20 @@ async fn release_daemon_handoff(restart: bool) -> Result<()> {
 
     let publisher = ReleasePublisher::connect(&config, keys.clone()).await?;
     assert!(publisher
-        .resolve(&format!("{}/unobserved", keys.public_key().to_bech32()?))
+        .resolve(
+            &format!("{}/unobserved", keys.public_key().to_bech32()?),
+            false
+        )
         .await
         .is_err());
-    let (current_root, created_at) = publisher.resolve(&key).await?;
+    let unobserved = format!("{}/unobserved", keys.public_key().to_bech32()?);
+    assert!(publisher.resolve(&unobserved, true).await.is_err());
+    let (current_root, created_at) = publisher.resolve(&key, false).await?;
     assert_eq!(current_root, Some(old_root));
     assert_eq!(created_at, Some(prior_timestamp));
     let new_root =
-        super::super::publish_release_root(&tree, current_root, "v2", &new_release, false).await?;
+        super::super::publish_release_root(&tree, current_root, "v2", &new_release, false, None)
+            .await?;
     publisher.publish(&key, &new_root, created_at).await?;
     drop(publisher);
     let daemon_client = daemon

@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use hashtree_cli::config::ensure_keys_string;
 use hashtree_cli::{Config, FetchConfig, Fetcher, HashtreeStore, NostrKeys, NostrToBech32};
-use hashtree_core::{Cid, HashTree, HashTreeConfig, LinkType, Store};
+use hashtree_core::{Cid, HashTree, HashTreeConfig, LinkType, Store, TreeEntry};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -111,6 +111,7 @@ async fn fetch_existing_directory_chain<S: Store>(
     tree: &HashTree<S>,
     root: &Cid,
     parent_segments: &[String],
+    require_history: bool,
 ) -> Result<()> {
     fetcher
         .fetch_chunk_with_store(store, &root.hash)
@@ -127,10 +128,13 @@ async fn fetch_existing_directory_chain<S: Store>(
             bail!("Release path component is not a directory: {}", segment);
         }
 
-        let entries = tree
-            .list_directory(&current)
-            .await
-            .context("Failed to list current release directory")?;
+        let entries = if require_history {
+            release_directory_entries(tree, &current).await?
+        } else {
+            tree.list_directory(&current)
+                .await
+                .context("Failed to list current release directory")?
+        };
 
         let Some(entry) = entries.iter().find(|entry| entry.name == *segment) else {
             break;
@@ -151,7 +155,39 @@ async fn fetch_existing_directory_chain<S: Store>(
         current = child;
     }
 
+    if require_history {
+        release_directory_entries(tree, &current).await?;
+    }
     Ok(())
+}
+
+async fn release_directory_entries<S: Store>(
+    tree: &HashTree<S>,
+    root: &Cid,
+) -> Result<Vec<TreeEntry>> {
+    if !tree
+        .is_dir(root)
+        .await
+        .context("Failed to inspect existing release history")?
+    {
+        bail!("Existing release history is missing or not a directory");
+    }
+    tree.list_directory_required(root)
+        .await
+        .context("Failed to read existing release history")
+}
+
+fn release_base_root(
+    current_root: Option<Cid>,
+    expected_root: Option<&Cid>,
+) -> Result<Option<Cid>> {
+    match (current_root, expected_root) {
+        (Some(observed), Some(expected)) if &observed != expected => {
+            bail!("Observed release tree differs from --expected-root; refusing to overwrite release history")
+        }
+        (_, Some(expected)) => Ok(Some(expected.clone())),
+        (observed, None) => Ok(observed),
+    }
 }
 
 async fn publish_release_root<S: Store>(
@@ -160,7 +196,12 @@ async fn publish_release_root<S: Store>(
     version_path: &str,
     release_cid: &Cid,
     publish_as_draft: bool,
+    expected_root: Option<&Cid>,
 ) -> Result<Cid> {
+    let current_root = release_base_root(current_root, expected_root)?;
+    if let Some(root) = expected_root {
+        release_directory_entries(tree, root).await?;
+    }
     let version_segments = parse_release_path(version_path)?;
     let version_name = version_segments
         .last()
@@ -169,7 +210,7 @@ async fn publish_release_root<S: Store>(
     let parent_segments = &version_segments[..version_segments.len() - 1];
 
     let mut root = match current_root {
-        Some(root) if root.hash != release_cid.hash => root,
+        Some(root) if expected_root.is_some() || root.hash != release_cid.hash => root,
         None => tree
             .put_directory(Vec::new())
             .await
@@ -220,6 +261,7 @@ pub(crate) async fn publish_release_version(
     cid_input: &str,
     local: bool,
     draft: bool,
+    expected_root: Option<Cid>,
 ) -> Result<PublishedRelease> {
     if tree_name.trim().is_empty() {
         bail!("Release tree name must not be empty");
@@ -263,9 +305,10 @@ pub(crate) async fn publish_release_version(
     let publisher = ReleasePublisher::connect(&config, keys).await?;
     let nostr_key = format!("{}/{}", npub, tree_name);
     let (current_root, latest_created_at) = publisher
-        .resolve(&nostr_key)
+        .resolve(&nostr_key, expected_root.is_some())
         .await
         .with_context(|| format!("Failed to resolve existing release tree {}", nostr_key))?;
+    let current_root = release_base_root(current_root, expected_root.as_ref())?;
 
     if let Some(root) = current_root.as_ref() {
         println!("Loading existing release path...");
@@ -275,6 +318,7 @@ pub(crate) async fn publish_release_version(
             &tree,
             root,
             &version_segments[..version_segments.len() - 1],
+            expected_root.is_some(),
         )
         .await?;
     }
@@ -285,6 +329,7 @@ pub(crate) async fn publish_release_version(
         version_path,
         &release_cid,
         draft,
+        expected_root.as_ref(),
     )
     .await?;
 
@@ -352,9 +397,16 @@ mod tests {
             .await
             .expect("release directory");
 
-        let root = publish_release_root(&tree, Some(release.clone()), "v0.2.69", &release, false)
-            .await
-            .expect("publish release root");
+        let root = publish_release_root(
+            &tree,
+            Some(release.clone()),
+            "v0.2.69",
+            &release,
+            false,
+            None,
+        )
+        .await
+        .expect("publish release root");
 
         assert_ne!(root.hash, release.hash);
         let version = tree
@@ -420,7 +472,7 @@ mod tests {
         let (_store, tree) = make_tree();
         let release_cid = make_release_dir(&tree, b"release-one").await;
 
-        let root = publish_release_root(&tree, None, "v0.2.3", &release_cid, false)
+        let root = publish_release_root(&tree, None, "v0.2.3", &release_cid, false, None)
             .await
             .expect("publish root");
 
@@ -445,10 +497,10 @@ mod tests {
         let release_v1 = make_release_dir(&tree, b"release-one").await;
         let release_v2 = make_release_dir(&tree, b"release-two").await;
 
-        let root = publish_release_root(&tree, None, "v0.2.2", &release_v1, false)
+        let root = publish_release_root(&tree, None, "v0.2.2", &release_v1, false, None)
             .await
             .expect("publish first release");
-        let root = publish_release_root(&tree, Some(root), "v0.2.3", &release_v2, false)
+        let root = publish_release_root(&tree, Some(root), "v0.2.3", &release_v2, false, None)
             .await
             .expect("publish second release");
 
@@ -474,11 +526,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expected_root_preserves_history_when_no_head_is_observed() {
+        let (_store, tree) = make_tree();
+        let first = make_release_dir(&tree, b"first").await;
+        let second = make_release_dir(&tree, b"second").await;
+        let previous = publish_release_root(&tree, None, "v1", &first, false, None)
+            .await
+            .unwrap();
+        let updated = publish_release_root(&tree, None, "v2", &second, false, Some(&previous))
+            .await
+            .unwrap();
+        assert_eq!(
+            tree.resolve_path(&updated, "v1").await.unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            tree.resolve_path(&updated, "v2").await.unwrap(),
+            Some(second.clone())
+        );
+        assert_eq!(
+            tree.resolve_path(&updated, "latest").await.unwrap(),
+            Some(second)
+        );
+    }
+
+    #[tokio::test]
+    async fn expected_root_rejects_a_conflicting_observed_head() {
+        let (_store, tree) = make_tree();
+        let release = make_release_dir(&tree, b"first").await;
+        let observed = publish_release_root(&tree, None, "v1", &release, false, None)
+            .await
+            .unwrap();
+        let expected = hashtree_core::Cid::public([7; 32]);
+        let error = publish_release_root(
+            &tree,
+            Some(observed),
+            "v2",
+            &release,
+            false,
+            Some(&expected),
+        )
+        .await
+        .expect_err("conflicting release history must not be overwritten");
+        assert!(error.to_string().contains("differs from --expected-root"));
+    }
+
+    #[tokio::test]
+    async fn expected_root_missing_data_cannot_create_a_fresh_tree() {
+        let (_store, tree) = make_tree();
+        let release = make_release_dir(&tree, b"first").await;
+        let missing = hashtree_core::Cid::public([7; 32]);
+        publish_release_root(&tree, None, "v2", &release, false, Some(&missing))
+            .await
+            .expect_err("unavailable previous root must not become a new tree");
+    }
+
+    #[tokio::test]
+    async fn expected_root_rejects_a_chunked_file_as_release_history() {
+        let store = Arc::new(MemoryStore::new());
+        let tree = HashTree::new(HashTreeConfig::new(store).with_chunk_size(4).public());
+        let (file, _) = tree.put_file(&[0xab; 32]).await.unwrap();
+        let release = make_release_dir(&tree, b"first").await;
+        publish_release_root(&tree, None, "v2", &release, false, Some(&file))
+            .await
+            .expect_err("ordinary chunked files are not release history");
+    }
+
+    #[tokio::test]
+    async fn expected_root_is_preserved_even_when_it_is_the_new_release_cid() {
+        let (_store, tree) = make_tree();
+        let first = make_release_dir(&tree, b"first").await;
+        let previous = publish_release_root(&tree, None, "v1", &first, false, None)
+            .await
+            .unwrap();
+        let updated = publish_release_root(
+            &tree,
+            Some(previous.clone()),
+            "v2",
+            &previous,
+            false,
+            Some(&previous),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            tree.resolve_path(&updated, "v1").await.unwrap(),
+            Some(first)
+        );
+        assert_eq!(
+            tree.resolve_path(&updated, "v2").await.unwrap(),
+            Some(previous)
+        );
+    }
+
+    #[tokio::test]
     async fn publish_release_root_creates_nested_parent_directories() {
         let (_store, tree) = make_tree();
         let release_cid = make_release_dir(&tree, b"release-three").await;
 
-        let root = publish_release_root(&tree, None, "releases/v0.2.3", &release_cid, false)
+        let root = publish_release_root(&tree, None, "releases/v0.2.3", &release_cid, false, None)
             .await
             .expect("publish nested release");
 
@@ -503,12 +649,13 @@ mod tests {
         let stable_release = make_release_dir(&tree, b"stable-release").await;
         let draft_release = make_release_dir(&tree, b"draft-release").await;
 
-        let root = publish_release_root(&tree, None, "v0.2.3", &stable_release, false)
+        let root = publish_release_root(&tree, None, "v0.2.3", &stable_release, false, None)
             .await
             .expect("publish stable release");
-        let root = publish_release_root(&tree, Some(root), "v0.2.4-rc.1", &draft_release, true)
-            .await
-            .expect("publish draft release");
+        let root =
+            publish_release_root(&tree, Some(root), "v0.2.4-rc.1", &draft_release, true, None)
+                .await
+                .expect("publish draft release");
 
         let draft = tree
             .resolve_path(&root, "v0.2.4-rc.1")
