@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## hashtree-fips-transport 0.4.28 - 2026-10-08
+
+- Require FIPS core 0.4.95, TCP core 0.2.5, and TCP endpoint 0.2.30 to bound idle
+  control work and retransmission attempts while preserving packet and loss accounting.
+- Preserve blob protocol behavior and transport defaults.
+- Align the workspace with nostr-pubsub-fips 0.5.22 and the same FIPS core.
+
 ## hashtree-fips-transport 0.4.27 - 2026-10-08
 
 - Require TCP/FIPS 0.2.4 to avoid false fast retransmission on receiver window
