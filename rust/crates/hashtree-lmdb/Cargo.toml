@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-lmdb"
-version = "0.2.89"
+version = "0.2.90"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -19,6 +19,11 @@ rmp-serde.workspace = true
 uuid.workspace = true
 sha2.workspace = true
 libc = "0.2"
+
+# iOS rejects System V semaphore syscalls. Keep LMDB's normal cross-process
+# locking using its supported POSIX backend; preserve macOS's existing format.
+[target.'cfg(target_os = "ios")'.dependencies]
+heed = { package = "hashtree-heed", version = "=0.20.5-hashtree.2", path = "../../vendor/heed", features = ["posix-sem"] }
 
 [dev-dependencies]
 futures.workspace = true

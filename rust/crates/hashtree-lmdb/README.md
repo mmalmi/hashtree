@@ -142,7 +142,7 @@ other processes. Membership and concurrency changes are generation-tracked and
 refresh safely across live processes; LMDB map resizing is deliberately not a live
 membership operation.
 
-On Darwin, LMDB's default System V semaphore backend uses `SEM_UNDO`, and the
+On macOS, LMDB's default System V semaphore backend uses `SEM_UNDO`, and the
 default per-process `kern.sysv.semume` limit is ten. The bound applies to
 simultaneous lock-owning transactions across distinct environments, not to the
 number of configured pool members. Hashtree therefore coordinates its blob and
@@ -151,6 +151,16 @@ write transactions may overlap, while short read/open lock acquisition is
 serialized and headroom remains for the social-graph backend. Linux and Windows
 do not receive this Darwin-only bound. Storage membership remains scalable, and
 no daemon or operator sysctl change is required.
+
+On iOS, the crate selects LMDB's POSIX named-semaphore backend automatically:
+System V semaphore syscalls are unsupported there. Reader and writer locking,
+transactions, and explicit durability through `force_sync()` remain enabled.
+POSIX semaphores do not provide `SEM_UNDO`: if a process dies while holding a
+lock, every other process using that environment must exit before reopening it.
+LMDB then exclusively reinitializes the abandoned locks and recovers committed
+data. An iOS app and its extensions must coordinate this lifecycle, or use
+separate store paths; do not assume live-peer owner-death recovery. All processes
+sharing an environment must use the same locking backend.
 
 For online imports, `htree storage pool migrate-lmdb` opens the source read-only,
 never resizes it, scans in bounded hash order, and writes only through the target
