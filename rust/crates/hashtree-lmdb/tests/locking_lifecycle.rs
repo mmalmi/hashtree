@@ -4,6 +4,7 @@
 use futures::executor::block_on;
 use hashtree_core::{sha256, Store};
 use hashtree_lmdb::LmdbBlobStore;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
@@ -156,5 +157,27 @@ fn last_process_crash_reopens_with_durable_data_and_fresh_locks() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("store");
     child("crash", &path).wait();
+    child("recover", &path).wait();
+}
+
+#[test]
+fn interrupted_lock_initialization_reopens_without_removing_durable_data() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store");
+    let store = open(&path);
+    store.put_sync(sha256(DATA), DATA).unwrap();
+    block_on(store.pin(&sha256(DATA))).unwrap();
+    store.force_sync().unwrap();
+    drop(store);
+    // LMDB allocates/maps lock.mdb before semget/sem_open, and writes these
+    // header fields only after semaphore initialization succeeds. Reproduce
+    // an interrupted initializer in this closed, exclusively owned fixture.
+    let mut lock = std::fs::OpenOptions::new()
+        .write(true)
+        .open(path.join("lock.mdb"))
+        .unwrap();
+    lock.write_all(&[0; 8]).unwrap();
+    lock.sync_all().unwrap();
+    drop(lock);
     child("recover", &path).wait();
 }

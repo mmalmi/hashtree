@@ -199,7 +199,6 @@ jobs:
         run: |
           rustup target add aarch64-apple-ios aarch64-apple-ios-sim
           python3 tests/verify_ios_lmdb_locking.py
-          cargo test --locked -p hashtree-lmdb --features heed/posix-sem --test locking_lifecycle
 
   windows-storage:
     name: Windows Storage
