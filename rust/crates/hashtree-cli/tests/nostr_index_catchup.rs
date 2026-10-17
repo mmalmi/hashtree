@@ -239,6 +239,16 @@ fn catchup(temp: &TempDir, root: &str, relay: &Relay) -> Command {
 }
 
 fn catchup_with_floor(temp: &TempDir, root: &str, relay: &Relay, floor: u64) -> Command {
+    catchup_with_timeout(temp, root, relay, floor, 1)
+}
+
+fn catchup_with_timeout(
+    temp: &TempDir,
+    root: &str,
+    relay: &Relay,
+    floor: u64,
+    timeout_secs: u64,
+) -> Command {
     let mut command = command(temp);
     command
         .args(["nostr-index", "catch-up", "--root", root, "--authors-file"])
@@ -257,7 +267,7 @@ fn catchup_with_floor(temp: &TempDir, root: &str, relay: &Relay, floor: u64) -> 
             "--page-size",
             "4",
             "--fetch-timeout-secs",
-            "1",
+            &timeout_secs.to_string(),
         ]);
     command
 }

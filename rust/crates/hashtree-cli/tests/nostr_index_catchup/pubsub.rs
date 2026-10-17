@@ -59,11 +59,13 @@ async fn cli_discovers_peers_automatically_and_keeps_relay_intake_and_resume() {
             .unwrap();
     }
     publisher.set_replay_source(Some(cache)).unwrap();
+    // This exercises cold discovery and authenticated replay, not latency.
+    // Give the new CLI process time to discover the publisher on busy CI hosts.
     std::fs::write(temp.path().join("config/config.toml"), format!(
-        "[storage]\nmax_size_gb = 1\nevict_orphans = false\n[server]\nenable_fips_udp = false\nenable_fips_webrtc = false\nenable_fips_lan_discovery = false\nfips_relays = []\nfips_discovery_scope = {scope:?}\nfips_local_rendezvous_addr = {addr:?}\nfips_request_timeout_ms = 800\n",
+        "[storage]\nmax_size_gb = 1\nevict_orphans = false\n[server]\nenable_fips_udp = false\nenable_fips_webrtc = false\nenable_fips_lan_discovery = false\nfips_relays = []\nfips_discovery_scope = {scope:?}\nfips_local_rendezvous_addr = {addr:?}\nfips_request_timeout_ms = 5000\n",
         addr = addr.to_string()
     )).unwrap();
-    let mut cmd = catchup(&temp, &root, &relay);
+    let mut cmd = catchup_with_timeout(&temp, &root, &relay, 0, 5);
     cmd.args(["--until", "100"]);
     let output = tokio::task::spawn_blocking(move || cmd.output().unwrap())
         .await
@@ -108,7 +110,7 @@ async fn cli_discovers_peers_automatically_and_keeps_relay_intake_and_resume() {
     assert!(raw.contains(&peer_only.id.to_hex()));
     assert!(raw.contains(&old.id.to_hex()));
     let before = std::fs::read(temp.path().join("data/nostr-index/catchup-state.json")).unwrap();
-    let mut cmd = catchup(&temp, &root, &relay);
+    let mut cmd = catchup_with_timeout(&temp, &root, &relay, 0, 5);
     cmd.args(["--until", "100"]);
     success(
         tokio::task::spawn_blocking(move || cmd.output().unwrap())
@@ -121,7 +123,7 @@ async fn cli_discovers_peers_automatically_and_keeps_relay_intake_and_resume() {
     );
     // P2P delivery does not rescue a required relay that never completes.
     relay.omit_eose.store(true, Ordering::SeqCst);
-    let mut cmd = catchup(&temp, &root, &relay);
+    let mut cmd = catchup_with_timeout(&temp, &root, &relay, 0, 5);
     cmd.args(["--until", "101"]);
     let rejected = tokio::task::spawn_blocking(move || cmd.output().unwrap())
         .await
@@ -133,7 +135,7 @@ async fn cli_discovers_peers_automatically_and_keeps_relay_intake_and_resume() {
     assert_eq!(failed["events_received"], saved["events_received"]);
     assert_eq!(failed["coverage_head"], saved["coverage_head"]);
     relay.omit_eose.store(false, Ordering::SeqCst);
-    let mut cmd = catchup(&temp, &root, &relay);
+    let mut cmd = catchup_with_timeout(&temp, &root, &relay, 0, 5);
     cmd.args(["--until", "101"]);
     let resumed = success(
         tokio::task::spawn_blocking(move || cmd.output().unwrap())
@@ -152,7 +154,7 @@ async fn cli_discovers_peers_automatically_and_keeps_relay_intake_and_resume() {
         serde_json::to_vec(&legacy).unwrap(),
     )
     .unwrap();
-    let mut cmd = catchup(&temp, &root, &relay);
+    let mut cmd = catchup_with_timeout(&temp, &root, &relay, 0, 5);
     cmd.args(["--until", "102"]);
     let resumed = success(
         tokio::task::spawn_blocking(move || cmd.output().unwrap())
