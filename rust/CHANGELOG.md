@@ -6,6 +6,14 @@
 
 - Update Negentropy to 0.5.2 to reject malformed reconciliation ID counts before
   allocating memory (GHSA-jcg8-qg98-373g / RUSTSEC-2026-0365).
+- Require the published indexing preparation API from hashtree-nostr 0.2.90.
+
+## hashtree-nostr 0.2.90 - 2026-10-17
+
+- Require Negentropy 0.5.2 in consuming applications to prevent unbounded
+  allocation from malformed reconciliation messages.
+- Export ordered append preparation so CLI checkpoint positions match durable
+  batches across interrupted imports.
 
 ## Unreleased
 

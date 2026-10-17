@@ -201,7 +201,9 @@ jobs:
 
       - name: Compile the locked publishable CLI package
         working-directory: rust
-        run: cargo package --locked -p hashtree-cli
+        run: |
+          cargo package --locked -p hashtree-nostr
+          cargo package --locked -p hashtree-cli
 
       - name: Preserve the verified package
         uses: actions/upload-artifact@v4

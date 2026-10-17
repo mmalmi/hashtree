@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-nostr"
-version = "0.2.89"
+version = "0.2.90"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -21,6 +21,8 @@ thiserror.workspace = true
 nostr-sdk.workspace = true
 nostr.workspace = true
 nostr-relay-pool.workspace = true
+# Keep the SDK's vulnerable transitive versions out of consumer lockfiles.
+negentropy = "0.5.2"
 nostr-social-graph.workspace = true
 tokio = { workspace = true, features = ["time"] }
 
@@ -29,6 +31,5 @@ libc = "0.2"
 
 [dev-dependencies]
 async-trait.workspace = true
-negentropy = "0.5"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 tokio-tungstenite = "0.24"

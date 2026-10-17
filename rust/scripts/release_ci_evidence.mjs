@@ -2,7 +2,7 @@
 export const requiredCiJobs = Object.freeze([
   'TypeScript', 'TypeScript Documentation', 'Release Wiring', 'Pool Migration Systemd', 'Rust Tests',
   'macOS Updater Security', 'Windows Storage', 'Rust FUSE Smoke',
-  'Rust Peripheral Tests', 'Rust FIPS WebRTC Tests', 'CLI Package',
+  'Rust Peripheral Tests', 'Rust FIPS WebRTC Tests', 'Nostr Index Package', 'CLI Package',
 ]);
 
 // The caller falls back to running the gates when evidence is absent or the API fails.

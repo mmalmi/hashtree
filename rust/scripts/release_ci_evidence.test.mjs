@@ -106,7 +106,7 @@ test('reuses all successful jobs from the exact push commit and latest attempt',
 test('requires every canonical CI job, including documentation and package verification', async () => {
   const workflow = readFileSync(new URL('../../.github/workflows/ci.yml', import.meta.url), 'utf8');
   const canonicalJobs = [...workflow.matchAll(/^    name: (.+)$/gm)].map(match => match[1]);
-  assert.equal(canonicalJobs.length, 11);
+  assert.equal(canonicalJobs.length, 12);
   assert.deepEqual([...requiredCiJobs].sort(), canonicalJobs.sort());
   const f = fixture();
   f.jobs.splice(f.jobs.findIndex(job => job.name === 'TypeScript Documentation'), 1);

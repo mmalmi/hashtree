@@ -168,6 +168,30 @@ jobs:
       - name: Run default-feature Rust gate
         run: bash ../scripts/release-gate.sh --lane rust
 
+  nostr-package:
+    name: Nostr Index Package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Test the indexing library and compile its locked package
+        working-directory: rust
+        run: |
+          cargo test --locked -p hashtree-nostr
+          cargo package --locked -p hashtree-nostr
+      - name: Preserve the verified library package
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-nostr-package
+          path: rust/target/package/hashtree-nostr-*.crate
+          if-no-files-found: error
+
   cli-package:
     name: CLI Package
     runs-on: ubuntu-latest
