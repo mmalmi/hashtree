@@ -6,5 +6,11 @@ slow-timeout = { period = "60s", terminate-after = 2 }
 service-integration = { max-threads = 4 }
 
 [[profile.default.overrides]]
+# Census checks snapshot ancestor metadata, including /tmp. Run them alone so
+# other test fixtures cannot change those ancestors during the capture.
+filter = 'test(app::pool_migration_controller::linux::tests::generated_)'
+threads-required = "num-test-threads"
+
+[[profile.default.overrides]]
 filter = '(package(git-remote-htree) | package(hashtree-cli)) & kind(test)'
 test-group = 'service-integration'
