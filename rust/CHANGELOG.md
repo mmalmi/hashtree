@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.153 - 2026-10-17
+
+### Security
+
+- Update Negentropy to 0.5.2 to reject malformed reconciliation ID counts before
+  allocating memory (GHSA-jcg8-qg98-373g / RUSTSEC-2026-0365).
+
 ## Unreleased
 
 ## hashtree-fips-transport 0.4.28 - 2026-10-08
