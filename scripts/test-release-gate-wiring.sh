@@ -111,7 +111,7 @@ reject grep -qF 'cargo test --workspace --tests' .github/workflows/ci.yml
 grep -F 'rust-fuse-smoke:' .github/workflows/ci.yml >/dev/null
 [ "$(grep -Fxc '        run: bash rust/scripts/run_fuse_smoke_in_docker.sh' .github/workflows/ci.yml)" -eq 1 ]
 [ "$(grep -h 'libwebkit2gtk-4.1-dev' .github/workflows/ci.yml .github/workflows/release.yml | wc -l | tr -d ' ')" -eq 2 ]
-[ "$(grep -Fc 'libdbus-1-dev' .github/workflows/ci.yml)" -eq 5 ]
+[ "$(grep -Fc 'libdbus-1-dev' .github/workflows/ci.yml)" -eq 6 ]
 [ "$(grep -Fc 'libdbus-1-dev' .github/workflows/release.yml)" -eq 5 ]
 
 # The independently consumable FIPS transport has one canonical TypeScript

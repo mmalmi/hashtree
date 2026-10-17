@@ -168,6 +168,44 @@ jobs:
       - name: Run default-feature Rust gate
         run: bash ../scripts/release-gate.sh --lane rust
 
+  cli-package:
+    name: CLI Package
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install package build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache package dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/target/package/
+          key: ${{ runner.os }}-cargo-cli-package-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-cli-package-
+      - name: Compile the locked publishable CLI package
+        working-directory: rust
+        run: |
+          rm -f target/package/hashtree-cli-*.crate
+          cargo package --locked -p hashtree-cli
+      - name: Preserve the verified package
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-cli-package
+          path: rust/target/package/hashtree-cli-*.crate
+          if-no-files-found: error
+
   updater-macos:
     name: macOS Updater Security
     runs-on: macos-latest
