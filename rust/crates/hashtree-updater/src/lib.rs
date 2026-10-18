@@ -12,6 +12,8 @@
 mod error;
 mod install;
 mod manifest;
+#[cfg(feature = "peer-storage")]
+mod peer_storage;
 mod product;
 mod progress;
 #[cfg(feature = "nostr-pubsub")]
@@ -22,8 +24,6 @@ mod reference;
 mod target;
 mod update_policy;
 mod updater;
-#[cfg(feature = "peer-storage")]
-mod peer_storage;
 
 #[cfg(feature = "peer-storage")]
 pub use peer_storage::{build_update_store, UpdateStore};
