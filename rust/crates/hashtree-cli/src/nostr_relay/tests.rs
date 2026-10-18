@@ -456,6 +456,131 @@ async fn relay_does_not_persist_ephemeral_events() -> Result<()> {
     Ok(())
 }
 
+async fn failed_durable_ingest_is_not_cached(ingress: &str) -> Result<()> {
+    let tmp = TempDir::new()?;
+    let graph_store = {
+        let _guard = crate::socialgraph::test_lock().await;
+        crate::socialgraph::open_test_social_graph_store_with_mapsize(
+            tmp.path(),
+            Some(128 * 1024 * 1024),
+        )?
+    };
+    let backend: Arc<dyn crate::socialgraph::SocialGraphBackend> = graph_store;
+    let relay = NostrRelay::new(
+        Arc::clone(&backend),
+        tmp.path().to_path_buf(),
+        HashSet::new(),
+        None,
+        NostrRelayConfig {
+            spambox_db_max_bytes: 0,
+            ..Default::default()
+        },
+    )?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    relay.register_client(1, tx, None).await;
+    let keys = Keys::generate();
+    let event = event_builder!(Kind::TextNote, "must not appear stored").sign_with_keys(&keys)?;
+    let root = tmp.path().join("socialgraph/events-root-ambient.msgpack");
+    std::fs::write(&root, [])?;
+
+    match ingress {
+        "client" => {
+            relay
+                .handle_client_message(1, NostrClientMessage::event(event.clone()))
+                .await;
+            match recv_relay_message(&mut rx).await? {
+                RelayMessage::Ok {
+                    status, message, ..
+                } => {
+                    assert!(!status);
+                    assert_eq!(message, "store failed");
+                }
+                other => anyhow::bail!("expected rejected OK, got {other:?}"),
+            }
+        }
+        "trusted" => assert!(relay.ingest_trusted_event(event.clone()).await.is_err()),
+        "peer" => assert!(relay.ingest_peer_event_silent(event.clone()).await.is_err()),
+        _ => unreachable!(),
+    }
+    assert!(
+        relay
+            .query_events(&Filter::new().id(event.id), 1)
+            .await
+            .is_empty(),
+        "{ingress}: failed durable ingest must not be served from the recent cache"
+    );
+    assert_eq!(
+        std::fs::metadata(&root)?.len(),
+        0,
+        "preserve corrupt metadata"
+    );
+
+    // Ephemeral events still work without disk persistence, even with a broken root.
+    let ephemeral = event_builder!(Kind::from_u16(25050), "ephemeral").sign_with_keys(&keys)?;
+    successful_test_ingest(&relay, &mut rx, ingress, ephemeral.clone()).await?;
+    assert_eq!(
+        relay
+            .query_events(&Filter::new().id(ephemeral.id), 1)
+            .await
+            .len(),
+        1
+    );
+
+    // Only this disposable fixture is repaired; retrying the exact event must work.
+    std::fs::remove_file(&root)?;
+    successful_test_ingest(&relay, &mut rx, ingress, event.clone()).await?;
+    assert_eq!(
+        relay
+            .query_events(&Filter::new().id(event.id), 1)
+            .await
+            .len(),
+        1
+    );
+    assert_eq!(
+        backend.query_events(&Filter::new().id(event.id), 1)?.len(),
+        1
+    );
+    Ok(())
+}
+
+async fn successful_test_ingest(
+    relay: &NostrRelay,
+    rx: &mut mpsc::UnboundedReceiver<String>,
+    ingress: &str,
+    event: Event,
+) -> Result<()> {
+    match ingress {
+        "client" => {
+            relay
+                .handle_client_message(1, NostrClientMessage::event(event))
+                .await;
+            match recv_relay_message(rx).await? {
+                RelayMessage::Ok { status, .. } => assert!(status),
+                other => anyhow::bail!("expected positive OK, got {other:?}"),
+            }
+        }
+        "trusted" => relay.ingest_trusted_event(event).await?,
+        "peer" => assert!(relay.ingest_peer_event_silent(event).await?),
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn relay_failed_client_ingest_is_not_cached() -> Result<()> {
+    failed_durable_ingest_is_not_cached("client").await
+}
+
+#[tokio::test]
+async fn relay_failed_trusted_ingest_is_not_cached() -> Result<()> {
+    failed_durable_ingest_is_not_cached("trusted").await
+}
+
+#[tokio::test]
+async fn relay_failed_peer_ingest_is_not_cached() -> Result<()> {
+    failed_durable_ingest_is_not_cached("peer").await
+}
+
 #[tokio::test]
 async fn relay_persists_bluetooth_received_event_records() -> Result<()> {
     let tmp = TempDir::new()?;

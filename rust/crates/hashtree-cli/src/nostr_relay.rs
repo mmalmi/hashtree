@@ -894,10 +894,6 @@ mod imp {
             }
 
             let is_ephemeral = event.kind.is_ephemeral();
-            {
-                let mut recent = self.recent_events.lock().await;
-                recent.insert(event.clone());
-            }
             if !is_ephemeral {
                 let storage_class = self.event_storage_class(&event);
                 if let Some(trusted) = self.trusted.as_ref() {
@@ -907,6 +903,7 @@ mod imp {
                     self.append_historical_index(&event).await;
                 }
             }
+            self.recent_events.lock().await.insert(event);
 
             Ok(true)
         }
@@ -924,11 +921,6 @@ mod imp {
                 .map_err(|e| anyhow::anyhow!("invalid signature: {}", e))?;
 
             let is_ephemeral = event.kind.is_ephemeral();
-            {
-                let mut recent = self.recent_events.lock().await;
-                recent.insert(event.clone());
-            }
-
             if !is_ephemeral {
                 let storage_class = self.event_storage_class(&event);
                 if let Some(trusted) = self.trusted.as_ref() {
@@ -938,6 +930,7 @@ mod imp {
                     self.append_historical_index(&event).await;
                 }
             }
+            self.recent_events.lock().await.insert(event.clone());
 
             if broadcast {
                 self.broadcast_event(&event).await;
@@ -1173,10 +1166,6 @@ mod imp {
             }
 
             let is_ephemeral = event.kind.is_ephemeral();
-            if trusted {
-                let mut recent = self.recent_events.lock().await;
-                recent.insert(event.clone());
-            }
             if !is_ephemeral {
                 let stored = if trusted {
                     let storage_class = self.event_storage_class(&event);
@@ -1208,6 +1197,9 @@ mod imp {
                         .await;
                     return;
                 }
+            }
+            if trusted {
+                self.recent_events.lock().await.insert(event.clone());
             }
 
             let message = if trusted { "" } else { "spambox" };
