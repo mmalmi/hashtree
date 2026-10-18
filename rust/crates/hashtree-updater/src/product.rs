@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-#[cfg(feature = "secure-nostr-blossom")]
+#[cfg(feature = "nostr-pubsub")]
 use std::time::Duration;
 
 #[cfg(feature = "secure-nostr-blossom")]
 use hashtree_blossom::{BlossomClient, BlossomStore};
 use hashtree_core::Store;
-#[cfg(feature = "secure-nostr-blossom")]
+#[cfg(feature = "nostr-pubsub")]
 use hashtree_core::{HashTree, HashTreeConfig};
 use hashtree_resolver::RootResolver;
 #[cfg(feature = "secure-nostr-blossom")]
@@ -579,6 +579,22 @@ pub async fn build_secure_pubsub_blossom_updater(
         crate::PubsubRootResolver::new(provider, config.manifest_timeout),
         blossom_tree(config.blossom_read_servers, config.download_timeout),
     ))
+}
+
+/// Authenticate announcements independently of where file blocks come from.
+/// A caller-owned store can reuse the application's existing peer connections,
+/// cache quota and serving lifecycle. No update announcement grants trust to
+/// the peer that supplied it or changes the configured publisher authority.
+#[cfg(feature = "nostr-pubsub")]
+pub fn build_secure_pubsub_store_updater<S: Store>(
+    provider: std::sync::Arc<dyn nostr_pubsub::NostrEventSubscriber>,
+    store: std::sync::Arc<S>,
+    manifest_timeout: Duration,
+) -> HashtreeUpdater<crate::PubsubRootResolver, S> {
+    HashtreeUpdater::new(
+        crate::PubsubRootResolver::new(provider, manifest_timeout),
+        HashTree::new(HashTreeConfig::new(store).public()),
+    )
 }
 
 #[cfg(feature = "secure-nostr-blossom")]

@@ -22,6 +22,13 @@ mod reference;
 mod target;
 mod update_policy;
 mod updater;
+#[cfg(feature = "peer-storage")]
+mod peer_storage;
+
+#[cfg(feature = "peer-storage")]
+pub use peer_storage::{build_update_store, UpdateStore};
+#[cfg(feature = "nostr-pubsub")]
+pub use product::build_secure_pubsub_store_updater;
 
 pub use error::UpdateError;
 pub use install::{

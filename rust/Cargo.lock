@@ -4039,12 +4039,13 @@ dependencies = [
 
 [[package]]
 name = "hashtree-updater"
-version = "0.2.88"
+version = "0.2.89"
 dependencies = [
  "async-trait",
  "flate2",
  "hashtree-blossom",
  "hashtree-core",
+ "hashtree-network",
  "hashtree-resolver",
  "hashtree-sim",
  "nostr-pubsub",

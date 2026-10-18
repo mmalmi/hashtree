@@ -20,6 +20,103 @@ use nostr_pubsub::{
 use nostr_sdk::{EventBuilder, Keys, Kind, Tag, TagKind, Timestamp, ToBech32};
 use tokio::sync::Notify;
 
+#[cfg(feature = "peer-storage")]
+#[tokio::test]
+async fn downloaded_release_is_reshared_without_the_original_source() {
+    use hashtree_core::{Store, StoreBlobRoute};
+    use hashtree_updater::{
+        build_secure_pubsub_store_updater, build_update_store, SecurePubsubBlossomConfig,
+    };
+
+    let publisher = Keys::generate();
+    let origin = Arc::new(MemoryStore::new());
+    let tree = HashTree::new(HashTreeConfig::new(origin.clone()).public());
+    let bytes = vec![42; 1024 * 1024 + 17];
+    let manifest = br#"{"app":"app","version":"2.0.0","assets":[{"name":"app","path":"app","target":"linux-x86_64"}]}"#;
+    let mut entries = Vec::new();
+    for (name, data) in [
+        ("release.json", manifest.as_slice()),
+        ("app", bytes.as_slice()),
+    ] {
+        let (cid, size) = tree.put_file(data).await.unwrap();
+        entries.push(
+            DirEntry::from_cid(name, &cid)
+                .with_size(size)
+                .with_link_type(LinkType::File),
+        );
+    }
+    let root = tree.put_directory(entries).await.unwrap();
+    let reference = UpdateRef {
+        npub: publisher.public_key().to_bech32().unwrap(),
+        tree_name: "releases/app".into(),
+        path: None,
+    };
+    let event = signed_root(&publisher, &reference.tree_name, 10, &root);
+    let downloaded = Arc::new(MemoryStore::new());
+    for (source, destination) in [
+        (origin.clone(), downloaded.clone()),
+        (downloaded.clone(), Arc::new(MemoryStore::new())),
+    ] {
+        let provider = Arc::new(SharedProvider::default());
+        let store = build_update_store(
+            destination.clone(),
+            Some(Arc::new(StoreBlobRoute::new(source))),
+            SecurePubsubBlossomConfig {
+                blossom_read_servers: Vec::new(),
+                manifest_timeout: Duration::from_millis(20),
+                download_timeout: Duration::from_secs(1),
+            },
+        )
+        .unwrap();
+        let updater =
+            build_secure_pubsub_store_updater(provider.clone(), store, Duration::from_millis(20));
+        let check = updater.check(UpdateCheckOptions {
+            reference: reference.clone(),
+            current_version: "1.0.0".into(),
+            target: UpdateTarget::new("linux-x86_64"),
+            ..Default::default()
+        });
+        let announce = async {
+            provider.started.notified().await;
+            announce(
+                &provider.bus,
+                event.clone(),
+                EventSource::peer("serving-peer"),
+            )
+            .await;
+        };
+        let (check, ()) = tokio::join!(check, announce);
+        let check = check.unwrap();
+        assert!(check.update_available);
+        assert_eq!(
+            updater.download_asset(&check, None).await.unwrap().bytes,
+            bytes
+        );
+        assert!(destination.has(&root.hash).await.unwrap());
+    }
+}
+
+#[cfg(feature = "peer-storage")]
+#[tokio::test]
+async fn corrupt_peer_blocks_are_neither_accepted_nor_cached() {
+    use hashtree_core::{sha256, Store, StoreBlobRoute};
+    use hashtree_updater::{build_update_store, SecurePubsubBlossomConfig};
+    let peer = Arc::new(MemoryStore::new());
+    let cache = Arc::new(MemoryStore::new());
+    let hash = sha256(b"authentic release");
+    peer.put(hash, b"substituted executable".to_vec())
+        .await
+        .unwrap();
+    let store = build_update_store(
+        cache.clone(),
+        Some(Arc::new(StoreBlobRoute::new(peer))),
+        SecurePubsubBlossomConfig::default(),
+    )
+    .unwrap();
+    assert!(store.get(&hash).await.is_err());
+    assert!(!cache.has(&hash).await.unwrap());
+}
+
 #[derive(Default)]
 struct SharedProvider {
     bus: InMemoryEventBus,
