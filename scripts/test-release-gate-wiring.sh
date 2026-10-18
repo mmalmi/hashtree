@@ -34,7 +34,6 @@ reject grep -qF 'hashtree-network' rust/crates/hashtree-fips-transport/Cargo.tom
 
 # The normal release path owns one full gate and one artifact publish. Tag
 # pushes must not start a second cross-platform build in GitHub Actions.
-grep -F 'export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/rust/target}"' scripts/release-gate.sh >/dev/null
 grep -F 'ensure_test_fd_limit' scripts/release-gate.sh >/dev/null
 grep -F 'cargo nextest run --workspace --locked' scripts/release-gate.sh >/dev/null
 grep -F 'run_pool_migration_systemd_gate' scripts/release-gate.sh >/dev/null
@@ -99,6 +98,41 @@ if PATH="$failure_bin:$PATH" \
     exit 1
 fi
 test -f "$failure_state"
+
+# Cargo's workspace default keeps each checkout's artifacts local without
+# adding its absolute target path to every sccache key. Empty and unset values
+# must use that default; explicit absolute or relative overrides must survive.
+cat >"$failure_bin/cargo" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+[[ "$PWD" == "$HASHTREE_EXPECT_CARGO_CWD" ]] || exit 81
+if [[ "$HASHTREE_EXPECT_CARGO_TARGET" == unset ]]; then
+    [[ -z "${CARGO_TARGET_DIR+x}" ]] || exit 82
+else
+    [[ "${CARGO_TARGET_DIR-}" == "$HASHTREE_EXPECT_CARGO_TARGET" ]] || exit 83
+fi
+printf '%s\n' "$*" >> "$HASHTREE_TARGET_CALLS"
+EOF
+target_calls="$failure_test_dir/target-calls"
+for target_setting in unset empty "$failure_test_dir/custom target" relative-target; do
+    (
+        case "$target_setting" in
+            unset) unset CARGO_TARGET_DIR ;;
+            empty) export CARGO_TARGET_DIR="" ;;
+            *) export CARGO_TARGET_DIR="$target_setting" ;;
+        esac
+        export HASHTREE_EXPECT_CARGO_TARGET="${CARGO_TARGET_DIR:-unset}"
+        export HASHTREE_EXPECT_CARGO_CWD="$repo_root/rust"
+        export HASHTREE_TARGET_CALLS="$target_calls"
+        export PATH="$failure_bin:$PATH"
+        for cargo_lane in rust rust-peripheral fips; do
+            : >"$target_calls"
+            /bin/bash scripts/release-gate.sh --lane "$cargo_lane" >/dev/null
+            test -s "$target_calls"
+        done
+    )
+done
+echo "release gate target environment checks passed"
 
 # The TypeScript test and documentation jobs each install dependencies once.
 # Ordinary and FIPS-enabled Rust suites run on separate runners.

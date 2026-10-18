@@ -48,10 +48,11 @@ case "$lane" in
     ;;
 esac
 
-# Do not inherit a machine-wide Cargo target directory shared by other Codex
-# worktrees. Concurrent test jobs must not serialize on or terminate each
-# other's artifact locks.
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$repo_root/rust/target}"
+# Let Cargo use its normal workspace target when the caller supplies no override.
+# Exporting a checkout-specific default fragments sccache's Rust cache keys.
+if [[ -z "${CARGO_TARGET_DIR:-}" ]]; then
+  unset CARGO_TARGET_DIR
+fi
 
 # The CLI test binary exercises hundreds of LMDB/server fixtures in one
 # process. Linux shells commonly default to 1,024 file descriptors, which can
