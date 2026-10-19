@@ -5,6 +5,7 @@ mod gate;
 mod maintenance;
 mod maintenance_batch;
 mod maintenance_move;
+mod map_size;
 #[cfg(test)]
 mod maintenance_tests;
 mod member;

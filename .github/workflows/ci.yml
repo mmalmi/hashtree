@@ -254,6 +254,12 @@ jobs:
         working-directory: rust
         run: cargo test --locked -p hashtree-updater
 
+      - name: Verify iOS LMDB locking and crash recovery
+        working-directory: rust
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim
+          python3 tests/verify_ios_lmdb_locking.py
+
   windows-storage:
     name: Windows Storage
     runs-on: windows-latest

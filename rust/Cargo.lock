@@ -3908,7 +3908,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-lmdb"
-version = "0.2.89"
+version = "0.2.91"
 dependencies = [
  "async-trait",
  "futures",
