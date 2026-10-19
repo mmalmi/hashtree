@@ -3310,7 +3310,7 @@ dependencies = [
 
 [[package]]
 name = "git-remote-htree"
-version = "0.2.90"
+version = "0.2.92"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5415,9 +5415,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-relay"
-version = "0.1.13"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "027e2ec1493bc6082e3279d7ad2bfa3cdd1717d0597cb724dd09ded904686f76"
+checksum = "fe53648d219d8fc5e3f8c2606d3dced398c383521127aeeaa9f3b345d2d3a9a9"
 dependencies = [
  "async-trait",
  "nostr-pubsub",

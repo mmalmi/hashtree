@@ -216,6 +216,17 @@ jobs:
           key: ${{ runner.os }}-cargo-cli-package-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-cli-package-
+      - name: Compile the locked modern Git helper package
+        working-directory: rust
+        run: |
+          rm -f target/package/git-remote-htree-*.crate
+          cargo package --locked -p git-remote-htree
+      - name: Preserve the verified Git helper package
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-git-helper-package
+          path: rust/target/package/git-remote-htree-*.crate
+          if-no-files-found: error
       - name: Compile the locked publishable CLI package
         working-directory: rust
         run: |
