@@ -24,7 +24,6 @@ mod closure_validation;
 mod hydration;
 mod local_rebuild;
 mod pack_fallback;
-mod root_observation;
 mod upload;
 
 const TEST_PUBKEY: &str = "4523be58d395b1b196a9b8c82b038b6895cb02b683d0c253a955068dba1facd0";
@@ -1318,17 +1317,9 @@ fn test_handle_capabilities_command() {
 
 #[test]
 fn test_handle_list_command() {
-    let _env_lock = ENV_LOCK.lock().expect("env lock");
-    let directory = TempDir::new().unwrap();
-    let _data = EnvGuard::set("HTREE_DATA_DIR", directory.path().to_str().unwrap());
-    let mut config = Config::default();
-    config.storage.data_dir = directory.path().to_string_lossy().into_owned();
-    config.server.bind_address = "127.0.0.1:1".to_string();
-    config.nostr.relays.clear();
-    config.blossom.servers.clear();
-    config.blossom.read_servers.clear();
-    config.blossom.write_servers.clear();
-    let mut helper = create_test_helper_with_config(config).expect("helper");
+    let Some(mut helper) = create_test_helper() else {
+        return;
+    };
 
     match helper.handle_command("list") {
         Ok(Some(lines)) => {
@@ -1337,7 +1328,7 @@ fn test_handle_list_command() {
         Ok(None) => panic!("list should return output lines"),
         Err(err) => {
             assert!(
-                RemoteHelper::is_repo_unobserved_error(&err),
+                err.to_string().contains("not found"),
                 "unexpected list error: {}",
                 err
             );
@@ -3428,22 +3419,14 @@ fn test_queue_links_for_diff_upload_prunes_known_subtrees() {
 }
 
 #[test]
-fn test_repo_unobserved_error_classifier() {
-    let missing = anyhow::Error::new(crate::nostr_client::RootNotObserved {
-        repo_name: "bench".to_string(),
-        author: "test publisher".to_string(),
-    })
-    .context("load existing refs");
-    assert!(RemoteHelper::is_repo_unobserved_error(&missing));
+fn test_repo_not_found_error_classifier() {
+    let missing = anyhow::anyhow!(
+        "Repository 'bench' not found (no hashtree event published by npub1example)"
+    );
+    assert!(RemoteHelper::is_repo_not_found_error(&missing));
 
     let timeout = anyhow::anyhow!("relay query timed out");
-    assert!(!RemoteHelper::is_repo_unobserved_error(&timeout));
-    let incomplete =
-        anyhow::anyhow!("Repository root observation incomplete: index read timed out");
-    assert!(!RemoteHelper::is_repo_unobserved_error(&incomplete));
-    let text =
-        anyhow::anyhow!("No repository root observed for 'bench' by test publisher during lookup");
-    assert!(!RemoteHelper::is_repo_unobserved_error(&text));
+    assert!(!RemoteHelper::is_repo_not_found_error(&timeout));
 }
 
 #[test]

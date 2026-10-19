@@ -45,7 +45,6 @@
 
 mod identity;
 mod repo_metadata;
-mod root_lookup;
 
 use crate::runtime::block_on_result;
 use anyhow::{Context, Result};
@@ -297,21 +296,10 @@ async fn wait_for_any_connected_relay(client: &Client, timeout: Duration) -> boo
 
 type FetchedRefs = (HashMap<String, String>, Option<String>, Option<[u8; 32]>);
 
-#[derive(Debug, thiserror::Error)]
-#[error("No repository root observed for '{repo_name}' by {author} during lookup")]
-pub(crate) struct RootNotObserved {
-    pub(crate) repo_name: String,
-    pub(crate) author: String,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("Repository root observation incomplete: {0}")]
-pub(crate) struct RootObservationIncomplete(pub(crate) String);
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 enum RootResolveSource {
     #[default]
-    NostrEvent,
+    Relay,
     LocalDaemon,
 }
 
@@ -386,7 +374,6 @@ pub struct NostrClient {
     local_daemon_url: Option<String>,
     /// Require all root and blob reads to use the local daemon.
     local_daemon_only: bool,
-    root_lookup: root_lookup::RootLookup,
     #[cfg(test)]
     forced_fetch_refs_results: std::collections::VecDeque<Result<FetchedRefs, String>>,
 }
@@ -530,8 +517,6 @@ impl NostrClient {
             )
         };
 
-        let root_lookup =
-            root_lookup::RootLookup::new(config, local_daemon_url.clone(), local_daemon_only);
         Ok(Self {
             pubkey: pubkey.to_string(),
             keys,
@@ -545,7 +530,6 @@ impl NostrClient {
             is_private,
             local_daemon_url,
             local_daemon_only,
-            root_lookup,
             #[cfg(test)]
             forced_fetch_refs_results: std::collections::VecDeque::new(),
         })
@@ -584,7 +568,7 @@ impl NostrClient {
             self.cached_encryption_key.remove(repo_name);
         }
         self.cached_root_source
-            .insert(repo_name.to_string(), RootResolveSource::NostrEvent);
+            .insert(repo_name.to_string(), RootResolveSource::Relay);
     }
 
     #[cfg(test)]
@@ -606,7 +590,7 @@ impl NostrClient {
                         self.cached_encryption_key.remove(repo_name);
                     }
                     self.cached_root_source
-                        .insert(repo_name.to_string(), RootResolveSource::NostrEvent);
+                        .insert(repo_name.to_string(), RootResolveSource::Relay);
                     self.cached_refs.insert(repo_name.to_string(), refs.clone());
                     Ok((refs, root_hash, encryption_key))
                 }
@@ -880,7 +864,7 @@ impl NostrClient {
             encryption_key,
             key_tag_name,
             self_encrypted_ciphertext,
-            source: RootResolveSource::NostrEvent,
+            source: RootResolveSource::Relay,
             daemon_source: None,
             event_created_at: Some(event.created_at.as_secs()),
             event_id: Some(event.id.to_hex()),
@@ -1083,20 +1067,48 @@ impl NostrClient {
             return self.finish_resolved_root(repo_name, root_data);
         }
 
+        // Create nostr-sdk client
+        let client = Client::default();
+
+        // Add relays
+        for relay in &self.relays {
+            if let Err(e) = client.add_relay(relay).await {
+                warn!("Failed to add relay {}: {}", relay, e);
+            }
+        }
+
+        // Connect to relays - this starts async connection
+        client.connect().await;
+
+        let connect_timeout = Duration::from_secs(2);
+        let query_timeout = Duration::from_secs(timeout_secs.saturating_sub(2).max(3));
+        let retry_delay = Duration::from_millis(300);
+        let max_attempts = 2;
+
+        let start = std::time::Instant::now();
+
+        // Build filter for hashtree root events from this author with matching d-tag
         let author = PublicKey::from_hex(&self.pubkey)
             .map_err(|e| anyhow::anyhow!("Invalid pubkey: {}", e))?;
+
         let filter = build_repo_event_filter(author, repo_name);
-        let query_window = Duration::from_secs(timeout_secs.saturating_sub(2).max(3));
+
+        debug!("Querying relays for repo {} events", repo_name);
+
         let mut root_data = None;
-        let mut daemon_fallback = None;
-        let mut query_error = None;
-        for attempt in 0..2 {
+        let mut daemon_fallback: Option<RootEventData> = None;
+        for attempt in 1..=max_attempts {
             if allow_local_daemon {
                 if let Some(data) = self
                     .fetch_root_from_local_daemon(repo_name, local_daemon_timeout)
                     .await
                 {
                     if Self::daemon_root_needs_relay_confirmation(&data) {
+                        debug!(
+                            "Local daemon resolved {} via {}; checking relays for fresher root",
+                            repo_name,
+                            data.daemon_source.as_deref().unwrap_or("unknown")
+                        );
                         daemon_fallback = Some(data);
                     } else {
                         root_data = Some(data);
@@ -1104,47 +1116,133 @@ impl NostrClient {
                     }
                 }
             }
-            match self
-                .root_lookup
-                .query(filter.clone(), &self.relays, query_window)
-                .await
-            {
-                Ok(events) => {
-                    if let Some(event) = pick_latest_repo_event(events.iter(), repo_name) {
-                        let observed = Self::parse_root_event_data_from_event(event);
-                        root_data = Some(match daemon_fallback.take() {
-                            Some(fallback) => Self::choose_newer_root_data(fallback, observed),
-                            None => observed,
-                        });
-                        break;
+
+            if !allow_local_daemon && attempt == 1 {
+                debug!(
+                    "Skipping local daemon while resolving {} because relay retry was requested",
+                    repo_name
+                );
+            }
+
+            if allow_local_daemon && daemon_fallback.is_none() {
+                debug!(
+                    "Local daemon did not resolve {}; querying relays",
+                    repo_name
+                );
+            }
+
+            // Wait for at least one relay to connect (quick timeout - break immediately when one
+            // connects). We retry once because relays and the local daemon can both lag briefly.
+            let connect_start = std::time::Instant::now();
+            let mut last_log = std::time::Instant::now();
+            let mut has_connected_relay = false;
+            loop {
+                let (connected, total) = connected_relay_count(&client).await;
+                if connected > 0 {
+                    debug!(
+                        "Connected to {}/{} relay(s) in {:?} (attempt {}/{})",
+                        connected,
+                        total,
+                        start.elapsed(),
+                        attempt,
+                        max_attempts
+                    );
+                    has_connected_relay = true;
+                    break;
+                }
+                if last_log.elapsed() > Duration::from_millis(500) {
+                    debug!(
+                        "Connecting to relays... (0/{} after {:?}, attempt {}/{})",
+                        total,
+                        start.elapsed(),
+                        attempt,
+                        max_attempts
+                    );
+                    last_log = std::time::Instant::now();
+                }
+                if connect_start.elapsed() > connect_timeout {
+                    debug!(
+                        "Timeout waiting for relay connections - continuing with local-daemon fallback"
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+
+            // Query with relay-level timeout.
+            // Using `EventSource::relays(Some(...))` preserves partial results from responsive
+            // relays instead of discarding everything when one relay stalls.
+            if !has_connected_relay {
+                if let Some(data) = daemon_fallback.take() {
+                    debug!(
+                        "Using local daemon root for {} because no relay connected",
+                        repo_name
+                    );
+                    root_data = Some(data);
+                    break;
+                }
+            }
+
+            let events = if has_connected_relay {
+                match client.fetch_events(filter.clone(), query_timeout).await {
+                    Ok(events) => events.to_vec(),
+                    Err(e) => {
+                        warn!("Failed to fetch events: {}", e);
+                        vec![]
                     }
                 }
-                Err(error) => {
-                    warn!(%error, "Repository root observation incomplete");
-                    query_error = Some(error);
-                }
+            } else {
+                vec![]
+            };
+
+            debug!(
+                "Got {} events from relays on attempt {}/{}",
+                events.len(),
+                attempt,
+                max_attempts
+            );
+            let relay_event = pick_latest_repo_event(events.iter(), repo_name);
+
+            if let Some(event) = relay_event {
+                debug!(
+                    "Found relay event with root hash: {}",
+                    &event.content[..12.min(event.content.len())]
+                );
+                let relay_data = Self::parse_root_event_data_from_event(event);
+                root_data = Some(match daemon_fallback.take() {
+                    Some(fallback) => Self::choose_newer_root_data(fallback, relay_data),
+                    None => relay_data,
+                });
+                break;
             }
-            if attempt == 0 && !self.relays.is_empty() {
-                tokio::time::sleep(Duration::from_millis(300)).await;
+
+            if attempt < max_attempts {
+                debug!(
+                    "No relay hashtree event found for {} on attempt {}/{}; retrying",
+                    repo_name, attempt, max_attempts
+                );
+                tokio::time::sleep(retry_delay).await;
+            } else if let Some(data) = daemon_fallback.take() {
+                debug!(
+                    "Using local daemon root for {} after relay lookup returned no event",
+                    repo_name
+                );
+                root_data = Some(data);
+                break;
             }
         }
-        if root_data.is_none() {
-            root_data = daemon_fallback;
-        }
-        if root_data.is_none() {
-            if let Some(error) = query_error {
-                return Err(error);
-            }
-        }
+
+        // Disconnect
+        let _ = client.disconnect().await;
 
         let root_data = match root_data {
             Some(data) => data,
             None => {
-                return Err(RootNotObserved {
-                    repo_name: repo_name.to_string(),
-                    author: Self::format_repo_author(&self.pubkey),
-                }
-                .into());
+                anyhow::bail!(
+                    "Repository '{}' not found (no hashtree event published by {})",
+                    repo_name,
+                    Self::format_repo_author(&self.pubkey)
+                );
             }
         };
 

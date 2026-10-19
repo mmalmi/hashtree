@@ -3309,7 +3309,7 @@ dependencies = [
 
 [[package]]
 name = "git-remote-htree"
-version = "0.2.90"
+version = "0.2.91"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3319,18 +3319,13 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "hashtree-blossom",
- "hashtree-client",
  "hashtree-config",
  "hashtree-core",
  "hashtree-fs",
  "hashtree-lmdb",
- "hashtree-nostr",
- "hashtree-nostr-pubsub",
  "hex",
  "libc",
  "nostr",
- "nostr-pubsub",
- "nostr-pubsub-relay",
  "nostr-relay-pool",
  "nostr-sdk",
  "reqwest 0.12.28",
@@ -3634,7 +3629,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.2.153"
+version = "0.2.155-drive-ios.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3774,7 +3769,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded"
-version = "0.2.93"
+version = "0.2.95-drive-ios.1"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3907,7 +3902,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-lmdb"
-version = "0.2.89"
+version = "0.2.91"
 dependencies = [
  "async-trait",
  "futures",
