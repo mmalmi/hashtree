@@ -1,7 +1,7 @@
 use hashtree_core::sha256;
 use hashtree_lmdb::{
     open_configured_lmdb_blob_store, open_shared_lmdb_blob_store, ConfiguredLmdbBlobStore,
-    SHARED_BLOB_MIN_MAP_SIZE_BYTES,
+    PoolMemberConfig, PoolStore, PoolStoreConfig, SHARED_BLOB_MIN_MAP_SIZE_BYTES,
 };
 use tempfile::TempDir;
 
@@ -90,5 +90,59 @@ fn existing_single_lmdb_is_not_silently_reclassified_as_a_pool() {
     assert_eq!(
         configured.get_sync(&hash).expect("single read"),
         Some(SINGLE_DATA.to_vec())
+    );
+}
+
+#[test]
+fn small_catalog_reopens_existing_pool_without_losing_blob_locations() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let data = b"catalog retains locations across the mobile default change".repeat(32);
+    let hash = sha256(&data);
+    // Existing desktop-sized mappings must not become a data migration when
+    // reopened with the smaller mobile default. No live transactions are kept.
+    let pool = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("original pool");
+    pool.add_member(PoolMemberConfig::new(
+        temp.path().join("blobs"),
+        SHARED_BLOB_MIN_MAP_SIZE_BYTES * 4,
+    ))
+    .expect("pool member");
+    assert!(pool.put_sync(hash, &data).expect("write"));
+    pool.force_sync().expect("sync");
+    drop(pool);
+
+    let reopened = PoolStore::open(
+        &catalog,
+        PoolStoreConfig {
+            catalog_map_size_bytes: 128 * 1024 * 1024,
+            ..PoolStoreConfig::default()
+        },
+    )
+    .expect("smaller catalog mapping");
+    assert!(reopened.catalog_map_size_bytes() <= 128 * 1024 * 1024);
+    assert_eq!(reopened.get_sync(&hash).expect("read"), Some(data.clone()));
+    let next = b"new data after reopening with a mobile-sized catalog";
+    let next_hash = sha256(next);
+    assert!(reopened
+        .put_sync(next_hash, next)
+        .expect("write after reopen"));
+    reopened.force_sync().expect("sync after reopen");
+    drop(reopened);
+
+    let final_pool = PoolStore::open(
+        &catalog,
+        PoolStoreConfig {
+            catalog_map_size_bytes: 128 * 1024 * 1024,
+            ..PoolStoreConfig::default()
+        },
+    )
+    .expect("second reopen");
+    assert_eq!(
+        final_pool.get_sync(&hash).expect("original read"),
+        Some(data)
+    );
+    assert_eq!(
+        final_pool.get_sync(&next_hash).expect("new read"),
+        Some(next.to_vec())
     );
 }

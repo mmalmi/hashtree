@@ -8,7 +8,8 @@ use std::str::FromStr;
 use std::time::Duration;
 use uuid::Uuid;
 
-pub(super) const DEFAULT_CATALOG_MAP_SIZE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+pub(super) const DEFAULT_CATALOG_MAP_SIZE_BYTES: u64 =
+    super::map_size::default_catalog_map_size_bytes(cfg!(target_os = "ios"));
 pub(super) const MIN_MEMBER_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Stable identity for one storage member in a local blob pool.
