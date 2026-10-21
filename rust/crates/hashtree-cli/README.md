@@ -35,6 +35,7 @@ Prebuilt macOS release binaries intentionally omit FUSE mount support so `htree`
 htree add myfile.txt                    # Add file (CHK-encrypted, shareable)
 htree add mydir/ --unencrypted          # Add directory as raw plaintext
 htree add myfile.txt --publish mydata   # Add and publish to Nostr
+htree add mydir/ --local --cache /private/state/mydir.json # Reuse unchanged file addresses (Unix)
 
 # Push to Blossom servers
 htree push <hash>                       # Push to configured servers
@@ -67,6 +68,18 @@ htree mount htree://self/mytree          # mounts to ./mytree and errors if it a
 htree mount htree://npub1.../mytree ~/mnt/mytree
 htree mount htree://npub1.../mytree/docs ~/mnt/docs
 ```
+
+`add --cache` is an opt-in Unix acceleration for directories. Keep its private
+cache outside the input tree; it contains local file metadata and must not be
+published. It checks device, inode, change/modification timestamps, size and mode,
+rejects symlinks and special files, and readdresses changed or missing cached
+content. The cache is saved atomically and is scoped to source, store, encryption,
+chunking and ignore policy. It trusts immutable CAS retention rather than reading
+every retained payload byte for a bitrot audit. Missing or invalid cache/root
+metadata causes a complete addressing pass. The resulting Hashtree directory
+format is identical to an uncached add. After a successful upload, use
+`push --previous-root` to upload changed branches; keep the previous remote root
+and its content retained until the new publication is accepted.
 
 ## Resuming an archived Nostr index
 

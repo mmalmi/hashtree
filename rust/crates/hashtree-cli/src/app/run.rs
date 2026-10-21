@@ -931,6 +931,7 @@ fn run_command(
             publish,
             chunk_size,
             local,
+            cache,
         } => command_future!({
             run_add(
                 data_dir.clone(),
@@ -942,6 +943,7 @@ fn run_command(
                     publish,
                     chunk_size,
                     local,
+                    cache,
                 },
             )
             .await?

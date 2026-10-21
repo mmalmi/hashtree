@@ -29,6 +29,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+#[cfg(unix)]
+mod add_cache;
 mod upload;
 pub use upload::{AddProgress, AddProgressSnapshot};
 

@@ -47,6 +47,7 @@ pub(crate) struct AddOptions {
     pub(crate) publish: Option<String>,
     pub(crate) chunk_size: Option<usize>,
     pub(crate) local: bool,
+    pub(crate) cache: Option<PathBuf>,
 }
 
 pub(crate) fn render_add_output(
@@ -123,9 +124,11 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
         publish,
         chunk_size,
         local,
+        cache,
     } = options;
     let _local_add_env = local.then(|| apply_local_add_env(&data_dir));
     let is_dir = path.is_dir();
+    anyhow::ensure!(cache.is_none() || is_dir, "add cache requires a directory");
     let show_progress = add_progress_enabled();
 
     if only_hash {
@@ -197,7 +200,31 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
             if show_progress {
                 discover_add_input(&path, !no_ignore, progress.as_ref())?;
             }
-            if unencrypted {
+            if let Some(cache) = cache.as_deref() {
+                #[cfg(not(unix))]
+                {
+                    let _ = cache;
+                    anyhow::bail!("directory add caching requires Unix file identity metadata");
+                }
+                #[cfg(unix)]
+                {
+                    let cid = hashtree_core::Cid::parse(&store.upload_dir_cached_with_progress(
+                        &path,
+                        !no_ignore,
+                        chunk_size,
+                        !unencrypted,
+                        progress.as_ref(),
+                        cache,
+                    )?)?;
+                    let hash_hex = hashtree_core::to_hex(&cid.hash);
+                    let key_hex = cid.key.map(|key| hashtree_core::to_hex(&key));
+                    let nhash = nhash_encode_full(&NHashData {
+                        hash: cid.hash,
+                        decrypt_key: cid.key,
+                    })?;
+                    Ok((cid.to_string(), hash_hex, key_hex, nhash))
+                }
+            } else if unencrypted {
                 let hash_hex = if is_dir {
                     store
                         .upload_dir_with_options_and_chunk_size_and_progress(

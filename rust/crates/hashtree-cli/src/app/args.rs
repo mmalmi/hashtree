@@ -239,6 +239,10 @@ pub(crate) enum Commands {
         /// Store locally only; skip configured Blossom/file-server pushes
         #[arg(long, alias = "no-blossom-push")]
         local: bool,
+        /// Private unchanged-file CID cache outside the input directory (Unix).
+        /// Trusts file identity/change metadata and immutable local CAS retention.
+        #[arg(long, conflicts_with = "only_hash")]
+        cache: Option<PathBuf>,
     },
 
     /// Capture an installable web app into hashtree

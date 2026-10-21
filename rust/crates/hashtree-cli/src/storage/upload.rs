@@ -222,7 +222,7 @@ impl HashtreeStore {
         let tree = HashTree::new(config);
 
         let root_cid = sync_block_on(async {
-            self.upload_dir_recursive(&tree, dir_path, dir_path, respect_gitignore, progress)
+            self.upload_dir_recursive(&tree, dir_path, dir_path, respect_gitignore, progress, None)
                 .await
         })
         .context("Failed to upload directory")?;
@@ -243,6 +243,8 @@ impl HashtreeStore {
         current_path: &Path,
         respect_gitignore: bool,
         progress: Option<&AddProgress>,
+        #[cfg(unix)] mut cache: Option<&mut super::add_cache::DirectoryCache>,
+        #[cfg(not(unix))] _cache: Option<()>,
     ) -> Result<Cid> {
         // Build directory structure from flat file list - store full Cid with key
         let mut dir_contents: HashMap<String, Vec<(String, Cid)>> = HashMap::new();
@@ -261,27 +263,49 @@ impl HashtreeStore {
 
             let relative = path.strip_prefix(current_path).unwrap_or(path);
 
+            #[cfg(unix)]
+            if cache.is_some() {
+                anyhow::ensure!(
+                    entry
+                        .file_type()
+                        .is_some_and(|kind| kind.is_file() || kind.is_dir()),
+                    "cached add requires regular files and directories; symlinks are not followed"
+                );
+            }
+
             if path.is_file() {
-                let file = std::fs::File::open(path)
-                    .with_context(|| format!("Failed to open file {}", path.display()))?;
-                if let Some(progress) = progress {
-                    if let Ok(metadata) = file.metadata() {
-                        progress.record_file_discovered(metadata.len());
-                    }
-                }
-                let (cid, _size) = tree
-                    .put_stream_with_progress(AllowStdIo::new(file), |bytes| {
-                        if let Some(progress) = progress {
-                            progress.record_bytes(bytes);
+                #[cfg(unix)]
+                let cached_cid = match cache.as_deref_mut() {
+                    Some(cache) => Some(cache.file(tree, relative, progress).await?),
+                    None => None,
+                };
+                #[cfg(not(unix))]
+                let cached_cid: Option<Cid> = None;
+                let cid = if let Some(cid) = cached_cid {
+                    cid
+                } else {
+                    let file = std::fs::File::open(path)
+                        .with_context(|| format!("Failed to open file {}", path.display()))?;
+                    if let Some(progress) = progress {
+                        if let Ok(metadata) = file.metadata() {
+                            progress.record_file_discovered(metadata.len());
                         }
-                    })
-                    .await
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to upload file {}: {}", path.display(), e)
-                    })?;
-                if let Some(progress) = progress {
-                    progress.record_file_finished();
-                }
+                    }
+                    let (cid, _size) = tree
+                        .put_stream_with_progress(AllowStdIo::new(file), |bytes| {
+                            if let Some(progress) = progress {
+                                progress.record_bytes(bytes);
+                            }
+                        })
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!("Failed to upload file {}: {}", path.display(), e)
+                        })?;
+                    if let Some(progress) = progress {
+                        progress.record_file_finished();
+                    }
+                    cid
+                };
 
                 // Get parent directory path and file name
                 let parent = relative
@@ -492,7 +516,7 @@ impl HashtreeStore {
         let tree = HashTree::new(config);
 
         let root_cid = sync_block_on(async {
-            self.upload_dir_recursive(&tree, dir_path, dir_path, respect_gitignore, progress)
+            self.upload_dir_recursive(&tree, dir_path, dir_path, respect_gitignore, progress, None)
                 .await
         })
         .context("Failed to upload encrypted directory")?;
@@ -505,5 +529,54 @@ impl HashtreeStore {
         wtxn.commit()?;
 
         Ok(cid_str)
+    }
+
+    /// Cache unchanged source-file CIDs outside the public directory. Unix file
+    /// identity/change metadata and CAS retention are trusted; this is not a
+    /// substitute for a full stored-payload bitrot audit.
+    #[cfg(unix)]
+    pub fn upload_dir_cached_with_progress(
+        &self,
+        source: &Path,
+        respect_ignore: bool,
+        chunk_size: Option<usize>,
+        encrypted: bool,
+        progress: &AddProgress,
+        cache_path: &Path,
+    ) -> Result<String> {
+        let mut config = HashTreeConfig::new(self.store_arc());
+        if !encrypted {
+            config = config.public();
+        }
+        if let Some(chunk_size) = chunk_size {
+            config = config.with_chunk_size(chunk_size);
+        }
+        let tree = HashTree::new(config);
+        let root = sync_block_on(async {
+            let mut cache = super::add_cache::DirectoryCache::open(
+                &tree,
+                source,
+                &self.base_path,
+                respect_ignore,
+                cache_path,
+            )
+            .await?;
+            let root = self
+                .upload_dir_recursive(
+                    &tree,
+                    source,
+                    source,
+                    respect_ignore,
+                    Some(progress),
+                    Some(&mut cache),
+                )
+                .await?;
+            cache.save(&root)?;
+            Ok::<_, anyhow::Error>(root)
+        })?;
+        let mut transaction = self.env.write_txn()?;
+        self.pins.put(&mut transaction, root.hash.as_slice(), &())?;
+        transaction.commit()?;
+        Ok(root.to_string())
     }
 }
