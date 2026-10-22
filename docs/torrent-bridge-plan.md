@@ -1,366 +1,79 @@
-# Torrent Bridge Plan
+# Optional BitTorrent adapter
 
-Date: April 6, 2026
-Scope: Read-through BitTorrent bridge for serving hashtree files and directories from torrent seeders without requiring a full torrent download or permanent local retention
+The Rust adapter supports demand-driven reads from BitTorrent v1, v2 and hybrid torrents, and seeding immutable hashtree file or directory snapshots to ordinary BitTorrent clients. It uses libtorrent 2.1 for the peer protocol, piece verification, magnets, DHT, peer exchange and optional trackers.
 
-## Goal
+## Enable explicitly
 
-Add a torrent-backed content source that lets the daemon:
+The default CLI features remain `["lmdb"]`. Default builds do not link libtorrent or include the `torrent` command. Building the optional feature does not start any BitTorrent service: `htree start` is unchanged, and every torrent session is explicitly started by a command or library call.
 
-- expose directory and file views backed by `.torrent` metadata
-- fetch only the pieces needed for a requested file or byte range
-- verify downloaded data before serving it
-- keep disk usage bounded and optionally discard fetched data immediately after use
-- materialize hot files or whole trees into real hashtree content only when useful
+Install libtorrent-rasterbar **2.1.x**, its development headers, a C++17 compiler and pkg-config. On macOS:
 
-This is aimed at archive-scale mirrors where the source already exists as torrents. A plausible use case is a local bridge for Minerva-style retro game archives, with emulator binaries or frontends published separately via normal hashtree flows.
-
-## Key Constraint Found During Initial Research
-
-The Minerva torrents sampled on April 6, 2026 appear to be BitTorrent v1 only, not v2 or hybrid:
-
-- no `meta version`
-- no `file tree`
-- no per-file SHA-256 merkle roots
-- standard v1 `pieces` with piece sizes such as `32768` and `16777216`
-
-This matters:
-
-- v1 torrents are still usable for lazy streaming from seeders
-- v1 torrents do not let us derive stable hashtree file roots from metadata alone
-- a true immutable hashtree mirror therefore requires at least one content hashing pass
-
-For future v2 or hybrid torrents, the TypeScript BEP52 utilities in [`bep52.ts`](/Users/sirius/src/hashtree/ts/packages/hashtree/src/bep52.ts) are already relevant.
-
-## Recommended Delivery Model
-
-Treat this as two layers, not one:
-
-1. Virtual torrent-backed serving
-2. Optional materialization into real hashtree content
-
-The first layer provides immediate value and does not require us to pre-hash entire archives. The second layer can progressively convert the useful subset into canonical hashtree trees.
-
-## Non-Goals For The First Version
-
-- Do not try to mirror an entire archive into permanent local storage by default.
-- Do not require complete torrent download before first serve.
-- Do not invent fake immutable hashtree CIDs for content that has not actually been hashed into hashtree yet.
-- Do not make public hashtree publication of copyrighted ROM collections the default behavior.
-- Do not start with magnets only; `.torrent` import is the simpler and more deterministic first step.
-
-## Current Seams In The Codebase
-
-The main Rust daemon already has the right miss-and-fill structure:
-
-- [`fetch_and_cache_blob`](/Users/sirius/src/hashtree/rust/crates/hashtree-cli/src/server/handlers/content.rs#L4)
-  - fetches missing blobs from upstream sources and caches them locally
-- [`ensure_blob_available`](/Users/sirius/src/hashtree/rust/crates/hashtree-cli/src/server/handlers/content.rs#L134)
-  - coalesces concurrent misses for the same hash
-- [`fetch_missing_chunk`](/Users/sirius/src/hashtree/rust/crates/hashtree-cli/src/server/handlers/content.rs#L174)
-  - loops missing-chunk recovery back into the fetch path
-- [`read_file_range_cid_with_fetch`](/Users/sirius/src/hashtree/rust/crates/hashtree-cli/src/server/handlers/content.rs#L314)
-  - already supports range-driven recovery
-- [`stream_file_range_cid_with_fetch`](/Users/sirius/src/hashtree/rust/crates/hashtree-cli/src/server/handlers/content.rs#L340)
-  - already streams large responses incrementally
-- eviction tests in [`eviction.rs`](/Users/sirius/src/hashtree/rust/crates/hashtree-cli/tests/eviction.rs)
-  - confirm the storage layer already supports bounded retention semantics
-
-This suggests a clean direction:
-
-- implement a torrent-backed opaque `BlobRoute`
-- add it alongside the FIPS composite route and Blossom terminal routes
-- keep the reader logic largely unchanged
-
-## Architectural Decision
-
-Do not make the first implementation pretend torrents are ordinary hashtree stores.
-
-Instead, add a dedicated virtual torrent namespace and only materialize real hashtree content when requested or explicitly promoted.
-
-Reason:
-
-- directory structure is available from torrent metadata immediately
-- file bytes are available only after piece fetch and verification
-- for v1 torrents, file-level hashtree hashes are unknown until we hash content ourselves
-- forcing everything into the current immutable CID model too early will create awkward placeholder semantics
-
-## Proposed User Model
-
-Suggested commands:
-
-```bash
-htree torrent import path/to/archive.torrent --name minerva-mame-roms
-htree torrent ls minerva-mame-roms
-htree torrent serve
-htree torrent materialize minerva-mame-roms "MAME - ROMs (non-merged)/pacman.zip"
+```sh
+brew install libtorrent-rasterbar pkg-config
+cd rust
+cargo build --release -p hashtree-cli --bin htree --features bittorrent
 ```
 
-Suggested URL model:
+The resulting optional binary requires the matching libtorrent shared library at runtime. Other platforms need libtorrent 2.1.x available through pkg-config; use `BOOST_ROOT` when Boost headers are outside the compiler search path. This is an optional native desktop/server integration, not a browser transport.
 
-- virtual route for immediate access:
-  - `/torrent/<catalog>/...`
-- optional later mutable publication after materialization:
-  - regular `htree://npub/tree/path`
+## Export and seed
 
-This keeps the first phase honest:
+Export uses an immutable `nhash` or raw blob hash. Give the torrent an explicit public name. The content must already be locally available; load it through normal hashtree tools first if necessary.
 
-- torrent-backed content is clearly virtual and local
-- materialized content becomes normal hashtree content
+```sh
+htree torrent export <nhash> --name collection --output collection.torrent
+htree torrent seed <nhash> --name collection --listen 0.0.0.0:6881
+```
 
-## Internal Components
+Encrypted roots or descendants require `--allow-plaintext`. This publishes their decrypted file bytes to torrent peers. The adapter never places hashtree decryption keys or read capabilities in the torrent metadata or magnet. Without the flag, a public parent cannot silently expose an encrypted child. A keyless ciphertext blob can instead be exported as an opaque file.
 
-### 1. Torrent Catalog Index
+Hybrid torrents are the default. Choose `--format v1` or `--format v2` explicitly if needed. `--piece-size` defaults to 256 KiB. Creation reads and verifies the content once to compute torrent hashes; it does not write a second complete copy to disk. Names, file sizes and content determine the torrent; local filesystem paths, timestamps, identities and keys are not added.
 
-Persist imported torrent metadata in a local index:
+`seed` pins and indexes the selected snapshot before opening its session. Existing pins and tree metadata are preserved. Stopping a seed does not unpin content. Each new immutable snapshot produces its own torrent. A snapshot consisting entirely of empty files is not a valid export; empty files inside nonempty torrents are supported.
 
-- torrent name
-- infohash
-- announce URLs
-- piece length
-- per-file path
-- per-file byte length
-- per-file offset within the torrent
-- piece span covering each file
+A seed prints a magnet and its listening port and runs until Ctrl-C. `--output <file.torrent>` also saves metadata. Output files are created atomically without overwriting existing files. Seed bandwidth can be capped with `--upload-limit <bytes-per-second>`.
 
-This index powers directory listing and file lookup without any file data present locally.
+## Read and import
 
-### 2. Torrent Piece Fetcher
+Inspecting a local torrent opens no network sockets and does not spawn the CLI background updater:
 
-Add a read-only leecher focused on demand fetching:
+```sh
+htree torrent inspect collection.torrent
+htree torrent get collection.torrent 'collection/file.bin' --peer <address:port> --offset 1024 --length 4096 --output part.bin
+htree torrent import collection.torrent 'collection/file.bin' --peer <address:port>
+```
 
-- request only pieces needed for the current file or range
-- verify piece hashes before use
-- coalesce concurrent requests for the same piece
-- support tracker and DHT peer discovery later, but start with `.torrent` + tracker flow
+Use the exact listed path or file index. `get` downloads only the pieces overlapping the requested range; v1 pieces may also contain adjacent file bytes. Omit the output path to write bytes to stdout. Import streams one selected file into normal hashtree storage, encrypts it by default, pins it, and prints its real immutable CID. `--unencrypted` explicitly selects public hashtree storage. Import files individually when only a subset of a directory is needed.
 
-The fetcher should expose:
+`get` and `import` also accept a quoted magnet URI. Metadata is obtained from peers and checked against the magnet's infohash before exposing file information. No placeholder hashtree hashes are invented from torrent metadata. Both v1 and v2 imports compute actual hashtree hashes from verified bytes.
 
-- `read_range(file_id, start, end) -> bytes`
-- `read_file(file_id) -> stream`
+## Discovery and limits
 
-### 3. Piece Cache
+All listeners bind to `127.0.0.1:0` unless explicitly overridden. Use a reachable `--listen` address to seed publicly. There is no automatic UPnP, NAT-PMP, local-service discovery or DNS bootstrap.
 
-Use a bounded local cache with explicit retention policy:
+- `--peer <numeric-address:port>` provides an initial peer, including IPv6 addresses in brackets.
+- `--dht --bootstrap <numeric-address:port>` enables trackerless discovery with explicit bootstrap nodes. The session retains discovery while running. Built-in DNS bootstrap and torrent-supplied bootstrap nodes are not used.
+- `--trackers` permits tracker URLs from the supplied torrent or magnet. Trackers are off by default. Web seeds are not used.
+- `--cache-bytes` bounds downloaded piece storage, defaulting to 64 MiB. The cache must hold at least one torrent piece. It is memory-only and disappears when the session closes.
+- `--timeout` bounds each range/metadata operation, defaulting to 60 seconds. Timeouts and cancellations are errors, never evidence that content does not exist.
+- `--connections`, `--upload-limit` and `--download-limit` bound network work and bandwidth.
 
-- cap total bytes
-- mark everything unpinned by default
-- allow immediate discard mode for low-disk environments
-- optionally keep a small hot cache for piece reuse
+On cache eviction, the adapter drains and replaces the torrent handle before dropping pieces, so peers never receive a stale availability bitfield. Verified cached pieces and known peers are retained across that transition. Cancellation can interrupt and resume the transition safely; incomplete pieces are fetched again. Range reads keep useful peer connections open between requests. Concurrent reads share a serialized session and its verified piece cache.
 
-Desired behavior:
+The piece cache limit excludes libtorrent metadata/network buffers and the caller's returned range. Seeding reuses up to four 2 MiB plaintext windows to avoid re-reading/decrypting a large hashtree chunk for every 16 KiB peer request. Metadata and individual reads are limited to 16 MiB, piece sizes to 16 KiB–16 MiB, file count to 100,000 (including torrent padding), and piece count to 1,000,000. Symlink torrents and unsafe or non-UTF-8 paths are rejected. These limits are deliberate resource bounds.
 
-- if disk space runs out, old pieces are evicted
-- subsequent reads simply re-fetch from seeders
+## Library integration
 
-### 4. Materializer
+`hashtree-bittorrent` has no default features. Enable its `libtorrent` feature to use `Metadata`, `Torrent`, `Seed` and `TorrentRoute`. `Snapshot` validates hashtree content and plaintext-export permission independently of the native engine.
 
-When a file is requested often, or on explicit command:
+`TorrentRoute` implements the existing opaque `BlobRoute` interface. Applications explicitly supply `BlobMapping` entries from a hashtree hash to a torrent file/range and register the route alongside other providers. Every returned range must match the requested hashtree SHA-256, in addition to libtorrent's piece verification. Absent mappings return `NoResult`; network failures and expired deadlines return errors. No daemon route is registered automatically, and public HTTP behavior is unchanged.
 
-- stream file bytes from the torrent fetcher
-- chunk into normal hashtree blobs
-- build the real hashtree file node
-- store it locally
-- optionally attach it into a mutable local tree
+The adapter does not discover arbitrary hashtree hashes in the BitTorrent DHT. Nor are torrent infohashes, v2 file roots and hashtree roots interchangeable. The source mapping is necessary even though v2 uses SHA-256.
 
-This separates "can serve now" from "is canonical hashtree content now".
+## Verification
 
-## Implementation Phases
+The optional gate is `rust/scripts/test_bittorrent_adapter.sh`. It requires the libtorrent Python binding for the separate ordinary-client fixture; select its interpreter with `HASHTREE_BITTORRENT_PYTHON`.
 
-### Phase 1: Metadata Import And Virtual Listing
+Tests use local peers and servers and cover all three torrent formats in both directions, nested directories, empty files, cross-piece/file boundaries, byte-range selectivity, bounded-cache eviction and re-fetching, magnets, normal encrypted hashtree materialization, SHA-256 rejection, timeout/cancellation recovery, encrypted-descendant consent, corrupted/missing source blobs, and feature-gated CLI parsing. Embedded tracker and web-seed URLs stay inactive by default; a positive control checks explicit tracker activation. The ordinary-client fixture uses libtorrent's filesystem storage independently of the adapter's custom storage.
 
-Add:
-
-- `htree torrent import <file.torrent> --name <catalog>`
-- local metadata database for imported torrents
-- directory listing endpoint or CLI output from imported file lists
-
-Acceptance:
-
-- imported torrent contents can be browsed without downloading file data
-- nested directories and file sizes are correct
-
-### Phase 2: On-Demand File And Range Reads
-
-Add:
-
-- torrent piece fetcher
-- piece verification
-- virtual HTTP serving for `/torrent/<catalog>/<path>`
-- byte-range support
-
-Acceptance:
-
-- large files can be read via HTTP range requests
-- only needed pieces are fetched
-- no full-torrent download is required
-
-### Phase 3: Bounded Retention
-
-Add:
-
-- explicit cache quota for torrent pieces
-- unpinned-by-default semantics
-- cache eviction metrics and logs
-
-Acceptance:
-
-- low cache settings still allow repeated reads with re-fetch
-- daemon does not grow unbounded on archive browsing
-
-### Phase 4: Materialize Selected Files
-
-Add:
-
-- `htree torrent materialize <catalog> <path>`
-- optional automatic materialization for hot files
-
-Acceptance:
-
-- materialized files become normal hashtree content
-- subsequent reads can prefer local hashtree blobs over torrent fetches
-
-### Phase 5: Mutable Mirror Trees
-
-After enough files are materialized:
-
-- build local mutable trees that point only to real hashtree content
-- optionally publish those trees to normal hashtree remotes
-
-Acceptance:
-
-- published trees contain only real hashtree content
-- no virtual torrent placeholders leak into canonical published trees
-
-## Rust Integration Direction
-
-Recommended first placement is under `hashtree-cli`, not `hashtree-core`.
-
-Likely files:
-
-- `rust/crates/hashtree-cli/src/torrent/mod.rs`
-- `rust/crates/hashtree-cli/src/torrent/index.rs`
-- `rust/crates/hashtree-cli/src/torrent/fetch.rs`
-- `rust/crates/hashtree-cli/src/torrent/cache.rs`
-- `rust/crates/hashtree-cli/src/torrent/http.rs`
-
-Likely call sites:
-
-- server routing in [`server/mod.rs`](/Users/sirius/src/hashtree/rust/crates/hashtree-cli/src/server/mod.rs)
-- upstream fetch generalization in [`server/handlers/content.rs`](/Users/sirius/src/hashtree/rust/crates/hashtree-cli/src/server/handlers/content.rs)
-- CLI plumbing in:
-  - [`app/args.rs`](/Users/sirius/src/hashtree/rust/crates/hashtree-cli/src/app/args.rs)
-  - [`app/mod.rs`](/Users/sirius/src/hashtree/rust/crates/hashtree-cli/src/app/mod.rs)
-  - likely a new `app/torrent.rs`
-
-## v1 Versus v2 Strategy
-
-### v1 torrents
-
-Use them as streaming sources, not as direct immutable roots.
-
-Properties:
-
-- piece verification is SHA-1 per piece
-- file-level hashtree structure is unknown until we hash content ourselves
-- good enough for virtual serving and later materialization
-
-### v2 or hybrid torrents
-
-Treat these as much closer to hashtree-native imports.
-
-Properties:
-
-- per-file merkle structure exists
-- SHA-256 block trees align conceptually with hashtree
-- potential for metadata-only import of file integrity structure
-
-Even then, hashtree and BEP52 do not have identical node layout semantics, so the safest rule is still:
-
-- use torrent metadata to prove/fetch file bytes
-- build actual hashtree trees explicitly
-
-## Emulator And Frontend Strategy
-
-Recommended split:
-
-- publish emulator binaries, web frontends, and metadata through normal hashtree flows
-- keep ROM payload access behind the local torrent bridge
-
-This avoids coupling emulator distribution to archive legality questions and keeps the public hashtree layer focused on software we can more comfortably publish.
-
-## Dependency Strategy
-
-Prefer a small, auditable implementation over a large opaque dependency.
-
-Two acceptable paths:
-
-1. Minimal in-process read-only torrent engine
-2. Thin experimental adapter to an existing local torrent client for validation only
-
-Production preference:
-
-- avoid a hard dependency on a heavyweight external daemon if a scoped internal implementation is practical
-- keep the first version leecher-only
-- no seeding, upload management, or torrent UX complexity unless later needed
-
-## Testing Plan
-
-### Deterministic local tests
-
-Add fixtures and tests for:
-
-- torrent metadata import
-- file path to offset mapping
-- piece boundary math
-- range reads spanning multiple pieces
-- partial reads at start and end of file
-- cache eviction under tiny quotas
-- repeated read after eviction triggers re-fetch
-- concurrent readers coalesce on the same piece
-
-### End-to-end tests
-
-Use a small local torrent swarm fixture:
-
-- one seed process with known files
-- daemon imports the `.torrent`
-- HTTP range requests verify exact returned bytes
-- ensure the leecher never downloads the entire torrent unless requested
-
-### Materialization tests
-
-- materialized file hash matches direct hashtree import of the same bytes
-- repeated reads prefer local materialized content when present
-
-## Open Questions
-
-1. Should the first HTTP surface be a dedicated `/torrent/...` route or a mount-like path under existing virtual host machinery?
-2. Should materialization happen only on explicit command, or also opportunistically for small files?
-3. Do we want a "zero retention" mode that spills only to memory and never writes piece cache to disk?
-4. Is tracker-only import enough for the first version, or do we need magnet/DHT support immediately?
-5. Do we want a future "pay seeders" path, or is this strictly archival/public swarm access?
-
-## Recommended First Slice
-
-Build the smallest honest version:
-
-1. import `.torrent`
-2. browse file list
-3. serve one file path with HTTP range support
-4. fetch only required pieces
-5. verify pieces
-6. evict aggressively under quota
-
-If that works well, then add explicit materialization into real hashtree content.
-
-## External References Consulted
-
-- Minerva FAQ:
-  - <https://minerva-archive.org/faq/>
-- Minerva torrent index:
-  - <https://cdn.minerva-archive.org/torrents/>
-- Sample torrents checked on April 6, 2026:
-  - <https://cdn.minerva-archive.org/torrents/Minerva_Myrient%20-%20No-Intro%20-%20Analogue%20-%20Analogue%20Pocket.torrent>
-  - <https://cdn.minerva-archive.org/torrents/Minerva_Myrient%20-%20Internet%20Archive%20-%20retro_game_champion.torrent>
-  - <https://cdn.minerva-archive.org/torrents/Minerva_Myrient%20-%20MAME%20-%20ROMs%20(non-merged).torrent>
+The command-line integration gate additionally exercises export, seed, range get and pinned import against fresh local stores. It verifies output-file preservation and rejection of accidental plaintext export. Default dependency-tree and command-parsing checks prove the adapter remains opt-in.

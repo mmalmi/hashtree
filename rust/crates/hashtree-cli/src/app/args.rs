@@ -128,7 +128,7 @@ General Commands:
 #[command(version)]
 #[command(about = "Content-addressed filesystem", long_about = None)]
 #[command(help_template = CLI_HELP_TEMPLATE)]
-#[command(after_help = CLI_GROUPED_COMMANDS)]
+#[command(after_help = grouped_commands())]
 pub(crate) struct Cli {
     /// Data directory (default: ~/.hashtree/data)
     #[arg(long, global = true, env = "HTREE_DATA_DIR")]
@@ -136,6 +136,17 @@ pub(crate) struct Cli {
 
     #[command(subcommand)]
     pub(crate) command: Commands,
+}
+
+fn grouped_commands() -> String {
+    #[cfg(feature = "bittorrent")]
+    {
+        format!("{CLI_GROUPED_COMMANDS}\n\nOptional Commands:\n  torrent      Import torrents or seed an immutable snapshot")
+    }
+    #[cfg(not(feature = "bittorrent"))]
+    {
+        CLI_GROUPED_COMMANDS.to_owned()
+    }
 }
 
 impl Cli {
@@ -165,6 +176,12 @@ impl From<StartMode> for hashtree_cli::config::ServerMode {
 
 #[derive(Subcommand)]
 pub(crate) enum Commands {
+    /// Explicit BitTorrent import and snapshot seeding (never started by the daemon)
+    #[cfg(feature = "bittorrent")]
+    Torrent {
+        #[command(subcommand)]
+        command: super::torrent_args::TorrentCommand,
+    },
     // ── Daemon ──────────────────────────────────────────────
     /// Start the hashtree daemon
     Start {

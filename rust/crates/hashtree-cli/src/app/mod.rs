@@ -33,6 +33,10 @@ pub(crate) mod repos;
 pub(crate) mod resolve;
 pub(crate) mod socialgraph;
 pub(crate) mod storage_stats;
+#[cfg(feature = "bittorrent")]
+mod torrent;
+#[cfg(feature = "bittorrent")]
+mod torrent_args;
 pub(crate) mod update;
 pub(crate) mod user;
 pub(crate) mod util;

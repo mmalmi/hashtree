@@ -59,6 +59,51 @@ fn args_to_strings(args: Vec<std::ffi::OsString>) -> Vec<String> {
         .collect()
 }
 
+#[test]
+fn torrent_command_is_strictly_feature_gated() {
+    assert_eq!(
+        Cli::command().find_subcommand("torrent").is_some(),
+        cfg!(feature = "bittorrent")
+    );
+    assert_eq!(
+        Cli::command()
+            .render_long_help()
+            .to_string()
+            .contains("torrent      "),
+        cfg!(feature = "bittorrent")
+    );
+}
+
+#[cfg(feature = "bittorrent")]
+#[test]
+fn torrent_cli_requires_explicit_discovery_and_plaintext_export() {
+    use super::torrent_args::TorrentCommand;
+    let cli = Cli::try_parse_from(["htree", "torrent", "seed", "abc", "--name", "public"]).unwrap();
+    assert!(!should_spawn_background_update(&cli));
+    let Commands::Torrent {
+        command: TorrentCommand::Seed {
+            snapshot, network, ..
+        },
+    } = cli.command
+    else {
+        panic!("expected torrent seed");
+    };
+    assert!(!snapshot.allow_plaintext);
+    assert!(!network.dht);
+    assert!(!network.trackers);
+    assert!(network.peer.is_empty());
+    assert!(Cli::try_parse_from([
+        "htree",
+        "torrent",
+        "get",
+        "data.torrent",
+        "0",
+        "--bootstrap",
+        "127.0.0.1:1234"
+    ])
+    .is_err());
+}
+
 #[cfg(all(feature = "lmdb", unix))]
 #[test]
 fn pool_migration_cursor_replacement_is_synced_and_atomic() {

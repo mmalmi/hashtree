@@ -315,6 +315,10 @@ pub(crate) async fn pin_input_target(
 }
 
 pub(crate) fn should_spawn_background_update(cli: &Cli) -> bool {
+    #[cfg(feature = "bittorrent")]
+    if matches!(cli.command, Commands::Torrent { .. }) {
+        return false;
+    }
     if matches!(&cli.command, Commands::Update { .. } | Commands::BgCheck) {
         return false;
     }
@@ -391,6 +395,10 @@ fn run_command(
     data_dir: PathBuf,
 ) -> futures::future::LocalBoxFuture<'static, Result<()>> {
     match cli.command {
+        #[cfg(feature = "bittorrent")]
+        Commands::Torrent { command } => command_future!({
+            super::torrent::run(data_dir, command).await?;
+        }),
         Commands::Start {
             addr,
             relays: relays_override,
