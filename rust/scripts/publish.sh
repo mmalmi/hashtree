@@ -55,6 +55,7 @@ STAGE_1_CRATES=(
 )
 
 STAGE_2_CRATES=(
+    "hashtree-bittorrent"
     "hashtree-index"
     "hashtree-lmdb"
     "hashtree-fuse"

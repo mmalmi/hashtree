@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Opt-in BitTorrent import and snapshot seeding for Hashtree"
+readme = "../../../docs/torrent-bridge-plan.md"
 
 [features]
 default = []

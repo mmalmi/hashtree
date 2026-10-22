@@ -67,6 +67,7 @@ plan_line() {
 fuse_line="$(plan_line hashtree-fuse)"
 fuser_line="$(plan_line hashtree-fuser)"
 core_line="$(plan_line hashtree-core)"
+bittorrent_line="$(plan_line hashtree-bittorrent)"
 collection_line="$(plan_line hashtree-collection)"
 nostr_line="$(plan_line hashtree-nostr)"
 transport_line="$(plan_line hashtree-fips-transport)"
@@ -80,7 +81,7 @@ heed_line="$(plan_line hashtree-heed)"
 social_graph_heed_line="$(plan_line hashtree-nostr-social-graph-heed)"
 lmdb_line="$(plan_line hashtree-lmdb)"
 
-if [ -z "$fuser_line" ] || [ -z "$fuse_line" ] || [ -z "$core_line" ] || [ -z "$collection_line" ] || \
+if [ -z "$fuser_line" ] || [ -z "$fuse_line" ] || [ -z "$core_line" ] || [ -z "$bittorrent_line" ] || [ -z "$collection_line" ] || \
     [ -z "$nostr_line" ] || [ -z "$transport_line" ] || \
     [ -z "$nostr_pubsub_line" ] || [ -z "$cli_line" ] || \
     [ -z "$cashu_cli_line" ] || [ -z "$embedded_line" ] || \
@@ -115,6 +116,11 @@ fi
 
 if [ "$fuse_line" -ge "$cli_line" ]; then
     echo "hashtree-fuse must be published before hashtree-cli" >&2
+    exit 1
+fi
+
+if [ "$core_line" -ge "$bittorrent_line" ] || [ "$bittorrent_line" -ge "$cli_line" ]; then
+    echo "hashtree-bittorrent must be published after core and before the optional CLI consumer" >&2
     exit 1
 fi
 

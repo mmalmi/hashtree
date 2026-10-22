@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.157 - 2026-10-22
+
+- Add optional BitTorrent v1, v2 and hybrid import, range reads, magnets and
+  immutable snapshot seeding through the `bittorrent` CLI build feature.
+- Keep BitTorrent out of default builds and daemon startup. Encrypted snapshot
+  export requires explicit `--allow-plaintext` permission.
+- Require libtorrent-rasterbar 2.1.x only when the optional feature is enabled.
+
+## hashtree-bittorrent 0.1.0 - 2026-10-22
+
+- Publish the reusable adapter with no default features. Enable `libtorrent`
+  for torrent metadata, verified range downloads, imports, snapshot seeding and
+  explicitly mapped blob routes.
+- Bound downloaded piece storage, preserve timeout/cancellation errors and
+  require consent before serving decrypted hashtree content.
+
 ## 0.2.153 - 2026-10-17
 
 ### Security

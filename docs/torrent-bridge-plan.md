@@ -16,6 +16,15 @@ cargo build --release -p hashtree-cli --bin htree --features bittorrent
 
 The resulting optional binary requires the matching libtorrent shared library at runtime. Other platforms need libtorrent 2.1.x available through pkg-config; use `BOOST_ROOT` when Boost headers are outside the compiler search path. This is an optional native desktop/server integration, not a browser transport.
 
+The registry release supports explicit installation with the same native prerequisites:
+
+```sh
+cargo install hashtree-cli --version 0.2.157 --locked --features bittorrent
+```
+
+Ordinary installs omit this feature. Library users can add `hashtree-bittorrent`
+0.1.0 with its `libtorrent` feature independently of the CLI.
+
 ## Export and seed
 
 Export uses an immutable `nhash` or raw blob hash. Give the torrent an explicit public name. The content must already be locally available; load it through normal hashtree tools first if necessary.
