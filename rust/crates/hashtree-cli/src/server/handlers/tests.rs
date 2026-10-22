@@ -30,6 +30,8 @@ use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};
 use tower::ServiceExt;
 
+mod daemon_status_access;
+
 macro_rules! event_builder {
     ($kind:expr, $content:expr $(,)?) => {
         EventBuilder::new($kind, $content)
@@ -453,7 +455,7 @@ async fn test_nostr_relay(dir: &TempDir, allowed_pubkey: String) -> Arc<NostrRel
     )
 }
 
-async fn spawn_mock_upstream_relay(events: Vec<nostr::Event>) -> String {
+async fn spawn_mock_upstream_relay(events: Vec<nostr::Event>, match_filters: bool) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind relay");
@@ -481,9 +483,10 @@ async fn spawn_mock_upstream_relay(events: Vec<nostr::Event>) -> String {
                     .map(|filter| filter.into_owned())
                     .collect::<Vec<_>>();
                 for event in events.iter().filter(|event| {
-                    filters
-                        .iter()
-                        .any(|filter| filter.match_event(event, Default::default()))
+                    !match_filters
+                        || filters
+                            .iter()
+                            .any(|filter| filter.match_event(event, Default::default()))
                 }) {
                     let _ = write
                         .send(TungsteniteMessage::Text(
@@ -535,6 +538,7 @@ async fn daemon_status_exposes_fips_relay_and_queue_metadata() {
 
     let response = daemon_status(
         AxumState(state),
+        HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 21417))),
     )
     .await
@@ -645,6 +649,7 @@ async fn daemon_status_reads_native_fips_endpoint_without_legacy_transport() {
 
     let response = daemon_status(
         AxumState(state),
+        HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 21417))),
     )
     .await
@@ -739,6 +744,7 @@ async fn daemon_status_reports_truthful_native_fips_connection_state() {
     state.fips_endpoint = Some(left.native_endpoint.clone());
     let response = daemon_status(
         AxumState(state),
+        HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 21417))),
     )
     .await
@@ -777,6 +783,7 @@ async fn daemon_status_reports_assist_mode_and_disabled_hash_get() {
 
     let response = daemon_status(
         AxumState(state),
+        HeaderMap::new(),
         axum::extract::ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 21417))),
     )
     .await
@@ -2971,7 +2978,7 @@ async fn nostr_profile_queries_upstream_relays_after_local_miss() {
     .custom_created_at(Timestamp::from_secs(42))
     .sign_with_keys(&keys)
     .unwrap();
-    let upstream_url = spawn_mock_upstream_relay(vec![event.clone()]).await;
+    let upstream_url = spawn_mock_upstream_relay(vec![event.clone()], true).await;
     let mut state = test_app_state(store, Vec::new());
     state.nostr_relay = Some(relay.clone());
     state.nostr_provider = Some(Arc::new(
@@ -3021,6 +3028,72 @@ fn resolver_config_prefers_state_relay_urls() {
 
     assert_eq!(config.relays, state.nostr_relay_urls);
     assert_eq!(config.resolve_timeout, HTTP_RESOLVER_TIMEOUT);
+}
+
+#[tokio::test]
+async fn resolve_refresh_filters_relay_results_before_root_selection_and_limit() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
+    let keys = Keys::generate();
+    let requested_hash = "ab".repeat(32);
+    let root = |name: &str, hash: String, created_at: u64| {
+        event_builder!(
+            Kind::Custom(30064),
+            "",
+            [
+                Tag::identifier(name.to_string()),
+                Tag::custom(
+                    TagKind::SingleLetter(SingleLetterTag::lowercase(Alphabet::L)),
+                    vec!["hashtree".to_string()],
+                ),
+                Tag::custom(TagKind::Custom("hash".into()), vec![hash]),
+            ],
+        )
+        .custom_created_at(Timestamp::from_secs(created_at))
+        .sign_with_keys(&keys)
+        .unwrap()
+    };
+    let requested = root("sites", requested_hash.clone(), 100);
+    let unrelated = root("drive", "cd".repeat(32), 200);
+    // Model an upstream relay returning valid signatures outside its REQ filter.
+    let upstream_url = spawn_mock_upstream_relay(vec![requested.clone(), unrelated], false).await;
+    let provider = Arc::new(
+        nostr_pubsub_relay::RelayEventBus::new([upstream_url.clone()], Duration::from_secs(2))
+            .await
+            .unwrap(),
+    );
+    let mut state = test_app_state(store, Vec::new());
+    state.nostr_provider = Some(provider.clone());
+    state.nostr_relay_urls = vec![upstream_url];
+    let npub = keys.public_key().to_bech32().unwrap();
+    let response = timeout(
+        Duration::from_secs(5),
+        resolve_to_hash(
+            State(state),
+            OriginalUri(format!("/api/resolve/{npub}/sites").parse().unwrap()),
+            Path((npub.clone(), "sites".to_string())),
+            Query(HashMap::from([("refresh".to_string(), "1".to_string())])),
+        ),
+    )
+    .await
+    .expect("bounded root resolution")
+    .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(payload["hash"], requested_hash);
+    assert_eq!(payload["source"], "nostr-relay");
+
+    let filter = crate::root_events::build_root_filter(&npub, "sites").unwrap();
+    let report = nostr_pubsub::EventBus::query(
+        provider.as_ref(),
+        vec![filter],
+        nostr_pubsub::QueryOptions { limit: Some(1) },
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.events.len(), 1);
+    assert_eq!(report.events[0].event.as_event().id, requested.id);
 }
 
 #[tokio::test]
@@ -3458,7 +3531,7 @@ async fn resolve_to_hash_refresh_uses_upstream_relays_after_local_miss() {
     )
     .sign_with_keys(&keys)
     .unwrap();
-    let upstream_url = spawn_mock_upstream_relay(vec![event.clone()]).await;
+    let upstream_url = spawn_mock_upstream_relay(vec![event.clone()], true).await;
 
     let mut state = test_app_state(store, Vec::new());
     state.nostr_relay = Some(relay.clone());

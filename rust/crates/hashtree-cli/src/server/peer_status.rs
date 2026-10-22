@@ -1,7 +1,7 @@
 use super::{auth::AppState, blob_read, blossom, status_metrics};
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
 };
 use serde_json::{json, Value};
@@ -28,10 +28,25 @@ fn current_unix_secs() -> u64 {
 
 pub(super) async fn daemon_status(
     State(state): State<AppState>,
+    headers: HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
     let ip = connect_info.0.ip();
-    if !ip.is_loopback() {
+    // A local proxy also connects from loopback. Forwarding headers can only
+    // remove access; they must never make a remote peer local.
+    let proxy_marked = [
+        "cf-ray",
+        "cf-connecting-ip",
+        "cf-connecting-ipv6",
+        "forwarded",
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "x-real-ip",
+    ]
+    .iter()
+    .any(|name| headers.contains_key(*name));
+    if !ip.is_loopback() || proxy_marked {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "localhost only"})),
