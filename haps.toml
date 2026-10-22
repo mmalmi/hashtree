@@ -1,0 +1,21 @@
+# https://haps.hashtree.cc
+[package]
+name = "hashtree"
+version = "0.2.157"
+target = "host"
+description = "Hashtree command-line tools"
+
+[package.commands]
+htree = "htree{exe}"
+git-remote-htree = "git-remote-htree{exe}"
+htree-cashu = "htree-cashu{exe}"
+
+[build]
+commands = [
+  ["cargo", "build", "--manifest-path", "rust/Cargo.toml", "--release", "--locked", "--target", "{target}", "--target-dir", "target/haps", "-p", "hashtree-cli", "-p", "git-remote-htree", "-p", "hashtree-cashu-cli", "--features", "hashtree-cli/fips-webrtc"],
+]
+
+[build.artifacts]
+"htree{exe}" = "target/haps/{target}/release/htree{exe}"
+"git-remote-htree{exe}" = "target/haps/{target}/release/git-remote-htree{exe}"
+"htree-cashu{exe}" = "target/haps/{target}/release/htree-cashu{exe}"
