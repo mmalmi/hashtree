@@ -49,7 +49,7 @@ Use the exact listed path or file index. `get` downloads only the pieces overlap
 
 ## Discovery and limits
 
-All listeners bind to `127.0.0.1:0` unless explicitly overridden. Use a reachable `--listen` address to seed publicly. There is no automatic UPnP, NAT-PMP, local-service discovery or DNS bootstrap.
+All listeners bind to `127.0.0.1:0` unless explicitly overridden. Outgoing TCP peers can still be reached. For public seeding, DHT, UDP trackers or uTP outside the local machine, select a suitable interface with `--listen 0.0.0.0:0` (IPv4) or `--listen '[::]:0'` (IPv6); UDP traffic uses this socket for outgoing connections too. Choose a fixed port when other peers need a stable address. There is no automatic UPnP, NAT-PMP, local-service discovery or DNS bootstrap.
 
 - `--peer <numeric-address:port>` provides an initial peer, including IPv6 addresses in brackets.
 - `--dht --bootstrap <numeric-address:port>` enables trackerless discovery with explicit bootstrap nodes. The session retains discovery while running. Built-in DNS bootstrap and torrent-supplied bootstrap nodes are not used.
