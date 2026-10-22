@@ -1,5 +1,5 @@
 use crate::ClientConfig;
-use anyhow::{ensure, Result};
+use anyhow::{bail, ensure, Context, Result};
 use async_trait::async_trait;
 use futures::{stream::FuturesUnordered, StreamExt};
 use hashtree_core::{Hash, Store, StoreError};
@@ -36,6 +36,27 @@ impl BlobStore {
     }
 
     async fn fetch(&self, server: &str, hash: &Hash) -> Result<Option<Vec<u8>>> {
+        // Keep credentials, query strings and private URL paths out of diagnostics.
+        let origin = reqwest::Url::parse(server)
+            .map(|url| url.origin().ascii_serialization())
+            .unwrap_or_else(|_| "invalid source URL".into());
+        let context = || format!("Hashtree block {} from {origin}", hex::encode(hash));
+        match self.fetch_once(server, hash).await {
+            Err(error)
+                if error.downcast_ref::<reqwest::Error>().is_some_and(|error| {
+                    error.is_connect() || error.is_timeout() || error.is_body() || error.is_decode()
+                }) =>
+            {
+                // A partial response is never cached. Retry just this source once;
+                // the other hedged sources remain free to finish first.
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                self.fetch_once(server, hash).await.with_context(context)
+            }
+            result => result.with_context(context),
+        }
+    }
+
+    async fn fetch_once(&self, server: &str, hash: &Hash) -> Result<Option<Vec<u8>>> {
         let response = self
             .http
             .get(format!(
@@ -44,11 +65,14 @@ impl BlobStore {
                 hex::encode(hash)
             ))
             .send()
-            .await?;
+            .await
+            .map_err(reqwest::Error::without_url)?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let response = response.error_for_status()?;
+        let response = response
+            .error_for_status()
+            .map_err(reqwest::Error::without_url)?;
         ensure!(
             response.status().is_success(),
             "unexpected Hashtree HTTP status: {}",
@@ -63,7 +87,7 @@ impl BlobStore {
         let mut body = response.bytes_stream();
         let mut bytes = Vec::new();
         while let Some(part) = body.next().await {
-            let part = part?;
+            let part = part.map_err(reqwest::Error::without_url)?;
             ensure!(
                 bytes.len().saturating_add(part.len()) <= MAX_BLOCK,
                 "oversized Hashtree block"
@@ -96,7 +120,7 @@ impl BlobStore {
                 self.fetch(server, hash).await
             });
         }
-        let mut error = None;
+        let mut errors = Vec::new();
         while let Some(result) = pending.next().await {
             match result {
                 Ok(Some(bytes)) => {
@@ -104,11 +128,11 @@ impl BlobStore {
                     return Ok(Some(bytes));
                 }
                 Ok(None) => {}
-                Err(e) => error = Some(e),
+                Err(error) => errors.push(format!("{error:#}")),
             }
         }
-        if let Some(e) = error {
-            return Err(e);
+        if !errors.is_empty() {
+            bail!("all Hashtree content sources failed: {}", errors.join("; "));
         }
         Ok(None)
     }
@@ -119,7 +143,7 @@ impl Store for BlobStore {
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         self.retrieve(hash)
             .await
-            .map_err(|e| StoreError::Other(e.to_string()))
+            .map_err(|e| StoreError::Other(format!("{e:#}")))
     }
     async fn put(&self, hash: Hash, bytes: Vec<u8>) -> Result<bool, StoreError> {
         verify(&hash, &bytes).map_err(|e| StoreError::Other(e.to_string()))?;
