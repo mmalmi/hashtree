@@ -1,0 +1,32 @@
+name: Prepare Linux FUSE qualification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build only the FUSE library test executable
+        working-directory: rust
+        run: |
+          cargo test --locked -p hashtree-fuse --features fuse --lib --no-run --message-format=json > fuse-build.jsonl
+      - name: Seal executable provenance and loader requirements
+        run: python3 rust/scripts/seal_fuse_test.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fuse-native-${{ github.sha }}
+          path: fuse-native/
+          retention-days: 7
+          if-no-files-found: error

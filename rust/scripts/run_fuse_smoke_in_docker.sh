@@ -101,7 +101,7 @@ if ! getent passwd "${HOST_UID}" >/dev/null; then
 fi
 user_name="$(getent passwd "${HOST_UID}" | cut -d: -f1 | head -n1)"
 chown "${HOST_UID}:${HOST_GID}" /cargo-home /work/rust/target
-su "${user_name}" -s /bin/sh -c 'export CARGO_HOME=/cargo-home RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH && cd /work/rust && cargo test --locked -p hashtree-fuser --lib --test integration_tests -- --nocapture && cargo test --locked -p hashtree-cli --features fuse --test fuse_mount_smoke -- --nocapture'
+su "${user_name}" -s /bin/sh -c 'export CARGO_HOME=/cargo-home RUSTUP_HOME=/usr/local/rustup PATH=/usr/local/cargo/bin:$PATH HTREE_REQUIRE_FUSE_SMOKE=1 && cd /work/rust && test -r /dev/fuse && test -w /dev/fuse && command -v fusermount3 && cargo test --locked -p hashtree-fuser --no-default-features --features abi-7-18 --lib --test integration_tests -- --nocapture && cargo test --locked -p hashtree-fuse --features fuse --lib --no-run && timeout --foreground 120s cargo test --locked -p hashtree-fuse --features fuse --lib linux_mount_tests::real_mount_crud_remote_root_and_remount -- --ignored --exact --nocapture && cargo test --locked -p hashtree-cli --features fuse --test fuse_mount_smoke -- --nocapture'
 EOF
 
 "$DOCKER_BIN" run --rm \

@@ -18,7 +18,15 @@ serde_json.workspace = true
 default = []
 fuse = ["dep:fuser", "dep:libc"]
 
-[dependencies.fuser]
+[target.'cfg(target_os = "linux")'.dependencies.fuser]
+package = "hashtree-fuser"
+version = "=0.14.0-hashtree.1"
+path = "../../vendor/fuser"
+optional = true
+default-features = false
+features = ["abi-7-12", "abi-7-18"]
+
+[target.'cfg(not(target_os = "linux"))'.dependencies.fuser]
 package = "hashtree-fuser"
 version = "=0.14.0-hashtree.1"
 path = "../../vendor/fuser"

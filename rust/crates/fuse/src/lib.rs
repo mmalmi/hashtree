@@ -9,6 +9,9 @@ use hashtree_core::{
 };
 use thiserror::Error;
 
+#[cfg(all(test, feature = "fuse", target_os = "linux"))]
+mod linux_mount_tests;
+
 pub const ROOT_INODE: u64 = 1;
 // Virtual entry used only to wake Linux directory monitors after remote root updates.
 pub const DIRECTORY_REFRESH_SENTINEL_NAME: &str = "iris-drive-refresh";
