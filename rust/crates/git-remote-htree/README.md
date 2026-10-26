@@ -2,6 +2,9 @@
 
 Git remote helper for hashtree - push/pull git repos via Nostr and hashtree.
 
+For a first push, independent clone, and agent setup, start with
+[Git for humans and agents](../../../docs/agents.md).
+
 ## Installation
 
 ```bash
