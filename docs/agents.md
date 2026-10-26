@@ -11,10 +11,10 @@ plugin. It uses a POSIX shell on macOS or Linux.
 
 ## Install
 
-Install the prebuilt `htree` CLI and Git helper:
+Install the prebuilt `htree` CLI and Git helper (this example pins `v0.2.150`):
 
 ```sh
-curl -fsSL https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhashtree/latest/install.sh -o /tmp/install-hashtree.sh
+curl -fsSL https://github.com/mmalmi/hashtree/releases/download/v0.2.150/install.sh -o /tmp/install-hashtree.sh
 # Inspect the installer, then run it:
 sh /tmp/install-hashtree.sh
 export PATH="$HOME/.local/bin:$PATH"

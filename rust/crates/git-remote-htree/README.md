@@ -7,11 +7,17 @@ For a first push, independent clone, and agent setup, start with
 
 ## Installation
 
+Install the prebuilt binaries from a [CLI release](https://github.com/mmalmi/hashtree/releases/tag/v0.2.150). This example pins version `v0.2.150`:
+
 ```bash
-curl -fsSL https://upload.iris.to/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/releases%2Fhashtree/latest/install.sh | sh
+curl -fsSL https://github.com/mmalmi/hashtree/releases/download/v0.2.150/install.sh -o /tmp/install-hashtree.sh
+# Inspect the installer, then run it:
+sh /tmp/install-hashtree.sh
 ```
 
-That installs `htree`, `htree-cashu`, and `git-remote-htree` into `~/.local/bin` by default. Prebuilt macOS release binaries intentionally omit FUSE mount support so `htree` still runs on machines without macFUSE installed. Linux prebuilt binaries keep FUSE mount support. For a system-wide install, pass a target directory, for example `sh -s -- /usr/local/bin`.
+That installs `htree`, `htree-cashu`, and `git-remote-htree` into `~/.local/bin` by default. Prebuilt macOS release binaries intentionally omit FUSE mount support so `htree` still runs on machines without macFUSE installed. Linux prebuilt binaries keep FUSE mount support. For a system-wide install, pass a target directory, for example `sh /tmp/install-hashtree.sh /usr/local/bin`.
+
+For another version, select a CLI `vX.Y.Z` release from the [release list](https://github.com/mmalmi/hashtree/releases) and replace the version in the URL. The repository's `latest` release can refer to a TypeScript package instead of the CLI.
 
 Windows note: this shell bootstrap is not supported on Windows. Download the latest `hashtree-x86_64-pc-windows-msvc.zip` release asset, extract it, and add `htree.exe`, `htree-cashu.exe`, and `git-remote-htree.exe` to your PATH. The Windows release zip does not include FUSE mount support.
 
