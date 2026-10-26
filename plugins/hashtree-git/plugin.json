@@ -2,9 +2,9 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "hashtree-git",
   "description": "Publish, clone, and collaborate on Git repositories through Hashtree using local keys and ordinary Git commands. No hosting account, email verification, or phone number is required.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
-    "name": "Hashtree contributors",
+    "name": "Sirius Business Ltd",
     "url": "https://git.iris.to/"
   },
   "homepage": "https://git.iris.to/",
@@ -24,7 +24,7 @@
         "displayName": "Hashtree Git",
         "shortDescription": "Git without hosting accounts",
         "longDescription": "Publish, clone, and collaborate on Git repositories through Hashtree using local keys and ordinary Git commands. No hosting account, email verification, or phone number is required. Requires the command line tool on the execution host; the plugin provides instructions and does not install software or change settings by itself.",
-        "developerName": "Hashtree contributors",
+        "developerName": "Sirius Business Ltd",
         "category": "Developer Tools",
         "capabilities": [],
         "websiteURL": "https://git.iris.to/",

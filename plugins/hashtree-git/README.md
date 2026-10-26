@@ -73,6 +73,19 @@ servers, and peers. A push publishes the selected repository with its chosen
 visibility. The plugin does not inspect secret-key files; the CLI manages keys.
 An optional Hashtree daemon keeps serving until stopped. No telemetry is added.
 
+## Versions and updates
+
+The plugin and Hashtree CLIs have separate versions. Plugin installation and
+updates do not upgrade `htree` or `git-remote-htree`. A fresh `latest`/unpinned setup uses that channel's current
+release; existing binaries change only through a separate upgrade. Preserve
+the identity and data directories when upgrading.
+
+A compatible CLI release needs no plugin update while the documented commands,
+JSON fields, permissions, and setup still work. When instructions or package
+metadata change, bump both manifests' `version` together, validate, and publish
+a new ZIP or catalog revision. Catalog review and each client's update settings
+govern delivery; changing the repository does not update every installed copy.
+
 ## Package and validate
 
 From a committed checkout, create a small distribution ZIP without app sources,

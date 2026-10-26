@@ -1,9 +1,9 @@
 {
   "name": "hashtree-git",
   "description": "Publish, clone, and collaborate on Git repositories through Hashtree using local keys and ordinary Git commands. No hosting account, email verification, or phone number is required.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": {
-    "name": "Hashtree contributors",
+    "name": "Sirius Business Ltd",
     "url": "https://git.iris.to/"
   },
   "homepage": "https://git.iris.to/",
