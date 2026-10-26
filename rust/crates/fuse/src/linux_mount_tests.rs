@@ -101,7 +101,7 @@ fn real_mount_crud_remote_root_and_remount() {
     let remounted = Mounted::new(filesystem.clone(), &directory.0);
     assert_eq!(fs::read(directory.0.join("added.txt")).unwrap(), b"remote");
     drop(remounted);
-    assert!(fuser::Session::new(filesystem, directory.0.join("missing"), &[]).is_err());
+    assert!(fuser::Session::new(filesystem, &directory.0.join("missing"), &[]).is_err());
     fs::remove_dir(&directory.0).expect("owned mount directory removed after normal unmount");
     println!("FUSE_NATIVE_ACCEPTANCE: crud=pass remote_root=pass remount=pass errors=pass normal_unmount=pass owned_mount_directory_removed=true");
 }

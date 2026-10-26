@@ -21,7 +21,7 @@ jobs:
       - name: Build only the FUSE library test executable
         working-directory: rust
         run: |
-          cargo test --locked -p hashtree-fuse --features fuse --lib --no-run --message-format=json > fuse-build.jsonl
+          cargo test --locked -p hashtree-fuse --features fuse --lib --no-run --message-format=json-render-diagnostics > fuse-build.jsonl
       - name: Seal executable provenance and loader requirements
         run: python3 rust/scripts/seal_fuse_test.py
       - uses: actions/upload-artifact@v4
