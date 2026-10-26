@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Iris Git">
+  <rect width="512" height="512" rx="120" fill="#050507"/>
+  <path fill="none" stroke="#f3f6ef" stroke-linecap="round" stroke-linejoin="round" stroke-width="34" d="M186 152v208m0-112h140m0 0v112"/>
+  <circle cx="186" cy="152" r="44" fill="#63e8b6"/>
+  <circle cx="186" cy="360" r="44" fill="#f3f6ef"/>
+  <circle cx="326" cy="248" r="44" fill="#63e8b6"/>
+  <circle cx="326" cy="360" r="44" fill="#f3f6ef"/>
+</svg>

@@ -1,0 +1,16 @@
+{
+  "name": "hashtree-plugins",
+  "owner": {
+    "name": "Hashtree contributors"
+  },
+  "plugins": [
+    {
+      "name": "hashtree-git",
+      "source": "./plugins/hashtree-git",
+      "description": "Publish, clone, and collaborate on Git repositories through Hashtree using local keys and ordinary Git commands. No hosting account, email verification, or phone number is required."
+    }
+  ],
+  "metadata": {
+    "description": "Permissionless Git publishing and collaboration with Hashtree."
+  }
+}

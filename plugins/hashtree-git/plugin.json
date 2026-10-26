@@ -1,0 +1,37 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "hashtree-git",
+  "description": "Publish, clone, and collaborate on Git repositories through Hashtree using local keys and ordinary Git commands. No hosting account, email verification, or phone number is required.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Hashtree contributors",
+    "url": "https://git.iris.to/"
+  },
+  "homepage": "https://git.iris.to/",
+  "repository": "https://github.com/mmalmi/hashtree",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "permissionless",
+    "nostr",
+    "hashtree-git"
+  ],
+  "extensions": {
+    "com.openai": {
+      "requires_local_executor": true,
+      "onboardingSkill": "./skills/hashtree-git/SKILL.md",
+      "interface": {
+        "displayName": "Hashtree Git",
+        "shortDescription": "Git without hosting accounts",
+        "longDescription": "Publish, clone, and collaborate on Git repositories through Hashtree using local keys and ordinary Git commands. No hosting account, email verification, or phone number is required. Requires the command line tool on the execution host; the plugin provides instructions and does not install software or change settings by itself.",
+        "developerName": "Hashtree contributors",
+        "category": "Developer Tools",
+        "capabilities": [],
+        "websiteURL": "https://git.iris.to/",
+        "defaultPrompt": "Help me publish a Git repository with Hashtree and verify that it can be cloned.",
+        "logo": "./skills/hashtree-git/assets/icon.svg",
+        "composerIcon": "./skills/hashtree-git/assets/icon.svg"
+      }
+    }
+  }
+}

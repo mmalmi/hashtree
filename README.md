@@ -11,7 +11,7 @@ servers or peers, and published under immutable hashes or mutable Nostr names.
 Publish, clone, and share repositories with ordinary Git commands. Humans and
 agents generate their own keys; no email, phone number, or provider signup is
 required. Start with the [first push and independent clone](docs/agents.md), or
-install the [agent plugin](docs/agent-plugin.md).
+install the [agent plugin](plugins/hashtree-git/README.md).
 
 ## TypeScript / JavaScript
 

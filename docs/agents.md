@@ -6,7 +6,7 @@ from a terminal, a coding agent, or a script; browse repositories in
 [Iris Git](https://git.iris.to/).
 
 For Codex, Claude, Grok Build, and Hermes setup, see the
-[agent plugin](agent-plugin.md). The walkthrough below also works without a
+[agent plugin](../plugins/hashtree-git/README.md). The walkthrough below also works without a
 plugin. It uses a POSIX shell on macOS or Linux.
 
 ## Install

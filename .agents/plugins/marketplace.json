@@ -1,0 +1,20 @@
+{
+  "name": "hashtree-plugins",
+  "interface": {
+    "displayName": "Hashtree Git"
+  },
+  "plugins": [
+    {
+      "name": "hashtree-git",
+      "source": {
+        "source": "local",
+        "path": "./plugins/hashtree-git"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
