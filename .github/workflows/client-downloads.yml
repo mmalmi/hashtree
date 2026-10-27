@@ -2,6 +2,10 @@ name: Verify client downloads
 
 on:
   workflow_dispatch:
+    inputs:
+      package:
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -20,4 +24,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Test bounded downloads and integrity checks
         working-directory: rust
+        if: ${{ !inputs.package }}
         run: cargo test --locked -p hashtree-client --test downloads
+      - name: Verify registry package downloads
+        if: inputs.package
+        working-directory: rust
+        run: |
+          cargo package --locked -p hashtree-client --no-verify
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("crates/hashtree-client/Cargo.toml", "rb"))["package"]["version"])')
+          mkdir target/client-registry-verification
+          tar -xzf "target/package/hashtree-client-$version.crate" -C target/client-registry-verification
+          CARGO_TARGET_DIR="$PWD/target" cargo test --locked --manifest-path "target/client-registry-verification/hashtree-client-$version/Cargo.toml" --test downloads
+          sha256sum "target/package/hashtree-client-$version.crate" > target/package/client-package.sha256
+          rustc -vV > target/package/client-toolchain.txt
+          git rev-parse HEAD > target/package/client-source.txt
+      - uses: actions/upload-artifact@v4
+        if: inputs.package
+        with:
+          name: client-package-${{ github.sha }}
+          path: |
+            rust/target/package/hashtree-client-*.crate
+            rust/target/package/client-package.sha256
+            rust/target/package/client-toolchain.txt
+            rust/target/package/client-source.txt
+          retention-days: 7
+          if-no-files-found: error
