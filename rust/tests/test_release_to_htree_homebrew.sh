@@ -188,7 +188,7 @@ cat >"${TMPDIR}/bin/haps" <<'EOF'
 #!/bin/bash
 set -euo pipefail
 echo "haps:$*" >>"${TEST_LOG_DIR}/calls.log"
-[[ "$*" != *"${FAIL_HAPS_PHASE:-not-a-phase}"* ]]
+[[ "${!#}" != "${FAIL_HAPS_PHASE:-not-a-phase}" ]]
 EOF
 chmod +x "${TMPDIR}/bin/haps"
 
@@ -201,6 +201,12 @@ PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" \
 
 grep -F "htree_add:${TMPDIR}/release-stage" "${TMPDIR}/logs/calls.log" >/dev/null
 grep -E '^haps:import-release .* --publish$' "${TMPDIR}/logs/calls.log" >/dev/null
+check_line="$(grep -nE '^haps:.* --check$' "${TMPDIR}/logs/calls.log" | cut -d: -f1)"
+source_line="$(grep -nE '^haps:.* --publish-source$' "${TMPDIR}/logs/calls.log" | cut -d: -f1)"
+add_line="$(grep -n '^htree_add:' "${TMPDIR}/logs/calls.log" | cut -d: -f1)"
+test "$check_line" -lt "$source_line"
+test "$source_line" -lt "$add_line"
+grep -F -- "--config ${SOURCE_REPO}/haps-release.json" "${TMPDIR}/logs/calls.log" >/dev/null
 test -f "${TMPDIR}/release-stage/release.json"
 test -f "${TMPDIR}/release-stage/notes.md"
 test -f "${TMPDIR}/release-stage/install.sh"
@@ -377,7 +383,7 @@ if grep -F "install_matrix:" "${TMPDIR}/logs/calls.log" >/dev/null; then
 fi
 
 grep -E '^haps:import-release .* --check$' "${TMPDIR}/logs/calls.log" >/dev/null
-for phase in --check --publish; do
+for phase in --check --publish-source --publish; do
     : >"${TMPDIR}/logs/calls.log"
     if PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" FAIL_HAPS_PHASE="$phase" \
         "${REPO_ROOT}/rust/scripts/release_to_htree.sh" --version v0.2.3 \
@@ -386,8 +392,8 @@ for phase in --check --publish; do
         echo "Haps failure must fail release" >&2
         exit 1
     fi
-    if [ "$phase" = --check ]; then
-        ! grep -q '^htree_add:' "${TMPDIR}/logs/calls.log"
+    if [ "$phase" != --publish ]; then
+        ! grep -Eq '^(htree_add:|htree_push:|publish_release:|publish_tap:|cargo_publish:)' "${TMPDIR}/logs/calls.log"
     else
         grep -q '^publish_release:' "${TMPDIR}/logs/calls.log"
     fi

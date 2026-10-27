@@ -330,8 +330,12 @@ fi
 
 node "${STAGE_ARGS[@]}"
 
-HAPS_ARGS=(import-release "$RELEASE_STAGE_DIR" --config "$REPO_DIR/haps-release.json" --tag "$VERSION")
+HAPS_ARGS=(import-release "$RELEASE_STAGE_DIR" --config "$BUILD_REPO_DIR/haps-release.json" --tag "$VERSION")
 haps "${HAPS_ARGS[@]}" --check
+
+# Publish and cold-verify the pinned source before exposing binary assets.
+# Unsupported Haps versions must stop the release here.
+haps "${HAPS_ARGS[@]}" --publish-source
 
 release_cid="$(
     cd "$REPO_DIR"

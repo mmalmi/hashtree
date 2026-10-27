@@ -154,6 +154,9 @@ case "${1:-}" in
         echo "htree_add:$2" >>"${TEST_LOG_DIR}/calls.log"
         printf '  url: nhash1release\n'
         ;;
+    push)
+        echo "htree_push:$*" >>"${TEST_LOG_DIR}/calls.log"
+        ;;
     user)
         printf 'npub1qqqqqqqqqqqqqqqqqqqqq\n'
         ;;
@@ -164,6 +167,13 @@ case "${1:-}" in
 esac
 EOF
 chmod +x "${TMPDIR}/bin/htree"
+
+cat >"${TMPDIR}/bin/haps" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+echo "haps:$*" >>"${TEST_LOG_DIR}/calls.log"
+EOF
+chmod +x "${TMPDIR}/bin/haps"
 
 STDOUT_FILE="${TMPDIR}/release_to_htree_windows.stdout"
 STDERR_FILE="${TMPDIR}/release_to_htree_windows.stderr"
