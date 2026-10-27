@@ -3,6 +3,9 @@ name: Verify client downloads
 on:
   workflow_dispatch:
     inputs:
+      source_commit:
+        type: string
+        default: ""
       source:
         type: boolean
         default: false
@@ -22,7 +25,7 @@ permissions:
 jobs:
   downloads:
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: ${{ inputs.source && 35 || 15 }}
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -45,14 +48,16 @@ jobs:
         if: inputs.source
         with:
           repository: mmalmi/haps
-          ref: 56caf4f6d90a0b7af46b9a5cbbde31b1d302f840
+          ref: 57560d8cd0371493855a4d76c3e96213456fe080
           path: source-verifier
           persist-credentials: false
       - name: Verify public source from an empty cache
         if: inputs.source
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit || github.sha }}
         run: |
           python3 source-verifier/scripts/bundle.py --target x86_64-unknown-linux-gnu --destination "$RUNNER_TEMP/source-tools" --cache "$RUNNER_TEMP/source-tools-cache"
-          python3 source-verifier/scripts/verify-public-source.py --config haps-release.json --commit "$GITHUB_SHA" --helpers "$RUNNER_TEMP/source-tools/libexec"
+          python3 source-verifier/scripts/verify-public-source.py --config haps-release.json --commit "$SOURCE_COMMIT" --helpers "$RUNNER_TEMP/source-tools/libexec" --clone-timeout 1800
       - name: Verify resolver registry package
         if: inputs.resolver_package
         working-directory: rust
