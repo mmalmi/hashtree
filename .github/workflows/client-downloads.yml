@@ -32,9 +32,9 @@ jobs:
         run: |
           cargo package --locked -p hashtree-client --no-verify
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("crates/hashtree-client/Cargo.toml", "rb"))["package"]["version"])')
-          mkdir target/client-registry-verification
-          tar -xzf "target/package/hashtree-client-$version.crate" -C target/client-registry-verification
-          CARGO_TARGET_DIR="$PWD/target" cargo test --locked --manifest-path "target/client-registry-verification/hashtree-client-$version/Cargo.toml" --test downloads
+          mkdir "$RUNNER_TEMP/client-registry-verification"
+          tar -xzf "target/package/hashtree-client-$version.crate" -C "$RUNNER_TEMP/client-registry-verification"
+          CARGO_TARGET_DIR="$PWD/target" cargo test --locked --manifest-path "$RUNNER_TEMP/client-registry-verification/hashtree-client-$version/Cargo.toml" --test downloads
           sha256sum "target/package/hashtree-client-$version.crate" > target/package/client-package.sha256
           rustc -vV > target/package/client-toolchain.txt
           git rev-parse HEAD > target/package/client-source.txt
