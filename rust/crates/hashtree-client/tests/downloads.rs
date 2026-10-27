@@ -16,6 +16,8 @@ const PAYLOAD: &[u8] = b"verified block contents";
 
 #[derive(Clone, Copy)]
 enum Behavior {
+    ResetFirst,
+    ResetAlways,
     TruncateFirst,
     TruncateAlways,
     Corrupt,
@@ -50,6 +52,15 @@ impl TestServer {
                     assert!(request.len() < 8192);
                 }
                 let attempt = count.fetch_add(1, Ordering::SeqCst);
+                if matches!(behavior, Behavior::ResetAlways)
+                    || matches!(behavior, Behavior::ResetFirst) && attempt == 0
+                {
+                    // Abort after reading the request but before sending headers.
+                    #[allow(deprecated)]
+                    socket.set_linger(Some(Duration::ZERO)).unwrap();
+                    drop(socket);
+                    continue;
+                }
                 let code = match behavior {
                     Behavior::StatusAlways(code) => code,
                     Behavior::StatusFirst(code) if attempt == 0 => code,
@@ -61,6 +72,9 @@ impl TestServer {
                         (status_error.as_str(), &b""[..], 0)
                     }
                     Behavior::StatusFirst(_) | Behavior::StatusAlways(_) => {
+                        ("200 OK", PAYLOAD, PAYLOAD.len())
+                    }
+                    Behavior::ResetFirst | Behavior::ResetAlways => {
                         ("200 OK", PAYLOAD, PAYLOAD.len())
                     }
                     Behavior::Oversized => ("200 OK", &b""[..], 4 * 1024 * 1024 + 1),
@@ -239,4 +253,25 @@ async fn a_healthy_hedged_source_can_finish_during_retry_backoff() {
     assert!(failing.reads.load(Ordering::SeqCst) <= 2);
     failing.stop().await;
     healthy.stop().await;
+}
+
+#[tokio::test]
+async fn request_reset_before_headers_recovers_once_and_caches_verified_bytes() {
+    let server = TestServer::start(Behavior::ResetFirst).await;
+    let temp = tempfile::tempdir().unwrap();
+    let store = BlobStore::new(temp.path(), config(vec![server.url.clone()])).unwrap();
+    assert_eq!(store.get(&sha256(PAYLOAD)).await.unwrap().unwrap(), PAYLOAD);
+    assert_eq!(server.reads.load(Ordering::SeqCst), 2);
+    server.stop().await;
+    assert_eq!(store.get(&sha256(PAYLOAD)).await.unwrap().unwrap(), PAYLOAD);
+}
+
+#[tokio::test]
+async fn request_reset_before_headers_has_a_finite_retry_budget() {
+    let server = TestServer::start(Behavior::ResetAlways).await;
+    let temp = tempfile::tempdir().unwrap();
+    let store = BlobStore::new(temp.path(), config(vec![server.url.clone()])).unwrap();
+    assert!(store.get(&sha256(PAYLOAD)).await.is_err());
+    assert_eq!(server.reads.load(Ordering::SeqCst), 2);
+    server.stop().await;
 }

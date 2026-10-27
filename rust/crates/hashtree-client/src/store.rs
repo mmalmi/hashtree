@@ -5,7 +5,7 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use hashtree_core::{Hash, Store, StoreError};
 use hashtree_fs::FsBlobStore;
 use sha2::{Digest, Sha256};
-use std::{path::Path, time::Duration};
+use std::{error::Error, io::ErrorKind, path::Path, time::Duration};
 
 const MAX_BLOCK: usize = 4 * 1024 * 1024;
 
@@ -21,6 +21,35 @@ fn verify(hash: &Hash, bytes: &[u8]) -> Result<()> {
         "invalid Hashtree block hash or size"
     );
     Ok(())
+}
+
+fn transient_http_error(error: &reqwest::Error) -> bool {
+    if error.is_connect()
+        || error.is_timeout()
+        || error.is_body()
+        || error.is_decode()
+        || error.status().is_some_and(|status| {
+            status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        })
+    {
+        return true;
+    }
+    // A connection can reset after connecting but before response headers.
+    // reqwest reports this as a request error, not necessarily is_connect().
+    // Inspect typed causes rather than retrying all request/protocol failures.
+    let mut cause = error.source();
+    while let Some(error) = cause {
+        if error.downcast_ref::<std::io::Error>().is_some_and(|io| {
+            matches!(
+                io.kind(),
+                ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::BrokenPipe
+            )
+        }) {
+            return true;
+        }
+        cause = error.source();
+    }
+    false
 }
 
 impl BlobStore {
@@ -43,16 +72,9 @@ impl BlobStore {
         let context = || format!("Hashtree block {} from {origin}", hex::encode(hash));
         match self.fetch_once(server, hash).await {
             Err(error)
-                if error.downcast_ref::<reqwest::Error>().is_some_and(|error| {
-                    error.is_connect()
-                        || error.is_timeout()
-                        || error.is_body()
-                        || error.is_decode()
-                        || error.status().is_some_and(|status| {
-                            status.is_server_error()
-                                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
-                        })
-                }) =>
+                if error
+                    .downcast_ref::<reqwest::Error>()
+                    .is_some_and(transient_http_error) =>
             {
                 // A partial response is never cached. Retry just this source once;
                 // the other hedged sources remain free to finish first.
