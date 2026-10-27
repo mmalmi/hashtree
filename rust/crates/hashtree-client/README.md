@@ -42,3 +42,8 @@ standalone relay URLs as a comma-separated list. Callers may instead provide
 The caller supplies a cache directory. This client never opens the daemon's
 database, starts a service, changes its configuration, or removes shared pins.
 Daemon cache entries may be evicted; caller-owned cached/installed bytes remain.
+
+Use `client.resolve_ready(&reference)` for interactive lookups: it returns the first
+usable signed root and uses `resolve_window` only as the maximum wait. Local
+discovery and configured relays run together. `resolve` retains its full
+observation window when callers need to collect newer roots before choosing.
