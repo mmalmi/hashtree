@@ -44,7 +44,14 @@ impl BlobStore {
         match self.fetch_once(server, hash).await {
             Err(error)
                 if error.downcast_ref::<reqwest::Error>().is_some_and(|error| {
-                    error.is_connect() || error.is_timeout() || error.is_body() || error.is_decode()
+                    error.is_connect()
+                        || error.is_timeout()
+                        || error.is_body()
+                        || error.is_decode()
+                        || error.status().is_some_and(|status| {
+                            status.is_server_error()
+                                || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+                        })
                 }) =>
             {
                 // A partial response is never cached. Retry just this source once;

@@ -20,6 +20,9 @@ enum Behavior {
     TruncateAlways,
     Corrupt,
     Missing,
+    Oversized,
+    StatusFirst(u16),
+    StatusAlways(u16),
 }
 
 struct TestServer {
@@ -47,7 +50,20 @@ impl TestServer {
                     assert!(request.len() < 8192);
                 }
                 let attempt = count.fetch_add(1, Ordering::SeqCst);
+                let code = match behavior {
+                    Behavior::StatusAlways(code) => code,
+                    Behavior::StatusFirst(code) if attempt == 0 => code,
+                    _ => 200,
+                };
+                let status_error = format!("{code} Test Status");
                 let (status, body, declared) = match behavior {
+                    Behavior::StatusFirst(_) | Behavior::StatusAlways(_) if code != 200 => {
+                        (status_error.as_str(), &b""[..], 0)
+                    }
+                    Behavior::StatusFirst(_) | Behavior::StatusAlways(_) => {
+                        ("200 OK", PAYLOAD, PAYLOAD.len())
+                    }
+                    Behavior::Oversized => ("200 OK", &b""[..], 4 * 1024 * 1024 + 1),
                     Behavior::Missing => ("404 Not Found", &b""[..], 0),
                     Behavior::Corrupt => ("200 OK", &b"wrong contents"[..], 14),
                     Behavior::TruncateAlways => ("200 OK", &PAYLOAD[..3], PAYLOAD.len()),
@@ -135,7 +151,7 @@ async fn persistent_body_failure_is_bounded_and_keeps_source_hash_and_cause() {
 
 #[tokio::test]
 async fn corrupt_blocks_and_definite_misses_are_not_retried() {
-    for behavior in [Behavior::Corrupt, Behavior::Missing] {
+    for behavior in [Behavior::Corrupt, Behavior::Missing, Behavior::Oversized] {
         let server = TestServer::start(behavior).await;
         let temp = tempfile::tempdir().unwrap();
         let store = BlobStore::new(temp.path(), config(vec![server.url.clone()])).unwrap();
@@ -149,6 +165,7 @@ async fn corrupt_blocks_and_definite_misses_are_not_retried() {
                 .to_string()
                 .contains("invalid Hashtree block hash or size")),
             Behavior::Missing => assert!(result.unwrap().is_none()),
+            Behavior::Oversized => assert!(result.unwrap_err().to_string().contains("oversized")),
             _ => unreachable!(),
         }
     }
@@ -179,4 +196,47 @@ async fn failures_retain_each_source_instead_of_only_the_last_error() {
         error.contains("end of file before message length reached"),
         "{error}"
     );
+}
+
+#[tokio::test]
+async fn transient_http_statuses_retry_once_and_cache_verified_success() {
+    for code in [429, 500, 502, 503, 504, 520] {
+        let server = TestServer::start(Behavior::StatusFirst(code)).await;
+        let temp = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(temp.path(), config(vec![server.url.clone()])).unwrap();
+        assert_eq!(store.get(&sha256(PAYLOAD)).await.unwrap().unwrap(), PAYLOAD);
+        assert_eq!(server.reads.load(Ordering::SeqCst), 2);
+        server.stop().await;
+        assert_eq!(store.get(&sha256(PAYLOAD)).await.unwrap().unwrap(), PAYLOAD);
+    }
+}
+
+#[tokio::test]
+async fn persistent_http_errors_have_a_bounded_retry_budget() {
+    for (code, attempts) in [(429, 2), (503, 2), (520, 2), (400, 1), (401, 1), (403, 1)] {
+        let server = TestServer::start(Behavior::StatusAlways(code)).await;
+        let temp = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(temp.path(), config(vec![server.url.clone()])).unwrap();
+        let error = store.get(&sha256(PAYLOAD)).await.unwrap_err().to_string();
+        assert!(error.contains(&code.to_string()), "{error}");
+        assert_eq!(server.reads.load(Ordering::SeqCst), attempts);
+        server.stop().await;
+    }
+}
+
+#[tokio::test]
+async fn a_healthy_hedged_source_can_finish_during_retry_backoff() {
+    let failing = TestServer::start(Behavior::StatusAlways(520)).await;
+    let healthy = TestServer::start(Behavior::StatusAlways(200)).await;
+    let temp = tempfile::tempdir().unwrap();
+    let store = BlobStore::new(
+        temp.path(),
+        config(vec![failing.url.clone(), healthy.url.clone()]),
+    )
+    .unwrap();
+    assert_eq!(store.get(&sha256(PAYLOAD)).await.unwrap().unwrap(), PAYLOAD);
+    assert_eq!(healthy.reads.load(Ordering::SeqCst), 1);
+    assert!(failing.reads.load(Ordering::SeqCst) <= 2);
+    failing.stop().await;
+    healthy.stop().await;
 }
