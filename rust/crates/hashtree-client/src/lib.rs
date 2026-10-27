@@ -156,6 +156,67 @@ impl Client {
             .context("Hashtree directory is missing")
     }
 
+    /// Return a usable signed root immediately; this does not promise the latest
+    /// root across every relay. Use `resolve` when an observation window is needed.
+    /// Local discovery and public relays run together; unsigned daemon responses
+    /// never supply the result. Quiet lookups end at the configured deadline.
+    pub async fn resolve_ready(&self, reference: &Reference) -> Result<Cid> {
+        let mut relays = if self.config.local_only {
+            Vec::new()
+        } else {
+            self.config.relays.clone()
+        };
+        let refresh_url = if let Some(daemon) = &self.config.daemon_url {
+            let mut url = reqwest::Url::parse(daemon)?;
+            let (publisher, name) = reference
+                .key
+                .split_once('/')
+                .context("invalid resolver key")?;
+            let mut refresh = url.clone();
+            refresh
+                .path_segments_mut()
+                .map_err(|_| anyhow::anyhow!("invalid daemon URL"))?
+                .extend(["api", "nostr", "resolve", publisher, name]);
+            refresh.set_query(Some("refresh=1"));
+            url.set_scheme("ws")
+                .map_err(|_| anyhow::anyhow!("invalid local daemon URL"))?;
+            url.set_path("/ws");
+            relays.insert(0, url.to_string());
+            Some(refresh)
+        } else {
+            ensure!(
+                !self.config.local_only,
+                "HTREE_LOCAL_DAEMON_ONLY requires a local htree daemon"
+            );
+            None
+        };
+        let resolver = NostrRootResolver::new(NostrResolverConfig {
+            relays,
+            resolve_timeout: self.config.resolve_window,
+            secret_key: None,
+        })
+        .await?;
+        let lookup = resolver.resolve_ready(&reference.key, self.config.resolve_window);
+        tokio::pin!(lookup);
+        let result = if let Some(url) = refresh_url {
+            tokio::select! {
+                result = &mut lookup => result,
+                _ = self.store.http.get(url).send() => lookup.await,
+            }
+        } else {
+            lookup.await
+        };
+        resolver.stop().await?;
+        let root = result?;
+        if reference.path.is_empty() {
+            return Ok(root);
+        }
+        self.tree()
+            .resolve(&root, &reference.path)
+            .await?
+            .context("Hashtree directory is missing")
+    }
+
     fn tree(&self) -> HashTree<BlobStore> {
         HashTree::new(HashTreeConfig::new(self.store.clone()))
     }

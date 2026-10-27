@@ -23,7 +23,9 @@ struct Fixture {
     reads: Arc<AtomicUsize>,
     corrupt: bool,
     primed: Arc<AtomicBool>,
+    prime_signal: Arc<tokio::sync::Notify>,
     require_prime: bool,
+    refresh_delay: Duration,
 }
 
 async fn ws(State(state): State<Fixture>, upgrade: WebSocketUpgrade) -> Response {
@@ -43,8 +45,17 @@ async fn ws(State(state): State<Fixture>, upgrade: WebSocketUpgrade) -> Response
                 .unwrap();
             // The client must keep observing after EOSE.
             tokio::time::sleep(Duration::from_millis(30)).await;
-            if state.require_prime && !state.primed.load(Ordering::SeqCst) {
-                continue;
+            if state.require_prime {
+                loop {
+                    let notified = state.prime_signal.notified();
+                    tokio::pin!(notified);
+                    // Register before checking so discovery cannot race this wait.
+                    notified.as_mut().enable();
+                    if state.primed.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    notified.await;
+                }
             }
             for event in &state.events {
                 if socket
@@ -86,7 +97,9 @@ async fn serve(fixture: Fixture) -> (String, tokio::task::JoinHandle<()>) {
         .route(
             "/api/nostr/resolve/:publisher/:tree",
             get(|State(state): State<Fixture>| async move {
+                tokio::time::sleep(state.refresh_delay).await;
                 state.primed.store(true, Ordering::SeqCst);
+                state.prime_signal.notify_waiters();
                 "{\"cid\":\"untrusted daemon hint\"}"
             }),
         )
@@ -142,7 +155,9 @@ async fn reads_the_same_signed_tree_standalone_and_through_a_daemon() -> anyhow:
         events: vec![event],
         reads: reads.clone(),
         primed: Arc::new(AtomicBool::new(false)),
+        prime_signal: Arc::new(tokio::sync::Notify::new()),
         require_prime: false,
+        refresh_delay: Duration::ZERO,
         corrupt: false,
     })
     .await;
@@ -193,13 +208,17 @@ async fn rejects_corrupt_blocks_and_can_use_another_verified_source() -> anyhow:
         events: vec![],
         reads: Arc::new(AtomicUsize::new(0)),
         primed: Arc::new(AtomicBool::new(false)),
+        prime_signal: Arc::new(tokio::sync::Notify::new()),
         require_prime: false,
+        refresh_delay: Duration::ZERO,
         corrupt: true,
     };
     let (bad, bad_task) = serve(fixture.clone()).await;
     let (good, good_task) = serve(Fixture {
         primed: Arc::new(AtomicBool::new(false)),
+        prime_signal: Arc::new(tokio::sync::Notify::new()),
         require_prime: false,
+        refresh_delay: Duration::ZERO,
         corrupt: false,
         ..fixture
     })
@@ -234,7 +253,9 @@ async fn local_only_never_falls_back_and_wrong_publisher_does_not_resolve() -> a
         events: vec![event],
         reads: Arc::new(AtomicUsize::new(0)),
         primed: Arc::new(AtomicBool::new(false)),
+        prime_signal: Arc::new(tokio::sync::Notify::new()),
         require_prime: false,
+        refresh_delay: Duration::ZERO,
         corrupt: false,
     })
     .await;
@@ -270,7 +291,9 @@ async fn cold_daemon_resolves_via_its_provider_but_only_signed_events_are_truste
         reads: Arc::new(AtomicUsize::new(0)),
         corrupt: false,
         primed: primed.clone(),
+        prime_signal: Arc::new(tokio::sync::Notify::new()),
         require_prime: true,
+        refresh_delay: Duration::from_millis(250),
     })
     .await;
     let reference = Reference::parse(&format!(
@@ -283,6 +306,103 @@ async fn cold_daemon_resolves_via_its_provider_but_only_signed_events_are_truste
     let client = Client::new(cfg, temp.path())?;
     assert_eq!(client.resolve(&reference).await?, expected);
     assert!(primed.load(Ordering::SeqCst));
+    primed.store(false, Ordering::SeqCst);
+    assert_eq!(client.resolve_ready(&reference).await?, expected);
+    assert!(primed.load(Ordering::SeqCst));
     task.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn ready_root_is_authenticated_and_does_not_wait_for_the_window() -> anyhow::Result<()> {
+    let keys = Keys::generate();
+    let root = hashtree_core::Cid::public([8; 32]);
+    let wrong = hashtree_core::Cid::public([9; 32]);
+    let valid =
+        NostrRootResolver::root_event_builder("packages", &root, None).sign_with_keys(&keys)?;
+    let mut invalid = valid.clone();
+    invalid.content.push_str("tampered");
+    let events = vec![
+        invalid,
+        NostrRootResolver::root_event_builder("packages", &wrong, None)
+            .sign_with_keys(&Keys::generate())?,
+        NostrRootResolver::root_event_builder("other", &wrong, None).sign_with_keys(&keys)?,
+        valid,
+    ];
+    let (url, task) = serve(Fixture {
+        store: Arc::new(MemoryStore::new()),
+        events,
+        reads: Arc::new(AtomicUsize::new(0)),
+        corrupt: false,
+        primed: Arc::new(AtomicBool::new(false)),
+        prime_signal: Arc::new(tokio::sync::Notify::new()),
+        require_prime: false,
+        refresh_delay: Duration::ZERO,
+    })
+    .await;
+    let reference = Reference::parse(&format!(
+        "htree://{}/packages",
+        keys.public_key().to_bech32()?
+    ))?;
+    let temp = tempfile::tempdir()?;
+    let mut cfg = config(None, vec![url.replace("http:", "ws:") + "/ws"], vec![]);
+    cfg.resolve_window = Duration::from_secs(10);
+    let client = Client::new(cfg, temp.path())?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), client.resolve_ready(&reference)).await??,
+        root
+    );
+    task.abort();
+    Ok(())
+}
+
+#[tokio::test]
+async fn ready_root_races_slow_local_refresh_and_respects_local_only() -> anyhow::Result<()> {
+    let keys = Keys::generate();
+    let root = hashtree_core::Cid::public([3; 32]);
+    let fixture = Fixture {
+        store: Arc::new(MemoryStore::new()),
+        events: vec![
+            NostrRootResolver::root_event_builder("packages", &root, None).sign_with_keys(&keys)?,
+        ],
+        reads: Arc::new(AtomicUsize::new(0)),
+        corrupt: false,
+        primed: Arc::new(AtomicBool::new(false)),
+        prime_signal: Arc::new(tokio::sync::Notify::new()),
+        require_prime: false,
+        refresh_delay: Duration::ZERO,
+    };
+    let (public, public_task) = serve(fixture.clone()).await;
+    let (local, local_task) = serve(Fixture {
+        events: vec![],
+        refresh_delay: Duration::from_secs(10),
+        ..fixture
+    })
+    .await;
+    let reference = Reference::parse(&format!(
+        "htree://{}/packages",
+        keys.public_key().to_bech32()?
+    ))?;
+    let temp = tempfile::tempdir()?;
+    let mut cfg = config(
+        Some(local),
+        vec![public.replace("http:", "ws:") + "/ws"],
+        vec![],
+    );
+    cfg.resolve_window = Duration::from_secs(10);
+    let client = Client::new(cfg.clone(), &temp.path().join("public"))?;
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), client.resolve_ready(&reference)).await??,
+        root
+    );
+    cfg.local_only = true;
+    cfg.resolve_window = Duration::from_millis(150);
+    let client = Client::new(cfg, &temp.path().join("local"))?;
+    let error = tokio::time::timeout(Duration::from_secs(2), client.resolve_ready(&reference))
+        .await?
+        .unwrap_err();
+    assert!(error.to_string().contains("Timed out"), "{error}");
+    public_task.abort();
+    local_task.abort();
     Ok(())
 }

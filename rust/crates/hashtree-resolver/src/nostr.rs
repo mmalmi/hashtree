@@ -1941,6 +1941,42 @@ mod tests {
         });
     }
 
+    #[tokio::test]
+    async fn test_ready_resolve_reobserves_and_removes_its_subscription() {
+        let keys = Keys::generate();
+        let root = Cid::public([6; 32]);
+        let relay = TestRelay::with_events(vec![NostrRootResolver::root_event_builder(
+            "ready", &root, None,
+        )
+        .sign_with_keys(&keys)
+        .unwrap()]);
+        let resolver = NostrRootResolver::new(NostrResolverConfig {
+            relays: vec![relay.url()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let key = format!("{}/ready", keys.public_key().to_bech32().unwrap());
+        for _ in 0..2 {
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                resolver.resolve_ready(&key, Duration::from_secs(10)),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(result, root);
+            assert!(resolver.client.subscriptions().await.is_empty());
+        }
+        let missing = format!("{}/missing", keys.public_key().to_bech32().unwrap());
+        assert!(resolver
+            .resolve_ready(&missing, Duration::from_millis(100))
+            .await
+            .is_err());
+        assert!(resolver.client.subscriptions().await.is_empty());
+        resolver.stop().await.unwrap();
+    }
+
     #[test]
     fn publish_succeeded_requires_at_least_one_successful_relay() {
         assert!(!publish_succeeded(0));

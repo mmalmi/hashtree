@@ -3,6 +3,9 @@ name: Verify client downloads
 on:
   workflow_dispatch:
     inputs:
+      ready:
+        type: boolean
+        default: false
       package:
         type: boolean
         default: false
@@ -26,6 +29,12 @@ jobs:
         working-directory: rust
         if: ${{ !inputs.package }}
         run: cargo test --locked -p hashtree-client --test downloads
+      - name: Test ready-root authentication and latency
+        if: inputs.ready
+        working-directory: rust
+        run: |
+          cargo test --locked -p hashtree-client --test transport
+          cargo test --locked -p hashtree-resolver --features nostr --lib test_ready_resolve
       - name: Verify registry package downloads
         if: inputs.package
         working-directory: rust

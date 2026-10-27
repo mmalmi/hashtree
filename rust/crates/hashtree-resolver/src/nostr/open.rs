@@ -7,6 +7,22 @@ impl NostrRootResolver {
     /// Unlike quick resolution, this does not use cached observations or a quorum
     /// shortcut. It closes only its own subscription before returning.
     pub async fn resolve_open(&self, key: &str, window: Duration) -> Result<Cid, ResolverError> {
+        self.observe_roots(key, window, false).await
+    }
+
+    /// Return the first usable authenticated root without waiting for EOSE or
+    /// a relay quorum. A quiet deadline is a timeout, never proof of absence.
+    /// Closes this lookup's subscription before returning.
+    pub async fn resolve_ready(&self, key: &str, timeout: Duration) -> Result<Cid, ResolverError> {
+        self.observe_roots(key, timeout, true).await
+    }
+
+    async fn observe_roots(
+        &self,
+        key: &str,
+        window: Duration,
+        ready: bool,
+    ) -> Result<Cid, ResolverError> {
         let (pubkey, tree_name) = Self::parse_key(key)?;
         if self.config.relays.is_empty() {
             return Err(ResolverError::Network(
@@ -58,6 +74,9 @@ impl NostrRootResolver {
                     is_newer_event(event.as_event(), current.created_at(), Some(current.id()))
                 }) {
                     latest = Some((event, cid));
+                    if ready {
+                        return Ok(());
+                    }
                 }
             }
         })
