@@ -56,7 +56,7 @@ fn cancelling_index_query_releases_read_and_blocking_runtime() {
             let query = tokio::spawn(async move {
                 let bus = HashtreeNostrIndexEventBus::new(
                     store,
-                    Some(Cid::new([1; 32])),
+                    Some(Cid::public([1; 32])),
                     EventSource::local_index("cancel-test"),
                 );
                 bus.query(vec![], QueryOptions::default()).await

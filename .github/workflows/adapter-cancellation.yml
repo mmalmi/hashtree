@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-          fetch-depth: 2
+          fetch-depth: 0
       - name: Install hash-pinned Rust
         run: |
           archive="$RUNNER_TEMP/rust.tar.xz"
@@ -31,7 +31,7 @@ jobs:
         run: |
           cp crates/hashtree-nostr-pubsub/src/lib.rs "$RUNNER_TEMP/fixed-adapter.rs"
           trap 'cp "$RUNNER_TEMP/fixed-adapter.rs" crates/hashtree-nostr-pubsub/src/lib.rs' EXIT
-          git show HEAD^:rust/crates/hashtree-nostr-pubsub/src/lib.rs > crates/hashtree-nostr-pubsub/src/lib.rs
+          git show 98c7b20b86b282c5424e954d1fba6b5ce2acc305:rust/crates/hashtree-nostr-pubsub/src/lib.rs > crates/hashtree-nostr-pubsub/src/lib.rs
           printf '\n#[cfg(test)]\nmod cancellation_tests;\n' >> crates/hashtree-nostr-pubsub/src/lib.rs
           if cargo test --locked -p hashtree-nostr-pubsub cancelling_index_query_releases_read_and_blocking_runtime > "$RUNNER_TEMP/regression.log" 2>&1; then
             cat "$RUNNER_TEMP/regression.log"
