@@ -1,0 +1,76 @@
+name: Git cached-root repair
+
+on:
+  push:
+    branches: [codex/git-cached-root-batch]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install hash-pinned Rust 1.99.1
+        run: |
+          archive="$RUNNER_TEMP/rust-1.99.1-x86_64-unknown-linux-gnu.tar.xz"
+          curl --fail --location --output "$archive" https://static.rust-lang.org/dist/rust-1.99.1-x86_64-unknown-linux-gnu.tar.xz
+          echo "231fcae47ee950621374725b5fc3b5441d2fbda2955ac45dd7dc816d8876cfe7  $archive" | sha256sum --check --strict
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/rust-1.99.1-x86_64-unknown-linux-gnu/install.sh" --prefix="$RUNNER_TEMP/rust-toolchain" --components=rustc,cargo,rust-std-x86_64-unknown-linux-gnu --disable-ldconfig
+          echo "$RUNNER_TEMP/rust-toolchain/bin" >> "$GITHUB_PATH"
+          echo "RUSTC=$RUNNER_TEMP/rust-toolchain/bin/rustc" >> "$GITHUB_ENV"
+      - name: Prove the regression against the previous repair loop
+        working-directory: rust
+        run: |
+          set -o pipefail
+          file=crates/git-remote-htree/src/helper/push.rs
+          cp "$file" "$RUNNER_TEMP/fixed-push.rs"
+          trap 'cp "$RUNNER_TEMP/fixed-push.rs" "$file"' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          path = Path('crates/git-remote-htree/src/helper/push.rs')
+          old = subprocess.check_output(['git', 'show', '73ca67a3441a503974a321b9d64ecd6174bf20c5:rust/' + str(path)], text=True)
+          old = old[old.index('    fn repair_delta_tree_build('):old.index('    /// Queue a push operation')]
+          old = old.replace('    fn repair_delta_tree_build(', '    pub(super) fn repair_delta_tree_build(', 1)
+          current = path.read_text()
+          start = current.index('    pub(super) fn repair_delta_tree_build(')
+          end = current.index('    /// Queue a push operation', start)
+          path.write_text(current[:start] + old + current[end:])
+          PY
+          cargo test --locked -p git-remote-htree --lib --no-run 2>&1 | tee "$RUNNER_TEMP/compile.log"
+          set +e
+          timeout 300 cargo test --locked -p git-remote-htree --lib packed_base_repair_batches_more_than_512_objects_and_preserves_diverged_refs -- --test-threads=1 > "$RUNNER_TEMP/old-repair.log" 2>&1
+          status=$?
+          set -e
+          cp "$RUNNER_TEMP/fixed-push.rs" "$file"
+          cat "$RUNNER_TEMP/old-repair.log"
+          test "$status" -eq 101
+          grep -F 'repair must not restart the entire merge for each missing object' "$RUNNER_TEMP/old-repair.log"
+      - name: Verify repair, history preservation and corrupt-object rejection
+        working-directory: rust
+        run: |
+          set -o pipefail
+          cargo test --locked -p git-remote-htree --lib helper::tests::cached_root_repair -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/cached-root-repair.log"
+          cargo test --locked -p git-remote-htree --lib helper::tests::hydration -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/hydration.log"
+          cargo test --locked -p git-remote-htree --lib helper::tests::local_rebuild -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/local-rebuild.log"
+          cargo test --locked -p git-remote-htree --lib helper::tests::closure_validation -- --test-threads=1 2>&1 | tee "$RUNNER_TEMP/closure-validation.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: git-repair-${{ github.sha }}
+          path: ${{ runner.temp }}/*.log
+          if-no-files-found: error
+          retention-days: 7
