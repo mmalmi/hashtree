@@ -3,6 +3,9 @@ name: Verify client downloads
 on:
   workflow_dispatch:
     inputs:
+      live_probe:
+        type: boolean
+        default: false
       characterize_timeout:
         type: boolean
         default: false
@@ -31,7 +34,7 @@ permissions:
 jobs:
   downloads:
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.source && 35 || 15 }}
+    timeout-minutes: ${{ (inputs.source || inputs.live_probe) && 35 || 15 }}
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -65,7 +68,7 @@ jobs:
           grep -F 'test result: FAILED. 0 passed; 2 failed;' "$RUNNER_TEMP/reset-before.log"
       - name: Test bounded downloads and integrity checks
         working-directory: rust
-        if: ${{ !inputs.package && !inputs.resolver_package && !inputs.source }}
+        if: ${{ !inputs.package && !inputs.resolver_package && !inputs.source && !inputs.live_probe }}
         env:
           CHARACTERIZE_TIMEOUT: ${{ inputs.characterize_timeout }}
         run: |
@@ -139,5 +142,19 @@ jobs:
             rust/target/package/client-package.sha256
             rust/target/package/client-toolchain.txt
             rust/target/package/client-source.txt
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Compare exact hosted block downloads
+        if: inputs.live_probe
+        working-directory: rust
+        run: |
+          git diff --exit-code cc1c73c1733bd14673bad6c87eae6829330b25cf HEAD -- crates/hashtree-client/src crates/hashtree-client/Cargo.toml Cargo.lock
+          python3 scripts/probe_client_downloads.py 2>&1 | tee "$RUNNER_TEMP/client-download-probe.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && inputs.live_probe
+        with:
+          name: client-download-probe-${{ github.sha }}
+          path: ${{ runner.temp }}/client-download-probe.log
           retention-days: 7
           if-no-files-found: error
