@@ -47,3 +47,12 @@ Use `client.resolve_ready(&reference)` for interactive lookups: it returns the f
 usable signed root and uses `resolve_window` only as the maximum wait. Local
 discovery and configured relays run together. `resolve` retains its full
 observation window when callers need to collect newer roots before choosing.
+
+Content reads use the shared Blossom configuration's combined, deduplicated
+legacy, read, and write servers. Empty lists select the shared defaults;
+`HTREE_LOCAL_DAEMON_ONLY=1` restricts network reads to the local daemon.
+
+The registry qualification workflow targets x86_64 Linux on the hosted Ubuntu
+24.04 image, using hash-pinned Rust 1.99.1 and locked Cargo dependencies. It
+assumes the runner's preinstalled linker, glibc, Git, Python, curl and archive
+tools; it does not claim a reproducible OS image or compiled application binary.

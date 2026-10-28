@@ -275,3 +275,19 @@ async fn request_reset_before_headers_has_a_finite_retry_budget() {
     assert_eq!(server.reads.load(Ordering::SeqCst), 2);
     server.stop().await;
 }
+
+#[tokio::test]
+async fn local_only_does_not_contact_configured_public_origins() {
+    let local = TestServer::start(Behavior::Missing).await;
+    let origin = TestServer::start(Behavior::StatusAlways(200)).await;
+    let temp = tempfile::tempdir().unwrap();
+    let mut cfg = config(vec![origin.url.clone()]);
+    cfg.daemon_url = Some(local.url.clone());
+    cfg.local_only = true;
+    let store = BlobStore::new(temp.path(), cfg).unwrap();
+    assert!(store.get(&sha256(PAYLOAD)).await.unwrap().is_none());
+    assert_eq!(local.reads.load(Ordering::SeqCst), 1);
+    assert_eq!(origin.reads.load(Ordering::SeqCst), 0);
+    local.stop().await;
+    origin.stop().await;
+}

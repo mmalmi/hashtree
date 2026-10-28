@@ -33,11 +33,19 @@ jobs:
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
           fetch-depth: 2
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install hash-pinned Rust 1.99.1
+        run: |
+          archive="$RUNNER_TEMP/rust-1.99.1-x86_64-unknown-linux-gnu.tar.xz"
+          curl --fail --location --output "$archive" https://static.rust-lang.org/dist/rust-1.99.1-x86_64-unknown-linux-gnu.tar.xz
+          echo "231fcae47ee950621374725b5fc3b5441d2fbda2955ac45dd7dc816d8876cfe7  $archive" | sha256sum --check --strict
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/rust-1.99.1-x86_64-unknown-linux-gnu/install.sh" --prefix="$RUNNER_TEMP/rust-toolchain" --components=rustc,cargo,rust-std-x86_64-unknown-linux-gnu --disable-ldconfig
+          echo "$RUNNER_TEMP/rust-toolchain/bin" >> "$GITHUB_PATH"
+          echo "RUSTC=$RUNNER_TEMP/rust-toolchain/bin/rustc" >> "$GITHUB_ENV"
       - name: Prove request-reset regression against prior implementation
         if: inputs.reset_regression
         working-directory: rust
@@ -62,7 +70,7 @@ jobs:
         run: |
           cargo test --locked -p hashtree-client --test transport
           cargo test --locked -p hashtree-resolver --features nostr --lib test_ready_resolve
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         if: inputs.source
         with:
           repository: mmalmi/haps
@@ -89,7 +97,7 @@ jobs:
           sha256sum "target/package/hashtree-resolver-$version.crate" > target/package/resolver-package.sha256
           rustc -vV > target/package/resolver-toolchain.txt
           git rev-parse HEAD > target/package/resolver-source.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: inputs.resolver_package
         with:
           name: resolver-package-${{ github.sha }}
@@ -108,11 +116,11 @@ jobs:
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("crates/hashtree-client/Cargo.toml", "rb"))["package"]["version"])')
           mkdir "$RUNNER_TEMP/client-registry-verification"
           tar -xzf "target/package/hashtree-client-$version.crate" -C "$RUNNER_TEMP/client-registry-verification"
-          CARGO_TARGET_DIR="$PWD/target" cargo test --locked --manifest-path "$RUNNER_TEMP/client-registry-verification/hashtree-client-$version/Cargo.toml" --test downloads --test transport
+          CARGO_TARGET_DIR="$PWD/target" cargo test --locked --manifest-path "$RUNNER_TEMP/client-registry-verification/hashtree-client-$version/Cargo.toml" --test downloads --test transport --test config
           sha256sum "target/package/hashtree-client-$version.crate" > target/package/client-package.sha256
           rustc -vV > target/package/client-toolchain.txt
           git rev-parse HEAD > target/package/client-source.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: inputs.package
         with:
           name: client-package-${{ github.sha }}

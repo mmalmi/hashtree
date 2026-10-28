@@ -66,8 +66,7 @@ impl ClientConfig {
                     .collect()
             })
             .unwrap_or(config.nostr.relays);
-        let mut read_servers = config.blossom.read_servers;
-        read_servers.extend(config.blossom.servers);
+        let read_servers = config.blossom.all_read_servers();
         Ok(Self {
             daemon_url: daemon_url.map(|s| s.trim_end_matches('/').to_string()),
             local_only,
