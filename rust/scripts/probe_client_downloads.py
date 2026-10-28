@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Compare exact public block routes; retain metrics, never execute fetched data."""
+import argparse
 import hashlib
 import json
 import os
@@ -12,6 +13,10 @@ BLOCKS = (
     '4111540f8bd9e8b342d92f1d3640e17cebb23fdc045a5d231fd563bdb4072743',
 )
 SERVERS = ('https://cdn.iris.to', 'https://upload.iris.to')
+parser = argparse.ArgumentParser()
+parser.add_argument('--manifest', default='Cargo.toml')
+parser.add_argument('--package', default='hashtree-client')
+args = parser.parse_args()
 print(subprocess.check_output(['curl', '--version'], text=True), flush=True)
 with tempfile.TemporaryDirectory(prefix='client-http-probe-') as temporary:
     for block in BLOCKS:
@@ -40,7 +45,7 @@ with tempfile.TemporaryDirectory(prefix='client-http-probe-') as temporary:
                     files=[dict(bytes=p.stat().st_size,
                                 hash_valid=hashlib.sha256(p.read_bytes()).hexdigest() == block)
                            if p.exists() else None for p in paths])), flush=True)
-subprocess.run(['cargo', 'tree', '--locked', '-p', 'hashtree-client', '-e', 'features',
+subprocess.run(['cargo', 'tree', '--locked', '--manifest-path', args.manifest, '-p', args.package, '-e', 'features',
                 '-i', 'reqwest@0.12.28'], check=True)
-subprocess.run(['cargo', 'run', '--locked', '-p', 'hashtree-client',
+subprocess.run(['cargo', 'run', '--locked', '--manifest-path', args.manifest, '-p', args.package,
                 '--example', 'download_probe'], check=True, timeout=1200)

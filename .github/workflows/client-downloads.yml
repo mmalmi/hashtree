@@ -145,12 +145,23 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        if: inputs.live_probe
+        with:
+          repository: mmalmi/haps
+          ref: 1cfbeabc68af89478670e95bd4d96a51704e88f7
+          path: haps-probe
+          persist-credentials: false
       - name: Compare exact hosted block downloads
         if: inputs.live_probe
         working-directory: rust
         run: |
-          git diff --exit-code cc1c73c1733bd14673bad6c87eae6829330b25cf HEAD -- crates/hashtree-client/src crates/hashtree-client/Cargo.toml Cargo.lock
-          python3 scripts/probe_client_downloads.py 2>&1 | tee "$RUNNER_TEMP/client-download-probe.log"
+          test "$(git -C ../haps-probe rev-parse HEAD)" = 1cfbeabc68af89478670e95bd4d96a51704e88f7
+          mkdir -p ../haps-probe/examples
+          cp crates/hashtree-client/examples/download_probe.rs ../haps-probe/examples/download_probe.rs
+          git -C ../haps-probe diff --exit-code -- Cargo.toml Cargo.lock
+          sha256sum ../haps-probe/Cargo.toml ../haps-probe/Cargo.lock
+          python3 scripts/probe_client_downloads.py --manifest ../haps-probe/Cargo.toml --package haps 2>&1 | tee "$RUNNER_TEMP/client-download-probe.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always() && inputs.live_probe
         with:
