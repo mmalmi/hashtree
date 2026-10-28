@@ -42,6 +42,16 @@ pub(super) fn push_error_status(dst: &str, error: &impl std::fmt::Display) -> St
     format!("error {dst} {reason}")
 }
 
+pub(super) fn is_visibility_access_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    error
+        .downcast_ref::<crate::nostr_client::RootObservationIncomplete>()
+        .is_none()
+        && (message.contains("link-visible")
+            || message.contains("private")
+            || message.contains("secret key"))
+}
+
 fn symbolic_head_target_is_deleted(
     refs: &HashMap<String, String>,
     push_specs: &[PushSpec],
@@ -1263,12 +1273,7 @@ impl RemoteHelper {
             loaded?;
         } else if let Err(e) = loaded {
             let err_str = e.to_string();
-            let is_access_error = e
-                .downcast_ref::<crate::nostr_client::RootObservationIncomplete>()
-                .is_none()
-                && (err_str.contains("link-visible")
-                    || err_str.contains("private")
-                    || err_str.contains("secret key"));
+            let is_access_error = is_visibility_access_error(&e);
             let is_likely_new_repo =
                 err_str.contains("No root hash") || Self::is_repo_unobserved_error(&e);
 
