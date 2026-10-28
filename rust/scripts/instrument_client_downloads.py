@@ -4,7 +4,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
-import shutil
+import io
+import tarfile
 import subprocess
 import sys
 import tomllib
@@ -19,12 +20,16 @@ metadata = json.loads(subprocess.check_output([
 package, = [p for p in metadata['packages'] if p['name'] == 'hashtree-client']
 assert package['version'] == '0.1.5' and package['source'].startswith('registry+')
 original = Path(package['manifest_path']).parent
-checksums = json.loads((original / '.cargo-checksum.json').read_text())
-assert checksums['package'] == '24d997547bb950fbb85e7f7d09bf6a062b9579ef7496751f37ab2467f9ceb58d'
-for path, digest in checksums['files'].items():
-    assert hashlib.sha256((original/path).read_bytes()).hexdigest() == digest, path
-copy = Path(os.environ['RUNNER_TEMP']) / 'diagnostic-client-0.1.5'
-shutil.copytree(original, copy)
+archive = original.parent.parent.parent / 'cache' / original.parent.name / (original.name + '.crate')
+archive_bytes = archive.read_bytes()
+digest = hashlib.sha256(archive_bytes).hexdigest()
+assert digest == '24d997547bb950fbb85e7f7d09bf6a062b9579ef7496751f37ab2467f9ceb58d'
+copy_root = Path(os.environ['RUNNER_TEMP']) / 'diagnostic-client'
+copy_root.mkdir()
+with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode='r:gz') as package_archive:
+    package_archive.extractall(copy_root, filter='data')
+copy = copy_root / 'hashtree-client-0.1.5'
+checksums = dict(package=digest, files={'src/store.rs': hashlib.sha256((copy/'src/store.rs').read_bytes()).hexdigest()})
 file = copy / 'src/store.rs'
 source = file.read_text()
 source = source.replace('self.fetch_once(server, hash).await', 'self.fetch_once(server, hash, 1).await', 1)

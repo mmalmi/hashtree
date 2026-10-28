@@ -191,9 +191,11 @@ jobs:
       - name: Diagnose one cold IrisChat installation before block probes
         if: inputs.cold_install || inputs.mac_cold_install
         working-directory: rust
+        shell: bash
         env:
           EXPECTED_HAPS: ${{ inputs.mac_cold_install && '6f05cfa25dd18cafae45cb50eccd7eec5656293b' || '1cfbeabc68af89478670e95bd4d96a51704e88f7' }}
         run: |
+          exec > >(tee "$RUNNER_TEMP/cold-install.log") 2>&1
           test "$(git -C ../haps-probe rev-parse HEAD)" = "$EXPECTED_HAPS"
           mkdir -p ../haps-probe/examples
           cp crates/hashtree-client/examples/download_probe.rs ../haps-probe/examples/download_probe.rs
@@ -203,7 +205,7 @@ jobs:
             python3 scripts/instrument_client_downloads.py ../haps-probe
           fi
           cargo build --locked --manifest-path ../haps-probe/Cargo.toml --bin haps --example download_probe
-          python3 scripts/probe_cold_install.py ../haps-probe 2>&1 | tee "$RUNNER_TEMP/cold-install.log"
+          python3 scripts/probe_cold_install.py ../haps-probe
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always() && (inputs.cold_install || inputs.mac_cold_install)
         with:
