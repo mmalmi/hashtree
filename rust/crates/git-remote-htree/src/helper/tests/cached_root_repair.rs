@@ -91,9 +91,10 @@ fn check_repair(corrupt: Option<bool>) {
         .unwrap();
     let root = helper.storage.build_tree().unwrap();
     let tree = HashTree::new(HashTreeConfig::new(helper.storage.store().clone()));
-    let old_packs = block_on_result(tree.resolve_path(&root, ".git/objects/pack"))
-        .unwrap()
-        .unwrap();
+    let old_packs =
+        block_on_result(async { Ok(tree.resolve_path(&root, ".git/objects/pack").await?) })
+            .unwrap()
+            .unwrap();
     helper.storage.clear().unwrap();
     helper
         .storage
@@ -168,9 +169,10 @@ fn check_repair(corrupt: Option<bool>) {
         return;
     }
     let repaired = result.expect("packed-base repair");
-    let new_packs = block_on_result(tree.resolve_path(&repaired, ".git/objects/pack"))
-        .unwrap()
-        .unwrap();
+    let new_packs =
+        block_on_result(async { Ok(tree.resolve_path(&repaired, ".git/objects/pack").await?) })
+            .unwrap()
+            .unwrap();
     assert_eq!(old_packs, new_packs, "inherited packs must be retained");
     let fresh = TempDir::new().unwrap();
     assert!(git(fresh.path(), &["init", "-b", "master"])
