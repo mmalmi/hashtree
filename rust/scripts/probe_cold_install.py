@@ -88,4 +88,10 @@ with tempfile.TemporaryDirectory(prefix='haps-cold-probe-') as temporary:
                 '--manifest', str(repo/'Cargo.toml'), '--package', 'haps', '--client-first'],
                 env=probe_env, check=True, timeout=1500)
         raise SystemExit(code)
+    installed = json.loads(text)['release']
+    if sys.platform == 'darwin':
+        assert installed['release_id'] == '7a9e4a1a8471bdd235d6804047cc3b44674acb584f6db243193a2ecde7b0abb2', 'package changed since baseline'
+    sizes = [path.stat().st_size for path in (root/'haps/packages').rglob('*') if path.is_file()]
+    print(json.dumps(dict(stage='installed_payload', files=len(sizes), bytes=sum(sizes),
+                         largest_file_bytes=max(sizes, default=0))), flush=True)
     print('Cold IrisChat payload installation succeeded; application not launched.', flush=True)

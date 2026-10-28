@@ -167,7 +167,7 @@ jobs:
         if: inputs.live_probe || inputs.cold_install || inputs.mac_cold_install
         with:
           repository: mmalmi/haps
-          ref: ${{ inputs.mac_cold_install && 'ffe098c399130c2ff1d728fbca5a307b27f993b8' || '1cfbeabc68af89478670e95bd4d96a51704e88f7' }}
+          ref: ${{ inputs.mac_cold_install && '6f05cfa25dd18cafae45cb50eccd7eec5656293b' || '1cfbeabc68af89478670e95bd4d96a51704e88f7' }}
           path: haps-probe
           persist-credentials: false
       - name: Compare exact hosted block downloads
@@ -192,13 +192,16 @@ jobs:
         if: inputs.cold_install || inputs.mac_cold_install
         working-directory: rust
         env:
-          EXPECTED_HAPS: ${{ inputs.mac_cold_install && 'ffe098c399130c2ff1d728fbca5a307b27f993b8' || '1cfbeabc68af89478670e95bd4d96a51704e88f7' }}
+          EXPECTED_HAPS: ${{ inputs.mac_cold_install && '6f05cfa25dd18cafae45cb50eccd7eec5656293b' || '1cfbeabc68af89478670e95bd4d96a51704e88f7' }}
         run: |
           test "$(git -C ../haps-probe rev-parse HEAD)" = "$EXPECTED_HAPS"
           mkdir -p ../haps-probe/examples
           cp crates/hashtree-client/examples/download_probe.rs ../haps-probe/examples/download_probe.rs
           git -C ../haps-probe diff --exit-code -- Cargo.toml Cargo.lock
           shasum -a 256 ../haps-probe/Cargo.toml ../haps-probe/Cargo.lock
+          if [ "$RUNNER_OS" = macOS ]; then
+            python3 scripts/instrument_client_downloads.py ../haps-probe
+          fi
           cargo build --locked --manifest-path ../haps-probe/Cargo.toml --bin haps --example download_probe
           python3 scripts/probe_cold_install.py ../haps-probe 2>&1 | tee "$RUNNER_TEMP/cold-install.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
