@@ -49,6 +49,7 @@ jobs:
           cargo package --locked -p hashtree-nostr-pubsub --no-verify
           mkdir "$RUNNER_TEMP/adapter-package"
           tar -xzf target/package/hashtree-nostr-pubsub-0.2.87.crate -C "$RUNNER_TEMP/adapter-package"
+          CARGO_TARGET_DIR="$PWD/target" cargo check --locked --lib --manifest-path "$RUNNER_TEMP/adapter-package/hashtree-nostr-pubsub-0.2.87/Cargo.toml"
           CARGO_TARGET_DIR="$PWD/target" cargo test --locked --manifest-path "$RUNNER_TEMP/adapter-package/hashtree-nostr-pubsub-0.2.87/Cargo.toml"
           sha256sum target/package/hashtree-nostr-pubsub-0.2.87.crate > target/package/adapter.sha256
           rustc -vV > target/package/adapter-toolchain.txt
