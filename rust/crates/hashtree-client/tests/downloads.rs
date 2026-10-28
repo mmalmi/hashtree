@@ -291,3 +291,49 @@ async fn local_only_does_not_contact_configured_public_origins() {
     local.stop().await;
     origin.stop().await;
 }
+
+// Characterizes the existing total deadline; this is not an idle-timeout policy.
+#[tokio::test]
+async fn total_request_deadline_expires_despite_body_progress() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let sent = Arc::new(AtomicUsize::new(0));
+    let progress = sent.clone();
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                socket.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+            }
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                PAYLOAD.len()
+            );
+            socket.write_all(header.as_bytes()).await.unwrap();
+            for byte in PAYLOAD {
+                if socket.write_all(&[*byte]).await.is_err() {
+                    break;
+                }
+                progress.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(30)).await;
+            }
+        }
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let mut cfg = config(vec![url]);
+    cfg.request_timeout = Duration::from_millis(300);
+    let store = BlobStore::new(temp.path(), cfg).unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(5), store.get(&sha256(PAYLOAD)))
+        .await
+        .unwrap();
+    server.abort();
+    let _ = server.await;
+    assert!(result.unwrap_err().to_string().contains("timed out"));
+    assert!(
+        sent.load(Ordering::SeqCst) >= 4,
+        "body must have made progress"
+    );
+}

@@ -3,6 +3,9 @@ name: Verify client downloads
 on:
   workflow_dispatch:
     inputs:
+      characterize_timeout:
+        type: boolean
+        default: false
       reset_regression:
         type: boolean
         default: false
@@ -63,7 +66,14 @@ jobs:
       - name: Test bounded downloads and integrity checks
         working-directory: rust
         if: ${{ !inputs.package && !inputs.resolver_package && !inputs.source }}
-        run: cargo test --locked -p hashtree-client --test downloads
+        env:
+          CHARACTERIZE_TIMEOUT: ${{ inputs.characterize_timeout }}
+        run: |
+          if [ "$CHARACTERIZE_TIMEOUT" = true ]; then
+            cargo test --locked -p hashtree-client --test downloads total_request_deadline_expires_despite_body_progress -- --exact
+          else
+            cargo test --locked -p hashtree-client --test downloads
+          fi
       - name: Test ready-root authentication and latency
         if: inputs.ready
         working-directory: rust
