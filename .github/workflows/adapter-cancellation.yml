@@ -1,0 +1,45 @@
+name: Verify index query cancellation
+on:
+  push:
+    branches: ['codex/haps-query-cancellation']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cancellation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+      - name: Install hash-pinned Rust
+        run: |
+          archive="$RUNNER_TEMP/rust.tar.xz"
+          curl --fail --location --output "$archive" https://static.rust-lang.org/dist/2026-10-15/rust-1.99.1-x86_64-unknown-linux-gnu.tar.xz
+          echo "231fcae47ee950621374725b5fc3b5441d2fbda2955ac45dd7dc816d8876cfe7  $archive" | sha256sum --check --strict
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/rust-1.99.1-x86_64-unknown-linux-gnu/install.sh" --prefix="$RUNNER_TEMP/rust-toolchain" --components=rustc,cargo,rust-std-x86_64-unknown-linux-gnu --disable-ldconfig
+          echo "$RUNNER_TEMP/rust-toolchain/bin" >> "$GITHUB_PATH"
+          echo "RUSTC=$RUNNER_TEMP/rust-toolchain/bin/rustc" >> "$GITHUB_ENV"
+      - name: Prove regression on previous query worker
+        working-directory: rust
+        run: |
+          cp crates/hashtree-nostr-pubsub/src/lib.rs "$RUNNER_TEMP/fixed-adapter.rs"
+          trap 'cp "$RUNNER_TEMP/fixed-adapter.rs" crates/hashtree-nostr-pubsub/src/lib.rs' EXIT
+          git show HEAD^:rust/crates/hashtree-nostr-pubsub/src/lib.rs > crates/hashtree-nostr-pubsub/src/lib.rs
+          printf '\n#[cfg(test)]\nmod cancellation_tests;\n' >> crates/hashtree-nostr-pubsub/src/lib.rs
+          if cargo test --locked -p hashtree-nostr-pubsub cancelling_index_query_releases_read_and_blocking_runtime > "$RUNNER_TEMP/regression.log" 2>&1; then
+            cat "$RUNNER_TEMP/regression.log"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/regression.log"
+          grep -F 'cancelled query retained its read' "$RUNNER_TEMP/regression.log"
+          grep -F 'test result: FAILED. 0 passed; 1 failed;' "$RUNNER_TEMP/regression.log"
+      - name: Verify fixed adapter and checkpoint ownership
+        working-directory: rust
+        run: cargo test --locked -p hashtree-nostr-pubsub
