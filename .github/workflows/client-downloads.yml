@@ -3,6 +3,9 @@ name: Verify client downloads
 on:
   workflow_dispatch:
     inputs:
+      mac_cold_install:
+        type: boolean
+        default: false
       cold_install:
         type: boolean
         default: false
@@ -36,8 +39,8 @@ permissions:
 
 jobs:
   downloads:
-    runs-on: ubuntu-24.04
-    timeout-minutes: ${{ inputs.cold_install && 50 || (inputs.source || inputs.live_probe) && 35 || 15 }}
+    runs-on: ${{ inputs.mac_cold_install && 'macos-14' || 'ubuntu-24.04' }}
+    timeout-minutes: ${{ (inputs.cold_install || inputs.mac_cold_install) && 50 || (inputs.source || inputs.live_probe) && 35 || 15 }}
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -47,12 +50,24 @@ jobs:
           persist-credentials: false
           fetch-depth: 2
       - name: Install hash-pinned Rust 1.99.1
+        if: ${{ !inputs.mac_cold_install }}
         run: |
           archive="$RUNNER_TEMP/rust-1.99.1-x86_64-unknown-linux-gnu.tar.xz"
           curl --fail --location --output "$archive" https://static.rust-lang.org/dist/rust-1.99.1-x86_64-unknown-linux-gnu.tar.xz
           echo "231fcae47ee950621374725b5fc3b5441d2fbda2955ac45dd7dc816d8876cfe7  $archive" | sha256sum --check --strict
           tar -xJf "$archive" -C "$RUNNER_TEMP"
           "$RUNNER_TEMP/rust-1.99.1-x86_64-unknown-linux-gnu/install.sh" --prefix="$RUNNER_TEMP/rust-toolchain" --components=rustc,cargo,rust-std-x86_64-unknown-linux-gnu --disable-ldconfig
+          echo "$RUNNER_TEMP/rust-toolchain/bin" >> "$GITHUB_PATH"
+          echo "RUSTC=$RUNNER_TEMP/rust-toolchain/bin/rustc" >> "$GITHUB_ENV"
+      - name: Install hash-pinned macOS Rust 1.99.1
+        if: inputs.mac_cold_install
+        run: |
+          test "$(uname -m)" = arm64
+          archive="$RUNNER_TEMP/rust-1.99.1-aarch64-apple-darwin.tar.xz"
+          curl --fail --location --output "$archive" https://static.rust-lang.org/dist/2026-10-15/rust-1.99.1-aarch64-apple-darwin.tar.xz
+          echo "30976378b6aaefd1861ba475905c6ba22a44c981418ce52285006af26337f98c  $archive" | shasum -a 256 --check
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/rust-1.99.1-aarch64-apple-darwin/install.sh" --prefix="$RUNNER_TEMP/rust-toolchain" --components=rustc,cargo,rust-std-aarch64-apple-darwin --disable-ldconfig
           echo "$RUNNER_TEMP/rust-toolchain/bin" >> "$GITHUB_PATH"
           echo "RUSTC=$RUNNER_TEMP/rust-toolchain/bin/rustc" >> "$GITHUB_ENV"
       - name: Prove request-reset regression against prior implementation
@@ -71,7 +86,7 @@ jobs:
           grep -F 'test result: FAILED. 0 passed; 2 failed;' "$RUNNER_TEMP/reset-before.log"
       - name: Test bounded downloads and integrity checks
         working-directory: rust
-        if: ${{ !inputs.package && !inputs.resolver_package && !inputs.source && !inputs.live_probe && !inputs.cold_install }}
+        if: ${{ !inputs.package && !inputs.resolver_package && !inputs.source && !inputs.live_probe && !inputs.cold_install && !inputs.mac_cold_install }}
         env:
           CHARACTERIZE_TIMEOUT: ${{ inputs.characterize_timeout }}
         run: |
@@ -149,10 +164,10 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        if: inputs.live_probe || inputs.cold_install
+        if: inputs.live_probe || inputs.cold_install || inputs.mac_cold_install
         with:
           repository: mmalmi/haps
-          ref: 1cfbeabc68af89478670e95bd4d96a51704e88f7
+          ref: ${{ inputs.mac_cold_install && 'ffe098c399130c2ff1d728fbca5a307b27f993b8' || '1cfbeabc68af89478670e95bd4d96a51704e88f7' }}
           path: haps-probe
           persist-credentials: false
       - name: Compare exact hosted block downloads
@@ -174,18 +189,20 @@ jobs:
           if-no-files-found: error
 
       - name: Diagnose one cold IrisChat installation before block probes
-        if: inputs.cold_install
+        if: inputs.cold_install || inputs.mac_cold_install
         working-directory: rust
+        env:
+          EXPECTED_HAPS: ${{ inputs.mac_cold_install && 'ffe098c399130c2ff1d728fbca5a307b27f993b8' || '1cfbeabc68af89478670e95bd4d96a51704e88f7' }}
         run: |
-          test "$(git -C ../haps-probe rev-parse HEAD)" = 1cfbeabc68af89478670e95bd4d96a51704e88f7
+          test "$(git -C ../haps-probe rev-parse HEAD)" = "$EXPECTED_HAPS"
           mkdir -p ../haps-probe/examples
           cp crates/hashtree-client/examples/download_probe.rs ../haps-probe/examples/download_probe.rs
           git -C ../haps-probe diff --exit-code -- Cargo.toml Cargo.lock
-          sha256sum ../haps-probe/Cargo.toml ../haps-probe/Cargo.lock
+          shasum -a 256 ../haps-probe/Cargo.toml ../haps-probe/Cargo.lock
           cargo build --locked --manifest-path ../haps-probe/Cargo.toml --bin haps --example download_probe
           python3 scripts/probe_cold_install.py ../haps-probe 2>&1 | tee "$RUNNER_TEMP/cold-install.log"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always() && inputs.cold_install
+        if: always() && (inputs.cold_install || inputs.mac_cold_install)
         with:
           name: cold-install-${{ github.sha }}
           path: |

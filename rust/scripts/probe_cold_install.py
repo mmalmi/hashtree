@@ -27,10 +27,21 @@ def run(stage, args, env, timeout):
                 if time.monotonic() - started > timeout:
                     raise TimeoutError(stage + ' exceeded its bound')
                 try:
-                    fields = Path(f'/proc/{child.pid}/stat').read_text().rsplit(')', 1)[1].split()
+                    if sys.platform == 'darwin':
+                        sample = subprocess.run(['ps', '-p', str(child.pid), '-o', 'time=', '-o', 'rss='],
+                            capture_output=True, text=True, timeout=2)
+                        fields = sample.stdout.split()
+                        if not fields:
+                            continue
+                        parts = [float(value) for value in fields[0].split(':')]
+                        cpu_seconds = sum(value * 60**i for i, value in enumerate(reversed(parts)))
+                        rss_bytes = int(fields[1]) * 1024
+                    else:
+                        fields = Path(f'/proc/{child.pid}/stat').read_text().rsplit(')', 1)[1].split()
+                        cpu_seconds = (int(fields[11])+int(fields[12]))/clock_ticks
+                        rss_bytes = int(fields[21])*page_size
                     metrics.write(json.dumps(dict(unix=time.time(), elapsed=time.monotonic()-started,
-                        pid=child.pid, cpu_seconds=(int(fields[11])+int(fields[12]))/clock_ticks,
-                        rss_bytes=int(fields[21])*page_size)) + '\n')
+                        pid=child.pid, cpu_seconds=cpu_seconds, rss_bytes=rss_bytes)) + '\n')
                     metrics.flush()
                 except FileNotFoundError:
                     pass
