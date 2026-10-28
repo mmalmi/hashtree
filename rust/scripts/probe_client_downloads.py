@@ -16,7 +16,15 @@ SERVERS = ('https://cdn.iris.to', 'https://upload.iris.to')
 parser = argparse.ArgumentParser()
 parser.add_argument('--manifest', default='Cargo.toml')
 parser.add_argument('--package', default='hashtree-client')
+parser.add_argument('--client-first', action='store_true')
 args = parser.parse_args()
+BLOCKS = tuple(os.environ.get('HAPS_PROBE_BLOCKS', ','.join(BLOCKS)).split(','))
+assert all(len(h) == 64 and all(c in '0123456789abcdef' for c in h) for h in BLOCKS)
+def client_probe():
+    subprocess.run(['cargo', 'run', '--locked', '--manifest-path', args.manifest, '-p', args.package,
+                    '--example', 'download_probe'], check=True, timeout=1200)
+if args.client_first:
+    client_probe()
 print(subprocess.check_output(['curl', '--version'], text=True), flush=True)
 with tempfile.TemporaryDirectory(prefix='client-http-probe-') as temporary:
     for block in BLOCKS:
@@ -47,5 +55,5 @@ with tempfile.TemporaryDirectory(prefix='client-http-probe-') as temporary:
                            if p.exists() else None for p in paths])), flush=True)
 subprocess.run(['cargo', 'tree', '--locked', '--manifest-path', args.manifest, '-p', args.package, '-e', 'features',
                 '-i', 'reqwest@0.12.28'], check=True)
-subprocess.run(['cargo', 'run', '--locked', '--manifest-path', args.manifest, '-p', args.package,
-                '--example', 'download_probe'], check=True, timeout=1200)
+if not args.client_first:
+    client_probe()

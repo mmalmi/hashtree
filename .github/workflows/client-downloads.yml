@@ -3,6 +3,9 @@ name: Verify client downloads
 on:
   workflow_dispatch:
     inputs:
+      cold_install:
+        type: boolean
+        default: false
       live_probe:
         type: boolean
         default: false
@@ -34,7 +37,7 @@ permissions:
 jobs:
   downloads:
     runs-on: ubuntu-24.04
-    timeout-minutes: ${{ (inputs.source || inputs.live_probe) && 35 || 15 }}
+    timeout-minutes: ${{ inputs.cold_install && 50 || (inputs.source || inputs.live_probe) && 35 || 15 }}
     env:
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
@@ -68,7 +71,7 @@ jobs:
           grep -F 'test result: FAILED. 0 passed; 2 failed;' "$RUNNER_TEMP/reset-before.log"
       - name: Test bounded downloads and integrity checks
         working-directory: rust
-        if: ${{ !inputs.package && !inputs.resolver_package && !inputs.source && !inputs.live_probe }}
+        if: ${{ !inputs.package && !inputs.resolver_package && !inputs.source && !inputs.live_probe && !inputs.cold_install }}
         env:
           CHARACTERIZE_TIMEOUT: ${{ inputs.characterize_timeout }}
         run: |
@@ -146,7 +149,7 @@ jobs:
           if-no-files-found: error
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        if: inputs.live_probe
+        if: inputs.live_probe || inputs.cold_install
         with:
           repository: mmalmi/haps
           ref: 1cfbeabc68af89478670e95bd4d96a51704e88f7
@@ -167,5 +170,26 @@ jobs:
         with:
           name: client-download-probe-${{ github.sha }}
           path: ${{ runner.temp }}/client-download-probe.log
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Diagnose one cold IrisChat installation before block probes
+        if: inputs.cold_install
+        working-directory: rust
+        run: |
+          test "$(git -C ../haps-probe rev-parse HEAD)" = 1cfbeabc68af89478670e95bd4d96a51704e88f7
+          mkdir -p ../haps-probe/examples
+          cp crates/hashtree-client/examples/download_probe.rs ../haps-probe/examples/download_probe.rs
+          git -C ../haps-probe diff --exit-code -- Cargo.toml Cargo.lock
+          sha256sum ../haps-probe/Cargo.toml ../haps-probe/Cargo.lock
+          cargo build --locked --manifest-path ../haps-probe/Cargo.toml --bin haps --example download_probe
+          python3 scripts/probe_cold_install.py ../haps-probe 2>&1 | tee "$RUNNER_TEMP/cold-install.log"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always() && inputs.cold_install
+        with:
+          name: cold-install-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/cold-install.log
+            ${{ runner.temp }}/cold-install-diagnostics/
           retention-days: 7
           if-no-files-found: error

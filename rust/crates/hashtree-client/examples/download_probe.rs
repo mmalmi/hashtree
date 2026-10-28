@@ -51,7 +51,16 @@ fn http() -> reqwest::Client {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    for block in BLOCKS {
+    let requested = std::env::var("HAPS_PROBE_BLOCKS").ok();
+    let blocks: Vec<&str> = requested
+        .as_deref()
+        .map(|v| v.split(',').collect())
+        .unwrap_or_else(|| BLOCKS.to_vec());
+    for block in blocks {
+        anyhow::ensure!(
+            block.len() == 64 && block.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid probe hash"
+        );
         let hash: [u8; 32] = hex::decode(block)?.try_into().unwrap();
         for sources in [vec![SERVERS[0]], vec![SERVERS[1]], SERVERS.to_vec()] {
             let cache = tempfile::tempdir()?;
