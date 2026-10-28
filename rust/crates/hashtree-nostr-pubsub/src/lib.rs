@@ -16,6 +16,8 @@ use nostr_pubsub::{
 use tokio::sync::Mutex;
 
 #[cfg(test)]
+mod cancellation_tests;
+#[cfg(test)]
 mod checkpoint_tests;
 
 /// Commits the index pointer after its blocks have been written. Implementations
@@ -371,23 +373,33 @@ async fn query_index_filter<S>(
 where
     S: Store + 'static,
 {
-    tokio::task::spawn_blocking(move || {
+    // Dropping a JoinHandle does not stop a blocking worker. Keep this sender
+    // in the caller future so cancellation also drops the worker's async read.
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+    let result = tokio::task::spawn_blocking(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|error| {
                 PubsubError::Storage(format!("build hashtree query runtime: {error}"))
             })?;
-        runtime
-            .block_on(async move {
-                NostrEventStore::new(store)
-                    .query_events(root.as_ref(), &filter, limit)
-                    .await
-            })
-            .map_err(|error| PubsubError::Storage(format!("query hashtree nostr index: {error}")))
+        runtime.block_on(async move {
+            tokio::select! {
+                result = async {
+                    NostrEventStore::new(store)
+                        .query_events(root.as_ref(), &filter, limit)
+                        .await
+                } => result.map_err(|error| {
+                    PubsubError::Storage(format!("query hashtree nostr index: {error}"))
+                }),
+                _ = cancelled => Err(PubsubError::Storage("hashtree index query cancelled".into())),
+            }
+        })
     })
     .await
-    .map_err(|error| PubsubError::Storage(format!("join hashtree nostr index query: {error}")))?
+    .map_err(|error| PubsubError::Storage(format!("join hashtree nostr index query: {error}")))?;
+    drop(cancel);
+    result
 }
 
 fn query_limit(filters: &[nostr_pubsub::Filter], options: QueryOptions) -> usize {
