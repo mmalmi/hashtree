@@ -108,3 +108,20 @@ limit. Null or zero means unlimited. Header and body writes share a one-second
 bucket; partial writes refund unused capacity. Responses larger than the bucket
 progress in smaller chunks within the original request deadline. Closing the
 transport aborts pending serving callbacks and response writers.
+
+## Durable browser discovery
+
+`createBrowserHashtreeNostrProvider` keeps up to 256 current signed public peer
+announcements in IndexedDB, scoped to the device identity and discovery app.
+Restarted providers load them before network discovery, and ordinary peer REQ
+queries can read the same local cache. Replacement, signature and expiration
+checks still apply. Closing the provider drains storage work.
+
+Applications composing their own pubsub clients can use
+`openBrowserAnnouncements` from the browser entry point and supply its discovery
+provider, retained reader and lifecycle. Keep private discovery in a separate
+owner-scoped store and apply the application's existing replay admission.
+
+An empty relay list is supported by the persistent provider. A reachable FIPS
+carrier is still needed for new WebRTC signaling; stored advertisements cannot
+create connectivity when every first adjacency is unavailable.

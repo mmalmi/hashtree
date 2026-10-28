@@ -4,8 +4,11 @@ import { FipsNode, type FipsIdentity, type Logger } from '@fips/core';
 import { WebRtcTransport, type WebRtcTransportConfig } from '@fips/transport-webrtc';
 import { WebSocketTransport } from '@fips/transport-websocket';
 import { type FipsBlobRouteSource, type HashtreeWorkerP2PProvider } from './workerProvider.js';
+export { openBrowserAnnouncements } from './browserAnnouncements.js';
 interface BrowserHashtreeFipsProviderBaseOptions {
     relays: readonly string[];
+    /** Application-owned discovery routing, including durable local announcements. */
+    discoveryProvider?: WebRtcTransportConfig['discoveryProvider'];
     localStore: Store;
     /** Serve authorized incoming requests without changing outgoing local-cache reads. */
     /** Inbound only. HTL 0 permits local content only; do not forward upstream. */
@@ -48,7 +51,9 @@ export declare function supportsBrowserHashtreeFips(): boolean;
  * then exposes Hashtree's worker-provider surface over authenticated FIPS data.
  */
 export declare function createBrowserHashtreeFipsProvider(options: BrowserHashtreeFipsProviderOptions): Promise<BrowserHashtreeFipsProvider>;
-export type BrowserHashtreeNostrProviderOptions = BrowserHashtreeFipsProviderOptions & Pick<FipsNostrPubsubClientOptions, 'retainedEventReader' | 'allowedKinds' | 'limits'> & {
+export type BrowserHashtreeNostrProviderOptions = BrowserHashtreeFipsProviderOptions & {
+    discoveryProvider?: never;
+} & Pick<FipsNostrPubsubClientOptions, 'retainedEventReader' | 'allowedKinds' | 'limits'> & {
     onNostrError?: FipsNostrPubsubClientOptions['onError'];
     /** Restrict event interests and retained history to application-admitted identities. */
     nostrPeers?: () => readonly string[];
@@ -59,5 +64,4 @@ export interface BrowserHashtreeNostrProvider extends BrowserHashtreeFipsProvide
 }
 /** Files and events share one authenticated FIPS node, identity and set of links. */
 export declare function createBrowserHashtreeNostrProvider(options: BrowserHashtreeNostrProviderOptions): Promise<BrowserHashtreeNostrProvider>;
-export {};
 //# sourceMappingURL=browserProvider.d.ts.map

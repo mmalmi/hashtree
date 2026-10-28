@@ -7,6 +7,7 @@ import {
   type Logger,
 } from '@fips/core';
 import { WebRtcTransport, type WebRtcTransportConfig } from '@fips/transport-webrtc';
+import { openBrowserAnnouncements } from './browserAnnouncements.js';
 import { WebSocketTransport } from '@fips/transport-websocket';
 import {
   DEFAULT_FIPS_DISCOVERY_APP,
@@ -18,6 +19,8 @@ import {
   type HashtreeWorkerP2PProvider,
 } from './workerProvider.js';
 
+export { openBrowserAnnouncements } from './browserAnnouncements.js';
+
 const DEFAULT_STUN_SERVERS = [
   'stun:stun.l.google.com:19302',
   'stun:stun.cloudflare.com:3478',
@@ -25,6 +28,8 @@ const DEFAULT_STUN_SERVERS = [
 
 interface BrowserHashtreeFipsProviderBaseOptions {
   relays: readonly string[];
+  /** Application-owned discovery routing, including durable local announcements. */
+  discoveryProvider?: WebRtcTransportConfig['discoveryProvider'];
   localStore: Store;
   /** Serve authorized incoming requests without changing outgoing local-cache reads. */
   /** Inbound only. HTL 0 permits local content only; do not forward upstream. */
@@ -76,7 +81,7 @@ export async function createBrowserHashtreeFipsProvider(
     throw new Error('browser FIPS requires WebSocket and RTCPeerConnection');
   }
   const relays = normalizeRelayUrls(options.relays);
-  if (relays.length === 0) {
+  if (relays.length === 0 && !options.discoveryProvider) {
     throw new Error('browser FIPS requires at least one Nostr relay');
   }
   const identity = options.identity ?? await identityFromSecretKey(readSecretKey(options.deviceSecretKey));
@@ -92,6 +97,7 @@ export async function createBrowserHashtreeFipsProvider(
   });
   const webRtcTransport = new WebRtcTransport({
     relays,
+    discoveryProvider: options.discoveryProvider,
     stunServers: [...(options.stunServers ?? DEFAULT_STUN_SERVERS)],
     advertiseOnNostr: true,
     acceptConnections: true,
@@ -183,7 +189,7 @@ function normalizeWebSocketSeedUrls(seedUrls: readonly string[]): string[] {
   return [...normalized];
 }
 
-export type BrowserHashtreeNostrProviderOptions = BrowserHashtreeFipsProviderOptions & Pick<
+export type BrowserHashtreeNostrProviderOptions = BrowserHashtreeFipsProviderOptions & { discoveryProvider?: never } & Pick<
   FipsNostrPubsubClientOptions, 'retainedEventReader' | 'allowedKinds' | 'limits'
 > & {
   onNostrError?: FipsNostrPubsubClientOptions['onError'];
@@ -200,31 +206,44 @@ export interface BrowserHashtreeNostrProvider extends BrowserHashtreeFipsProvide
 export async function createBrowserHashtreeNostrProvider(
   options: BrowserHashtreeNostrProviderOptions,
 ): Promise<BrowserHashtreeNostrProvider> {
-  const provider = await createBrowserHashtreeFipsProvider(options);
+  if (!supportsBrowserHashtreeFips()) throw new Error('browser FIPS requires WebSocket and RTCPeerConnection');
+  const identity = options.identity ?? await identityFromSecretKey(readSecretKey(options.deviceSecretKey));
+  const announcements = await openBrowserAnnouncements(toHex(identity.publicKey),
+    options.discoveryApp ?? DEFAULT_FIPS_DISCOVERY_APP, options.relays, options.retainedEventReader,
+    error => options.onNostrError?.(error, { operation: 'receive' }));
+  let provider: BrowserHashtreeFipsProvider;
+  try {
+    provider = await createBrowserHashtreeFipsProvider({ ...options, identity, deviceSecretKey: undefined,
+      discoveryProvider: announcements.discovery });
+  } catch (error) { await announcements.close(); throw error; }
   let client: FipsNostrPubsubClient;
   try {
     client = new FipsNostrPubsubClient({
       node: provider.node,
       localPeerId: provider.localPeerId,
       peers: options.nostrPeers ?? (() => provider.listConnectedPeerIds()),
-      retainedEventReader: options.retainedEventReader,
-      allowedKinds: options.allowedKinds,
+      retainedEventReader: announcements.retained,
+      allowedKinds: options.allowedKinds ? [...new Set([...options.allowedKinds, 37195])] : undefined,
       limits: { maxFiltersPerSubscription: 32, ...options.limits },
       onError: options.onNostrError,
     }).start();
   } catch (error) {
-    await provider.stop();
+    try { await provider.stop(); } finally { await announcements.close(); }
     throw error;
   }
+  const nostrSource = Object.assign(new FipsNostrPubsubEventSource(client), { id: 'fips' });
+  announcements.attach(nostrSource);
   let stopped = false;
   return {
     ...provider,
-    nostrSource: Object.assign(new FipsNostrPubsubEventSource(client), { id: 'fips' }),
+    nostrSource,
     refreshNostrPeers: () => client.refreshPeers(),
     stop: async () => {
       if (stopped) return;
       stopped = true;
-      try { await client.stop(); } finally { await provider.stop(); }
+      try { await announcements.close(); } finally {
+        try { await client.stop(); } finally { await provider.stop(); }
+      }
     },
   };
 }
