@@ -69,6 +69,22 @@ fn htree_binary_available() -> bool {
 /// Entry point for the git remote helper
 /// Call this from main() to run the helper
 pub fn main_entry() {
+    // Capability discovery must not open a store, resolve a signer, or connect
+    // to relays. Package publishers use this before allowing source writes.
+    let args: Vec<_> = std::env::args_os().collect();
+    if args.len() == 2 && args[1] == "--publisher-capabilities" {
+        println!(
+            "{}",
+            serde_json::json!({
+                "schema": 1,
+                "helper": "git-remote-htree",
+                "version": env!("CARGO_PKG_VERSION"),
+                "capabilities": ["complete-blob-dag-v1"]
+            })
+        );
+        return;
+    }
+
     // Install TLS crypto provider for reqwest/rustls
     let _ = rustls::crypto::ring::default_provider().install_default();
 
