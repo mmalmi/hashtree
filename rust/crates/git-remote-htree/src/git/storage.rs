@@ -609,6 +609,20 @@ impl GitStorage {
         Ok(refs.contains_key(name))
     }
 
+    /// Objects still needed in the in-memory import cache, including objects
+    /// whose payload is retained in an inherited Git pack.
+    pub fn missing_imported_objects(&self, oids: &[String]) -> Result<Vec<String>> {
+        let objects = self
+            .objects
+            .read()
+            .map_err(|e| Error::StorageError(format!("lock: {}", e)))?;
+        Ok(oids
+            .iter()
+            .filter(|oid| !objects.contains_key(*oid))
+            .cloned()
+            .collect())
+    }
+
     /// Get count of objects in storage
     #[cfg(test)]
     pub fn object_count(&self) -> Result<usize> {
