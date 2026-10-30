@@ -11,7 +11,7 @@ export async function initNostrRuntime(relays, options) {
     await closeNostrRuntime();
     runtime = createNostrRuntime({
         relays,
-        store: createWorkerEventStore(options.store, options.storeName),
+        store: createWorkerEventStore(options.store, options.storeName, options.onStorePersisted),
         reconciliation: options.reconciliation,
         signAuthEvent: (_relay, template) => signEvent(template),
         maxSubscriptions: 256,
