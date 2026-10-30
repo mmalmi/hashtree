@@ -24,12 +24,15 @@ async function withIndexLock(name, operation) {
     }
 }
 /** Event bodies and indexes share the existing Hashtree block cache. */
-export function createWorkerEventStore(store, storeName) {
+export function createWorkerEventStore(store, storeName, onPersisted) {
     const name = `${storeName}-nostr-index`;
     const db = new EventIndexState(name);
     return new HashtreeRuntimeEventStore(store, {
         load: async () => (await db.state.get('roots'))?.value ?? null,
-        save: async (value) => { await db.state.put({ id: 'roots', value }); },
+        save: async (value) => {
+            await db.state.put({ id: 'roots', value });
+            onPersisted?.();
+        },
         withLock: (operation) => withIndexLock(name, operation),
         close: () => db.close(),
     });

@@ -224,6 +224,10 @@ Behavior:
 - After bytes or fragments start flowing, prefer idle/progress-based expiry over total wall-clock deadlines. That keeps large media transfers alive without giving malicious peers an unlimited pin.
 - For realistic verification, test cold direct navigation with requester-side Blossom disabled and assert that artwork/audio loads from `/htree/...` without any fallback requests to default Blossom servers.
 
+## Cache Budget
+
+`RelayWorkerClient.setStorageMaxBytes(bytes)` sets the shared block cache budget (default 1 GiB). Eviction checks run after initialization and persisted event/index changes as well as blob writes, coalesced over five seconds. Superseded index blocks and disposable cached files can be reclaimed; blocks reachable from current event and pending-publication roots remain protected, so durable data can exceed the budget.
+
 ## Service Worker Client Keys
 
 If your service worker intercepts `/htree/...` media requests and forwards them to a worker over `MessagePort`, use a stable per-tab client key:

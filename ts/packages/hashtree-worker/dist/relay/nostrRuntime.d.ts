@@ -6,6 +6,7 @@ declare let onEose: ((subId: string, status: RuntimeCompletion) => void) | null;
 export declare function initNostrRuntime(relays: string[], options: {
     store: Store;
     storeName: string;
+    onStorePersisted?: () => void;
     reconciliation?: Omit<RuntimeReconciliationOptions, 'fetch'>;
 }): Promise<void>;
 export declare function setOnEvent(callback: typeof onEvent): void;

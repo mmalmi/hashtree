@@ -91,6 +91,7 @@ const treeRootSubscriptionRefs = new Map<string, number>();
 // Storage quota management
 let storageMaxBytes = 1024 * 1024 * 1024; // Default 1GB
 let evictionCheckPending = false;
+let evictionCheckRequested = false;
 const EVICTION_CHECK_DEBOUNCE_MS = 5000; // Debounce eviction checks
 
 /**
@@ -98,20 +99,24 @@ const EVICTION_CHECK_DEBOUNCE_MS = 5000; // Debounce eviction checks
  * Debounced to avoid running too frequently after many puts.
  */
 function runEvictionCheck(): void {
-  if (evictionCheckPending || !store) return;
+  if (!store) return;
+  evictionCheckRequested = true;
+  if (evictionCheckPending) return;
 
   evictionCheckPending = true;
   setTimeout(async () => {
-    evictionCheckPending = false;
-    if (!store) return;
-
+    evictionCheckRequested = false;
     try {
+      if (!store) return;
       const evicted = await evictWorkerCache(store, _config?.storeName || 'hashtree-worker', storageMaxBytes);
       if (evicted > 0) {
         console.log(`[Worker] Eviction completed, removed ${evicted} entries`);
       }
     } catch (err) {
       console.error('[Worker] Eviction error:', err);
+    } finally {
+      evictionCheckPending = false;
+      if (evictionCheckRequested) runEvictionCheck();
     }
   }, EVICTION_CHECK_DEBOUNCE_MS);
 }
@@ -761,7 +766,9 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
       store,
       storeName,
       reconciliation: cfg.reconciliation,
+      onStorePersisted: runEvictionCheck,
     });
+    runEvictionCheck();
     console.log('[Worker] Nostr runtime initialized with', cfg.relays.length, 'relays');
 
     // Set up unified event handler for all subscriptions

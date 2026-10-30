@@ -23,11 +23,11 @@ let onEvent: ((subId: string, event: SignedEvent, info: RuntimeEventInfo) => voi
 let onEose: ((subId: string, status: RuntimeCompletion) => void) | null = null;
 const subscriptions = new Map<string, RuntimeSubscription>();
 
-export async function initNostrRuntime(relays: string[], options: { store: Store; storeName: string; reconciliation?: Omit<RuntimeReconciliationOptions, 'fetch'> }): Promise<void> {
+export async function initNostrRuntime(relays: string[], options: { store: Store; storeName: string; onStorePersisted?: () => void; reconciliation?: Omit<RuntimeReconciliationOptions, 'fetch'> }): Promise<void> {
   await closeNostrRuntime();
   runtime = createNostrRuntime({
     relays,
-    store: createWorkerEventStore(options.store, options.storeName),
+    store: createWorkerEventStore(options.store, options.storeName, options.onStorePersisted),
     reconciliation: options.reconciliation,
     signAuthEvent: (_relay, template) => signEvent(template),
     maxSubscriptions: 256,

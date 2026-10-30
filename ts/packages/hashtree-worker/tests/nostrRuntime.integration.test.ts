@@ -6,7 +6,7 @@ import { finalizeEvent, getPublicKey, verifyEvent } from 'nostr-tools/pure';
 import { once } from 'node:events';
 import { WebSocket, WebSocketServer } from 'ws';
 import { expect, it, vi } from 'vitest';
-import { initNostrRuntime, closeNostrRuntime, publish, query } from '../src/relay/nostrRuntime.js';
+import { initNostrRuntime, closeNostrRuntime, publish, query, ingestEvents } from '../src/relay/nostrRuntime.js';
 import { initIdentity, clearIdentity } from '../src/relay/identity.js';
 import { signEvent } from '../src/relay/signing.js';
 import { createWorkerEventStore, evictWorkerCache } from '../src/relay/eventIndex.js';
@@ -101,5 +101,36 @@ it('batches worker interests within common relay filter limits without losing ex
     await new Promise<void>(resolve => relay.close(() => resolve()));
     await Dexie.delete(name);
     await Dexie.delete(`${name}-nostr-index`);
+  }
+});
+
+
+it('schedules cache eviction for imported events while retaining current event and outbox roots', async () => {
+  const name = `worker-ingest-eviction-${crypto.randomUUID()}`;
+  const blocks = new DexieStore(name);
+  const evictions: Promise<number>[] = [];
+  const events = Array.from({ length: 4 }, (_, index) => finalizeEvent({
+    kind: 30064, created_at: 100 + index, content: `revision ${index}`, tags: [['d', 'document']],
+  }, new Uint8Array(32).fill(6)));
+  try {
+    await initNostrRuntime([], {
+      store: blocks, storeName: name,
+      onStorePersisted: () => { evictions.push(evictWorkerCache(blocks, name, 0)); },
+    });
+    await publish(events[0]);
+    for (const event of events.slice(1)) await ingestEvents([event]);
+    await Promise.all(evictions);
+    expect(evictions.length).toBeGreaterThanOrEqual(events.length);
+    expect((await Promise.all(evictions)).some(count => count > 0)).toBe(true);
+    expect((await query([{ kinds: [30064] }], { cache: 'cache-only' })).events.map(event => event.id)).toEqual([events[3].id]);
+    const persisted = createWorkerEventStore(blocks, name);
+    try {
+      expect((await persisted.listPending()).map(({ event }) => event.id)).toEqual([events[0].id]);
+    } finally { await persisted.close(); }
+  } finally {
+    await closeNostrRuntime();
+    await Promise.all(evictions);
+    blocks.close();
+    await Dexie.delete(name); await Dexie.delete(`${name}-nostr-index`);
   }
 });
