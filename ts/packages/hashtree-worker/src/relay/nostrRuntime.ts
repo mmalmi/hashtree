@@ -10,6 +10,7 @@ import {
   type RuntimeQueryResult,
   type RuntimeSource,
   type RuntimeSubscription,
+  type RuntimeReconciliationOptions,
 } from 'nostr-pubsub';
 import { fromHex, type Store } from '@hashtree/core';
 import { HASHTREE_LABEL, HASHTREE_ROOT_KINDS } from '@hashtree/nostr';
@@ -22,11 +23,12 @@ let onEvent: ((subId: string, event: SignedEvent, info: RuntimeEventInfo) => voi
 let onEose: ((subId: string, status: RuntimeCompletion) => void) | null = null;
 const subscriptions = new Map<string, RuntimeSubscription>();
 
-export async function initNostrRuntime(relays: string[], options: { store: Store; storeName: string }): Promise<void> {
+export async function initNostrRuntime(relays: string[], options: { store: Store; storeName: string; reconciliation?: Omit<RuntimeReconciliationOptions, 'fetch'> }): Promise<void> {
   await closeNostrRuntime();
   runtime = createNostrRuntime({
     relays,
     store: createWorkerEventStore(options.store, options.storeName),
+    reconciliation: options.reconciliation,
     signAuthEvent: (_relay, template) => signEvent(template),
     maxSubscriptions: 256,
     maxFilterBytesPerBatch: 64 * 1024,
@@ -56,6 +58,13 @@ export function unsubscribe(subId: string): void {
 }
 
 export function publish(event: SignedEvent): Promise<RuntimePublishResult> { return current().publish(event); }
+/** Import signed cached/network records without placing them in the outbox. */
+export async function ingestEvents(events: SignedEvent[]): Promise<void> {
+  if (!Array.isArray(events) || events.length > 128 || new TextEncoder().encode(JSON.stringify(events)).length > 2 * 1024 * 1024) {
+    throw new Error('Event import exceeds its bounds');
+  }
+  for (const event of events) await current().ingest(event, 'external-cache');
+}
 export function query(filters: NostrFilter[], options: RuntimeQueryOptions = {}): Promise<RuntimeQueryResult> {
   return current().query(filters as EventFilter[], options);
 }

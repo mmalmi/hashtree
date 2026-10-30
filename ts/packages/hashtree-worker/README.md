@@ -7,7 +7,7 @@ Runs hashtree storage operations in a Web Worker to keep the main thread free. H
 ## Install
 
 ```bash
-npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.18/hashtree-worker-0.4.10.tgz
+npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.23/hashtree-worker-0.4.13.tgz
 ```
 
 The npm registry version is older than this runtime archive. With npm 12+, add
@@ -35,6 +35,21 @@ try {
   await client.close();
 }
 ```
+
+## Retained Nostr events and gap recovery
+
+`RelayWorkerClient` accepts an optional `reconciliation: {}` configuration for
+bounded NIP-77 recovery on compatible relays. It compares against the worker's
+existing persistent event store; normal subscriptions remain independent.
+Reconciliation is off unless configured. Numeric bounds from
+`RuntimeReconciliationOptions` can be supplied, but fetch functions cannot cross
+the worker boundary.
+
+Use `await client.ingestEvents(cachedSignedEvents)` to seed that store from an
+existing application cache before opening a recovery subscription. Imports are
+signature-checked and follow the runtime's deletion, expiration and replacement
+rules. They do not sign, publish, or enter the outgoing queue. Each call accepts
+up to 128 events and 2 MiB; split larger caches into bounded batches.
 
 ## Plain Worker + FIPS WebRTC
 

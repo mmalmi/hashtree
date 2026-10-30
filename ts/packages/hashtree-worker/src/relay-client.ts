@@ -503,6 +503,12 @@ export class RelayWorkerClient {
     return response.receipt;
   }
 
+  /** Seed the retained event cache without publishing or signing anything. */
+  async ingestEvents(events: RelayWorkerSignedEvent[]): Promise<void> {
+    const response = await this.request({ type: 'ingestEvents', events });
+    if (response.type !== 'void' || response.error) throw new Error('error' in response && response.error || 'Event import failed');
+  }
+
   /** Attach pubsub on the same FIPS node already used by the blob provider. */
   async setNostrSource(source: RuntimeSource | null): Promise<void> {
     const revision = ++this.sourceRevision;
