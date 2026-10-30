@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/dexie",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Dexie-based IndexedDB store for hashtree",
   "type": "module",
   "main": "dist/index.js",
@@ -12,6 +12,7 @@
     }
   },
   "files": [
+    "LICENSE",
     "dist",
     "src"
   ],

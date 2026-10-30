@@ -134,3 +134,38 @@ it('schedules cache eviction for imported events while retaining current event a
     await Dexie.delete(name); await Dexie.delete(`${name}-nostr-index`);
   }
 });
+
+
+it('does not commit event or outbox roots after failed block writes', async () => {
+  const name = `worker-write-failure-${crypto.randomUUID()}`;
+  const blocks = new DexieStore(name);
+  const events = [100, 101].map(created_at => finalizeEvent({
+    kind: 30064, created_at, content: `revision ${created_at}`, tags: [['d', 'document']],
+  }, new Uint8Array(32).fill(8)));
+  const stored = createWorkerEventStore(blocks, name);
+  const pending = (event: typeof events[number]) => ({ event, attempts: 0, updatedAt: 100, relays: [], sources: [] });
+  try {
+    await stored.put(events[0]);
+    await stored.putPending(pending(events[0]));
+    const failed = vi.spyOn(blocks, 'put').mockResolvedValue(false);
+    try {
+      await expect(stored.put(events[1])).rejects.toThrow('Failed to persist event index block');
+      await expect(stored.putPending(pending(events[1]))).rejects.toThrow('Failed to persist event index block');
+    } finally { failed.mockRestore(); }
+    expect((await stored.query([{ kinds: [30064] }])).map(event => event.id)).toEqual([events[0].id]);
+    expect((await stored.listPending()).map(({ event }) => event.id)).toEqual([events[0].id]);
+    expect(await evictWorkerCache(blocks, name, 0)).toBeGreaterThanOrEqual(0);
+    expect((await stored.query([{ kinds: [30064] }])).map(event => event.id)).toEqual([events[0].id]);
+    expect((await stored.listPending()).map(({ event }) => event.id)).toEqual([events[0].id]);
+    const put = blocks.put.bind(blocks);
+    const deduplicated = vi.spyOn(blocks, 'put').mockImplementation(async (hash, data) => {
+      await put(hash, data);
+      return false;
+    });
+    try { await stored.put(events[1]); } finally { deduplicated.mockRestore(); }
+    expect((await stored.query([{ kinds: [30064] }])).map(event => event.id)).toEqual([events[1].id]);
+  } finally {
+    await stored.close(); blocks.close();
+    await Dexie.delete(name); await Dexie.delete(`${name}-nostr-index`);
+  }
+});

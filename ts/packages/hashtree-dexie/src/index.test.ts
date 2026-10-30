@@ -1,7 +1,8 @@
 /**
  * Unit tests for DexieStore
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { toHex } from '@hashtree/core';
 import { DexieStore } from './index.js';
 
 // Helper to create a hash from data (simplified for tests)
@@ -295,6 +296,57 @@ describe('DexieStore', () => {
       expect(await store.has(hash1)).toBe(true);
       expect(await store.has(hash2)).toBe(false);
       expect(await store.has(hash3)).toBe(true);
+    });
+
+    it('counts and evicts across bounded batches while retaining protected blobs', async () => {
+      const hashes: Uint8Array[] = [];
+      for (let index = 0; index < 150; index++) {
+        const data = new Uint8Array(100 + index);
+        data[0] = index;
+        const hash = makeHash(data);
+        hashes.push(hash);
+        await store.put(hash, data);
+      }
+      const protectedHashes = new Set(hashes.filter((_, index) => index % 3 === 0).map(toHex));
+      const db = (store as any).db;
+      const getAll = vi.spyOn(IDBObjectStore.prototype, 'getAll');
+      const bulkGet = vi.spyOn(db.blobs, 'bulkGet');
+      const blobDeletes = vi.spyOn(db.blobs, 'bulkDelete');
+      const accessDeletes = vi.spyOn(db.accesses, 'bulkDelete');
+      try {
+        expect(await store.totalBytes()).toBe(26175);
+        expect(getAll.mock.calls.filter(call => call[1] === 64 || (call[0] as { count?: number })?.count === 64).length).toBeGreaterThan(1);
+        expect(await store.evict(0, protectedHashes)).toBe(100);
+        expect(bulkGet.mock.calls.length).toBeGreaterThan(1);
+        expect(bulkGet.mock.calls.every(([keys]) => (keys as string[]).length <= 64)).toBe(true);
+        expect(blobDeletes.mock.calls.length).toBeLessThan(10);
+        expect(blobDeletes.mock.calls).toEqual(accessDeletes.mock.calls);
+        expect(await db.accesses.count()).toBe(50);
+        for (const hash of hashes) expect(await store.has(hash)).toBe(protectedHashes.has(toHex(hash)));
+      } finally { vi.restoreAllMocks(); }
+    });
+
+    it('serializes concurrent eviction requests without deleting beyond the target', async () => {
+      for (let index = 0; index < 130; index++) {
+        const data = new Uint8Array(100); data[0] = index;
+        await store.put(makeHash(data), data);
+      }
+      const removed = await Promise.all([store.evict(100), store.evict(100)]);
+      expect(removed.reduce((total, count) => total + count, 0)).toBe(129);
+      expect(await store.count()).toBe(1);
+      expect(await store.totalBytes()).toBe(100);
+    });
+
+    it('rolls back a deletion batch if deleting access metadata fails', async () => {
+      const hashes = [makeHash(new Uint8Array([1])), makeHash(new Uint8Array([2]))];
+      for (const hash of hashes) await store.put(hash, new Uint8Array(100));
+      const db = (store as any).db;
+      const failed = vi.spyOn(db.accesses, 'bulkDelete').mockRejectedValueOnce(new Error('metadata failure'));
+      try {
+        expect(await store.evict(0)).toBe(0);
+        expect(await db.accesses.count()).toBe(2);
+        for (const hash of hashes) expect(await store.has(hash)).toBe(true);
+      } finally { failed.mockRestore(); }
     });
 
     it('should return 0 when store is empty', async () => {

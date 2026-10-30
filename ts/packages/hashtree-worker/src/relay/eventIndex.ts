@@ -29,7 +29,18 @@ async function withIndexLock<T>(name: string, operation: () => Promise<T>): Prom
 export function createWorkerEventStore(store: Store, storeName: string, onPersisted?: () => void): HashtreeRuntimeEventStore {
   const name = `${storeName}-nostr-index`;
   const db = new EventIndexState(name);
-  return new HashtreeRuntimeEventStore(store, {
+  const checkedStore: Store = {
+    get: (hash) => store.get(hash),
+    has: (hash) => store.has(hash),
+    delete: (hash) => store.delete(hash),
+    put: async (hash, data) => {
+      const added = await store.put(hash, data);
+      // Store.put(false) may mean deduplication or a failed Dexie write.
+      if (!added && !await store.has(hash)) throw new Error('Failed to persist event index block');
+      return added;
+    },
+  };
+  return new HashtreeRuntimeEventStore(checkedStore, {
     load: async () => (await db.state.get('roots'))?.value ?? null,
     save: async (value) => {
       await db.state.put({ id: 'roots', value });

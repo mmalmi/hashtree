@@ -19,6 +19,7 @@ interface BlobAccessEntry {
 }
 
 const LAST_ACCESS_FLUSH_DELAY_MS = 50;
+const BLOB_BATCH_SIZE = 64;
 
 class HashTreeDB extends Dexie {
   blobs!: Table<BlobEntry, string>;
@@ -71,6 +72,7 @@ export class DexieStore implements Store {
   private db: HashTreeDB;
   private pendingLastAccessUpdates = new Map<string, number>();
   private lastAccessFlushPromise: Promise<void> | null = null;
+  private pendingEviction: Promise<unknown> = Promise.resolve();
   private lastAccessFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(dbName: string = 'hashtree') {
@@ -245,13 +247,22 @@ export class DexieStore implements Store {
 
   /**
    * Get total bytes stored
-   * Uses cursor to avoid loading all blobs into memory at once
+   * Uses bounded native bulk reads rather than one cursor round trip per blob.
    */
   async totalBytes(): Promise<number> {
     try {
       let total = 0;
-      await this.db.blobs.each(entry => {
-        total += entry.data.byteLength;
+      await this.db.transaction('r', this.db.blobs, async () => {
+        let lastHash: string | undefined;
+        while (true) {
+          const page: BlobEntry[] = await (lastHash === undefined
+            ? this.db.blobs.orderBy(':id')
+            : this.db.blobs.where(':id').above(lastHash))
+            .limit(BLOB_BATCH_SIZE).toArray();
+          for (const entry of page) total += entry.data.byteLength;
+          if (page.length < BLOB_BATCH_SIZE) break;
+          lastHash = page[page.length - 1].hashHex;
+        }
       });
       return total;
     } catch (e) {
@@ -265,29 +276,43 @@ export class DexieStore implements Store {
    * Returns the number of entries deleted.
    */
   async evict(maxBytes: number, protectedHashes: ReadonlySet<string> = new Set()): Promise<number> {
+    const run = this.pendingEviction.then(() => this.evictBatches(maxBytes, protectedHashes));
+    this.pendingEviction = run.catch(() => undefined);
+    return run;
+  }
+
+  private async evictBatches(maxBytes: number, protectedHashes: ReadonlySet<string>): Promise<number> {
     try {
       await this.flushPendingLastAccessUpdates();
       const currentBytes = await this.totalBytes();
       if (currentBytes <= maxBytes) return 0;
 
       // Get entries sorted by lastAccess (oldest first) from the lightweight access table.
-      const entries = await this.db.accesses.orderBy('lastAccess').toArray();
+      const hashes = await this.db.accesses.orderBy('lastAccess').primaryKeys();
 
       let bytesRemoved = 0;
       let entriesRemoved = 0;
       const targetRemoval = currentBytes - maxBytes;
 
-      for (const entry of entries) {
-        if (bytesRemoved >= targetRemoval) break;
-        if (protectedHashes.has(entry.hashHex)) continue;
-
-        const blob = await this.db.blobs.get(entry.hashHex);
-        await this.db.transaction('rw', this.db.blobs, this.db.accesses, async () => {
-          await this.db.blobs.delete(entry.hashHex);
-          await this.db.accesses.delete(entry.hashHex);
+      for (let offset = 0; offset < hashes.length && bytesRemoved < targetRemoval; offset += BLOB_BATCH_SIZE) {
+        const candidates = hashes.slice(offset, offset + BLOB_BATCH_SIZE)
+          .filter(hash => !protectedHashes.has(hash));
+        if (candidates.length === 0) continue;
+        const removed = await this.db.transaction('rw', this.db.blobs, this.db.accesses, async () => {
+          const blobs = await this.db.blobs.bulkGet(candidates);
+          const keys: string[] = [];
+          let bytes = 0;
+          for (let index = 0; index < candidates.length; index++) {
+            if (bytesRemoved + bytes >= targetRemoval) break;
+            keys.push(candidates[index]);
+            bytes += blobs[index]?.data.byteLength ?? 0;
+          }
+          await this.db.blobs.bulkDelete(keys);
+          await this.db.accesses.bulkDelete(keys);
+          return { bytes, count: keys.length };
         });
-        bytesRemoved += blob?.data.byteLength ?? 0;
-        entriesRemoved++;
+        bytesRemoved += removed.bytes;
+        entriesRemoved += removed.count;
       }
 
       console.log(`[DexieStore] Evicted ${entriesRemoved} entries (${bytesRemoved} bytes)`);

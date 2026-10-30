@@ -4,10 +4,10 @@ Persistent browser storage for Hashtree, backed by IndexedDB via Dexie.
 
 ## Install
 
-The current runtime uses `0.1.10`; the npm registry version is older:
+The current runtime uses `0.1.12`; the npm registry version is older:
 
 ```bash
-npm install @hashtree/core https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-dexie-0.1.10.tgz
+npm install @hashtree/core https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.26/hashtree-dexie-0.1.12.tgz
 ```
 
 With npm 12+, add `--allow-remote=all`. See [SDK installation](https://github.com/mmalmi/hashtree/blob/master/ts/README.md#install)
@@ -52,3 +52,5 @@ a saved root. Use it for a recoverable cache, not your only authoritative copy.
 ## License
 
 MIT
+
+Cache size scans read at most 64 blobs per native IndexedDB batch. Eviction retains protected hashes and deletes disposable blobs plus their access metadata atomically in batches of at most 64 keys. Concurrent eviction calls on one store are serialized.
