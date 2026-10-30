@@ -1,5 +1,5 @@
 // @ts-nocheck
-import type { RuntimeEventInfo, RuntimeCompletion, RuntimePublishResult, RuntimeQueryOptions, RuntimeQueryResult, RuntimeSource } from 'nostr-pubsub';
+import type { RuntimeEventInfo, RuntimeCompletion, RuntimePublishResult, RuntimeQueryOptions, RuntimeQueryResult, RuntimeSource, RuntimeReconciliationOptions } from 'nostr-pubsub';
 /**
  * Worker Protocol Types
  *
@@ -112,6 +112,7 @@ export type WorkerRequest =
   | { type: 'subscribe'; id: string; filters: NostrFilter[] }
   | { type: 'unsubscribe'; id: string; subId: string }
   | { type: 'publish'; id: string; event: SignedEvent }
+  | { type: 'ingestEvents'; id: string; events: SignedEvent[] }
 
   // Media streaming (service worker registers a MessagePort)
   | { type: 'registerMediaPort'; port: MessagePort; debug?: boolean }
@@ -176,6 +177,8 @@ export interface WorkerConfig {
   pubkey: string;  // User's pubkey (required - user always logged in)
   nsec?: string;  // Hex-encoded secret key (only for nsec login, not extension)
   storeName?: string;  // IndexedDB database name, defaults to 'hashtree-worker'
+  /** Opt-in background NIP-77 recovery against the worker's retained event store. */
+  reconciliation?: Omit<RuntimeReconciliationOptions, 'fetch'>;
 }
 
 // ============================================================================

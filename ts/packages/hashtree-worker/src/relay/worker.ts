@@ -18,7 +18,7 @@ import { initTreeRootCache, getCachedRootInfo, setCachedRoot, mergeCachedRootKey
 import { handleTreeRootEvent, isTreeRootEvent, setNotifyCallback as setTreeRootNotifyCallback, subscribeToTreeRoots, unsubscribeFromTreeRoots } from './treeRootSubscription';
 import {
   initNostrRuntime,
-  addSource, removeSource, query as queryNostr,
+  addSource, removeSource, query as queryNostr, ingestEvents,
   closeNostrRuntime,
   subscribe as nostrSubscribe,
   unsubscribe as nostrUnsubscribe,
@@ -566,6 +566,10 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       case 'publish':
         await handlePublish(msg.id, msg.event);
         break;
+      case 'ingestEvents':
+        await ingestEvents(msg.events);
+        respond({ type: 'void', id: msg.id });
+        break;
 
       // Media streaming
       case 'registerMediaPort':
@@ -756,6 +760,7 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
     await initNostrRuntime(cfg.relays, {
       store,
       storeName,
+      reconciliation: cfg.reconciliation,
     });
     console.log('[Worker] Nostr runtime initialized with', cfg.relays.length, 'relays');
 

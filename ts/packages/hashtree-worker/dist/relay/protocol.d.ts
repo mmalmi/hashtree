@@ -1,4 +1,4 @@
-import type { RuntimeEventInfo, RuntimeCompletion, RuntimePublishResult, RuntimeQueryOptions, RuntimeQueryResult, RuntimeSource } from 'nostr-pubsub';
+import type { RuntimeEventInfo, RuntimeCompletion, RuntimePublishResult, RuntimeQueryOptions, RuntimeQueryResult, RuntimeSource, RuntimeReconciliationOptions } from 'nostr-pubsub';
 /**
  * Worker Protocol Types
  *
@@ -176,6 +176,10 @@ export type WorkerRequest = {
     id: string;
     event: SignedEvent;
 } | {
+    type: 'ingestEvents';
+    id: string;
+    events: SignedEvent[];
+} | {
     type: 'registerMediaPort';
     port: MessagePort;
     debug?: boolean;
@@ -302,6 +306,8 @@ export interface WorkerConfig {
     pubkey: string;
     nsec?: string;
     storeName?: string;
+    /** Opt-in background NIP-77 recovery against the worker's retained event store. */
+    reconciliation?: Omit<RuntimeReconciliationOptions, 'fetch'>;
 }
 export type WorkerResponse = {
     type: 'ready';

@@ -12,6 +12,7 @@ export async function initNostrRuntime(relays, options) {
     runtime = createNostrRuntime({
         relays,
         store: createWorkerEventStore(options.store, options.storeName),
+        reconciliation: options.reconciliation,
         signAuthEvent: (_relay, template) => signEvent(template),
         maxSubscriptions: 256,
         maxFilterBytesPerBatch: 64 * 1024,
@@ -37,6 +38,14 @@ export function unsubscribe(subId) {
     subscriptions.delete(subId);
 }
 export function publish(event) { return current().publish(event); }
+/** Import signed cached/network records without placing them in the outbox. */
+export async function ingestEvents(events) {
+    if (!Array.isArray(events) || events.length > 128 || new TextEncoder().encode(JSON.stringify(events)).length > 2 * 1024 * 1024) {
+        throw new Error('Event import exceeds its bounds');
+    }
+    for (const event of events)
+        await current().ingest(event, 'external-cache');
+}
 export function query(filters, options = {}) {
     return current().query(filters, options);
 }

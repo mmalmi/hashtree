@@ -45,6 +45,8 @@ export declare class RelayWorkerClient {
     subscribeEvents(filters: NostrFilter[], handlers: RuntimeSubscriptionHandlers): RuntimeSubscription;
     queryEvents(filters: NostrFilter[], options?: RuntimeQueryOptions): Promise<RuntimeQueryResult>;
     publishEvent(event: RelayWorkerSignedEvent): Promise<RuntimePublishResult>;
+    /** Seed the retained event cache without publishing or signing anything. */
+    ingestEvents(events: RelayWorkerSignedEvent[]): Promise<void>;
     /** Attach pubsub on the same FIPS node already used by the blob provider. */
     setNostrSource(source: RuntimeSource | null): Promise<void>;
     setP2PProvider(provider: WorkerP2PProvider | null): void;

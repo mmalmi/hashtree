@@ -406,6 +406,12 @@ export class RelayWorkerClient {
             throw new Error('error' in response && response.error || 'Invalid event publication receipt');
         return response.receipt;
     }
+    /** Seed the retained event cache without publishing or signing anything. */
+    async ingestEvents(events) {
+        const response = await this.request({ type: 'ingestEvents', events });
+        if (response.type !== 'void' || response.error)
+            throw new Error('error' in response && response.error || 'Event import failed');
+    }
     /** Attach pubsub on the same FIPS node already used by the blob provider. */
     async setNostrSource(source) {
         const revision = ++this.sourceRevision;

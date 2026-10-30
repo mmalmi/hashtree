@@ -14,7 +14,7 @@ import { BlobRouter } from '@hashtree/mesh';
 import { DexieStore } from '@hashtree/dexie';
 import { initTreeRootCache, getCachedRootInfo, setCachedRoot, mergeCachedRootKey, clearMemoryCache } from './treeRootCache';
 import { handleTreeRootEvent, isTreeRootEvent, setNotifyCallback as setTreeRootNotifyCallback, subscribeToTreeRoots, unsubscribeFromTreeRoots } from './treeRootSubscription';
-import { initNostrRuntime, addSource, removeSource, query as queryNostr, closeNostrRuntime, subscribe as nostrSubscribe, unsubscribe as nostrUnsubscribe, publish as nostrPublish, setOnEvent, setOnEose, getRelayStats as getNostrRelayStats, republishTrees, republishTree, setRelays as nostrSetRelays, } from './nostrRuntime';
+import { initNostrRuntime, addSource, removeSource, query as queryNostr, ingestEvents, closeNostrRuntime, subscribe as nostrSubscribe, unsubscribe as nostrUnsubscribe, publish as nostrPublish, setOnEvent, setOnEose, getRelayStats as getNostrRelayStats, republishTrees, republishTree, setRelays as nostrSetRelays, } from './nostrRuntime';
 import { initIdentity, setIdentity, clearIdentity } from './identity';
 import { setResponseSender, signEvent, handleSignedResponse, handleEncryptedResponse, handleDecryptedResponse, } from './signing';
 import { SocialGraph } from 'nostr-social-graph';
@@ -492,6 +492,10 @@ self.onmessage = async (e) => {
             case 'publish':
                 await handlePublish(msg.id, msg.event);
                 break;
+            case 'ingestEvents':
+                await ingestEvents(msg.events);
+                respond({ type: 'void', id: msg.id });
+                break;
             // Media streaming
             case 'registerMediaPort':
                 registerMediaPort(msg.port, msg.debug);
@@ -659,6 +663,7 @@ async function handleInit(id, cfg, hasP2PProvider, peerListSupported = true) {
         await initNostrRuntime(cfg.relays, {
             store,
             storeName,
+            reconciliation: cfg.reconciliation,
         });
         console.log('[Worker] Nostr runtime initialized with', cfg.relays.length, 'relays');
         // Set up unified event handler for all subscriptions
