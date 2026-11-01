@@ -16,6 +16,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
+mod cached_root_repair;
 mod cached_store;
 mod git_objects;
 mod local_rebuild;
@@ -132,6 +133,8 @@ pub struct RemoteHelper {
     is_private: bool,
     /// Start time for current operation (for conditional verbose logging)
     op_start: Option<Instant>,
+    #[cfg(test)]
+    cached_root_build_attempts: std::sync::atomic::AtomicUsize,
 }
 
 #[derive(Debug)]
@@ -318,6 +321,8 @@ impl RemoteHelper {
             url_secret,
             is_private,
             op_start: None,
+            #[cfg(test)]
+            cached_root_build_attempts: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 

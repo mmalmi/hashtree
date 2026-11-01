@@ -20,6 +20,7 @@ use std::thread::JoinHandle;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
+mod cached_root_repair;
 mod closure_validation;
 mod hydration;
 mod local_rebuild;

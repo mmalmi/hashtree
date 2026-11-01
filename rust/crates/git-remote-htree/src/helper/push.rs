@@ -42,6 +42,16 @@ pub(super) fn push_error_status(dst: &str, error: &impl std::fmt::Display) -> St
     format!("error {dst} {reason}")
 }
 
+pub(super) fn is_visibility_access_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string();
+    error
+        .downcast_ref::<crate::nostr_client::RootObservationIncomplete>()
+        .is_none()
+        && (message.contains("link-visible")
+            || message.contains("private")
+            || message.contains("secret key"))
+}
+
 fn symbolic_head_target_is_deleted(
     refs: &HashMap<String, String>,
     push_specs: &[PushSpec],
@@ -981,11 +991,14 @@ impl RemoteHelper {
         Ok(result?)
     }
 
-    fn build_tree_with_cached_remote_root(
+    pub(super) fn build_tree_with_cached_remote_root(
         &self,
         label: &str,
         delta_base: Option<&str>,
     ) -> Result<Option<hashtree_core::Cid>> {
+        #[cfg(test)]
+        self.cached_root_build_attempts
+            .fetch_add(1, Ordering::Relaxed);
         let Some(root_hash) = self.nostr.get_cached_root_hash(&self.repo_name).cloned() else {
             return Ok(None);
         };
@@ -1109,7 +1122,7 @@ impl RemoteHelper {
         None
     }
 
-    fn repair_delta_tree_build(
+    pub(super) fn repair_delta_tree_build(
         &mut self,
         sha: &str,
         dst_ref: &str,
@@ -1117,104 +1130,15 @@ impl RemoteHelper {
         reason_label: &str,
         reason: String,
     ) -> Result<hashtree_core::Cid> {
-        eprintln!(
-            "  {reason_label} ({}); hydrating existing remote objects from cached root",
-            reason
-        );
-        debug!(
-            "{} for {} via {}: {}. Hydrating cached remote objects before full local import.",
-            reason_label, dst_ref, base, reason
-        );
-
-        if let Some(root_hash) = self.nostr.get_cached_root_hash(&self.repo_name).cloned() {
-            let existing_objects = self.fetch_all_git_objects(&root_hash)?;
-            eprintln!(
-                "  Importing {} cached remote object(s)",
-                existing_objects.len()
-            );
-            for (oid, content) in existing_objects {
-                self.storage.import_compressed_object(&oid, content)?;
-            }
-        }
-
-        let mut hydrated_missing = HashSet::new();
-        let post_hydration_err = loop {
-            let retry = self
-                .build_tree_with_cached_remote_root(
-                    "Retrying repo tree after cached-object hydration",
-                    Some(base),
-                )
-                .and_then(|root| {
-                    root.ok_or_else(|| {
-                        anyhow::anyhow!("cached remote root disappeared after hydration")
-                    })
-                });
-
-            match retry {
-                Ok(root_cid) => return Ok(root_cid),
-                Err(err) => {
-                    let Some(missing_oid) = Self::missing_object_id_from_error(&err) else {
-                        break err;
-                    };
-                    if !hydrated_missing.insert(missing_oid.clone()) || hydrated_missing.len() > 512
-                    {
-                        break err;
-                    }
-
-                    eprintln!(
-                        "  Hydrating missing local git object {} for cached-root merge",
-                        &missing_oid[..12]
-                    );
-                    let objects_with_content =
-                        self.read_git_objects_batch(std::slice::from_ref(&missing_oid))?;
-                    eprintln!();
-                    Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
-                }
-            }
-        };
-
-        {
-            eprintln!(
-                "  Cached-root hydration still incomplete ({}); falling back to full local import",
-                post_hydration_err
-            );
-            debug!(
-                    "Cached remote hydration still incomplete for {} via {}: {}. Falling back to full local import.",
-                    dst_ref, base, post_hydration_err
-                );
-
-            eprintln!("  Listing objects...");
-            let objects = self.list_objects_to_push(sha, &[])?;
-            eprintln!("  Listed {} object(s)", objects.len());
-
-            let objects_with_content = self.read_git_objects_batch(&objects)?;
-
-            eprintln!("  Writing to local store...");
-            Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
-
-            self.build_tree_with_progress("Building repo tree from repaired local store")
-        }
-    }
-
-    fn missing_object_id_from_error(err: &anyhow::Error) -> Option<String> {
-        for cause in err.chain() {
-            if let Some(crate::git::error::Error::ObjectNotFound(oid)) =
-                cause.downcast_ref::<crate::git::error::Error>()
-            {
-                if Self::is_hex_object_id(oid) {
-                    return Some(oid.clone());
-                }
-            }
-
-            let message = cause.to_string();
-            if let Some(oid) = message.strip_prefix("Object not found: ") {
-                if Self::is_hex_object_id(oid) {
-                    return Some(oid.to_string());
-                }
-            }
-        }
-
-        None
+        eprintln!("  {reason_label} ({reason}); repairing from verified local history");
+        self.hydrate_cached_root_repair(sha)?;
+        // Retry once after hydrating the closure, rather than rebuilding the
+        // entire tree for each missing object. Keep the inherited packs/refs.
+        self.build_tree_with_cached_remote_root("Merging repaired cached root", Some(base))
+            .with_context(|| {
+                format!("cached-root repair failed for {dst_ref}; source was not published")
+            })?
+            .context("cached remote root disappeared during repair")
     }
 
     /// Queue a push operation
@@ -1263,12 +1187,7 @@ impl RemoteHelper {
             loaded?;
         } else if let Err(e) = loaded {
             let err_str = e.to_string();
-            let is_access_error = e
-                .downcast_ref::<crate::nostr_client::RootObservationIncomplete>()
-                .is_none()
-                && (err_str.contains("link-visible")
-                    || err_str.contains("private")
-                    || err_str.contains("secret key"));
+            let is_access_error = is_visibility_access_error(&e);
             let is_likely_new_repo =
                 err_str.contains("No root hash") || Self::is_repo_unobserved_error(&e);
 

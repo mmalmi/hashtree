@@ -1,0 +1,66 @@
+name: Verify index query cancellation
+on:
+  push:
+    branches: ['codex/haps-query-cancellation']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cancellation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install hash-pinned Rust
+        run: |
+          archive="$RUNNER_TEMP/rust.tar.xz"
+          curl --fail --location --output "$archive" https://static.rust-lang.org/dist/2026-10-15/rust-1.99.1-x86_64-unknown-linux-gnu.tar.xz
+          echo "231fcae47ee950621374725b5fc3b5441d2fbda2955ac45dd7dc816d8876cfe7  $archive" | sha256sum --check --strict
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/rust-1.99.1-x86_64-unknown-linux-gnu/install.sh" --prefix="$RUNNER_TEMP/rust-toolchain" --components=rustc,cargo,rust-std-x86_64-unknown-linux-gnu --disable-ldconfig
+          echo "$RUNNER_TEMP/rust-toolchain/bin" >> "$GITHUB_PATH"
+          echo "RUSTC=$RUNNER_TEMP/rust-toolchain/bin/rustc" >> "$GITHUB_ENV"
+      - name: Prove regression on previous query worker
+        working-directory: rust
+        run: |
+          cp crates/hashtree-nostr-pubsub/src/lib.rs "$RUNNER_TEMP/fixed-adapter.rs"
+          trap 'cp "$RUNNER_TEMP/fixed-adapter.rs" crates/hashtree-nostr-pubsub/src/lib.rs' EXIT
+          git show 98c7b20b86b282c5424e954d1fba6b5ce2acc305:rust/crates/hashtree-nostr-pubsub/src/lib.rs > crates/hashtree-nostr-pubsub/src/lib.rs
+          printf '\n#[cfg(test)]\nmod cancellation_tests;\n' >> crates/hashtree-nostr-pubsub/src/lib.rs
+          if cargo test --locked -p hashtree-nostr-pubsub cancelling_index_query_releases_read_and_blocking_runtime > "$RUNNER_TEMP/regression.log" 2>&1; then
+            cat "$RUNNER_TEMP/regression.log"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/regression.log"
+          grep -F 'cancelled query retained its read' "$RUNNER_TEMP/regression.log"
+          grep -F 'test result: FAILED. 0 passed; 1 failed;' "$RUNNER_TEMP/regression.log"
+      - name: Verify fixed adapter and checkpoint ownership
+        working-directory: rust
+        run: cargo test --locked -p hashtree-nostr-pubsub
+      - name: Verify exact registry archive
+        working-directory: rust
+        run: |
+          cargo package --locked -p hashtree-nostr-pubsub --no-verify
+          mkdir "$RUNNER_TEMP/adapter-package"
+          tar -xzf target/package/hashtree-nostr-pubsub-0.2.87.crate -C "$RUNNER_TEMP/adapter-package"
+          CARGO_TARGET_DIR="$PWD/target" cargo check --locked --lib --manifest-path "$RUNNER_TEMP/adapter-package/hashtree-nostr-pubsub-0.2.87/Cargo.toml"
+          CARGO_TARGET_DIR="$PWD/target" cargo test --locked --manifest-path "$RUNNER_TEMP/adapter-package/hashtree-nostr-pubsub-0.2.87/Cargo.toml"
+          sha256sum target/package/hashtree-nostr-pubsub-0.2.87.crate > target/package/adapter.sha256
+          rustc -vV > target/package/adapter-toolchain.txt
+          git rev-parse HEAD > target/package/adapter-source.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: adapter-package-${{ github.sha }}
+          path: |
+            rust/target/package/hashtree-nostr-pubsub-0.2.87.crate
+            rust/target/package/adapter.sha256
+            rust/target/package/adapter-toolchain.txt
+            rust/target/package/adapter-source.txt
+          retention-days: 7
+          if-no-files-found: error

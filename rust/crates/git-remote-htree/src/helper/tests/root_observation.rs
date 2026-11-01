@@ -76,7 +76,22 @@ impl Drop for UnavailablePrivateSource {
 }
 
 #[test]
-fn ordinary_push_rejects_incomplete_observation_despite_private_in_source_url() {
+fn incomplete_observation_is_not_a_visibility_change() {
+    for message in ["private", "link-visible", "secret key"] {
+        let incomplete: anyhow::Error =
+            crate::nostr_client::RootObservationIncomplete(message.to_owned()).into();
+        assert!(!super::super::push::is_visibility_access_error(&incomplete));
+        assert!(!super::super::push::is_visibility_access_error(
+            &incomplete.context(format!("private source: {message}"))
+        ));
+        assert!(super::super::push::is_visibility_access_error(
+            &anyhow::anyhow!(message.to_owned())
+        ));
+    }
+}
+
+#[test]
+fn ordinary_push_rejects_incomplete_observation() {
     let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
     let (home, repo, _, _, _) = create_repo_with_diverged_master_and_dev();
     let _home = HomeGuard::set(home.path());
@@ -140,7 +155,6 @@ fn ordinary_push_rejects_incomplete_observation_despite_private_in_source_url() 
     assert!(error
         .downcast_ref::<crate::nostr_client::RootObservationIncomplete>()
         .is_some());
-    assert!(error.to_string().contains("private"), "{error}");
     helper
         .queue_push("refs/heads/master:refs/heads/master")
         .unwrap();
