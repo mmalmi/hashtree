@@ -39,6 +39,11 @@ cargo install git-remote-htree
 # Clone a repo
 git clone htree://npub1.../repo-name
 
+# Find a repo by name and choose its publisher
+htree clone iris-chat
+htree clone alice/iris-chat
+htree search iris-chat --git
+
 # Push your own repo
 git remote add htree htree://self/myrepo
 git push htree master
@@ -56,6 +61,14 @@ git push origin main
 ```
 
 Each pusher should use their own identity-specific remote instead of sharing one private key. If multiple people push with the same key and their local refs are not in sync, a later push can overwrite refs published by someone else.
+
+Unresolved names such as `git clone htree://iris-chat` or
+`git clone htree://alice/iris-chat` show social-graph matches and explicit clone
+commands on stderr, then exit. The helper never reads a choice from Git's
+protocol input. Use `htree clone` for the interactive picker; the selected
+`npub` URL becomes `origin`, keeping future fetches tied to that publisher.
+Known local aliases keep their existing behavior. Discovery is bounded and
+may be incomplete; `htree search --wait 30` allows a longer observation window.
 
 ## P2P
 

@@ -23,7 +23,8 @@ Content Commands:
   add          Add file or directory to hashtree (like ipfs add)
   pwa          Capture an installable web app into hashtree
   load         Load/prefetch content into local hashtree storage
-  get          Get/download content by CID
+  get          Download content by CID, URL or name
+  search       Find public trees in your social graph
   cat          Output file content to stdout (like cat)
   push         Push content to file servers (Blossom)
   info         Get information about a CID
@@ -39,6 +40,7 @@ Storage Commands:
   mounts       List active hashtree mounts
 
 Publishing & Git Commands:
+  clone        Find and clone a Git repository
   publish      Publish a hash to Nostr under a ref name
   release      Manage published release trees
   repos        List published git repositories for yourself or another user
@@ -80,7 +82,8 @@ Content Commands:
   add          Add file or directory to hashtree (like ipfs add)
   pwa          Capture an installable web app into hashtree
   load         Load/prefetch content into local hashtree storage
-  get          Get/download content by CID
+  get          Download content by CID, URL or name
+  search       Find public trees in your social graph
   cat          Output file content to stdout (like cat)
   push         Push content to file servers (Blossom)
   info         Get information about a CID
@@ -95,6 +98,7 @@ Storage Commands:
   mounts       List active hashtree mounts
 
 Publishing & Git Commands:
+  clone        Find and clone a Git repository
   publish      Publish a hash to Nostr under a ref name
   release      Manage published release trees
   repos        List published git repositories for yourself or another user
@@ -268,13 +272,39 @@ pub(crate) enum Commands {
         command: PwaCommands,
     },
 
-    /// Get/download content by CID
+    /// Download content by CID, URL or a name in your social graph
     Get {
-        /// CID to retrieve
+        /// CID, htree:// URL, tree name or publisher/tree[/path]
         cid: String,
         /// Output path (default: current dir, uses CID as filename)
         #[arg(short, long)]
         output: Option<PathBuf>,
+        /// Print choices instead of prompting when a publisher must be selected
+        #[arg(long)]
+        non_interactive: bool,
+    },
+
+    /// Find public trees in your social graph without downloading
+    Search {
+        /// Tree name or publisher/tree
+        query: String,
+        /// Only show Git repositories
+        #[arg(long)]
+        git: bool,
+        /// Seconds to observe live results (a quiet source is not a miss)
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=60))]
+        wait: u64,
+    },
+
+    /// Find and clone a Git repository, keeping origin tied to its publisher
+    Clone {
+        /// htree:// URL, repository name or publisher/repository
+        repository: String,
+        /// Destination directory (defaults to the selected repository name)
+        directory: Option<PathBuf>,
+        /// Print choices instead of prompting when a publisher must be selected
+        #[arg(long)]
+        non_interactive: bool,
     },
 
     /// Load/prefetch content into local hashtree storage

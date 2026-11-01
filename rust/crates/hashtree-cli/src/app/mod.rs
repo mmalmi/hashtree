@@ -5,6 +5,7 @@ pub(crate) mod cashu_delegate;
 pub(crate) mod content;
 pub(crate) mod daemonize;
 mod deferred_subcommand;
+mod discovery;
 pub(crate) mod lists;
 #[cfg(feature = "fuse")]
 pub(crate) mod mount;

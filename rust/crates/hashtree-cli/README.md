@@ -44,6 +44,13 @@ htree push <hash>                       # Push to configured servers
 htree get <hash>                        # Download to file
 htree cat <hash>                        # Print to stdout
 
+# Find public content and Git repositories through your social graph
+htree search iris-chat --git            # List explicit clone URLs
+htree clone iris-chat                   # Choose a publisher, then clone
+htree clone alice/iris-chat my-checkout  # Search by profile name
+htree get photos                       # Choose a public tree to download
+htree get alice/photos/cat.jpg -o cat.jpg
+
 # Pins
 htree pins                              # List pinned content
 htree pin <hash>                        # Pin content
@@ -68,6 +75,23 @@ htree mount htree://self/mytree          # mounts to ./mytree and errors if it a
 htree mount htree://npub1.../mytree ~/mnt/mytree
 htree mount htree://npub1.../mytree/docs ~/mnt/docs
 ```
+
+Name discovery observes signed profiles, follow lists, public mutes and public
+tree announcements through the local daemon and configured Nostr relays. It
+searches up to two follow hops from `nostr.socialgraph_root` or your identity;
+without an identity it uses the configured bootstrap follows. Existing local
+contacts and mutes are respected, including the selected `--data-dir`. Exact tree names
+rank before partial matches, then closer publishers. Git searches only include
+trees labelled `git`. Local aliases remain explicit publisher choices.
+
+Profile names are not unique. `get` and `clone` require a numbered publisher
+choice in an interactive terminal, even for a single match. Without terminal
+input and stderr, or with `--non-interactive`, they print up to eight explicit `npub` URLs
+and exit without downloading. `clone` passes the selected URL to Git, so later
+fetches stay tied to that publisher. `search` only lists results; use
+`--wait 30` for a longer observation window (default five seconds). A quiet
+window does not prove that a tree is absent. Explicit URLs and immutable CIDs
+continue to work without a picker.
 
 `add --cache` is an opt-in Unix acceleration for directories. Keep its private
 cache outside the input tree; it contains local file metadata and must not be

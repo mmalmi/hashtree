@@ -987,11 +987,14 @@ fn run_command(
         Commands::Get {
             cid: cid_input,
             output,
+            non_interactive,
         } => command_future!({
             use hashtree_core::{to_hex, Cid};
 
             // Resolve to Cid (raw bytes, no hex conversion needed for nhash)
-            let resolved = super::resolve::resolve_get_input(&cid_input).await?;
+            let target =
+                super::discovery::target(&cid_input, false, non_interactive, &data_dir).await?;
+            let resolved = super::resolve::resolve_get_input(&target).await?;
             let cid = resolved.cid.clone();
 
             let store = Arc::new(HashtreeStore::new(&data_dir)?);
@@ -1053,6 +1056,16 @@ fn run_command(
                 store.write_file_by_cid(&target_cid, &out_path)?;
                 println!("{} -> {}", hash_hex, out_path.display());
             }
+        }),
+        Commands::Search { query, git, wait } => command_future!({
+            super::discovery::list(&query, git, wait, &data_dir).await?;
+        }),
+        Commands::Clone {
+            repository,
+            directory,
+            non_interactive,
+        } => command_future!({
+            super::discovery::clone(&repository, directory, non_interactive, &data_dir).await?;
         }),
         Commands::Cat { cid: cid_input } => command_future!({
             use std::io::Write;

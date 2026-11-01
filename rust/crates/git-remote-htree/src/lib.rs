@@ -40,6 +40,7 @@ use nostr_sdk::ToBech32;
 use std::io::{BufRead, Write};
 use tracing::{debug, info, warn};
 
+pub mod discovery;
 pub mod git;
 mod helper;
 pub mod nostr_client;
@@ -111,6 +112,21 @@ fn run() -> Result<()> {
     let url = &args[2];
 
     info!("Remote: {}, URL: {}", remote_name, url);
+
+    // Name discovery never reads Git's protocol input or chooses a publisher
+    // implicitly. The CLI clone command can prompt before Git creates origin.
+    if url.starts_with("htree://") && discovery::is_name_query(url) {
+        let results = runtime::block_on_result(discovery::search(
+            url,
+            true,
+            std::time::Duration::from_secs(5),
+            None,
+        ))?;
+        bail!(
+            "{}For interactive selection, use htree clone <name>.",
+            discovery::suggestions(&results, "git clone")
+        );
+    }
 
     // Parse URL: htree://<identifier>/<repo-name>#k=<secret>
     let parsed = parse_htree_url(url)?;
