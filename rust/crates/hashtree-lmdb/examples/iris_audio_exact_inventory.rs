@@ -1,4 +1,4 @@
-use hashtree_core::{decode_tree_node, decrypt_chk, from_hex, key_from_hex, sha256, to_hex, Hash};
+use hashtree_core::{decode_tree_node, decrypt_object, from_hex, sha256, to_hex, Hash, ObjectKey};
 use hashtree_lmdb::{
     ExternalBlobOptions, LmdbBlobReader, PoolMemberId, PoolStoreConfig, PoolStoreReader,
 };
@@ -155,7 +155,7 @@ fn load_rows(path: &Path) -> Result<(Vec<InputRow>, String), Box<dyn std::error:
         if to_hex(&hash) != fields[2] {
             return Err(format!("non-canonical hash on row {}", index + 2).into());
         }
-        key_from_hex(fields[3])
+        ObjectKey::from_hex(fields[3])
             .map_err(|error| format!("invalid CHK key on row {}: {error}", index + 2))?;
         rows.push(InputRow {
             source_key: fields[0].to_string(),
@@ -232,8 +232,8 @@ fn probe_tier(
                     if result.witness.is_none() {
                         result.witness = Some(tier.label);
                         result.body_sha = "ok";
-                        let key = key_from_hex(&rows[row_index].key_hex)?;
-                        match decrypt_chk(&body, &key) {
+                        let key = ObjectKey::from_hex(&rows[row_index].key_hex)?;
+                        match decrypt_object(&body, &key) {
                             Ok(plaintext) => {
                                 result.chk_auth = "ok";
                                 result.root_decode = if decode_tree_node(&plaintext).is_ok() {

@@ -120,7 +120,7 @@ fn git_storage_upload_includes_chunked_objects_and_multilevel_descendants() {
             let path = format!(".git/objects/{}/{}", &oid[..2], &oid[2..]);
             let cid = tree.resolve_path(&root, &path).await?.unwrap();
             let encrypted = helper.storage.store().get(&cid.hash).await?.unwrap();
-            let plaintext = hashtree_core::decrypt_chk(&encrypted, cid.key.as_ref().unwrap())?;
+            let plaintext = hashtree_core::decrypt_object(&encrypted, cid.key.as_ref().unwrap())?;
             let node = hashtree_core::decode_tree_node(&plaintext)?;
             assert_eq!(node.node_type, LinkType::File);
             assert_eq!(

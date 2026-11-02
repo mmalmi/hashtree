@@ -23,12 +23,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 
+use crate::encryption::ObjectKey;
 use crate::hash::sha256;
 use crate::types::{Hash, Link, LinkType, TreeNode};
 
 /// Error type for codec operations
 #[derive(Debug, thiserror::Error)]
 pub enum CodecError {
+    #[error("Invalid encryption key: {0}")]
+    InvalidEncryptionKey(String),
     #[error("Invalid node type: {0}")]
     InvalidNodeType(u8),
     #[error("Invalid link type: {0}")]
@@ -143,7 +146,7 @@ pub fn encode_tree_node(node: &TreeNode) -> Result<Vec<u8>, CodecError> {
                     t: link.link_type as u8,
                     n: link.name.clone(),
                     s: link.size,
-                    k: link.key.map(|k| k.to_vec()),
+                    k: link.key.map(|k| k.as_bytes().to_vec()),
                     m: sorted_meta
                         .map(|m| m.into_iter().map(|(k, v)| (k.clone(), v.clone())).collect()),
                 }
@@ -184,14 +187,11 @@ pub fn decode_tree_node(data: &[u8]) -> Result<TreeNode, CodecError> {
         let mut hash = [0u8; 32];
         hash.copy_from_slice(&wl.h);
 
-        let key = match wl.k {
-            Some(k) if k.len() == 32 => {
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&k);
-                Some(key)
-            }
-            _ => None,
-        };
+        let key =
+            wl.k.as_deref()
+                .map(ObjectKey::from_bytes)
+                .transpose()
+                .map_err(|e| CodecError::InvalidEncryptionKey(e.to_string()))?;
 
         let link_type = LinkType::from_u8(wl.t).ok_or(CodecError::InvalidLinkType(wl.t))?;
 
@@ -465,7 +465,7 @@ mod tests {
             hash,
             name: Some("encrypted.dat".to_string()),
             size: 1024,
-            key: Some(key),
+            key: Some(key.into()),
             link_type: LinkType::Blob,
             meta: None,
         }]);
@@ -473,7 +473,7 @@ mod tests {
         let encoded = encode_tree_node(&node).unwrap();
         let decoded = decode_tree_node(&encoded).unwrap();
 
-        assert_eq!(decoded.links[0].key, Some(key));
+        assert_eq!(decoded.links[0].key, Some(key.into()));
     }
 
     #[test]

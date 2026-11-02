@@ -15,7 +15,7 @@ use tokio::task::JoinSet;
 
 mod open;
 
-use hashtree_core::{decrypt, xor_keys};
+use hashtree_core::{decrypt, mask_object_key, xor_key_bytes, ObjectKey};
 
 pub const HASHTREE_KIND: u16 = 30064;
 pub const HASHTREE_LEGACY_KIND: u16 = 30078;
@@ -613,38 +613,23 @@ impl NostrRootResolver {
         let hash = from_hex(&hash_hex?).ok()?;
 
         // key is optional
-        let mut key = key_hex.and_then(|k| {
-            let bytes = hex::decode(&k).ok()?;
-            if bytes.len() == 32 {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                Some(arr)
-            } else {
-                None
+        let key_hex = match (key_hex, self_encrypted_key, keys) {
+            (Some(key), _, _) => Some(key),
+            (None, Some(ciphertext), Some(keys)) => {
+                Some(nip44::decrypt(keys.secret_key(), &keys.public_key(), &ciphertext).ok()?)
             }
-        });
-
-        if key.is_none() {
-            if let (Some(ciphertext), Some(keys)) = (self_encrypted_key, keys) {
-                if let Ok(key_hex) =
-                    nip44::decrypt(keys.secret_key(), &keys.public_key(), &ciphertext)
-                {
-                    if let Ok(bytes) = hex::decode(&key_hex) {
-                        if bytes.len() == 32 {
-                            let mut arr = [0u8; 32];
-                            arr.copy_from_slice(&bytes);
-                            key = Some(arr);
-                        }
-                    }
-                }
-            }
-        }
+            _ => None,
+        };
+        let key = key_hex
+            .map(|value| ObjectKey::from_hex(&value))
+            .transpose()
+            .ok()?;
 
         Some(Cid { hash, key })
     }
 
     /// Extract Cid from event with encrypted key decryption
-    fn cid_from_event_shared(event: &Event, share_secret: &[u8; 32]) -> Option<Cid> {
+    fn cid_from_event_shared(event: &Event, share_secret: &[u8]) -> Option<Cid> {
         let mut hash_hex: Option<String> = None;
         let mut key_hex: Option<String> = None;
         let mut encrypted_key_hex: Option<String> = None;
@@ -671,34 +656,14 @@ impl NostrRootResolver {
 
         let hash = from_hex(&hash_hex?).ok()?;
 
-        let key = if let Some(k_hex) = key_hex {
-            let bytes = hex::decode(&k_hex).ok()?;
-            if bytes.len() == 32 {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&bytes);
-                Some(arr)
-            } else {
-                None
-            }
-        } else if let Some(ek_hex) = encrypted_key_hex {
-            let masked = hex::decode(&ek_hex).ok()?;
-            if masked.len() == 32 {
-                let mut masked_arr = [0u8; 32];
-                masked_arr.copy_from_slice(&masked);
-                Some(xor_keys(&masked_arr, share_secret))
-            } else {
-                None
-            }
-        } else if let Some(ek_hex) = encrypted_key_legacy_hex {
-            let encrypted_key = hex::decode(&ek_hex).ok()?;
-            let decrypted = decrypt(&encrypted_key, share_secret).ok()?;
-            if decrypted.len() == 32 {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&decrypted);
-                Some(arr)
-            } else {
-                None
-            }
+        let key = if let Some(hex) = key_hex {
+            Some(ObjectKey::from_hex(&hex).ok()?)
+        } else if let Some(hex) = encrypted_key_hex {
+            let masked = hex::decode(hex).ok()?;
+            Some(ObjectKey::from_bytes(&xor_key_bytes(&masked, share_secret).ok()?).ok()?)
+        } else if let Some(hex) = encrypted_key_legacy_hex {
+            let bytes = decrypt(&hex::decode(hex).ok()?, share_secret.try_into().ok()?).ok()?;
+            Some(ObjectKey::from_bytes(&bytes).ok()?)
         } else {
             None
         };
@@ -831,7 +796,7 @@ impl RootResolver for NostrRootResolver {
     async fn resolve_shared(
         &self,
         key: &str,
-        share_secret: &[u8; 32],
+        share_secret: &[u8],
     ) -> Result<Option<Cid>, ResolverError> {
         let (pubkey, tree_name) = Self::parse_key(key)?;
         let events = self
@@ -984,7 +949,7 @@ impl RootResolver for NostrRootResolver {
         &self,
         key: &str,
         cid: &Cid,
-        share_secret: &[u8; 32],
+        share_secret: &[u8],
     ) -> Result<bool, ResolverError> {
         let (pubkey, tree_name) = Self::parse_key(key)?;
 
@@ -1004,7 +969,8 @@ impl RootResolver for NostrRootResolver {
 
         // Mask the key with share_secret (XOR)
         if let Some(key) = cid.key {
-            let masked = xor_keys(&key, share_secret);
+            let masked = mask_object_key(&key, share_secret)
+                .map_err(|e| ResolverError::InvalidKey(e.to_string()))?;
             tags.push(Tag::custom(
                 TagKind::Custom(TAG_ENCRYPTED_KEY.into()),
                 vec![hex::encode(masked)],

@@ -46,7 +46,7 @@ describe.each([false, true])('walkBlocks (unencrypted=%s)', (unencrypted) => {
 
 it('walks legacy plaintext nodes carrying a key and encrypted children', async () => {
   const store = new MemoryStore();
-  const tree = new HashTree({ store });
+  const tree = new HashTree({ store, encryptionMode: 'legacy-chk' });
   const file = await tree.putFile(new TextEncoder().encode('encrypted child'));
   const root = await tree.putDirectory([
     { name: 'file', cid: file.cid, size: file.size, type: LinkType.Blob },

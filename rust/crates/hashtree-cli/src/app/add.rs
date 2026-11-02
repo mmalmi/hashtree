@@ -5,8 +5,7 @@ use hashtree_cli::{
     NostrRootResolver, NostrToBech32, RootResolver, LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, PRIORITY_OWN,
 };
 use hashtree_core::{
-    from_hex, key_from_hex, nhash_encode, nhash_encode_full, Cid, HashTree, HashTreeConfig,
-    NHashData,
+    from_hex, nhash_encode, nhash_encode_full, Cid, HashTree, HashTreeConfig, NHashData, ObjectKey,
 };
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
@@ -274,7 +273,7 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
                 let hash = from_hex(&hash_hex).context("Invalid hash")?;
                 let key = key_hex
                     .as_ref()
-                    .map(|k| key_from_hex(k))
+                    .map(|k| ObjectKey::from_hex(k))
                     .transpose()
                     .map_err(|e| anyhow::anyhow!("Invalid key: {}", e))?;
                 let nhash_data = NHashData {
@@ -372,7 +371,7 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
         let hash = from_hex(&hash_hex).context("Invalid hash")?;
         let key = key_hex
             .as_ref()
-            .map(|k| key_from_hex(k))
+            .map(|k| ObjectKey::from_hex(k))
             .transpose()
             .map_err(|e| anyhow::anyhow!("Invalid key: {}", e))?;
         let cid = Cid { hash, key };

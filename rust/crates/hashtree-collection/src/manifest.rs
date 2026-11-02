@@ -155,18 +155,10 @@ impl TryFrom<SerializedCid> for Cid {
         })?;
         let key = value
             .key
-            .map(|key| -> Result<[u8; 32], CollectionError> {
-                let key = hex::decode(&key).map_err(|err| {
-                    CollectionError::Validation(format!(
-                        "invalid collection schema_ref key hex: {err}"
-                    ))
-                })?;
-                let key: [u8; 32] = key.try_into().map_err(|_| {
-                    CollectionError::Validation(
-                        "invalid collection schema_ref key length".to_string(),
-                    )
-                })?;
-                Ok::<[u8; 32], CollectionError>(key)
+            .map(|key| {
+                hashtree_core::ObjectKey::from_hex(&key).map_err(|err| {
+                    CollectionError::Validation(format!("invalid collection schema_ref key: {err}"))
+                })
             })
             .transpose()?;
 

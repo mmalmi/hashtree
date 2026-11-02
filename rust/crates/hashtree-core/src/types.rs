@@ -1,7 +1,6 @@
-//! HashTree - Simple content-addressed merkle tree
-//!
-//! Core principle: Every node is stored by SHA256(msgpack(node)) -> msgpack(node)
-//! This enables pure KV content-addressed storage.
+//! Content-addressed Merkle tree types.
+
+use crate::encryption::ObjectKey;
 
 /// Link type - distinguishes blobs, chunked files, directories, and directory fanout
 /// Uses small integer values for efficient MessagePack encoding
@@ -46,8 +45,8 @@ impl LinkType {
 pub type Hash = [u8; 32];
 
 /// Convert hash to hex string
-pub fn to_hex(hash: &Hash) -> String {
-    hex::encode(hash)
+pub fn to_hex<T: AsRef<[u8]> + ?Sized>(hash: &T) -> String {
+    hex::encode(hash.as_ref())
 }
 
 /// Convert hex string to hash
@@ -76,7 +75,7 @@ pub struct Link {
     /// Size of subtree in bytes (for efficient seeks). 0 for Dir links.
     pub size: u64,
     /// Optional decryption key for encrypted links (CHK: content hash)
-    pub key: Option<[u8; 32]>,
+    pub key: Option<ObjectKey>,
     /// Type of content this link points to (Blob, File, Dir, or Fanout)
     /// Always set explicitly - no probing needed during tree traversal
     pub link_type: LinkType,
@@ -106,8 +105,8 @@ impl Link {
         self
     }
 
-    pub fn with_key(mut self, key: [u8; 32]) -> Self {
-        self.key = Some(key);
+    pub fn with_key(mut self, key: impl Into<ObjectKey>) -> Self {
+        self.key = Some(key.into());
         self
     }
 
@@ -197,7 +196,7 @@ pub struct Cid {
     pub hash: Hash,
     /// Encryption key (content hash of plaintext for CHK)
     /// None for unencrypted/public content
-    pub key: Option<[u8; 32]>,
+    pub key: Option<ObjectKey>,
 }
 
 impl Cid {
@@ -207,10 +206,10 @@ impl Cid {
     }
 
     /// Create a new CID for encrypted content
-    pub fn encrypted(hash: Hash, key: [u8; 32]) -> Self {
+    pub fn encrypted(hash: Hash, key: impl Into<ObjectKey>) -> Self {
         Self {
             hash,
-            key: Some(key),
+            key: Some(key.into()),
         }
     }
 
@@ -224,10 +223,11 @@ impl Cid {
     pub fn parse(s: &str) -> Result<Self, CidParseError> {
         if let Some((hash_hex, key_hex)) = s.split_once(':') {
             let hash = from_hex(hash_hex).map_err(|_| CidParseError::InvalidHash)?;
-            let key = from_hex(key_hex).map_err(|_| CidParseError::InvalidKey)?;
+            let bytes = hex::decode(key_hex).map_err(|_| CidParseError::InvalidKey)?;
+            let key = ObjectKey::from_bytes(&bytes).map_err(|_| CidParseError::InvalidKey)?;
             Ok(Self {
                 hash,
-                key: Some(key),
+                key: Some(key.into()),
             })
         } else {
             let hash = from_hex(s).map_err(|_| CidParseError::InvalidHash)?;
@@ -239,7 +239,7 @@ impl Cid {
 impl std::fmt::Display for Cid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(key) = &self.key {
-            write!(f, "{}:{}", to_hex(&self.hash), to_hex(key))
+            write!(f, "{}:{}", to_hex(&self.hash), hex::encode(key.as_bytes()))
         } else {
             write!(f, "{}", to_hex(&self.hash))
         }
@@ -270,7 +270,7 @@ pub struct DirEntry {
     pub name: String,
     pub hash: Hash,
     pub size: u64,
-    pub key: Option<[u8; 32]>,
+    pub key: Option<ObjectKey>,
     /// Type of content this entry points to (Blob, File, Dir, or Fanout)
     pub link_type: LinkType,
     /// Optional metadata (createdAt, mimeType, thumbnail, etc.)
@@ -307,8 +307,8 @@ impl DirEntry {
         self
     }
 
-    pub fn with_key(mut self, key: [u8; 32]) -> Self {
-        self.key = Some(key);
+    pub fn with_key(mut self, key: impl Into<ObjectKey>) -> Self {
+        self.key = Some(key.into());
         self
     }
 

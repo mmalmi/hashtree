@@ -85,7 +85,7 @@ async fn walk_decryption_errors_do_not_expose_keys() {
     let tree = HashTree::new(HashTreeConfig::new(Arc::new(MemoryStore::new())));
     let bad_cid = Cid {
         hash: tree.put_blob(b"invalid ciphertext").await.unwrap(),
-        key: Some([0x5a; 32]),
+        key: Some([0x5a; 32].into()),
     };
     let root = tree
         .put_directory(vec![

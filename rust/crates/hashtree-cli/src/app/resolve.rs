@@ -17,7 +17,7 @@ pub(crate) struct ResolvedCid {
 
 #[derive(Default, Clone)]
 pub(crate) struct ResolveOptions {
-    pub(crate) link_key: Option<[u8; 32]>,
+    pub(crate) link_key: Option<hashtree_core::LinkKeyBytes>,
     pub(crate) private: bool,
     pub(crate) relays: Option<Vec<String>>,
     pub(crate) secret_key: Option<NostrKeys>,
@@ -128,7 +128,7 @@ pub(crate) async fn resolve_cid_input_with_opts(
             .context("Failed to create nostr resolver")?;
 
         let resolved = if let Some(link_key) = opts.link_key {
-            resolver.resolve_shared(&key, &link_key).await
+            resolver.resolve_shared(&key, link_key.as_ref()).await
         } else {
             resolver.resolve(&key).await
         };
@@ -197,7 +197,7 @@ fn resolve_cached_published_target_from_cache(
             .map_err(|e| anyhow::anyhow!("Invalid cached root hash: {}", e))?,
         key: match cached.key.as_deref() {
             Some(key) => Some(
-                hashtree_core::from_hex(key)
+                hashtree_core::ObjectKey::from_hex(key)
                     .map_err(|e| anyhow::anyhow!("Invalid cached root key: {}", e))?,
             ),
             None => None,

@@ -1762,7 +1762,7 @@ async fn htree_nhash_rejects_embedded_decryption_key() {
     let key = [0x99; 32];
     let nhash = hashtree_core::nhash_encode_full(&hashtree_core::NHashData {
         hash,
-        decrypt_key: Some(key),
+        decrypt_key: Some(key.into()),
     })
     .expect("encode keyed nhash");
     let route_nhash = nhash.strip_prefix("nhash1").expect("nhash prefix");

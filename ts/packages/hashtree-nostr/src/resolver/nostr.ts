@@ -16,7 +16,7 @@ import type {
   PublishResult,
   RefResolverSubscriptionMetadata,
 } from '@hashtree/core';
-import { fromHex, toHex, cid } from '@hashtree/core';
+import { fromHex, toHex, cid, objectKeyFromHex } from '@hashtree/core';
 import {
   encryptKeyForLink,
   computeKeyId,
@@ -195,6 +195,9 @@ function parseHashAndVisibility(event: NostrEvent): ParsedTreeVisibility | null 
   const selfEncryptedLinkKeyTag = event.tags.find(t => t[0] === 'selfEncryptedLinkKey')?.[1];
 
   const key = keyTag ?? legacyContent?.key;
+  if (key !== undefined) {
+    try { objectKeyFromHex(key); } catch { return null; }
+  }
   const encryptedKey = encryptedKeyTag ?? legacyContent?.encryptedKey;
   const keyId = keyIdTag ?? legacyContent?.keyId;
   const selfEncryptedKey = selfEncryptedKeyTag ?? legacyContent?.selfEncryptedKey;
@@ -341,7 +344,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
         const doResolve = () => {
           unsubscribe();
           if (latestData) {
-            resolve(cid(fromHex(latestData.hash), latestData.key ? fromHex(latestData.key) : undefined));
+            resolve(cid(fromHex(latestData.hash), latestData.key ? objectKeyFromHex(latestData.key) : undefined));
           } else {
             resolve(null);
           }
@@ -416,7 +419,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
           currentVisibility: sub.currentVisibility ? JSON.stringify(sub.currentVisibility) : 'null'
         });
         if (sub.currentHash) {
-          const keyBytes = sub.currentKey ? fromHex(sub.currentKey) : undefined;
+          const keyBytes = sub.currentKey ? objectKeyFromHex(sub.currentKey) : undefined;
           callback(
             cid(fromHex(sub.currentHash), keyBytes),
             sub.currentVisibility ?? undefined,
@@ -430,7 +433,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
         // Helper to notify all callbacks
         const notifyCallbacks = (subEntry: SubscriptionEntry) => {
           if (!subEntry.currentHash) return;
-          const keyBytes = subEntry.currentKey ? fromHex(subEntry.currentKey) : undefined;
+          const keyBytes = subEntry.currentKey ? objectKeyFromHex(subEntry.currentKey) : undefined;
           const visibilityInfo = subEntry.currentVisibility ?? undefined;
           const metadata = {
             updatedAt: subEntry.latestCreatedAt,
@@ -558,7 +561,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
 
         // Fire callback immediately with cached value if available
         if (cachedEntry?.hash) {
-          const keyBytes = cachedEntry.key ? fromHex(cachedEntry.key) : undefined;
+          const keyBytes = cachedEntry.key ? objectKeyFromHex(cachedEntry.key) : undefined;
           callback(
             cid(fromHex(cachedEntry.hash), keyBytes),
             sub.currentVisibility ?? undefined,
@@ -651,8 +654,8 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
             break;
 
           case 'link-visible': {
-            // Encrypt key with link key (XOR one-time pad)
-            const linkKey = options?.linkKey ?? generateLinkKey();
+            // Mask the object key with the link secret.
+            const linkKey = options?.linkKey ?? generateLinkKey(chkKey.length === 32 ? 32 : 33);
             resultLinkKey = linkKey;
             const encryptedKey = encryptKeyForLink(chkKey, linkKey);
             const keyId = await computeKeyId(linkKey);
@@ -672,7 +675,6 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
               }
 
               // Encrypt linkKey to self for URL recovery (so owner can share URLs easily)
-              // Owner can also derive linkKey from XOR(encryptedKey, contentKey)
               try {
                 const selfEncryptedLinkKey = await visibility.encrypt(linkKey, pubkey);
                 tags.push(['selfEncryptedLinkKey', selfEncryptedLinkKey]);
@@ -771,7 +773,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
             if (!entry.hash) continue; // Skip deleted trees
             result.push({
               key: `${npubStr}/${dTag}`,
-              cid: cid(fromHex(entry.hash), entry.key ? fromHex(entry.key) : undefined),
+              cid: cid(fromHex(entry.hash), entry.key ? objectKeyFromHex(entry.key) : undefined),
               labels: entry.labels,
               visibility: entry.visibility,
               encryptedKey: entry.encryptedKey,
@@ -853,7 +855,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
           }
           result.push({
             key: `${npubStr}/${dTag}`,
-            cid: cid(fromHex(entry.hash), entry.key ? fromHex(entry.key) : undefined),
+            cid: cid(fromHex(entry.hash), entry.key ? objectKeyFromHex(entry.key) : undefined),
             labels: entry.labels,
             visibility: entry.visibility,
             encryptedKey: entry.encryptedKey,
@@ -895,7 +897,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
           if (!entry.hash) continue;
           result.push({
             key: `${npubStr}/${dTag}`,
-            cid: cid(fromHex(entry.hash), entry.key ? fromHex(entry.key) : undefined),
+            cid: cid(fromHex(entry.hash), entry.key ? objectKeyFromHex(entry.key) : undefined),
             labels: entry.labels,
             visibility: entry.visibility,
             encryptedKey: entry.encryptedKey,
@@ -1074,7 +1076,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
           if (!entry.hash) continue;
           result.push({
             key: `${npubStr}/${dTag}`,
-            cid: cid(fromHex(entry.hash), entry.key ? fromHex(entry.key) : undefined),
+            cid: cid(fromHex(entry.hash), entry.key ? objectKeyFromHex(entry.key) : undefined),
             labels: entry.labels,
             visibility: entry.visibility,
             encryptedKey: entry.encryptedKey,
@@ -1186,7 +1188,7 @@ export function createNostrRefResolver(config: NostrRefResolverConfig): RefResol
             if (!e.hash) continue; // Skip deleted trees
             result.push({
               key: `${npubStr}/${dTag}`,
-              cid: cid(fromHex(e.hash), e.key ? fromHex(e.key) : undefined),
+              cid: cid(fromHex(e.hash), e.key ? objectKeyFromHex(e.key) : undefined),
               labels: e.labels,
               visibility: e.visibility,
               encryptedKey: e.encryptedKey,

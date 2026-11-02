@@ -35,7 +35,7 @@ impl<S: Store> HashTree<S> {
 
         // Decrypt if key is present
         let data = if let Some(key) = &cid.key {
-            decrypt_chk(&data, key).map_err(|e| HashTreeError::Decryption(e.to_string()))?
+            decrypt_object(&data, key).map_err(|e| HashTreeError::Decryption(e.to_string()))?
         } else {
             data
         };
@@ -172,7 +172,7 @@ impl<S: Store> HashTree<S> {
 
                 // Decrypt if key is present
                 let data = if let Some(key) = &node_cid.key {
-                    decrypt_chk(&data, key).map_err(|e| {
+                    decrypt_object(&data, key).map_err(|e| {
                         HashTreeError::Decryption(format!(
                             "{} at path '{}' hash {}",
                             e,
@@ -287,7 +287,7 @@ impl<S: Store> HashTree<S> {
 
                         // Decrypt if key is present
                         let data = if let Some(key) = &cid.key {
-                            match decrypt_chk(&data, key) {
+                            match decrypt_object(&data, key) {
                                 Ok(d) => d,
                                 Err(e) => {
                                     return Some((
@@ -380,7 +380,7 @@ impl<S: Store> HashTree<S> {
             };
 
             let data = if let Some(key) = &item.key {
-                match decrypt_chk(&data, key) {
+                match decrypt_object(&data, key) {
                     Ok(d) => d,
                     Err(e) => {
                         return Some((
@@ -464,7 +464,7 @@ impl<S: Store> HashTree<S> {
 struct WalkStackItem {
     hash: Hash,
     path: String,
-    key: Option<[u8; 32]>,
+    key: Option<ObjectKey>,
 }
 
 enum WalkStreamState<'a, S: Store> {

@@ -58,7 +58,7 @@ pub struct InventoryRow {
     pub source_key: String,
     pub song_id: String,
     pub hash: hashtree_core::Hash,
-    pub key: [u8; 32],
+    pub key: hashtree_core::ObjectKey,
     pub input_line: usize,
 }
 
@@ -71,7 +71,7 @@ pub struct WorkItem {
     pub input_line: Option<usize>,
     pub role: String,
     pub hash: hashtree_core::Hash,
-    pub key: Option<[u8; 32]>,
+    pub key: Option<hashtree_core::ObjectKey>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -256,7 +256,7 @@ pub struct AuditManifest {
 #[derive(Debug, Clone)]
 pub struct BlockRef {
     pub hash: hashtree_core::Hash,
-    pub key: Option<[u8; 32]>,
+    pub key: Option<hashtree_core::ObjectKey>,
     pub path: String,
     pub role: String,
     pub expected_link_type: Option<hashtree_core::LinkType>,

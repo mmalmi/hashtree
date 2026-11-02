@@ -1,3 +1,4 @@
+import { encryptionMode } from '../encryption.js';
 /**
  * Encrypted tree editing operations
  *
@@ -117,7 +118,7 @@ export async function setEntryEncrypted(
   newEntries.push({ name, hash, size, key, type, meta });
 
   // Create new encrypted directory
-  const newDir = await putDirectoryEncrypted(config, newEntries);
+  const newDir = await putDirectoryEncrypted(editConfig(config, resolved.dirKey), newEntries);
 
   // Rebuild the path with new directory
   return rebuildPathEncrypted(
@@ -163,7 +164,7 @@ export async function removeEntryEncrypted(
       meta: e.meta,
     }));
 
-  const newDir = await putDirectoryEncrypted(config, newEntries);
+  const newDir = await putDirectoryEncrypted(editConfig(config, resolved.dirKey), newEntries);
 
   return rebuildPathEncrypted(
     config,
@@ -227,7 +228,7 @@ export async function renameEntryEncrypted(
     meta: entry.meta,
   });
 
-  const newDir = await putDirectoryEncrypted(config, newEntries);
+  const newDir = await putDirectoryEncrypted(editConfig(config, resolved.dirKey), newEntries);
 
   return rebuildPathEncrypted(
     config,
@@ -301,7 +302,7 @@ export async function moveEntryEncrypted(
     meta: entryToMove.meta,
   });
 
-  const newTargetDir = await putDirectoryEncrypted(config, newTargetEntries);
+  const newTargetDir = await putDirectoryEncrypted(editConfig(config, targetResolved.dirKey), newTargetEntries);
 
   return rebuildPathEncrypted(
     config,
@@ -368,10 +369,14 @@ async function rebuildPathEncrypted(
         : { name: e.name, hash: e.hash, size: e.size, key: e.key, type: e.type, meta: e.meta }
     );
 
-    const newParent = await putDirectoryEncrypted(config, newParentEntries);
+    const newParent = await putDirectoryEncrypted(editConfig(config, parentKey), newParentEntries);
     childHash = newParent.hash;
     childKey = newParent.key;
   }
 
   return { hash: childHash, key: childKey };
+}
+
+function editConfig(config: EncryptedEditConfig, key: EncryptionKey): EncryptedEditConfig {
+  return encryptionMode(key) === 'rnd-v1' ? { ...config, encryptionMode: 'rnd-v1' } : config;
 }

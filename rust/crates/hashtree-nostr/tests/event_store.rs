@@ -1185,9 +1185,10 @@ fn manifest_root_matches_typescript_fixture() {
         assert_eq!(
             cid_to_pair(&root),
             (
-                "42fe879573c9d4b526c8e0b0302ccf5c7be5976da11c82a37268da9d79c7ff79".to_string(),
+                "26444da311236d3e5d88154ad64d2c52bc0ca7e8b8667070af5466513fd32f2c".to_string(),
                 Some(
-                    "d71321a960031651d28135f4d1304a2e2cf8ae612ca40ab07eb5fb1c389b06b4".to_string()
+                    "01b80ec4fdc38b28171435075791ff3c9236f22fe72168c6d0b75ccb53a9a3c887"
+                        .to_string()
                 )
             )
         );
@@ -1195,36 +1196,40 @@ fn manifest_root_matches_typescript_fixture() {
         assert_eq!(
             cid_to_pair(manifest.by_id.as_ref().unwrap()),
             (
-                "cfef6382cd6e8f76eeac020241e0bf2cf06f1d4aa04f22386563f51cd6b82255".to_string(),
+                "d4a3b272faefcb70ff726ec50073c7b2021ee00a714859bf8c0637171e519bdb".to_string(),
                 Some(
-                    "b6574a09ef40e5e058bdefb41da932984754a29dd41286b1edb2a0d76e949df3".to_string()
+                    "01aa1bc7af7f3ea462093094368ddc294b20087d4b0c05bde34ae4b4c22853aba9"
+                        .to_string()
                 )
             )
         );
         assert_eq!(
             cid_to_pair(manifest.by_author_time.as_ref().unwrap()),
             (
-                "59c18768cfd9635b0fcd9aa4364428176eaf81b198cf01dd15d5d7fbd64f8b58".to_string(),
+                "1450856646a4a05ea99ec74142b58944ca0f7b067e855674126e849d8572b0c2".to_string(),
                 Some(
-                    "a9a6b38d6fc3ae3ec08ce09a5d9ffe1c1a3ee7b1019713abf691ce9635c9ef0c".to_string()
+                    "0157b7350594d3d31ab2e91e599ec722c031468fffead373e851321c6d45c0c613"
+                        .to_string()
                 )
             )
         );
         assert_eq!(
             cid_to_pair(manifest.by_kind_time.as_ref().unwrap()),
             (
-                "66679b40e811a34aa6f769a1463b0c3d99ad902ce25765ee7f11e4e6a2c9504d".to_string(),
+                "86549d32024c7cce695b4ae497799f2c0446f48bc4fc5f74aff48f4b83a0c2f2".to_string(),
                 Some(
-                    "b6c798064906e42b709e44271942d9a489f8304ac6f6e99d49ce7f88fe11e6f7".to_string()
+                    "01e18df7631a9f7e9170eed54161401e9b8452904e113203ef96dfb2589b9572fa"
+                        .to_string()
                 )
             )
         );
         assert_eq!(
             cid_to_pair(manifest.by_time.as_ref().unwrap()),
             (
-                "3a06b344cc4f726e9000f00d6ddea99f28466fc08a33a84c01def4b682fbb2f0".to_string(),
+                "7b1cfb0f45ad6b33ee2a277f6db6bbba0ed6ff20d7b7cbf9ff8ae9287dc1f23d".to_string(),
                 Some(
-                    "4d6e07652d9fd5d148d826e2acb06195a416efff0df27fdd0c11a52cd7ee3a34".to_string()
+                    "01befbbd54f3083119f024e3146df5d786e73bc259e78fbb4f476e420d78814f30"
+                        .to_string()
                 )
             )
         );

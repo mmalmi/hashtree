@@ -1,3 +1,4 @@
+import { encryptionMode } from './encryption.js';
 /**
  * Bech32-encoded identifiers for hashtree content
  *
@@ -27,7 +28,7 @@ const TLV = {
   TREE_NAME: 3,
   /** UTF-8 path segment (can appear multiple times, in order) */
   PATH: 4,
-  /** 32-byte decryption key (optional) */
+  /** Legacy or versioned object key (optional) */
   DECRYPT_KEY: 5,
 } as const;
 
@@ -38,7 +39,7 @@ const TLV = {
 export interface NHashData {
   /** 32-byte merkle hash (hex string) */
   hash: string;
-  /** 32-byte decryption key (hex string) - optional */
+  /** Legacy or versioned object key (hex string) - optional */
   decryptKey?: string;
 }
 
@@ -52,7 +53,7 @@ export interface NPathData {
   treeName: string;
   /** Path segments within the tree (e.g., ["folder", "file.txt"]) */
   path: string[];
-  /** 32-byte decryption key (hex string) - optional */
+  /** Legacy or versioned object key (hex string) - optional */
   decryptKey?: string;
 }
 
@@ -148,9 +149,7 @@ function encodeNhashTlv(hashBytes: Uint8Array, keyBytes?: Uint8Array): Uint8Arra
   };
 
   if (keyBytes) {
-    if (keyBytes.length !== 32) {
-      throw new Error(`Decrypt key must be 32 bytes, got ${keyBytes.length}`);
-    }
+    encryptionMode(keyBytes);
     tlv[TLV.DECRYPT_KEY] = [keyBytes];
   }
 
@@ -229,9 +228,7 @@ export function nhashDecode(code: string): CID {
   };
 
   if (tlv[TLV.DECRYPT_KEY]?.[0]) {
-    if (tlv[TLV.DECRYPT_KEY][0].length !== 32) {
-      throw new Error('nhash: decrypt key must be 32 bytes');
-    }
+    encryptionMode(tlv[TLV.DECRYPT_KEY][0]);
     result.key = tlv[TLV.DECRYPT_KEY][0];
   }
 
@@ -269,9 +266,7 @@ export function npathEncode(data: NPathData): string {
 
   if (data.decryptKey) {
     const keyBytes = hexToBytes(data.decryptKey);
-    if (keyBytes.length !== 32) {
-      throw new Error(`Decrypt key must be 32 bytes, got ${keyBytes.length}`);
-    }
+    encryptionMode(keyBytes);
     tlv[TLV.DECRYPT_KEY] = [keyBytes];
   }
 
@@ -309,9 +304,7 @@ export function npathDecode(code: string): NPathData {
   };
 
   if (tlv[TLV.DECRYPT_KEY]?.[0]) {
-    if (tlv[TLV.DECRYPT_KEY][0].length !== 32) {
-      throw new Error('npath: decrypt key must be 32 bytes');
-    }
+    encryptionMode(tlv[TLV.DECRYPT_KEY][0]);
     result.decryptKey = bytesToHex(tlv[TLV.DECRYPT_KEY][0]);
   }
 

@@ -135,7 +135,7 @@ async fn test_plaintext_directory_with_stray_key_still_lists_as_directory() {
         .unwrap();
     let legacy_cid = Cid {
         hash: dir_cid.hash,
-        key: Some([7u8; 32]),
+        key: Some([7u8; 32].into()),
     };
 
     assert!(tree.is_dir(&legacy_cid).await.unwrap());
@@ -435,7 +435,7 @@ async fn test_cid_to_string_encrypted() {
     let (cid, _) = tree.put(b"test").await.unwrap();
     let s = cid.to_string();
 
-    // Encrypted CID is "hash:key" (64 + 1 + 64 = 129 chars)
-    assert_eq!(s.len(), 129);
+    // Encrypted CID is "hash:key" (64 + 1 + 66 = 131 chars)
+    assert_eq!(s.len(), 131);
     assert!(s.contains(':'));
 }

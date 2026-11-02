@@ -579,7 +579,7 @@ fn test_parse_daemon_response_to_root_data_encrypted_key() {
     assert_eq!(parsed.root_hash, "ab".repeat(32));
     assert_eq!(parsed.key_tag_name.as_deref(), Some("encryptedKey"));
     assert!(parsed.self_encrypted_ciphertext.is_none());
-    assert_eq!(parsed.encryption_key.unwrap(), [0x11; 32]);
+    assert_eq!(parsed.encryption_key.unwrap(), "11".repeat(32));
     assert_eq!(parsed.daemon_source.as_deref(), Some("webrtc"));
     assert_eq!(parsed.event_created_at, Some(10));
 }
@@ -623,7 +623,7 @@ fn test_parse_daemon_response_to_root_data_cid_key() {
     let parsed = NostrClient::parse_daemon_response_to_root_data(payload).unwrap();
     assert_eq!(parsed.root_hash, "ab".repeat(32));
     assert_eq!(parsed.key_tag_name, None);
-    assert_eq!(parsed.encryption_key, Some([0x33; 32]));
+    assert_eq!(parsed.encryption_key, Some("33".repeat(32)));
 }
 
 #[test]
@@ -698,7 +698,7 @@ async fn test_fetch_root_from_local_daemon_parses_response() {
         .unwrap();
     assert_eq!(resolved.root_hash, "ab".repeat(32));
     assert_eq!(resolved.key_tag_name.as_deref(), Some("key"));
-    assert_eq!(resolved.encryption_key, Some([0x22; 32]));
+    assert_eq!(resolved.encryption_key, Some("22".repeat(32)));
 
     server.abort();
 }

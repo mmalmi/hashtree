@@ -1,6 +1,6 @@
 use crate::config::canonical_hash;
 use crate::model::InventoryRow;
-use hashtree_core::{key_from_hex, sha256, to_hex};
+use hashtree_core::{sha256, to_hex};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -48,11 +48,8 @@ pub fn load_inventory_bytes(
         }
         let hash = canonical_hash("inventory hash", fields[2])
             .map_err(|error| format!("invalid hash on row {}: {error}", index + 2))?;
-        let key = key_from_hex(fields[3])
+        let key = crate::config::canonical_key(fields[3])
             .map_err(|error| format!("invalid CHK key on row {}: {error}", index + 2))?;
-        if to_hex(&key) != fields[3] {
-            return Err(format!("non-canonical CHK key on row {}", index + 2).into());
-        }
         rows.push(InventoryRow {
             source_key: fields[0].to_string(),
             song_id: fields[1].to_string(),

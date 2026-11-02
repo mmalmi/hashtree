@@ -43,6 +43,67 @@ pub fn xor_keys(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
     out
 }
 
+/// Opaque link secret or masked key. Its first byte need not identify a suite.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LinkKeyBytes {
+    Legacy([u8; 32]),
+    Versioned([u8; 33]),
+}
+
+impl std::fmt::Debug for LinkKeyBytes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LinkKeyBytes(..)")
+    }
+}
+
+impl LinkKeyBytes {
+    pub fn from_hex(value: &str) -> Result<Self, crate::CryptoError> {
+        Self::from_bytes(&hex::decode(value).map_err(|_| crate::CryptoError::InvalidKeyLength)?)
+    }
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, crate::CryptoError> {
+        match bytes.len() {
+            32 => Ok(Self::Legacy(bytes.try_into().unwrap())),
+            33 => Ok(Self::Versioned(bytes.try_into().unwrap())),
+            _ => Err(crate::CryptoError::InvalidKeyLength),
+        }
+    }
+}
+
+impl AsRef<[u8]> for LinkKeyBytes {
+    fn as_ref(&self) -> &[u8] {
+        match self {
+            Self::Legacy(bytes) => bytes,
+            Self::Versioned(bytes) => bytes,
+        }
+    }
+}
+
+/// Preserve an existing 32-byte share secret by encoding a CHK root key in its
+/// equivalent legacy form. Randomized roots always require a 33-byte secret.
+pub fn mask_object_key(
+    key: &crate::ObjectKey,
+    secret: &[u8],
+) -> Result<Vec<u8>, crate::CryptoError> {
+    match (key.mode(), secret.len()) {
+        (crate::EncryptionMode::ChkV1, 32) => xor_key_bytes(&key.raw_key(), secret),
+        (crate::EncryptionMode::LegacyChk, 33) => {
+            let mut encoded = [1u8; 33];
+            encoded[1..].copy_from_slice(key.as_bytes());
+            xor_key_bytes(&encoded, secret)
+        }
+        _ => xor_key_bytes(key.as_bytes(), secret),
+    }
+}
+
+/// Mask or unmask a legacy or versioned key with an equally sized link secret.
+/// The masked bytes and link secret are opaque, not parsed encryption keys.
+pub fn xor_key_bytes(a: &[u8], b: &[u8]) -> Result<Vec<u8>, crate::crypto::CryptoError> {
+    if a.len() != b.len() || !matches!(a.len(), 32 | 33) {
+        return Err(crate::crypto::CryptoError::InvalidKeyLength);
+    }
+    Ok(a.iter().zip(b).map(|(a, b)| a ^ b).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

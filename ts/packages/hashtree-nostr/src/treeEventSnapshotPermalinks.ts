@@ -1,7 +1,7 @@
 import { nhashDecode } from '@hashtree/core';
 
 const NHASH_PATTERN = /^nhash1[a-z0-9]+$/;
-const LINK_KEY_PATTERN = /^[a-f0-9]{64}$/i;
+const LINK_KEY_PATTERN = /^(?:[a-f0-9]{2}){32,33}$/i;
 
 export interface TreeEventSnapshotPermalink {
   snapshotNhash: string;
@@ -79,7 +79,7 @@ function normalizeTreeEventSnapshotPermalink(
 
   const linkKey = normalizeTreeEventSnapshotLinkKey(value.linkKey);
   if (value.linkKey?.trim() && !linkKey) {
-    throw new Error(`Invalid tree event snapshot link key: ${value.linkKey}`);
+    throw new Error('Invalid tree event snapshot link key');
   }
 
   return {

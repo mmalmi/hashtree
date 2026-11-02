@@ -118,7 +118,7 @@ pub(crate) async fn add_directory_with_progress<S: hashtree_core::store::Store>(
 mod tests {
     use super::add_directory_with_progress;
     use hashtree_core::{
-        decode_tree_node, decrypt_chk, store::Store, HashTree, HashTreeConfig, LinkType,
+        decode_tree_node, decrypt_object, store::Store, HashTree, HashTreeConfig, LinkType,
         MemoryStore,
     };
     use std::sync::Arc;
@@ -144,7 +144,7 @@ mod tests {
             .unwrap()
             .unwrap();
         let root_plaintext = match root.key {
-            Some(key) => decrypt_chk(&root_bytes, &key).unwrap(),
+            Some(key) => decrypt_object(&root_bytes, &key).unwrap(),
             None => root_bytes,
         };
         let root_node = decode_tree_node(&root_plaintext).unwrap();

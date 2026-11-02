@@ -73,7 +73,7 @@ struct BulkProjectionState {
 struct SpoolEventRecord {
     event: StoredNostrEvent,
     cid_hash: [u8; 32],
-    cid_key: Option<[u8; 32]>,
+    cid_key: Option<hashtree_core::ObjectKey>,
 }
 
 #[derive(Debug, Default)]
@@ -990,7 +990,7 @@ fn decode_edge_value(encoded: &[u8]) -> Result<EdgeValue> {
 }
 
 fn encode_cid(cid: &Cid) -> Vec<u8> {
-    let mut encoded = Vec::with_capacity(if cid.key.is_some() { 65 } else { 33 });
+    let mut encoded = Vec::with_capacity(33 + cid.key.map_or(0, |k| k.len()));
     encoded.push(u8::from(cid.key.is_some()));
     encoded.extend_from_slice(&cid.hash);
     if let Some(key) = cid.key {
@@ -1010,11 +1010,7 @@ fn decode_cid(encoded: &[u8]) -> Result<Cid> {
         .expect("CID hash slice is exactly 32 bytes");
     let key = match *encrypted {
         0 if rest.len() == 32 => None,
-        1 if rest.len() == 64 => Some(
-            rest[32..]
-                .try_into()
-                .expect("CID key slice is exactly 32 bytes"),
-        ),
+        1 => Some(hashtree_core::ObjectKey::from_bytes(&rest[32..])?),
         marker => anyhow::bail!(
             "invalid bulk projection CID encoding marker={marker} length={}",
             encoded.len()

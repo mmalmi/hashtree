@@ -1,7 +1,9 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use hashtree_core::{from_hex, nhash_decode, nhash_encode, xor_keys, Cid, Store, TreeVisibility};
+use hashtree_core::{
+    nhash_decode, nhash_encode, xor_key_bytes, Cid, LinkKeyBytes, ObjectKey, Store, TreeVisibility,
+};
 use nostr_sdk::{PublicKey, ToBech32};
 
 use crate::{
@@ -61,8 +63,8 @@ fn normalize_link_key(value: Option<&str>) -> Result<Option<String>, NostrEventS
     };
 
     let lower = trimmed.to_ascii_lowercase();
-    from_hex(&lower)
-        .map_err(|_| validation_error(format!("invalid tree snapshot link key: {trimmed}")))?;
+    LinkKeyBytes::from_hex(&lower)
+        .map_err(|_| validation_error("invalid tree snapshot link key"))?;
     Ok(Some(lower))
 }
 
@@ -224,11 +226,14 @@ pub fn resolve_snapshot_root_cid(
             let Some(link_key_hex) = normalize_link_key(link_key)? else {
                 return Ok(None);
             };
-            let encrypted_key = from_hex(encrypted_key_hex)
+            let encrypted_key = LinkKeyBytes::from_hex(encrypted_key_hex)
                 .map_err(|_| validation_error("invalid encrypted tree key in snapshot event"))?;
-            let link_key = from_hex(&link_key_hex)
+            let link_key = LinkKeyBytes::from_hex(&link_key_hex)
                 .map_err(|_| validation_error("invalid tree snapshot link key"))?;
-            let decrypted_key = xor_keys(&encrypted_key, &link_key);
+            let raw = xor_key_bytes(encrypted_key.as_ref(), link_key.as_ref())
+                .map_err(|e| validation_error(e.to_string()))?;
+            let decrypted_key =
+                ObjectKey::from_bytes(&raw).map_err(|e| validation_error(e.to_string()))?;
             Ok(Some(Cid {
                 hash: snapshot.root_cid.hash,
                 key: Some(decrypted_key),

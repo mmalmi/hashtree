@@ -13,28 +13,28 @@ import {
 describe('visibility', () => {
   describe('generateLinkKey', () => {
     it('should generate 32-byte key', () => {
-      const key = generateLinkKey();
+      const key = generateLinkKey(32);
       expect(key).toBeInstanceOf(Uint8Array);
       expect(key.length).toBe(32);
     });
 
     it('should generate unique keys', () => {
-      const key1 = generateLinkKey();
-      const key2 = generateLinkKey();
+      const key1 = generateLinkKey(32);
+      const key2 = generateLinkKey(32);
       expect(key1).not.toEqual(key2);
     });
   });
 
   describe('computeKeyId', () => {
     it('should return 8-byte hash of key', async () => {
-      const key = generateLinkKey();
+      const key = generateLinkKey(32);
       const keyId = await computeKeyId(key);
       expect(keyId).toBeInstanceOf(Uint8Array);
       expect(keyId.length).toBe(8);
     });
 
     it('should be deterministic', async () => {
-      const key = generateLinkKey();
+      const key = generateLinkKey(32);
       const keyId1 = await computeKeyId(key);
       const keyId2 = await computeKeyId(key);
       expect(keyId1).toEqual(keyId2);
@@ -44,7 +44,7 @@ describe('visibility', () => {
   describe('encryptKeyForLink / decryptKeyFromLink', () => {
     it('should encrypt and decrypt CHK key (XOR format)', async () => {
       const chkKey = crypto.getRandomValues(new Uint8Array(32));
-      const linkKey = generateLinkKey();
+      const linkKey = generateLinkKey(32);
 
       const encrypted = encryptKeyForLink(chkKey, linkKey);
       expect(encrypted.length).toBe(32); // XOR preserves size
@@ -56,8 +56,8 @@ describe('visibility', () => {
 
     it('should produce wrong result with wrong link key', async () => {
       const chkKey = crypto.getRandomValues(new Uint8Array(32));
-      const linkKey = generateLinkKey();
-      const wrongKey = generateLinkKey();
+      const linkKey = generateLinkKey(32);
+      const wrongKey = generateLinkKey(32);
 
       const encrypted = encryptKeyForLink(chkKey, linkKey);
       const decrypted = await decryptKeyFromLink(encrypted, wrongKey);
@@ -68,7 +68,7 @@ describe('visibility', () => {
 
     it('should be deterministic (same inputs = same output)', async () => {
       const chkKey = crypto.getRandomValues(new Uint8Array(32));
-      const linkKey = generateLinkKey();
+      const linkKey = generateLinkKey(32);
 
       const encrypted1 = encryptKeyForLink(chkKey, linkKey);
       const encrypted2 = encryptKeyForLink(chkKey, linkKey);
@@ -85,13 +85,13 @@ describe('visibility', () => {
 
     it('should return null for invalid length', async () => {
       const shortKey = new Uint8Array(16);
-      const linkKey = generateLinkKey();
+      const linkKey = generateLinkKey(32);
       expect(await decryptKeyFromLink(shortKey, linkKey)).toBeNull();
     });
 
     it('should decrypt legacy AES-GCM format (60 bytes)', async () => {
       const chkKey = crypto.getRandomValues(new Uint8Array(32));
-      const linkKey = generateLinkKey();
+      const linkKey = generateLinkKey(32);
 
       // Manually create AES-GCM encrypted data (legacy format)
       const keyBuffer = new ArrayBuffer(linkKey.length);
@@ -130,7 +130,7 @@ describe('visibility', () => {
       // 5. Owner XORs encryptedKey with linkKey -> gets contentKey
 
       const contentKey = crypto.getRandomValues(new Uint8Array(32));
-      const linkKey = generateLinkKey();
+      const linkKey = generateLinkKey(32);
 
       // Step 1: Create encryptedKey (stored in Nostr event)
       const encryptedKey = encryptKeyForLink(contentKey, linkKey);
@@ -145,8 +145,8 @@ describe('visibility', () => {
     });
 
     it('hex version of owner recovery flow', async () => {
-      const contentKeyHex = visibilityHex.generateLinkKey();
-      const linkKeyHex = visibilityHex.generateLinkKey();
+      const contentKeyHex = visibilityHex.generateLinkKey(32);
+      const linkKeyHex = visibilityHex.generateLinkKey(32);
 
       // Create encryptedKey
       const encryptedKeyHex = visibilityHex.encryptKeyForLink(contentKeyHex, linkKeyHex);
@@ -173,21 +173,21 @@ describe('visibility', () => {
 
   describe('hex helpers', () => {
     it('should generate hex link key', () => {
-      const key = visibilityHex.generateLinkKey();
+      const key = visibilityHex.generateLinkKey(32);
       expect(typeof key).toBe('string');
       expect(key.length).toBe(64); // 32 bytes = 64 hex chars
     });
 
     it('should compute hex keyId', async () => {
-      const key = visibilityHex.generateLinkKey();
+      const key = visibilityHex.generateLinkKey(32);
       const keyId = await visibilityHex.computeKeyId(key);
       expect(typeof keyId).toBe('string');
       expect(keyId.length).toBe(16); // 8 bytes = 16 hex chars
     });
 
     it('should encrypt and decrypt with hex', async () => {
-      const chkKey = visibilityHex.generateLinkKey(); // Use as CHK key
-      const linkKey = visibilityHex.generateLinkKey();
+      const chkKey = visibilityHex.generateLinkKey(32); // Use as CHK key
+      const linkKey = visibilityHex.generateLinkKey(32);
 
       const encrypted = visibilityHex.encryptKeyForLink(chkKey, linkKey);
       expect(typeof encrypted).toBe('string');
@@ -199,7 +199,7 @@ describe('visibility', () => {
 
     it('should return null for invalid length hex', async () => {
       const shortEncrypted = 'abcd'; // Too short
-      const linkKey = visibilityHex.generateLinkKey();
+      const linkKey = visibilityHex.generateLinkKey(32);
 
       const decrypted = await visibilityHex.decryptKeyFromLink(shortEncrypted, linkKey);
       expect(decrypted).toBeNull();

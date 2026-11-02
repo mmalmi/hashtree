@@ -13,6 +13,7 @@
 
 import { sha256 } from './hash.js';
 import { toHex, fromHex } from './types.js';
+import { encryptionMode } from './encryption.js';
 
 /**
  * Tree visibility levels
@@ -22,8 +23,8 @@ export type TreeVisibility = 'public' | 'link-visible' | 'private';
 /**
  * Generate a random 32-byte link key for link-visible trees
  */
-export function generateLinkKey(): Uint8Array {
-  return crypto.getRandomValues(new Uint8Array(32));
+export function generateLinkKey(length: 32 | 33 = 33): Uint8Array {
+  return crypto.getRandomValues(new Uint8Array(length));
 }
 
 /**
@@ -35,14 +36,13 @@ export async function computeKeyId(linkKey: Uint8Array): Promise<Uint8Array> {
   return hash.slice(0, 8);
 }
 
-/**
- * XOR two 32-byte arrays
- * Used for encrypting/decrypting CHK keys with link keys.
- * XOR with random key is one-time pad (information-theoretically secure).
- */
-function xor32(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const result = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) {
+/** Mask or recover the encoded object key using its link secret. */
+function xorKey(a: Uint8Array, b: Uint8Array): Uint8Array {
+  if (a.length !== b.length || (a.length !== 32 && a.length !== 33)) {
+    throw new Error('Key and link secret must have the same length (32 or 33 bytes)');
+  }
+  const result = new Uint8Array(a.length);
+  for (let i = 0; i < a.length; i++) {
     result[i] = a[i] ^ b[i];
   }
   return result;
@@ -76,35 +76,29 @@ async function decryptAesGcm(encryptedKey: Uint8Array, linkKey: Uint8Array): Pro
   }
 }
 
-/**
- * Encrypt a CHK key for link-visible visibility using XOR (one-time pad)
- * @param chkKey - The CHK key to encrypt (32 bytes)
- * @param linkKey - The link decryption key (32 bytes)
- * @returns Encrypted key (32 bytes) - XOR of chkKey and linkKey
- */
+/** Mask a root key, preserving existing 32-byte sharing links for CHK roots. */
 export function encryptKeyForLink(chkKey: Uint8Array, linkKey: Uint8Array): Uint8Array {
-  return xor32(chkKey, linkKey);
+  const suite = encryptionMode(chkKey);
+  if (suite === 'chk-v1' && linkKey.length === 32) return xorKey(chkKey.subarray(1), linkKey);
+  if (suite === 'legacy-chk' && linkKey.length === 33) return xorKey(Uint8Array.of(1, ...chkKey), linkKey);
+  return xorKey(chkKey, linkKey);
 }
 
-/**
- * Decrypt a CHK key for link-visible visibility
- * Supports both new XOR format (32 bytes) and legacy AES-GCM format (60 bytes)
- * @param encryptedKey - Encrypted key (32 bytes for XOR, 60 bytes for AES-GCM)
- * @param linkKey - The link decryption key (32 bytes)
- * @returns Decrypted CHK key (32 bytes), or null if decryption fails
- */
+/** Recover the object key from a masked key or a legacy 60-byte AES-GCM envelope. */
 export async function decryptKeyFromLink(encryptedKey: Uint8Array, linkKey: Uint8Array): Promise<Uint8Array | null> {
-  if (linkKey.length !== 32) {
+  if (linkKey.length !== 32 && linkKey.length !== 33) {
     return null;
   }
 
-  // New XOR format: 32 bytes
-  if (encryptedKey.length === 32) {
-    return xor32(encryptedKey, linkKey);
+  // The opaque link secret and masked key have matching lengths.
+  if (encryptedKey.length === linkKey.length) {
+    const key = xorKey(encryptedKey, linkKey);
+    try { encryptionMode(key); } catch { return null; }
+    return key;
   }
 
   // Legacy AES-GCM format: 60 bytes (12 nonce + 32 ciphertext + 16 tag)
-  if (encryptedKey.length === 60) {
+  if (encryptedKey.length === 60 && linkKey.length === 32) {
     return decryptAesGcm(encryptedKey, linkKey);
   }
 
@@ -115,8 +109,8 @@ export async function decryptKeyFromLink(encryptedKey: Uint8Array, linkKey: Uint
  * Hex string versions of the encryption functions for convenience
  */
 export const hex = {
-  generateLinkKey(): string {
-    return toHex(generateLinkKey());
+  generateLinkKey(length: 32 | 33 = 33): string {
+    return toHex(generateLinkKey(length));
   },
 
   async computeKeyId(linkKeyHex: string): Promise<string> {

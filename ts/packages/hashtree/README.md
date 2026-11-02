@@ -4,6 +4,12 @@ Core merkle tree library for content-addressed storage.
 
 [Getting started](https://github.com/mmalmi/hashtree/blob/master/ts/GETTING_STARTED.md) · [API reference](https://github.com/mmalmi/hashtree/blob/master/ts/API.md) · [SDK packages](https://github.com/mmalmi/hashtree/blob/master/ts/README.md)
 
+## Encryption compatibility
+
+New encrypted writes use versioned CHK by default. Readers accept plaintext, legacy 32-byte CHK keys, and both versioned encryption schemes. Existing CIDs still work. Manifests containing new key descriptors have new hashes, and older clients need a reader upgrade to follow them.
+
+Set `encryptionMode: 'rnd-v1'` for randomized encryption or `encryptionMode: 'legacy-chk'` to write for older readers. Pass `{ unencrypted: true }` to write a plaintext file. Preserve the full 32- or 33-byte key when storing or sharing a CID.
+
 ## Install
 
 ```bash

@@ -251,7 +251,11 @@ async fn git_root(store: Arc<MemoryStore>, commit: &str) -> Result<Cid> {
         .await?)
 }
 
-type FetchedRefs = (HashMap<String, String>, Option<String>, Option<[u8; 32]>);
+type FetchedRefs = (
+    HashMap<String, String>,
+    Option<String>,
+    Option<hashtree_core::ObjectKey>,
+);
 
 async fn fetch(config: Config, author: &Keys, name: &str) -> Result<FetchedRefs> {
     let author = author.public_key().to_hex();

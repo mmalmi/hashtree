@@ -32,7 +32,7 @@ struct WorkItemState {
     index: usize,
     item: WorkItem,
     frontier: Vec<BlockRef>,
-    seen: HashSet<(Hash, Option<[u8; 32]>, u8)>,
+    seen: HashSet<(Hash, Option<hashtree_core::ObjectKey>, u8)>,
     rows: Vec<BlockLedgerRow>,
     complete: bool,
 }
@@ -401,7 +401,7 @@ fn build_work_items(
             key: root
                 .key
                 .as_deref()
-                .map(|key| canonical_hash("additional root key", key))
+                .map(crate::config::canonical_key)
                 .transpose()?,
         });
     }

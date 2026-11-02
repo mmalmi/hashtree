@@ -1,7 +1,7 @@
 use crate::model::{BlockLedgerRow, BlockRef, WorkItem, LEDGER_ROW_SCHEMA};
 use crate::probe::HashProbe;
 use hashtree_core::{
-    decode_tree_node, decrypt_chk, nhash_decode, to_hex, Link, LinkType, TreeNode,
+    decode_tree_node, decrypt_object, nhash_decode, to_hex, Link, LinkType, TreeNode,
 };
 use std::collections::BTreeSet;
 
@@ -29,7 +29,7 @@ pub fn process_block(
 
     if let Some(stored) = probe.data.as_ref() {
         let plaintext = match block.key {
-            Some(key) => match decrypt_chk(stored, &key) {
+            Some(key) => match decrypt_object(stored, &key) {
                 Ok(plaintext) => Some(plaintext),
                 Err(decrypt_error) => {
                     traversal_failed = true;

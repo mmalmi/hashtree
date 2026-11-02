@@ -13,7 +13,7 @@ use crate::hash::sha256;
 use crate::store::Store;
 use crate::types::{Cid, DirEntry, Hash, Link, LinkType, TreeNode};
 
-use crate::crypto::{encrypt_chk, EncryptionKey};
+use crate::encryption::{encrypt_object, EncryptionMode, ObjectKey};
 
 /// Default chunk size: 2MB (optimized for blossom uploads, matches hashtree-ts)
 pub const DEFAULT_CHUNK_SIZE: usize = 2 * 1024 * 1024;
@@ -106,10 +106,10 @@ impl<S: Store> TreeBuilder<S> {
     async fn put_chunk_internal(
         &self,
         data: &[u8],
-    ) -> Result<(Hash, Option<EncryptionKey>), BuilderError> {
+    ) -> Result<(Hash, Option<ObjectKey>), BuilderError> {
         if self.encrypted {
-            let (encrypted, key) =
-                encrypt_chk(data).map_err(|e| BuilderError::Encryption(e.to_string()))?;
+            let (encrypted, key) = encrypt_object(data, EncryptionMode::default())
+                .map_err(|e| BuilderError::Encryption(e.to_string()))?;
             let hash = sha256(&encrypted);
             self.store
                 .put(hash, encrypted)
@@ -174,7 +174,7 @@ impl<S: Store> TreeBuilder<S> {
         &self,
         links: Vec<Link>,
         total_size: Option<u64>,
-    ) -> Result<(Hash, Option<[u8; 32]>, LinkType), BuilderError> {
+    ) -> Result<(Hash, Option<ObjectKey>, LinkType), BuilderError> {
         // Single link with matching size - return directly
         if links.len() == 1 {
             if let Some(ts) = total_size {
@@ -192,8 +192,8 @@ impl<S: Store> TreeBuilder<S> {
             let (data, _) = encode_and_hash(&node)?;
 
             if self.encrypted {
-                let (encrypted, key) =
-                    encrypt_chk(&data).map_err(|e| BuilderError::Encryption(e.to_string()))?;
+                let (encrypted, key) = encrypt_object(&data, EncryptionMode::default())
+                    .map_err(|e| BuilderError::Encryption(e.to_string()))?;
                 let hash = sha256(&encrypted);
                 self.store
                     .put(hash, encrypted)

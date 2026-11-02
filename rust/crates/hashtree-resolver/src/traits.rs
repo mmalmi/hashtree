@@ -54,7 +54,7 @@ pub trait RootResolver: Send + Sync {
     async fn resolve_shared(
         &self,
         key: &str,
-        share_secret: &[u8; 32],
+        share_secret: &[u8],
     ) -> Result<Option<Cid>, ResolverError> {
         let _ = share_secret;
         self.resolve(key).await
@@ -83,7 +83,7 @@ pub trait RootResolver: Send + Sync {
         &self,
         key: &str,
         cid: &Cid,
-        share_secret: &[u8; 32],
+        share_secret: &[u8],
     ) -> Result<bool, ResolverError> {
         let _ = (key, cid, share_secret);
         Err(ResolverError::NotAuthorized)

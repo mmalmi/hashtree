@@ -1168,7 +1168,7 @@ mod tests {
         let key = from_hex("2222222222222222222222222222222222222222222222222222222222222222")?;
         let cid = Cid {
             hash,
-            key: Some(key),
+            key: Some(key.into()),
         };
 
         let server = HashtreeServer::new(store, "127.0.0.1:0".to_string())

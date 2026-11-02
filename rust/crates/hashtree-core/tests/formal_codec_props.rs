@@ -50,7 +50,7 @@ fn arb_link() -> impl Strategy<Value = Link> {
             hash,
             name,
             size,
-            key,
+            key: key.map(Into::into),
             link_type,
             meta,
         })

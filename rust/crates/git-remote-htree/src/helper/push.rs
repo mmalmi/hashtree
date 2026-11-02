@@ -89,13 +89,13 @@ struct ServerUploadPresence {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct UploadQueueItem {
     pub(super) hash: [u8; 32],
-    pub(super) key: Option<[u8; 32]>,
+    pub(super) key: Option<hashtree_core::ObjectKey>,
     pub(super) link_type: Option<LinkType>,
     pub(super) size: u64,
 }
 
 impl UploadQueueItem {
-    fn root(hash: [u8; 32], key: Option<[u8; 32]>) -> Self {
+    fn root(hash: [u8; 32], key: Option<hashtree_core::ObjectKey>) -> Self {
         Self {
             hash,
             key,
@@ -1870,13 +1870,9 @@ impl RemoteHelper {
         }
 
         let key_to_publish = if let (Some(chk), Some(secret)) = (chk_key, self.url_secret) {
-            let mut masked = [0u8; 32];
-            for i in 0..32 {
-                masked[i] = chk[i] ^ secret[i];
-            }
-            Some(masked)
+            Some(hashtree_core::mask_object_key(&chk, secret.as_ref())?)
         } else {
-            chk_key
+            chk_key.map(|k| k.as_bytes().to_vec())
         };
 
         let old_root_hash = self.nostr.get_cached_root_hash(&self.repo_name).cloned();
@@ -1896,7 +1892,7 @@ impl RemoteHelper {
 
         let key_with_privacy = key_to_publish
             .as_ref()
-            .map(|k| (k, is_link_visible, self.is_private));
+            .map(|k| (k.as_slice(), is_link_visible, self.is_private));
         let repo_announcement = self.repo_announcement_options_for_public_push(sha);
         let (npub_url, relay_result) = self
             .nostr
@@ -2764,12 +2760,12 @@ impl RemoteHelper {
     pub(super) fn push_to_file_servers_with_diff(
         &self,
         root_hash: &str,
-        encryption_key: Option<&[u8; 32]>,
+        encryption_key: Option<&hashtree_core::ObjectKey>,
         old_root_hash: Option<&str>,
-        old_encryption_key: Option<&[u8; 32]>,
+        old_encryption_key: Option<&hashtree_core::ObjectKey>,
         trust_server_old_tree_coverage: bool,
     ) -> BlossomResult {
-        use hashtree_core::crypto::decrypt_chk;
+        use hashtree_core::decrypt_object;
         use hashtree_core::try_decode_tree_node;
 
         let store = self.storage.store();
@@ -3133,9 +3129,16 @@ impl RemoteHelper {
 
                 if item.needs_tree_decode() {
                     let plaintext = if let Some(k) = item.key {
-                        match decrypt_chk(&data, &k) {
+                        match decrypt_object(&data, &k) {
                             Ok(p) => p,
-                            Err(_) => data.clone(),
+                            Err(_) if k.mode() == hashtree_core::EncryptionMode::LegacyChk && try_decode_tree_node(&data).is_some() => data.clone(),
+                            Err(error) => {
+                                failed.fetch_add(1, Ordering::Relaxed);
+                                local_failed.fetch_add(1, Ordering::Relaxed);
+                                completed.fetch_add(1, Ordering::Relaxed);
+                                eprintln!("\n  Cannot decrypt object {}: {}", hex::encode(hash), error);
+                                continue;
+                            }
                         }
                     } else {
                         data.clone()

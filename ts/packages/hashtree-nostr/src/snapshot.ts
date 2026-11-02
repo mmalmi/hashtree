@@ -1,3 +1,4 @@
+import { objectKeyFromHex } from '@hashtree/core';
 import { HashTree, cid, fromHex, type CID, type Store, type TreeVisibility } from '@hashtree/core';
 import type { StoredNostrEvent } from './events.js';
 
@@ -199,7 +200,7 @@ export function parseHashtreeRootEvent(event: StoredNostrEvent): ParsedHashtreeR
     return {
       event: normalized,
       treeName,
-      rootCid: cid(fromHex(hashHex), visibility === 'public' && keyHex ? fromHex(keyHex) : undefined),
+      rootCid: cid(fromHex(hashHex), visibility === 'public' && keyHex !== undefined ? objectKeyFromHex(keyHex) : undefined),
       visibility,
       labels,
       encryptedKey,
