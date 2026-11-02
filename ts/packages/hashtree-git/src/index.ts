@@ -1,7 +1,10 @@
 import type { CID, TreeVisibility } from '@hashtree/core';
-import { fromHex, toHex } from '@hashtree/core';
+import { fromHex, toHex, objectKeyFromHex, decryptKeyFromLink } from '@hashtree/core';
 
 const HEX_32_RE = /^[0-9a-fA-F]{64}$/;
+const KEY_HEX = /^[0-9a-fA-F]{64}(?:[0-9a-fA-F]{2})?$/;
+
+
 
 export interface HtreeUrlParts {
   identifier: string;
@@ -21,7 +24,7 @@ export interface HtreeUrlOptions {
  * Parse htree://<identifier>/<repo>[#fragment]
  *
  * Supported fragments:
- * - #k=<64-hex-chars> (link-visible with explicit key)
+ * - #k=<64-or-66-hex-chars> (link-visible with explicit key)
  * - #link-visible (auto-generate key on push)
  * - #private (author-only)
  */
@@ -45,8 +48,8 @@ export function parseHtreeUrl(uri: string): HtreeUrlParts {
       autoGenerateLinkKey = true;
     } else if (fragment.startsWith('k=')) {
       const keyHex = fragment.slice(2);
-      if (!HEX_32_RE.test(keyHex)) {
-        throw new Error('Invalid Htree URI: secret key must be 64 hex characters');
+      if (!KEY_HEX.test(keyHex)) {
+        throw new Error('Invalid Htree URI: secret key must be 64 or 66 hex characters');
       }
       visibility = 'link-visible';
       linkKey = keyHex.toLowerCase();
@@ -85,8 +88,8 @@ export function buildHtreeUrl(identifier: string, repo: string, options: HtreeUr
   } else if (options.visibility === 'link-visible') {
     if (options.linkKey) {
       const keyHex = options.linkKey;
-      if (!HEX_32_RE.test(keyHex)) {
-        throw new Error('Invalid Htree URI: secret key must be 64 hex characters');
+      if (!KEY_HEX.test(keyHex)) {
+        throw new Error('Invalid Htree URI: secret key must be 64 or 66 hex characters');
       }
       url += `#k=${keyHex.toLowerCase()}`;
     } else if (options.autoGenerateLinkKey) {
@@ -168,25 +171,16 @@ export async function resolveHtreeRootCid(options: ResolveHtreeRootCidOptions): 
   const keyValue = keyTag[1];
 
   if (keyType === 'key') {
-    const keyBytes = fromHex(keyValue);
-    if (keyBytes.length !== 32) {
-      throw new Error('Invalid Htree encryption key');
-    }
-    return { hash: rootHash, key: keyBytes };
+    return { hash: rootHash, key: objectKeyFromHex(keyValue) };
   }
 
   if (keyType === 'encryptedKey') {
     if (!linkKey) {
       throw new Error('Htree repository requires a secret key');
     }
-    const masked = fromHex(keyValue);
-    if (masked.length !== 32 || linkKey.length !== 32) {
-      throw new Error('Invalid Htree link-visible key');
-    }
-    const unmasked = new Uint8Array(32);
-    for (let i = 0; i < 32; i += 1) {
-      unmasked[i] = masked[i] ^ linkKey[i];
-    }
+    if (!KEY_HEX.test(keyValue)) throw new Error('Invalid Htree link-visible key');
+    const unmasked = await decryptKeyFromLink(fromHex(keyValue), linkKey);
+    if (!unmasked) throw new Error('Invalid Htree link-visible key');
     return { hash: rootHash, key: unmasked };
   }
 
@@ -199,9 +193,11 @@ export async function resolveHtreeRootCid(options: ResolveHtreeRootCidOptions): 
     }
     const decrypted = await decryptSelfKey(keyValue);
     const decryptedHex = typeof decrypted === 'string' ? decrypted : toHex(decrypted);
-    const keyBytes = fromHex(decryptedHex);
-    if (keyBytes.length !== 32) {
-      throw new Error('Invalid decrypted Htree key');
+    let keyBytes: Uint8Array;
+    try {
+      keyBytes = objectKeyFromHex(decryptedHex);
+    } catch (cause) {
+      throw new Error('Invalid decrypted Htree key', { cause });
     }
     return { hash: rootHash, key: keyBytes };
   }

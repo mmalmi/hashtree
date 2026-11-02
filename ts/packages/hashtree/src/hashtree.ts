@@ -1,3 +1,4 @@
+import { type EncryptionMode } from './encryption.js';
 /**
  * HashTree - Unified merkle tree operations
  *
@@ -43,6 +44,8 @@ export interface HashTreeConfig {
   chunkSize?: number;
   /** Maximum links per tree node. Defaults to 174. */
   maxLinks?: number;
+  /** Encryption suite for new objects. Defaults to versioned CHK. */
+  encryptionMode?: EncryptionMode;
 }
 
 export interface TreeEntry {
@@ -78,9 +81,11 @@ export class HashTree {
   private store: Store;
   private chunkSize: number;
   private maxLinks: number;
+  private encryptionMode: EncryptionMode;
 
   constructor(config: HashTreeConfig) {
     this.store = config.store;
+    this.encryptionMode = config.encryptionMode ?? 'chk-v1';
     this.chunkSize = config.chunkSize ?? DEFAULT_CHUNK_SIZE;
     this.maxLinks = config.maxLinks ?? DEFAULT_MAX_LINKS;
     if (!Number.isInteger(this.maxLinks) || this.maxLinks < 1) {
@@ -89,7 +94,7 @@ export class HashTree {
   }
 
   private get config(): create.CreateConfig {
-    return { store: this.store, chunkSize: this.chunkSize, maxLinks: this.maxLinks };
+    return { store: this.store, chunkSize: this.chunkSize, maxLinks: this.maxLinks, encryptionMode: this.encryptionMode };
   }
 
   // Create (encrypted by default)
@@ -765,6 +770,7 @@ export class HashTree {
       store: this.store,
       chunkSize: this.chunkSize,
       chunker: options?.chunker,
+      encryptionMode: this.encryptionMode,
       unencrypted: options?.unencrypted ?? false,
     });
   }

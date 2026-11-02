@@ -370,7 +370,7 @@ fn published_root_from_event(event: &Event) -> hashtree_core::Cid {
     let hash = <[u8; 32]>::try_from(hash).expect("published root hash length");
     let key = tag_value("key").map(|key| {
         let key = hex::decode(key).expect("decode published root key");
-        <[u8; 32]>::try_from(key).expect("published root key length")
+        hashtree_core::ObjectKey::from_bytes(&key).expect("published root key")
     });
     hashtree_core::Cid { hash, key }
 }

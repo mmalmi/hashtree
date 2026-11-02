@@ -289,7 +289,7 @@ async fn test_get_stream_rejects_malformed_file_links() {
         let mut link = Link::new(hash)
             .with_size(malformed.len() as u64 + 1)
             .with_link_type(LinkType::File);
-        link.key = child_key;
+        link.key = child_key.map(Into::into);
         let root = encode_tree_node(&TreeNode::new(LinkType::File, vec![link])).unwrap();
         let (root_bytes, root_key) = if encrypted {
             let (bytes, key) = encrypt_chk(&root).unwrap();
@@ -299,7 +299,7 @@ async fn test_get_stream_rejects_malformed_file_links() {
         };
         let cid = Cid {
             hash: tree.put_blob(&root_bytes).await.unwrap(),
-            key: root_key,
+            key: root_key.map(Into::into),
         };
         let mut stream = tree.get_stream(&cid);
         assert!(matches!(

@@ -53,9 +53,8 @@ impl Checkpoint {
                     key: root
                         .key
                         .map(|key| -> Result<_> {
-                            hex::decode(key)?
-                                .try_into()
-                                .map_err(|_| anyhow::anyhow!("Invalid head index key"))
+                            hashtree_core::ObjectKey::from_hex(&key)
+                                .context("Invalid head index key")
                         })
                         .transpose()?,
                 })

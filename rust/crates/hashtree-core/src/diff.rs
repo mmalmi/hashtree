@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::codec::{decode_tree_node, is_tree_node};
-use crate::crypto::decrypt_chk;
+use crate::encryption::{decrypt_object, ObjectKey};
 use crate::hashtree::{HashTree, HashTreeError};
 use crate::store::Store;
 use crate::types::{Cid, Hash};
@@ -59,9 +59,9 @@ pub struct DiffStats {
     pub unchanged_subtrees: usize,
 }
 
-fn decrypt_if_keyed(data: Vec<u8>, key: Option<[u8; 32]>) -> Result<Vec<u8>, HashTreeError> {
+fn decrypt_if_keyed(data: Vec<u8>, key: Option<ObjectKey>) -> Result<Vec<u8>, HashTreeError> {
     if let Some(k) = key {
-        decrypt_chk(&data, &k).map_err(|e| HashTreeError::Decryption(e.to_string()))
+        decrypt_object(&data, &k).map_err(|e| HashTreeError::Decryption(e.to_string()))
     } else {
         Ok(data)
     }
@@ -100,7 +100,7 @@ pub async fn collect_hashes_with_progress<S: Store>(
     let concurrency = concurrency.max(1);
     let store = tree.get_store();
     let mut hashes = HashSet::new();
-    let mut pending: VecDeque<(Hash, Option<[u8; 32]>)> = VecDeque::new();
+    let mut pending: VecDeque<(Hash, Option<ObjectKey>)> = VecDeque::new();
     let mut active = FuturesUnordered::new();
 
     // Seed with root
@@ -241,7 +241,7 @@ where
     let concurrency = concurrency.max(1);
     let store = tree.get_store();
     let mut visited: HashSet<Hash> = HashSet::new();
-    let mut pending: VecDeque<(Hash, Option<[u8; 32]>)> = VecDeque::new();
+    let mut pending: VecDeque<(Hash, Option<ObjectKey>)> = VecDeque::new();
     let mut active = FuturesUnordered::new();
 
     let mut stats = DiffStats {

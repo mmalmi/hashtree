@@ -21,7 +21,7 @@ use super::run::format_cid_for_display;
 
 pub(crate) struct MountVisibility {
     pub(crate) visibility: hashtree_core::TreeVisibility,
-    pub(crate) link_key: Option<[u8; 32]>,
+    pub(crate) link_key: Option<hashtree_core::LinkKeyBytes>,
 }
 
 pub(crate) struct MountFuseOptions {
@@ -41,7 +41,7 @@ pub(crate) fn parse_mount_visibility(
     use hashtree_core::TreeVisibility;
 
     let mut resolved_visibility: Option<TreeVisibility> = None;
-    let mut resolved_link_key: Option<[u8; 32]> = None;
+    let mut resolved_link_key: Option<hashtree_core::LinkKeyBytes> = None;
 
     if let Some(fragment) = fragment {
         if fragment == "private" {
@@ -51,7 +51,7 @@ pub(crate) fn parse_mount_visibility(
         } else if let Some(hex_key) = fragment.strip_prefix("k=") {
             resolved_visibility = Some(TreeVisibility::LinkVisible);
             resolved_link_key = Some(
-                hashtree_core::key_from_hex(hex_key)
+                hashtree_core::LinkKeyBytes::from_hex(hex_key)
                     .map_err(|e| anyhow::anyhow!("Invalid link key: {}", e))?,
             );
         }
@@ -69,7 +69,7 @@ pub(crate) fn parse_mount_visibility(
     }
 
     if let Some(link_key) = link_key {
-        let parsed = hashtree_core::key_from_hex(&link_key)
+        let parsed = hashtree_core::LinkKeyBytes::from_hex(&link_key)
             .map_err(|e| anyhow::anyhow!("Invalid link key: {}", e))?;
         if let Some(existing) = resolved_link_key {
             if existing != parsed {
@@ -112,7 +112,7 @@ struct NostrPublishSink {
     resolver: NostrRootResolver,
     key: String,
     visibility: hashtree_core::TreeVisibility,
-    link_key: Option<[u8; 32]>,
+    link_key: Option<hashtree_core::LinkKeyBytes>,
 }
 
 struct BlossomPostPublishHook {
@@ -143,7 +143,7 @@ impl PublishSink for NostrPublishSink {
                     anyhow::bail!("Missing link key");
                 };
                 self.resolver
-                    .publish_shared(&self.key, cid, &link_key)
+                    .publish_shared(&self.key, cid, link_key.as_ref())
                     .await
             }
             hashtree_core::TreeVisibility::Private => {

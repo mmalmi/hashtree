@@ -1980,7 +1980,7 @@ mod tests {
         #[derive(Serialize)]
         struct StoredCid {
             hash: [u8; 32],
-            key: Option<[u8; 32]>,
+            key: Option<hashtree_core::ObjectKey>,
         }
 
         std::fs::create_dir_all(path.parent().expect("root file parent")).expect("create dir");

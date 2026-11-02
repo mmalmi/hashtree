@@ -6,6 +6,7 @@
 //! Types:
 //! - nhash: Permalink (hash + optional decrypt key)
 
+use crate::encryption::ObjectKey;
 use crate::types::Hash;
 use thiserror::Error;
 
@@ -28,7 +29,7 @@ pub enum NHashError {
     InvalidPrefix { expected: String, got: String },
     #[error("Invalid hash length: expected 32 bytes, got {0}")]
     InvalidHashLength(usize),
-    #[error("Invalid key length: expected 32 bytes, got {0}")]
+    #[error("Invalid key length: expected 32 or 33 bytes, got {0}")]
     InvalidKeyLength(usize),
     #[error("Missing required field: {0}")]
     MissingField(String),
@@ -44,7 +45,7 @@ pub struct NHashData {
     /// 32-byte merkle hash
     pub hash: Hash,
     /// 32-byte decryption key (optional)
-    pub decrypt_key: Option<[u8; 32]>,
+    pub decrypt_key: Option<ObjectKey>,
 }
 
 /// Decode result
@@ -147,7 +148,7 @@ pub fn nhash_encode_full(data: &NHashData) -> Result<String, NHashError> {
     tlv.insert(tlv::HASH, vec![data.hash.to_vec()]);
 
     if let Some(key) = &data.decrypt_key {
-        tlv.insert(tlv::DECRYPT_KEY, vec![key.to_vec()]);
+        tlv.insert(tlv::DECRYPT_KEY, vec![key.as_bytes().to_vec()]);
     }
 
     encode_bech32("nhash", &encode_tlv(&tlv)?)
@@ -197,12 +198,10 @@ pub fn nhash_decode(code: &str) -> Result<NHashData, NHashError> {
 
     let decrypt_key = if let Some(keys) = tlv.get(&tlv::DECRYPT_KEY) {
         if let Some(key_bytes) = keys.first() {
-            if key_bytes.len() != 32 {
-                return Err(NHashError::InvalidKeyLength(key_bytes.len()));
-            }
-            let mut key = [0u8; 32];
-            key.copy_from_slice(key_bytes);
-            Some(key)
+            Some(
+                ObjectKey::from_bytes(key_bytes)
+                    .map_err(|e| NHashError::TlvError(e.to_string()))?,
+            )
         } else {
             None
         }
@@ -280,7 +279,7 @@ mod tests {
 
         let data = NHashData {
             hash,
-            decrypt_key: Some(key),
+            decrypt_key: Some(key.into()),
         };
 
         let encoded = nhash_encode_full(&data).unwrap();
@@ -288,7 +287,7 @@ mod tests {
 
         let decoded = nhash_decode(&encoded).unwrap();
         assert_eq!(decoded.hash, hash);
-        assert_eq!(decoded.decrypt_key, Some(key));
+        assert_eq!(decoded.decrypt_key, Some(key.into()));
     }
 
     #[test]

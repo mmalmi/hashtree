@@ -128,7 +128,7 @@ pub struct RemoteHelper {
     fetch_specs: Vec<FetchSpec>,
     /// Secret key from URL fragment #k=<hex> (for link-visible repos)
     /// If set, use this for encryption instead of CHK, and don't publish key in event
-    url_secret: Option<[u8; 32]>,
+    url_secret: Option<hashtree_core::LinkKeyBytes>,
     /// Whether this is a private (author-only) repo using NIP-44 encryption
     is_private: bool,
     /// Start time for current operation (for conditional verbose logging)
@@ -292,7 +292,7 @@ impl RemoteHelper {
         pubkey: &str,
         repo_name: &str,
         signing_key: Option<String>,
-        url_secret: Option<[u8; 32]>,
+        url_secret: Option<hashtree_core::LinkKeyBytes>,
         is_private: bool,
         config: Config,
     ) -> Result<Self> {
@@ -680,7 +680,7 @@ impl RemoteHelper {
     async fn collect_git_object_locations_async(
         &self,
         root_hash: &str,
-        encryption_key: Option<&[u8; 32]>,
+        encryption_key: Option<&hashtree_core::ObjectKey>,
     ) -> Result<(
         hashtree_core::HashTree<cached_store::CachedStore>,
         Vec<GitObjectLocation>,
@@ -1347,7 +1347,7 @@ impl RemoteHelper {
     async fn fetch_git_objects_async(
         &self,
         root_hash: &str,
-        encryption_key: Option<&[u8; 32]>,
+        encryption_key: Option<&hashtree_core::ObjectKey>,
     ) -> Result<Vec<(String, Vec<u8>)>> {
         let mut objects = Vec::new();
         let (tree, fetch_tasks, _pack_locations, local_store_for_eviction) = self
@@ -1493,7 +1493,7 @@ impl RemoteHelper {
     async fn fetch_git_objects_to_local_git_async(
         &self,
         root_hash: &str,
-        encryption_key: Option<&[u8; 32]>,
+        encryption_key: Option<&hashtree_core::ObjectKey>,
     ) -> Result<GitFetchStats> {
         use futures::stream::{self, StreamExt};
         use tokio::sync::mpsc;

@@ -1,3 +1,4 @@
+import { type EncryptionMode } from '../encryption.js';
 /**
  * Tree creation operations
  */
@@ -13,6 +14,7 @@ export interface CreateConfig {
   store: Store;
   chunkSize: number;
   maxLinks?: number;
+  encryptionMode?: EncryptionMode;
 }
 
 export interface DirEntry {

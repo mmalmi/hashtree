@@ -133,9 +133,17 @@ fn validate_additional_root(root: &AdditionalRootConfig) -> Result<(), Box<dyn s
     }
     canonical_hash("additional root hash", &root.hash)?;
     if let Some(key) = &root.key {
-        canonical_hash("additional root key", key)?;
+        canonical_key(key)?;
     }
     Ok(())
+}
+
+pub fn canonical_key(value: &str) -> Result<hashtree_core::ObjectKey, Box<dyn std::error::Error>> {
+    let key = hashtree_core::ObjectKey::from_hex(value)?;
+    if key.to_hex() != value {
+        return Err("object key is not canonical lowercase hex".into());
+    }
+    Ok(key)
 }
 
 pub fn canonical_hash(label: &str, value: &str) -> Result<Hash, Box<dyn std::error::Error>> {

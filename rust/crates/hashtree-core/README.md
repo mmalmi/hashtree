@@ -4,7 +4,13 @@ Encrypted, content-addressed files and directories over an async `Store`.
 The core handles hashing, chunking, encryption, and immutable tree edits;
 storage, transport, and mutable-name discovery are separate crates.
 
-[Published API](https://docs.rs/hashtree-core/latest/hashtree_core/) · [Crate](https://crates.io/crates/hashtree-core) · [Protocol](https://github.com/mmalmi/hashtree/blob/master/docs/HTS-01.md)
+[Published API](https://docs.rs/hashtree-core/latest/hashtree_core/) · [Crate](https://crates.io/crates/hashtree-core) · [Protocol](https://github.com/mmalmi/hashtree-spec)
+
+## Encryption compatibility
+
+New encrypted writes use versioned CHK by default. Readers accept plaintext, legacy 32-byte CHK keys, and both versioned encryption schemes. Existing CIDs still work. Manifests containing new key descriptors have new hashes, and older clients need a reader upgrade to follow them.
+
+Use `HashTree::with_encryption_mode(EncryptionMode::RndV1)` for randomized encryption or `EncryptionMode::LegacyChk` to write for older readers. `HashTreeConfig::public()` writes plaintext. Rust CID and link fields now use `Option<ObjectKey>`. A caller that initializes a field with a legacy array can use `Some(raw_key.into())`.
 
 ## Install and store a file
 

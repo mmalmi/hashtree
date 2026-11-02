@@ -175,7 +175,10 @@ export async function decryptChk(ciphertext: Uint8Array, key: EncryptionKey): Pr
     ciphertextBuffer
   );
 
-  return new Uint8Array(plaintext);
+  const bytes = new Uint8Array(plaintext);
+  const hash = await contentHash(bytes);
+  if (hash.some((value, index) => value !== key[index])) throw new Error('CHK content hash mismatch');
+  return bytes;
 }
 
 /**

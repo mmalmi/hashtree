@@ -97,7 +97,7 @@ async fn standalone_root_lookup_reads_offline_index_announcements_and_private_ro
     .expect("offline lookup does not wait for relays")
     .expect("root exists in native index");
     assert_eq!(resolved.root_hash.as_deref(), Some(root_hash.as_str()));
-    assert_eq!(resolved.encryption_key, Some(key));
+    assert_eq!(resolved.encryption_key, Some(key.into()));
 }
 
 #[tokio::test]

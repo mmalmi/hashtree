@@ -200,3 +200,5 @@ export type {
 } from './worker/protocol.js';
 
 export { generateRequestId } from './worker/protocol.js';
+
+export { encryptionMode, objectKeyFromHex, encryptObject, decryptObject, type EncryptionMode } from './encryption.js';

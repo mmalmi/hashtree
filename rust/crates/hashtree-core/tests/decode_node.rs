@@ -31,7 +31,7 @@ fn loaded_node_decoder_retains_legacy_keyed_plaintext_and_rejects_bad_ciphertext
     let (bytes, hash) = encode_and_hash(&TreeNode::dir(Vec::new())).unwrap();
     let legacy = Cid {
         hash,
-        key: Some([7; 32]),
+        key: Some([7; 32].into()),
     };
     assert!(decode_tree_node_by_cid(&legacy, bytes).unwrap().is_some());
     assert!(matches!(

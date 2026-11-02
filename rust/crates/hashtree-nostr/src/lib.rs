@@ -28,7 +28,7 @@ use hashtree_collection::{
     CollectionWriter, COLLECTION_MANIFEST_METADATA_FILE, MANIFEST_BY_ID,
 };
 use hashtree_core::{
-    collect_hashes, decrypt_chk, is_tree_node, sha256, BufferedStore, Cid, Hash, HashTree,
+    collect_hashes, decrypt_object, is_tree_node, sha256, BufferedStore, Cid, Hash, HashTree,
     HashTreeConfig, HashTreeError, LinkType, Store, TreeVisibility,
 };
 use hashtree_index::{BTree, BTreeError, BTreeOptions};
@@ -681,9 +681,10 @@ pub fn parse_hashtree_root_event(
     })?;
     let key = match (visibility, key_hex) {
         (TreeVisibility::Public, Some(key_hex)) => {
-            Some(hashtree_core::from_hex(&key_hex).map_err(|_| {
+            Some(hashtree_core::ObjectKey::from_hex(&key_hex).map_err(|_| {
                 NostrEventStoreError::Validation(
-                    "root key must be a lowercase 64-character hex string".to_string(),
+                    "root key must be a supported 32-byte or 33-byte encryption key encoded as hex"
+                        .to_string(),
                 )
             })?)
         }
@@ -734,9 +735,10 @@ pub fn resolve_self_encrypted_root_cid(
     let key_hex = nip44::decrypt(owner_keys.secret_key(), &author, ciphertext).map_err(|_| {
         NostrEventStoreError::Validation("hashtree root key is unavailable".to_string())
     })?;
-    let key = hashtree_core::from_hex(&key_hex).map_err(|_| {
+    let key = hashtree_core::ObjectKey::from_hex(&key_hex).map_err(|_| {
         NostrEventStoreError::Validation(
-            "root key must be a lowercase 64-character hex string".to_string(),
+            "root key must be a supported 32-byte or 33-byte encryption key encoded as hex"
+                .to_string(),
         )
     })?;
     Ok(Cid {
@@ -1021,7 +1023,7 @@ impl<S: Store> NostrEventStore<S> {
                     )));
                 }
                 let plaintext = match cid.key {
-                    Some(key) => decrypt_chk(&stored_bytes, &key)
+                    Some(key) => decrypt_object(&stored_bytes, &key)
                         .map_err(|err| HashTreeError::Decryption(err.to_string()))?,
                     None => stored_bytes.clone(),
                 };

@@ -51,7 +51,9 @@ use crate::runtime::block_on_result;
 use anyhow::{Context, Result};
 use futures::{SinkExt, StreamExt};
 use hashtree_blossom::BlossomClient;
-use hashtree_core::{decode_tree_node, decrypt_chk, Cid, LinkType, TreeNode};
+use hashtree_core::{
+    decode_tree_node, decrypt_object, Cid, LinkKeyBytes, LinkType, ObjectKey, TreeNode,
+};
 use nostr_sdk::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -295,7 +297,7 @@ async fn wait_for_any_connected_relay(client: &Client, timeout: Duration) -> boo
     }
 }
 
-type FetchedRefs = (HashMap<String, String>, Option<String>, Option<[u8; 32]>);
+type FetchedRefs = (HashMap<String, String>, Option<String>, Option<ObjectKey>);
 
 #[derive(Debug, thiserror::Error)]
 #[error("No repository root observed for '{repo_name}' by {author} during lookup")]
@@ -318,7 +320,7 @@ enum RootResolveSource {
 #[derive(Debug, Clone)]
 struct ResolvedRoot {
     root_hash: Option<String>,
-    encryption_key: Option<[u8; 32]>,
+    encryption_key: Option<ObjectKey>,
     source: Option<RootResolveSource>,
 }
 use hashtree_config::Config;
@@ -374,12 +376,12 @@ pub struct NostrClient {
     /// Cached root hashes (hashtree SHA256)
     cached_root_hash: HashMap<String, String>,
     /// Cached encryption keys
-    cached_encryption_key: HashMap<String, [u8; 32]>,
+    cached_encryption_key: HashMap<String, ObjectKey>,
     /// Source of the cached root hash, used to retry tentative daemon roots via relays.
     cached_root_source: HashMap<String, RootResolveSource>,
     /// URL secret for link-visible repos (#k=<hex>)
     /// If set, encryption keys from nostr are XOR-masked and need unmasking
-    url_secret: Option<[u8; 32]>,
+    url_secret: Option<LinkKeyBytes>,
     /// Whether this is a private (author-only) repo using NIP-44 encryption
     is_private: bool,
     /// Local htree daemon URL for peer-assisted root discovery
@@ -394,7 +396,7 @@ pub struct NostrClient {
 #[derive(Debug, Clone, Default)]
 struct RootEventData {
     root_hash: String,
-    encryption_key: Option<[u8; 32]>,
+    encryption_key: Option<String>,
     key_tag_name: Option<String>,
     self_encrypted_ciphertext: Option<String>,
     source: RootResolveSource,
@@ -427,7 +429,7 @@ impl NostrClient {
     pub fn new(
         pubkey: &str,
         secret_key: Option<String>,
-        url_secret: Option<[u8; 32]>,
+        url_secret: Option<LinkKeyBytes>,
         is_private: bool,
         config: &Config,
     ) -> Result<Self> {
@@ -452,7 +454,7 @@ impl NostrClient {
     fn new_with_local_daemon_only(
         pubkey: &str,
         secret_key: Option<String>,
-        url_secret: Option<[u8; 32]>,
+        url_secret: Option<LinkKeyBytes>,
         is_private: bool,
         config: &Config,
         local_daemon_only: bool,
@@ -562,7 +564,7 @@ impl NostrClient {
         &mut self,
         refs: HashMap<String, String>,
         root_hash: Option<String>,
-        encryption_key: Option<[u8; 32]>,
+        encryption_key: Option<ObjectKey>,
     ) {
         self.forced_fetch_refs_results
             .push_back(Ok((refs, root_hash, encryption_key)));
@@ -573,7 +575,7 @@ impl NostrClient {
         &mut self,
         repo_name: &str,
         root_hash: String,
-        encryption_key: Option<[u8; 32]>,
+        encryption_key: Option<ObjectKey>,
     ) {
         self.cached_root_hash
             .insert(repo_name.to_string(), root_hash);
@@ -863,13 +865,7 @@ impl NostrClient {
                     return Some((None, Some(tag_name.to_string()), Some(tag_value)));
                 }
                 if tag_name == "key" || tag_name == "encryptedKey" {
-                    if let Ok(bytes) = hex::decode(&tag_value) {
-                        if bytes.len() == 32 {
-                            let mut key = [0u8; 32];
-                            key.copy_from_slice(&bytes);
-                            return Some((Some(key), Some(tag_name.to_string()), None));
-                        }
-                    }
+                    return Some((Some(tag_value), Some(tag_name.to_string()), None));
                 }
                 None
             })
@@ -903,7 +899,7 @@ impl NostrClient {
 
         let mut data = RootEventData {
             root_hash,
-            encryption_key: parsed_cid.and_then(|cid| cid.key),
+            encryption_key: parsed_cid.and_then(|cid| cid.key.map(|key| key.to_hex())),
             key_tag_name: None,
             self_encrypted_ciphertext: None,
             source: RootResolveSource::LocalDaemon,
@@ -926,14 +922,8 @@ impl NostrClient {
             return Some(data);
         };
 
-        if let Ok(bytes) = hex::decode(&tag_value) {
-            if bytes.len() == 32 {
-                let mut key = [0u8; 32];
-                key.copy_from_slice(&bytes);
-                data.encryption_key = Some(key);
-                data.key_tag_name = Some(tag_name.to_string());
-            }
-        }
+        data.encryption_key = Some(tag_value);
+        data.key_tag_name = Some(tag_name.to_string());
 
         Some(data)
     }
@@ -1008,7 +998,7 @@ impl NostrClient {
         &self,
         repo_name: &str,
         root_hash: &str,
-        encryption_key: Option<(&[u8; 32], bool, bool)>,
+        encryption_key: Option<(&[u8], bool, bool)>,
     ) {
         let Some(base) = self.local_daemon_url.as_ref() else {
             return;
@@ -1177,11 +1167,9 @@ impl NostrClient {
             Some("encryptedKey") => {
                 // Link-visible: XOR the masked key with url_secret
                 if let (Some(masked), Some(secret)) = (encryption_key, self.url_secret) {
-                    let mut unmasked = [0u8; 32];
-                    for i in 0..32 {
-                        unmasked[i] = masked[i] ^ secret[i];
-                    }
-                    Some(unmasked)
+                    let bytes =
+                        hashtree_core::xor_key_bytes(&hex::decode(masked)?, secret.as_ref())?;
+                    Some(ObjectKey::from_bytes(&bytes)?)
                 } else {
                     anyhow::bail!(
                         "This repo is link-visible and requires a secret key.\n\
@@ -1206,16 +1194,7 @@ impl NostrClient {
                         // Decrypt with NIP-44 (encrypted to self)
                         let pubkey = keys.public_key();
                         match nip44::decrypt(keys.secret_key(), &pubkey, &ciphertext) {
-                            Ok(key_hex) => {
-                                let key_bytes =
-                                    hex::decode(&key_hex).context("Invalid decrypted key hex")?;
-                                if key_bytes.len() != 32 {
-                                    anyhow::bail!("Decrypted key wrong length");
-                                }
-                                let mut key = [0u8; 32];
-                                key.copy_from_slice(&key_bytes);
-                                Some(key)
-                            }
+                            Ok(key_hex) => Some(ObjectKey::from_hex(&key_hex)?),
                             Err(e) => {
                                 anyhow::bail!(
                                     "Failed to decrypt private repo: {}\n\
@@ -1238,10 +1217,16 @@ impl NostrClient {
             Some("key") | None => {
                 // Public: use key directly
                 encryption_key
+                    .as_deref()
+                    .map(ObjectKey::from_hex)
+                    .transpose()?
             }
             Some(other) => {
                 warn!("Unknown key tag type: {}", other);
                 encryption_key
+                    .as_deref()
+                    .map(ObjectKey::from_hex)
+                    .transpose()?
             }
         };
 
@@ -1261,10 +1246,10 @@ impl NostrClient {
     }
 
     /// Decrypt data if encryption key is provided, then decode as tree node
-    fn decrypt_and_decode(&self, data: &[u8], key: Option<&[u8; 32]>) -> Result<TreeNode> {
+    fn decrypt_and_decode(&self, data: &[u8], key: Option<&ObjectKey>) -> Result<TreeNode> {
         let decrypted_data: Vec<u8>;
         let data_to_decode = if let Some(k) = key {
-            decrypted_data = decrypt_chk(data, k).context("Decryption failed")?;
+            decrypted_data = decrypt_object(data, k).context("Decryption failed")?;
             &decrypted_data
         } else {
             data
@@ -1278,7 +1263,7 @@ impl NostrClient {
     pub(crate) async fn fetch_refs_from_hashtree(
         &self,
         root_hash: &str,
-        encryption_key: Option<&[u8; 32]>,
+        encryption_key: Option<&ObjectKey>,
     ) -> Result<HashMap<String, String>> {
         let mut refs = HashMap::new();
         debug!(
@@ -1395,7 +1380,7 @@ impl NostrClient {
                 .with_context(|| format!("Failed to download HEAD {}", &head_hash[..12]))?;
             // HEAD is a blob, decrypt if needed
             let head_content = if let Some(k) = head_link.key.as_ref() {
-                let decrypted = decrypt_chk(&head_data, k)
+                let decrypted = decrypt_object(&head_data, k)
                     .with_context(|| format!("Failed to decrypt HEAD {}", &head_hash[..12]))?;
                 String::from_utf8_lossy(&decrypted).trim().to_string()
             } else {
@@ -1416,7 +1401,7 @@ impl NostrClient {
     async fn collect_refs_recursive(
         &self,
         dir_hash: &str,
-        dir_key: Option<&[u8; 32]>,
+        dir_key: Option<&ObjectKey>,
         prefix: &str,
         refs: &mut HashMap<String, String>,
     ) -> Result<()> {
@@ -1462,7 +1447,7 @@ impl NostrClient {
                     .with_context(|| format!("Failed to download ref {}", ref_path))?;
                 // Decrypt if needed
                 let sha = if let Some(k) = link.key.as_ref() {
-                    let decrypted = decrypt_chk(&ref_data, k)
+                    let decrypted = decrypt_object(&ref_data, k)
                         .with_context(|| format!("Failed to decrypt ref {}", ref_path))?;
                     String::from_utf8_lossy(&decrypted).trim().to_string()
                 } else {
@@ -1507,7 +1492,7 @@ impl NostrClient {
     }
 
     /// Get cached encryption key for a repository
-    pub fn get_cached_encryption_key(&self, repo_name: &str) -> Option<&[u8; 32]> {
+    pub fn get_cached_encryption_key(&self, repo_name: &str) -> Option<&ObjectKey> {
         self.cached_encryption_key.get(repo_name)
     }
 
@@ -1554,7 +1539,7 @@ impl NostrClient {
         &self,
         repo_name: &str,
         root_hash: &str,
-        encryption_key: Option<(&[u8; 32], bool, bool)>,
+        encryption_key: Option<(&[u8], bool, bool)>,
     ) -> Result<(String, RelayResult)> {
         self.publish_repo_with_announcement(repo_name, root_hash, encryption_key, None)
     }
@@ -1563,7 +1548,7 @@ impl NostrClient {
         &self,
         repo_name: &str,
         root_hash: &str,
-        encryption_key: Option<(&[u8; 32], bool, bool)>,
+        encryption_key: Option<(&[u8], bool, bool)>,
         repo_announcement: Option<RepoAnnouncementOptions>,
     ) -> Result<(String, RelayResult)> {
         let keys = self.keys.as_ref().context(format!(
@@ -1600,7 +1585,7 @@ impl NostrClient {
         keys: &Keys,
         repo_name: &str,
         root_hash: &str,
-        encryption_key: Option<(&[u8; 32], bool, bool)>,
+        encryption_key: Option<(&[u8], bool, bool)>,
         repo_announcement: Option<RepoAnnouncementOptions>,
     ) -> Result<(String, RelayResult)> {
         if self.local_daemon_only {
@@ -1778,7 +1763,7 @@ impl NostrClient {
         keys: &Keys,
         repo_name: &str,
         root_hash: &str,
-        encryption_key: Option<(&[u8; 32], bool, bool)>,
+        encryption_key: Option<(&[u8], bool, bool)>,
     ) -> Result<(String, RelayResult)> {
         let existing_created_at = self
             .fetch_root_from_local_daemon(repo_name, Duration::from_secs(2))

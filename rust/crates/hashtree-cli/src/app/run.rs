@@ -1556,7 +1556,7 @@ fn run_command(
             hash,
             key,
         } => command_future!({
-            use hashtree_core::{from_hex, key_from_hex, Cid};
+            use hashtree_core::{from_hex, Cid, ObjectKey};
 
             // Load config for relay list
             let config = Config::load()?;
@@ -1577,7 +1577,7 @@ fn run_command(
             let hash_bytes = from_hex(&hash).context("Invalid hash (expected hex)")?;
             let key_bytes = key
                 .as_ref()
-                .map(|k| key_from_hex(k))
+                .map(|k| ObjectKey::from_hex(k))
                 .transpose()
                 .map_err(|e| anyhow::anyhow!("Invalid key: {}", e))?;
 

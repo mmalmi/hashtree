@@ -87,7 +87,10 @@ async fn test_diff_encrypted_wrong_key_returns_decryption_error() {
 
     let (cid, _size) = tree.put(b"encrypted-content").await.unwrap();
     let mut wrong_key = cid.key.unwrap();
-    wrong_key[0] ^= 0xff;
+    let mut bytes = wrong_key.as_bytes().to_vec();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 0xff;
+    wrong_key = hashtree_core::ObjectKey::from_bytes(&bytes).unwrap();
     let bad_root = hashtree_core::Cid {
         hash: cid.hash,
         key: Some(wrong_key),

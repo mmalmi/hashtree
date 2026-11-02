@@ -158,12 +158,7 @@ fn cid_from_tree_event(event: &Event, author_keys: Option<&Keys>) -> Option<Cid>
     let hash = from_hex(&hash_hex?).ok()?;
 
     if let Some(key_hex) = key_hex {
-        let bytes = hex::decode(&key_hex).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&bytes);
+        let key = hashtree_core::ObjectKey::from_hex(&key_hex).ok()?;
         return Some(Cid {
             hash,
             key: Some(key),
@@ -176,12 +171,7 @@ fn cid_from_tree_event(event: &Event, author_keys: Option<&Keys>) -> Option<Cid>
             return None;
         }
         let key_hex = nip44::decrypt(keys.secret_key(), &event.pubkey, &ciphertext).ok()?;
-        let bytes = hex::decode(&key_hex).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&bytes);
+        let key = hashtree_core::ObjectKey::from_hex(&key_hex).ok()?;
         return Some(Cid {
             hash,
             key: Some(key),
@@ -958,7 +948,7 @@ mod tests {
         let cid = cid_from_tree_event(&event, Some(&author)).expect("decrypt tracked private cid");
 
         assert_eq!(cid.hash, root_hash);
-        assert_eq!(cid.key, Some(root_key));
+        assert_eq!(cid.key, Some(root_key.into()));
     }
 
     #[test]

@@ -1,3 +1,5 @@
+import { tryDecodeTreeNode } from '../codec.js';
+import { decryptObject, encryptionMode } from '../encryption.js';
 import { LinkType, type Link, type TreeNode } from '../types.js';
 
 export interface ReadState {
@@ -53,4 +55,18 @@ export function isInternalDirectoryLink(node: TreeNode, link: Link): boolean {
     && link.type === LinkType.Dir
     && link.name !== undefined
     && internalChunkStart(link.name) !== null;
+}
+
+export async function decryptRootNodeOrBlob(
+  encryptedData: Uint8Array,
+  key?: Uint8Array
+): Promise<Uint8Array> {
+  if (!key) return encryptedData;
+  const legacy = encryptionMode(key) === 'legacy-chk';
+  try {
+    return await decryptObject(encryptedData, key);
+  } catch (error) {
+    if (legacy && tryDecodeTreeNode(encryptedData)) return encryptedData;
+    throw error;
+  }
 }

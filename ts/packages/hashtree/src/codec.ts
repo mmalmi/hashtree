@@ -1,3 +1,4 @@
+import { encryptionMode } from './encryption.js';
 /**
  * MessagePack encoding/decoding for tree nodes
  *
@@ -83,6 +84,7 @@ export function encodeTreeNode(node: TreeNode): Uint8Array {
       if (!Number.isSafeInteger(link.size) || link.size < 0) {
         throw new Error('Link size must be an exact nonnegative safe integer');
       }
+      if (link.key !== undefined) encryptionMode(link.key);
       if (link.name !== undefined) assertUnicode(link.name);
       // Link fields in alphabetical order: h, k?, m?, n?, s, t
       // Build object with all fields in order, undefined values are omitted by msgpack
@@ -148,7 +150,10 @@ export function tryDecodeTreeNode(data: Uint8Array): TreeNode | null {
         type: linkType,
       };
       if (linkValue.n !== undefined) link.name = linkValue.n as string;
-      if (linkValue.k !== undefined) link.key = linkValue.k as Uint8Array;
+      if (linkValue.k !== undefined) {
+        encryptionMode(linkValue.k as Uint8Array);
+        link.key = linkValue.k as Uint8Array;
+      }
       if (linkValue.m !== undefined) link.meta = linkValue.m as Record<string, unknown>;
       return link;
     }),

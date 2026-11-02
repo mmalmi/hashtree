@@ -36,7 +36,7 @@ fn snapshot(overrides: impl FnOnce(&mut TreeEventSnapshotInfo)) -> TreeEventSnap
         tree_name: "videos/demo".to_string(),
         root_cid: Cid {
             hash: from_hex(&"3".repeat(64)).expect("root hash"),
-            key: Some(from_hex(&"4".repeat(64)).expect("root key")),
+            key: Some(from_hex(&"4".repeat(64)).expect("root key").into()),
         },
         visibility: hashtree_core::TreeVisibility::Public,
         labels: vec!["hashtree".to_string()],
@@ -121,10 +121,31 @@ fn resolves_link_visible_snapshot_roots_with_link_keys() {
             resolved,
             Some(Cid {
                 hash: from_hex(&"3".repeat(64)).expect("root hash"),
-                key: Some(content_key),
+                key: Some(content_key.into()),
             })
         );
     });
+}
+
+#[test]
+fn legacy_sharing_link_can_open_an_updated_chk_root() {
+    use hashtree_core::{decrypt_object, encrypt_object, mask_object_key, EncryptionMode};
+    let (stored, root_key) = encrypt_object(b"updated root", EncryptionMode::ChkV1).unwrap();
+    let secret = [7; 32];
+    let masked = mask_object_key(&root_key, &secret).unwrap();
+    let snapshot = snapshot(|snapshot| {
+        snapshot.visibility = hashtree_core::TreeVisibility::LinkVisible;
+        snapshot.root_cid = Cid::public(hashtree_core::sha256(&stored));
+        snapshot.encrypted_key = Some(hex::encode(masked));
+    });
+    let resolved = resolve_snapshot_root_cid(&snapshot, Some(&hex::encode(secret)))
+        .unwrap()
+        .unwrap();
+    let key = resolved.key.unwrap();
+    assert_eq!(key.mode(), EncryptionMode::LegacyChk);
+    assert_eq!(decrypt_object(&stored, &key).unwrap(), b"updated root");
+    let (_, random_key) = encrypt_object(b"updated root", EncryptionMode::RndV1).unwrap();
+    assert!(mask_object_key(&random_key, &secret).is_err());
 }
 
 #[test]

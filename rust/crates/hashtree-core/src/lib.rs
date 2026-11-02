@@ -7,6 +7,7 @@ pub mod codec;
 pub mod crypto;
 pub mod diff;
 mod directory;
+pub mod encryption;
 pub mod hash;
 pub mod hashtree;
 #[doc(hidden)]
@@ -16,6 +17,8 @@ pub mod reader;
 pub mod store;
 pub mod types;
 pub mod visibility;
+
+pub use encryption::{decrypt_object, encrypt_object, EncryptionMode, ObjectKey};
 
 // Re-exports for convenience
 pub use blob_route::{
@@ -63,7 +66,7 @@ pub use crypto::{
     encrypted_size_chk, generate_key, key_from_hex, key_to_hex, plaintext_size, CryptoError,
     EncryptionKey,
 };
-pub use visibility::{xor_keys, TreeVisibility};
+pub use visibility::{mask_object_key, xor_key_bytes, xor_keys, LinkKeyBytes, TreeVisibility};
 
 // Tree diff operations
 pub use diff::{

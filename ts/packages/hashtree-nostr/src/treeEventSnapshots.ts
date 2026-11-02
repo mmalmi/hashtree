@@ -6,6 +6,7 @@ import {
   type CID,
 } from '@hashtree/core';
 import type { StoredNostrEvent } from './events.js';
+import { normalizeTreeEventSnapshotLinkKey } from './treeEventSnapshotPermalinks.js';
 import { compareReplaceableEvents } from './eventKeys.js';
 import type { Nip19Like, NostrFilter } from './resolver/nostr.js';
 import {
@@ -68,7 +69,9 @@ function normalizeLinkKey(linkKey?: string | Uint8Array | null): Uint8Array | nu
   if (!linkKey) {
     return null;
   }
-  return typeof linkKey === 'string' ? fromHex(linkKey) : linkKey;
+  if (typeof linkKey !== 'string') return linkKey;
+  const hex = normalizeTreeEventSnapshotLinkKey(linkKey);
+  return hex ? fromHex(hex) : null;
 }
 
 function isValidTreeEventFor(

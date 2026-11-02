@@ -677,7 +677,7 @@ pub(crate) enum PublicEventsRootApplyOutcome {
 #[serde(deny_unknown_fields)]
 struct StoredCid {
     hash: [u8; 32],
-    key: Option<[u8; 32]>,
+    key: Option<hashtree_core::ObjectKey>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

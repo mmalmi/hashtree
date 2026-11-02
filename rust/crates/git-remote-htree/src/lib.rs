@@ -313,7 +313,7 @@ pub struct ParsedUrl {
     pub identifier: String,
     pub repo_name: String,
     /// Secret key from #k=<hex> fragment (for link-visible repos)
-    pub secret_key: Option<[u8; 32]>,
+    pub secret_key: Option<hashtree_core::LinkKeyBytes>,
     /// Whether this is a private (self-only) repo from #private fragment
     pub is_private: bool,
     /// Whether to auto-generate a secret key (from #link-visible fragment)
@@ -344,11 +344,8 @@ fn parse_htree_url(url: &str) -> Result<ParsedUrl> {
         } else if let Some(key_hex) = fragment.strip_prefix("k=") {
             // #k=<hex> - link-visible with explicit key
             let bytes = hex::decode(key_hex).context("Invalid secret key hex in URL fragment")?;
-            if bytes.len() != 32 {
-                bail!("Secret key must be 32 bytes (64 hex chars)");
-            }
-            let mut key = [0u8; 32];
-            key.copy_from_slice(&bytes);
+            let key = hashtree_core::LinkKeyBytes::from_bytes(&bytes)
+                .context("Secret key must be 32 or 33 bytes")?;
             (path, Some(key), false, false)
         } else {
             // Unknown fragment - error to prevent accidental public push
@@ -390,10 +387,10 @@ fn parse_htree_url(url: &str) -> Result<ParsedUrl> {
 }
 
 /// Generate a new random secret key for private repos
-pub fn generate_secret_key() -> [u8; 32] {
-    let mut key = [0u8; 32];
+pub fn generate_secret_key() -> hashtree_core::LinkKeyBytes {
+    let mut key = [0u8; 33];
     getrandom::fill(&mut key).expect("Failed to generate random bytes");
-    key
+    hashtree_core::LinkKeyBytes::Versioned(key)
 }
 
 /// Detect if local htree daemon is running

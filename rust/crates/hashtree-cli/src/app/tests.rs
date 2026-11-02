@@ -1387,7 +1387,7 @@ fn test_load_mute_entries_legacy_format() {
 fn test_format_cid_for_display_preserves_decrypt_key() {
     let cid = Cid {
         hash: [0x11; 32],
-        key: Some([0x22; 32]),
+        key: Some([0x22; 32].into()),
     };
 
     let rendered = format_cid_for_display(&cid);
@@ -2333,13 +2333,13 @@ async fn test_resolve_hex_cid_with_key_and_path() {
 
     let resolved = resolve_cid_input(&cid).await.unwrap();
     assert_eq!(resolved.cid.hash, hash);
-    assert_eq!(resolved.cid.key, Some(key));
+    assert_eq!(resolved.cid.key, Some(key.into()));
     assert!(resolved.path.is_none());
 
     let with_path = format!("{}/dir/file.txt", cid);
     let resolved = resolve_cid_input(&with_path).await.unwrap();
     assert_eq!(resolved.cid.hash, hash);
-    assert_eq!(resolved.cid.key, Some(key));
+    assert_eq!(resolved.cid.key, Some(key.into()));
     assert_eq!(resolved.path, Some("dir/file.txt".to_string()));
 }
 

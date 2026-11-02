@@ -137,7 +137,7 @@ describe('HashTree encrypted', () => {
 
       expect(size).toBe(data.length);
       expect(cid.key).toBeDefined();
-      expect(cid.key!.length).toBe(32);
+      expect(cid.key!.length).toBe(33);
 
       // readFile(cid) decrypts using the key in the CID
       const decrypted = await tree.readFile(cid);

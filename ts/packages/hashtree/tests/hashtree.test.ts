@@ -290,7 +290,7 @@ describe('HashTree', () => {
       const { cid, size } = await tree.putFile(data);
 
       expect(cid.key).toBeDefined();
-      expect(cid.key!.length).toBe(32);
+      expect(cid.key!.length).toBe(33);
       expect(size).toBe(14);
 
       // Should be retrievable with CID (has key)
@@ -309,7 +309,7 @@ describe('HashTree', () => {
       ]);
 
       expect(dirCid.key).toBeDefined();
-      expect(dirCid.key!.length).toBe(32);
+      expect(dirCid.key!.length).toBe(33);
 
       // Should list with CID (has key)
       const entries = await tree.listDirectory(dirCid);

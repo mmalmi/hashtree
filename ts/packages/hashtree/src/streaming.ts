@@ -10,7 +10,8 @@
 import { Store, Hash, CID, TreeNode, LinkType, Link, cid } from './types.js';
 import { encodeAndHash } from './codec.js';
 import { sha256 } from './hash.js';
-import { encryptChk, type EncryptionKey } from './crypto.js';
+import { type EncryptionKey } from './crypto.js';
+import { encryptObject, type EncryptionMode } from './encryption.js';
 import { type Chunker, fixedChunker } from './builder.js';
 export type { Chunker } from './builder.js';
 
@@ -19,12 +20,14 @@ export interface StreamWriterConfig {
   chunkSize?: number;
   chunker?: Chunker;
   unencrypted?: boolean;
+  encryptionMode?: EncryptionMode;
 }
 
 export class StreamWriter {
   private store: Store;
   private chunker: Chunker;
   private unencrypted: boolean;
+  private encryptionMode: EncryptionMode = 'chk-v1';
 
   // Current partial chunk being built
   private buffer: Uint8Array;
@@ -47,6 +50,7 @@ export class StreamWriter {
       // New config-based constructor
       const config = storeOrConfig as StreamWriterConfig;
       this.store = config.store;
+      this.encryptionMode = config.encryptionMode ?? 'chk-v1';
       this.chunker = config.chunker ?? fixedChunker(config.chunkSize ?? 2 * 1024 * 1024);
       this.unencrypted = config.unencrypted ?? false;
     } else {
@@ -115,7 +119,7 @@ export class StreamWriter {
       this.chunks.push({ hash, size: chunkSize, type: LinkType.Blob });
     } else {
       // Encrypted mode: CHK encrypt the chunk
-      const { ciphertext, key } = await encryptChk(chunk);
+      const { ciphertext, key } = await encryptObject(chunk, this.encryptionMode);
       const hash = await sha256(ciphertext);
       await this.store.put(hash, ciphertext);
       this.chunks.push({ hash, size: chunkSize, key, type: LinkType.Blob });
@@ -146,7 +150,7 @@ export class StreamWriter {
       } else {
         // Store PLAINTEXT size in link.size for correct range seeking
         const plaintextSize = chunk.length;
-        const { ciphertext, key } = await encryptChk(chunk);
+        const { ciphertext, key } = await encryptObject(chunk, this.encryptionMode);
         const hash = await sha256(ciphertext);
         await this.store.put(hash, ciphertext);
         tempChunks.push({ hash, size: plaintextSize, key, type: LinkType.Blob });
@@ -173,7 +177,7 @@ export class StreamWriter {
         await this.store.put(hash, emptyData);
         return { hash, size: 0 };
       } else {
-        const { ciphertext, key } = await encryptChk(new Uint8Array(0));
+        const { ciphertext, key } = await encryptObject(new Uint8Array(0), this.encryptionMode);
         const hash = await sha256(ciphertext);
         await this.store.put(hash, ciphertext);
         return { hash, size: 0, key };
@@ -206,7 +210,7 @@ export class StreamWriter {
       return { hash: nodeHash };
     } else {
       // Encrypted mode: CHK encrypt the tree node
-      const { ciphertext, key } = await encryptChk(data);
+      const { ciphertext, key } = await encryptObject(data, this.encryptionMode);
       const hash = await sha256(ciphertext);
       await this.store.put(hash, ciphertext);
       return cid(hash, key);

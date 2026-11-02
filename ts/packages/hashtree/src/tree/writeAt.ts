@@ -8,11 +8,13 @@
 import { Store, Hash, TreeNode, Link, LinkType, toHex } from '../types.js';
 import { sha256 } from '../hash.js';
 import { encodeAndHash, decodeTreeNode, tryDecodeTreeNode } from '../codec.js';
-import { encryptChk, decryptChk, type EncryptionKey } from '../crypto.js';
+import { type EncryptionKey } from '../crypto.js';
+import { encryptObject, decryptObject, encryptionMode, type EncryptionMode } from '../encryption.js';
 
 export interface WriteAtConfig {
   store: Store;
   chunkSize: number;
+  encryptionMode?: EncryptionMode;
 }
 
 export interface WriteAtResult {
@@ -99,6 +101,7 @@ export async function writeAtEncrypted(
   offset: number,
   data: Uint8Array
 ): Promise<WriteAtEncryptedResult> {
+  if (encryptionMode(rootKey) === 'rnd-v1') config = { ...config, encryptionMode: 'rnd-v1' };
   const { store } = config;
 
   // Get and decrypt root
@@ -107,7 +110,7 @@ export async function writeAtEncrypted(
     throw new Error(`Root not found: ${toHex(rootHash)}`);
   }
 
-  const decryptedRoot = await decryptChk(encryptedRoot, rootKey);
+  const decryptedRoot = await decryptObject(encryptedRoot, rootKey);
 
   // Check if it's a tree node or single blob
   const node = tryDecodeTreeNode(decryptedRoot);
@@ -121,7 +124,7 @@ export async function writeAtEncrypted(
     newData.set(data, offset);
 
     // Re-encrypt with CHK
-    const { ciphertext, key } = await encryptChk(newData);
+    const { ciphertext, key } = await encryptObject(newData, config.encryptionMode);
     const newHash = await sha256(ciphertext);
     await store.put(newHash, ciphertext);
 
@@ -135,7 +138,7 @@ export async function writeAtEncrypted(
     throw new Error(`Write extends beyond file: offset=${offset}, data=${data.length}, file=${totalSize}`);
   }
 
-  const newLinks = await writeAtInNodeEncrypted(config, node, offset, data);
+  const newLinks = await writeAtInNode(config, node, offset, data);
 
   // Rebuild encrypted tree with new links
   const { hash: newRootHash, key: newRootKey } = await buildEncryptedTreeFromLinks(config, newLinks, totalSize);
@@ -143,204 +146,45 @@ export async function writeAtEncrypted(
   return { hash: newRootHash, size: totalSize, key: newRootKey };
 }
 
-/**
- * Recursively modify chunks in a tree node (unencrypted)
- */
+/** Rewrite overlapping links and preserve each child's plaintext or encrypted representation. */
 async function writeAtInNode(
   config: WriteAtConfig,
   node: TreeNode,
   offset: number,
   data: Uint8Array
 ): Promise<Link[]> {
-  const { store } = config;
-  const newLinks: Link[] = [];
+  const links: Link[] = [];
   let position = 0;
-
   for (const link of node.links) {
-    const linkStart = position;
-    const linkEnd = position + link.size;
-    position = linkEnd;
-
-    // Check if this chunk overlaps with the write range
-    const writeStart = offset;
-    const writeEnd = offset + data.length;
-
-    if (linkEnd <= writeStart || linkStart >= writeEnd) {
-      // No overlap - keep original link
-      newLinks.push(link);
+    const start = position;
+    position += link.size;
+    if (position <= offset || start >= offset + data.length) {
+      links.push(link);
       continue;
     }
 
-    // This chunk needs modification
-    const chunkData = await store.get(link.hash);
-    if (!chunkData) {
-      throw new Error(`Missing chunk: ${toHex(link.hash)}`);
-    }
-
-    if (link.type !== LinkType.Blob) {
-      // Intermediate node - recurse
-      const childNode = decodeTreeNode(chunkData);
-      const childOffset = Math.max(0, offset - linkStart);
-      const childData = data.slice(
-        Math.max(0, linkStart - offset),
-        Math.min(data.length, linkEnd - offset)
-      );
-
-      const newChildLinks = await writeAtInNode(config, childNode, childOffset, childData);
-
-      // Build new intermediate node
-      const newChildNode: TreeNode = {
-        type: LinkType.File,
-        links: newChildLinks,
-      };
-      const { data: encodedNode, hash: newChildHash } = await encodeAndHash(newChildNode);
-      await store.put(newChildHash, encodedNode);
-
-      newLinks.push({
-        hash: newChildHash,
-        size: link.size,
-        type: LinkType.File,
-      });
+    const stored = await config.store.get(link.hash);
+    if (!stored) throw new Error(`Missing chunk: ${toHex(link.hash)}`);
+    const original = link.key ? await decryptObject(stored, link.key) : stored;
+    const patch = data.subarray(Math.max(0, start - offset), position - offset);
+    const localOffset = Math.max(0, offset - start);
+    let updated: Uint8Array;
+    if (link.type === LinkType.Blob) {
+      updated = original.slice();
+      updated.set(patch, localOffset);
     } else {
-      // Leaf blob - modify bytes
-      const newChunkData = new Uint8Array(chunkData);
-
-      // Calculate which bytes to modify in this chunk
-      const chunkWriteStart = Math.max(0, writeStart - linkStart);
-      const chunkWriteEnd = Math.min(chunkData.length, writeEnd - linkStart);
-      const dataReadStart = Math.max(0, linkStart - writeStart);
-      const dataReadEnd = dataReadStart + (chunkWriteEnd - chunkWriteStart);
-
-      newChunkData.set(data.slice(dataReadStart, dataReadEnd), chunkWriteStart);
-
-      const newHash = await sha256(newChunkData);
-      await store.put(newHash, newChunkData);
-
-      newLinks.push({
-        hash: newHash,
-        size: newChunkData.length,
-        type: LinkType.Blob,
-      });
+      const child = decodeTreeNode(original);
+      const childLinks = await writeAtInNode(config, child, localOffset, patch);
+      updated = (await encodeAndHash({ ...child, links: childLinks })).data;
     }
+
+    const mode = link.key && encryptionMode(link.key) === 'rnd-v1' ? 'rnd-v1' : config.encryptionMode;
+    const encoded = link.key ? await encryptObject(updated, mode) : { ciphertext: updated, key: undefined };
+    const hash = await sha256(encoded.ciphertext);
+    await config.store.put(hash, encoded.ciphertext);
+    links.push({ ...link, hash, key: encoded.key });
   }
-
-  return newLinks;
-}
-
-/**
- * Recursively modify chunks in an encrypted tree node
- *
- * NOTE: For encrypted files, link.size stores CIPHERTEXT size (includes AES-GCM tag),
- * but offset/data are in PLAINTEXT terms. We need to decrypt each chunk to get
- * the actual plaintext size for offset calculations.
- */
-async function writeAtInNodeEncrypted(
-  config: WriteAtConfig,
-  node: TreeNode,
-  offset: number,
-  data: Uint8Array
-): Promise<Link[]> {
-  const { store } = config;
-  const newLinks: Link[] = [];
-
-  // First pass: collect plaintext sizes by decrypting headers or using heuristics
-  // AES-GCM adds 16 bytes tag, so plaintext size = ciphertext size - 16
-  const AES_GCM_TAG_SIZE = 16;
-
-  let position = 0; // Track plaintext position
-
-  for (const link of node.links) {
-    // For blobs, plaintext size = ciphertext size - tag
-    // For intermediate nodes, the size stored is the sum of child plaintext sizes
-    const plaintextSize = link.type === LinkType.Blob
-      ? link.size - AES_GCM_TAG_SIZE
-      : link.size; // Intermediate nodes store total plaintext size of subtree
-
-    const linkStart = position;
-    const linkEnd = position + plaintextSize;
-    position = linkEnd;
-
-    // Check if this chunk overlaps with the write range
-    const writeStart = offset;
-    const writeEnd = offset + data.length;
-
-    if (linkEnd <= writeStart || linkStart >= writeEnd) {
-      // No overlap - keep original link
-      newLinks.push(link);
-      continue;
-    }
-
-    // This chunk needs modification
-    if (!link.key) {
-      throw new Error(`Missing decryption key for chunk: ${toHex(link.hash)}`);
-    }
-
-    const encryptedChunk = await store.get(link.hash);
-    if (!encryptedChunk) {
-      throw new Error(`Missing chunk: ${toHex(link.hash)}`);
-    }
-
-    const decryptedChunk = await decryptChk(encryptedChunk, link.key);
-
-    if (link.type !== LinkType.Blob) {
-      // Intermediate node - recurse
-      const childNode = decodeTreeNode(decryptedChunk);
-      const childOffset = Math.max(0, offset - linkStart);
-      const childData = data.slice(
-        Math.max(0, linkStart - offset),
-        Math.min(data.length, linkEnd - offset)
-      );
-
-      const newChildLinks = await writeAtInNodeEncrypted(config, childNode, childOffset, childData);
-
-      // Build new encrypted intermediate node
-      const newChildNode: TreeNode = {
-        type: LinkType.File,
-        links: newChildLinks,
-      };
-      const { data: encodedNode } = await encodeAndHash(newChildNode);
-      const { ciphertext, key } = await encryptChk(encodedNode);
-      const newChildHash = await sha256(ciphertext);
-      await store.put(newChildHash, ciphertext);
-
-      // Recalculate total plaintext size from new links
-      const newPlaintextSize = newChildLinks.reduce((sum, l) => {
-        return sum + (l.type === LinkType.Blob ? l.size - AES_GCM_TAG_SIZE : l.size);
-      }, 0);
-
-      newLinks.push({
-        hash: newChildHash,
-        size: newPlaintextSize, // Store plaintext size for intermediate nodes
-        key,
-        type: LinkType.File,
-      });
-    } else {
-      // Leaf blob - modify bytes
-      const newChunkData = new Uint8Array(decryptedChunk);
-
-      // Calculate which bytes to modify in this chunk
-      const chunkWriteStart = Math.max(0, writeStart - linkStart);
-      const chunkWriteEnd = Math.min(decryptedChunk.length, writeEnd - linkStart);
-      const dataReadStart = Math.max(0, linkStart - writeStart);
-      const dataReadEnd = dataReadStart + (chunkWriteEnd - chunkWriteStart);
-
-      newChunkData.set(data.slice(dataReadStart, dataReadEnd), chunkWriteStart);
-
-      // Re-encrypt with CHK
-      const { ciphertext, key } = await encryptChk(newChunkData);
-      const newHash = await sha256(ciphertext);
-      await store.put(newHash, ciphertext);
-
-      newLinks.push({
-        hash: newHash,
-        size: ciphertext.length, // Store ciphertext size for blobs
-        key,
-        type: LinkType.Blob,
-      });
-    }
-  }
-
-  return newLinks;
+  return links;
 }
 
 /**
@@ -353,7 +197,7 @@ async function buildTreeFromLinks(
 ): Promise<Hash> {
   const { store } = config;
 
-  if (links.length === 1 && links[0].size === totalSize) {
+  if (links.length === 1 && !links[0].key && links[0].size === totalSize) {
     return links[0].hash;
   }
 
@@ -378,7 +222,7 @@ async function buildEncryptedTreeFromLinks(
   const { store } = config;
 
   // Single link with key - return directly
-  if (links.length === 1 && links[0].key && links[0].size === totalSize) {
+  if (links.length === 1 && links[0].key && encryptionMode(links[0].key) === config.encryptionMode && links[0].size === totalSize) {
     return { hash: links[0].hash, key: links[0].key };
   }
 
@@ -388,7 +232,7 @@ async function buildEncryptedTreeFromLinks(
     links,
   };
   const { data } = await encodeAndHash(node);
-  const { ciphertext, key } = await encryptChk(data);
+  const { ciphertext, key } = await encryptObject(data, config.encryptionMode);
   const hash = await sha256(ciphertext);
   await store.put(hash, ciphertext);
   return { hash, key };

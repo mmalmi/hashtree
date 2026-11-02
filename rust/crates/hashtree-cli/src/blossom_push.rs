@@ -72,7 +72,7 @@ async fn node_for_push<S: Store>(
             // plaintext leaf, regardless of the writer's chunk size. Authenticate
             // keyed bytes before treating tree-shaped file contents as a leaf.
             let plaintext_size = match cid.key.as_ref() {
-                Some(key) => hashtree_core::crypto::decrypt_chk(&data, key)
+                Some(key) => hashtree_core::decrypt_object(&data, key)
                     .ok()
                     .map(|plaintext| plaintext.len() as u64),
                 None => Some(data.len() as u64),
@@ -627,9 +627,7 @@ mod tests {
                 .expect("encoded file")
                 .expect("bytes");
             let encoded = match file.key.as_ref() {
-                Some(key) => {
-                    hashtree_core::crypto::decrypt_chk(&encoded, key).expect("decrypt file")
-                }
+                Some(key) => hashtree_core::decrypt_object(&encoded, key).expect("decrypt file"),
                 None => encoded,
             };
             let (raw, raw_size) = tree.put(&encoded).await.expect("raw encoded node");
@@ -696,9 +694,7 @@ mod tests {
                 .expect("encoded node")
                 .expect("bytes");
             let encoded = match file.key.as_ref() {
-                Some(key) => {
-                    hashtree_core::crypto::decrypt_chk(&encoded, key).expect("decrypt node")
-                }
+                Some(key) => hashtree_core::decrypt_object(&encoded, key).expect("decrypt node"),
                 None => encoded,
             };
             let (raw, size) = tree.put(&encoded).await.expect("literal node bytes");

@@ -859,8 +859,9 @@ fn test_collect_git_object_locations_errors_on_bad_objects_tree_key() {
         let objects_cid = tree.put_directory(vec![]).await.expect("objects directory");
         let refs_cid = tree.put_directory(vec![]).await.expect("refs directory");
 
-        let mut bad_objects_key = objects_cid.key.expect("objects tree key");
-        bad_objects_key[0] ^= 0x01;
+        let mut bytes = objects_cid.key.expect("objects tree key").to_vec();
+        *bytes.last_mut().unwrap() ^= 0x01;
+        let bad_objects_key = hashtree_core::ObjectKey::from_bytes(&bytes).unwrap();
         let git_cid = tree
             .put_directory(vec![
                 DirEntry::from_cid("objects", &objects_cid)
@@ -1276,7 +1277,10 @@ fn test_build_repo_viewer_url_uses_git_host() {
 fn test_build_repo_viewer_url_preserves_link_key() {
     let url_secret = [0xab; 32];
     assert_eq!(
-        build_repo_viewer_url("npub1example/repo", Some(&url_secret)),
+        build_repo_viewer_url(
+            "npub1example/repo",
+            Some(&hashtree_core::LinkKeyBytes::Legacy(url_secret))
+        ),
         format!(
             "https://git.iris.to/#/npub1example/repo?k={}",
             "ab".repeat(32)
@@ -1754,19 +1758,19 @@ fn test_queue_hash_if_new_counts_unique_hashes_when_queued() {
         &mut queue,
         &mut queued,
         hash_a,
-        Some([0x33; 32])
+        Some([0x33; 32].into())
     ));
     assert!(queue_hash_if_new(
         &mut queue,
         &mut queued,
         hash_b,
-        Some([0x44; 32])
+        Some([0x44; 32].into())
     ));
 
     assert_eq!(queue.len(), 2);
     assert_eq!(queued.len(), 2);
     assert_eq!(queue[0], (hash_a, None));
-    assert_eq!(queue[1], (hash_b, Some([0x44; 32])));
+    assert_eq!(queue[1], (hash_b, Some([0x44; 32].into())));
 }
 
 #[test]

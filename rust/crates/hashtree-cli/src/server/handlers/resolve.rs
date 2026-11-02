@@ -6,7 +6,7 @@ use crate::root_events::{
 };
 use anyhow::Result;
 use git_remote_htree::nostr_client::is_hashtree_root_kind;
-use hashtree_core::{from_hex, to_hex, Cid, HashTree, LinkType, Store, TreeEntry};
+use hashtree_core::{to_hex, Cid, HashTree, LinkType, Store, TreeEntry};
 use nostr::nips::nip19::ToBech32;
 use nostr_pubsub::EventSourceKind;
 use std::collections::HashMap;
@@ -32,7 +32,9 @@ pub(super) fn peer_root_to_cid(root: &PeerRootEvent) -> Option<Cid> {
         cid.key = root
             .key
             .as_deref()
-            .and_then(|key_hex| from_hex(key_hex).ok());
+            .map(hashtree_core::ObjectKey::from_hex)
+            .transpose()
+            .ok()?;
     }
     Some(cid)
 }
@@ -61,7 +63,7 @@ pub(super) async fn resolve_root_offline(
     state: &AppState,
     pubkey: &str,
     treename: &str,
-    link_key: Option<[u8; 32]>,
+    link_key: Option<hashtree_core::ObjectKey>,
 ) -> Option<ResolvedRoot> {
     let cache_key = tree_root_cache_key(pubkey, treename, link_key);
     if let Some(cached) = get_cached_tree_root(state, &cache_key) {
@@ -75,7 +77,7 @@ pub(super) async fn resolve_root_for_mutable_request(
     state: &AppState,
     pubkey: &str,
     treename: &str,
-    link_key: Option<[u8; 32]>,
+    link_key: Option<hashtree_core::ObjectKey>,
 ) -> Option<ResolvedRoot> {
     let cache_key = tree_root_cache_key(pubkey, treename, link_key);
     if let Some(cached_root) = get_cached_tree_root(state, &cache_key) {
@@ -103,7 +105,7 @@ fn refresh_tree_root_cache_in_background(
     state: AppState,
     pubkey: String,
     treename: String,
-    link_key: Option<[u8; 32]>,
+    link_key: Option<hashtree_core::ObjectKey>,
 ) {
     tokio::spawn(async move {
         let _ = resolve_root_without_cache(&state, &pubkey, &treename, link_key).await;
@@ -114,7 +116,7 @@ pub(super) async fn resolve_root_without_cache(
     state: &AppState,
     pubkey: &str,
     treename: &str,
-    link_key: Option<[u8; 32]>,
+    link_key: Option<hashtree_core::ObjectKey>,
 ) -> Option<ResolvedRoot> {
     let cache_key = tree_root_cache_key(pubkey, treename, link_key);
     if let Some(root) = resolve_root_from_nostr_relays(state, pubkey, treename).await {
@@ -151,7 +153,7 @@ pub(super) async fn resolve_root_without_cache(
 pub(super) fn tree_root_cache_key(
     npub: &str,
     treename: &str,
-    link_key: Option<[u8; 32]>,
+    link_key: Option<hashtree_core::ObjectKey>,
 ) -> String {
     match link_key {
         Some(key) => format!("{}/{}?k={}", npub, treename, to_hex(&key)),
@@ -175,7 +177,7 @@ pub(super) fn cache_tree_root_key(
     npub: &str,
     treename: &str,
     visibility: Option<&str>,
-    key: Option<[u8; 32]>,
+    key: Option<hashtree_core::ObjectKey>,
 ) -> String {
     let visibility = visibility.unwrap_or("public");
     let link_key = if visibility == "public" { None } else { key };
@@ -244,7 +246,7 @@ fn cached_tree_root_is_fresh(entry: &CachedTreeRootEntry) -> bool {
 
 fn resolved_cached_tree_root(
     mut cached: CachedTreeRootEntry,
-    link_key: Option<[u8; 32]>,
+    link_key: Option<hashtree_core::ObjectKey>,
     source: &'static str,
 ) -> ResolvedRoot {
     if cached.cid.key.is_none() {

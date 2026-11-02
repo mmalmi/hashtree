@@ -4,8 +4,10 @@
 
 import { Store, Hash, TreeNode, LinkType, toHex, CID, cid } from '../types.js';
 import { decodeTreeNode, tryDecodeTreeNode, getNodeType } from '../codec.js';
+import { decryptObject } from '../encryption.js';
 import { loadBlock } from './loadBlock.js';
 import {
+  decryptRootNodeOrBlob,
   ensureWithinLimit,
   isDirectoryLikeNode,
   isInternalDirectoryLink,
@@ -36,9 +38,10 @@ export async function getBlob(store: Store, hash: Hash): Promise<Uint8Array | nu
 /**
  * Get and decode a tree node
  */
-export async function getTreeNode(store: Store, hash: Hash): Promise<TreeNode | null> {
-  const data = await store.get(hash);
-  if (!data) return null;
+export async function getTreeNode(store: Store, hash: Hash, key?: Uint8Array): Promise<TreeNode | null> {
+  const stored = await store.get(hash);
+  if (!stored) return null;
+  const data = await decryptRootNodeOrBlob(stored, key);
   return tryDecodeTreeNode(data);
 }
 
@@ -69,13 +72,15 @@ export async function isDirectory(store: Store, hash: Hash): Promise<boolean> {
 export async function readFile(
   store: Store,
   hash: Hash,
-  options: ReadOptions = {}
+  options: ReadOptions = {},
+  key?: Uint8Array
 ): Promise<Uint8Array | null> {
   if (!hash) return null;
   const maxBytes = normalizeMaxBytes(options.maxBytes);
 
-  const data = await store.get(hash);
-  if (!data) return null;
+  const stored = await store.get(hash);
+  if (!stored) return null;
+  const data = await decryptRootNodeOrBlob(stored, key);
 
   const node = tryDecodeTreeNode(data);
   if (!node) {
@@ -99,10 +104,11 @@ async function assembleChunks(
   for (const link of node.links) {
     ensureWithinLimit(state.maxBytes, state.bytesRead + (link.size ?? 0));
 
-    const childData = await store.get(link.hash);
-    if (!childData) {
+    const stored = await store.get(link.hash);
+    if (!stored) {
       throw new Error(`Missing chunk: ${toHex(link.hash)}`);
     }
+    const childData = link.key ? await decryptObject(stored, link.key) : stored;
 
     if (link.type !== LinkType.Blob) {
       // Intermediate tree node - decode and recurse
@@ -141,12 +147,14 @@ export interface StreamOptions {
 export async function* readFileStream(
   store: Store,
   hash: Hash,
-  options: StreamOptions = {}
+  options: StreamOptions = {},
+  key?: Uint8Array
 ): AsyncGenerator<Uint8Array> {
   const { offset = 0, prefetch = 1 } = options;
 
-  const data = await store.get(hash);
-  if (!data) return;
+  const stored = await store.get(hash);
+  if (!stored) return;
+  const data = await decryptRootNodeOrBlob(stored, key);
 
   const node = tryDecodeTreeNode(data);
   if (!node) {
@@ -216,10 +224,11 @@ async function* streamChunksWithOffset(
       throw new Error('Prefetch queue empty unexpectedly');
     }
 
-    const childData = await entry.promise;
-    if (!childData) {
+    const stored = await entry.promise;
+    if (!stored) {
       throw new Error(`Missing chunk: ${toHex(link.hash)}`);
     }
+    const childData = link.key ? await decryptObject(stored, link.key) : stored;
 
     // Start prefetching next chunk
     if (nextPrefetchIdx < linksToProcess.length) {
@@ -269,10 +278,12 @@ export async function readFileRange(
   store: Store,
   hash: Hash,
   start: number,
-  end?: number
+  end?: number,
+  key?: Uint8Array
 ): Promise<Uint8Array | null> {
-  const data = await store.get(hash);
-  if (!data) return null;
+  const stored = await store.get(hash);
+  if (!stored) return null;
+  const data = await decryptRootNodeOrBlob(stored, key);
 
   const node = tryDecodeTreeNode(data);
   if (!node) {
@@ -307,10 +318,11 @@ async function readRangeFromNode(
       continue;
     }
 
-    const childData = await store.get(link.hash);
-    if (!childData) {
+    const stored = await store.get(link.hash);
+    if (!stored) {
       throw new Error(`Missing chunk: ${toHex(link.hash)}`);
     }
+    const childData = link.key ? await decryptObject(stored, link.key) : stored;
 
     if (link.type !== LinkType.Blob) {
       // Intermediate tree node - decode and recurse
@@ -374,9 +386,10 @@ async function readRangeFromNode(
 async function getDirectoryNode(
   store: Store,
   hash: Hash,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  key?: Uint8Array
 ): Promise<TreeNode | null> {
-  const data = await loadBlock(store, hash, signal);
+  const data = await decryptRootNodeOrBlob(await loadBlock(store, hash, signal), key);
 
   const node = tryDecodeTreeNode(data);
   if (!node) {
@@ -413,16 +426,17 @@ async function getDirectoryNode(
 export async function listDirectory(
   store: Store,
   hash: Hash,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  key?: Uint8Array
 ): Promise<TreeEntry[]> {
-  const node = await getDirectoryNode(store, hash, signal);
+  const node = await getDirectoryNode(store, hash, signal, key);
   if (!node) return [];
 
   const entries: TreeEntry[] = [];
 
   for (const link of node.links) {
     if (isInternalDirectoryLink(node, link)) {
-      entries.push(...await listDirectory(store, link.hash, signal));
+      entries.push(...await listDirectory(store, link.hash, signal, link.key));
       continue;
     }
 
@@ -457,17 +471,17 @@ export async function resolvePath(
 ): Promise<Hash | null> {
   const parts = path.split('/').filter(p => p.length > 0);
 
-  let currentHash = rootHash;
+  let current = cid(rootHash);
 
   for (const part of parts) {
-    const entries = await listDirectory(store, currentHash, signal);
+    const entries = await listDirectory(store, current.hash, signal, current.key);
     const entry = entries.find(e => e.name === part);
     if (!entry) return null;
 
-    currentHash = entry.cid.hash;
+    current = entry.cid;
   }
 
-  return currentHash;
+  return current.hash;
 }
 
 /**

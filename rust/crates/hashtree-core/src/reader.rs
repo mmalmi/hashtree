@@ -11,7 +11,7 @@ use crate::hash::sha256;
 use crate::store::Store;
 use crate::types::{to_hex, Cid, Hash, Link, LinkType, TreeNode};
 
-use crate::crypto::{decrypt_chk, EncryptionKey};
+use crate::encryption::{decrypt_object, ObjectKey};
 
 /// Tree entry for directory listings
 #[derive(Debug, Clone)]
@@ -22,7 +22,7 @@ pub struct TreeEntry {
     /// Type of content this entry points to (Blob, File, Dir, or Fanout)
     pub link_type: LinkType,
     /// Optional decryption key (for encrypted content)
-    pub key: Option<[u8; 32]>,
+    pub key: Option<ObjectKey>,
     /// Optional metadata (createdAt, mimeType, thumbnail, etc.)
     pub meta: Option<HashMap<String, serde_json::Value>>,
 }
@@ -36,7 +36,7 @@ pub struct WalkEntry {
     pub link_type: LinkType,
     pub size: u64,
     /// Optional decryption key (for encrypted content)
-    pub key: Option<[u8; 32]>,
+    pub key: Option<ObjectKey>,
 }
 
 /// TreeReader - reads and traverses merkle trees
@@ -151,7 +151,7 @@ impl<S: Store> TreeReader<S> {
     async fn get_encrypted(
         &self,
         hash: &Hash,
-        key: &EncryptionKey,
+        key: &ObjectKey,
     ) -> Result<Option<Vec<u8>>, ReaderError> {
         let encrypted_data = match self
             .store
@@ -164,13 +164,13 @@ impl<S: Store> TreeReader<S> {
         };
 
         // Decrypt the data
-        let decrypted = decrypt_chk(&encrypted_data, key)
+        let decrypted = decrypt_object(&encrypted_data, key)
             .map_err(|e| ReaderError::Decryption(e.to_string()))?;
 
         // Check if it's a tree node
         if is_tree_node(&decrypted) {
             let node = decode_tree_node(&decrypted)?;
-            let assembled = self.assemble_encrypted_chunks(&node).await?;
+            let assembled = self.assemble_chunks(&node).await?;
             return Ok(Some(assembled));
         }
 
@@ -178,40 +178,17 @@ impl<S: Store> TreeReader<S> {
         Ok(Some(decrypted))
     }
 
-    /// Assemble encrypted chunks from tree
-    async fn assemble_encrypted_chunks(&self, node: &TreeNode) -> Result<Vec<u8>, ReaderError> {
-        let mut parts: Vec<Vec<u8>> = Vec::new();
-
-        for link in &node.links {
-            let chunk_key = link.key.ok_or(ReaderError::MissingKey)?;
-
-            let encrypted_child = self
-                .store
-                .get(&link.hash)
-                .await
-                .map_err(|e| ReaderError::Store(e.to_string()))?
-                .ok_or_else(|| ReaderError::MissingChunk(to_hex(&link.hash)))?;
-
-            let decrypted = decrypt_chk(&encrypted_child, &chunk_key)
-                .map_err(|e| ReaderError::Decryption(e.to_string()))?;
-
-            if let Some(child_node) = Self::decode_linked_file_node(link, &decrypted)? {
-                // Intermediate tree node - recurse
-                let child_data = Box::pin(self.assemble_encrypted_chunks(&child_node)).await?;
-                parts.push(child_data);
-            } else {
-                // Leaf data chunk
-                parts.push(decrypted);
+    async fn read_link_bytes(&self, cid: &Cid) -> Result<Vec<u8>, ReaderError> {
+        let stored = self
+            .get_blob(&cid.hash)
+            .await?
+            .ok_or_else(|| ReaderError::MissingChunk(to_hex(&cid.hash)))?;
+        match &cid.key {
+            Some(key) => {
+                decrypt_object(&stored, key).map_err(|e| ReaderError::Decryption(e.to_string()))
             }
+            None => Ok(stored),
         }
-
-        let total_len: usize = parts.iter().map(|p| p.len()).sum();
-        let mut result = Vec::with_capacity(total_len);
-        for part in parts {
-            result.extend_from_slice(&part);
-        }
-
-        Ok(result)
     }
 
     /// Read a complete file (reassemble chunks if needed)
@@ -302,7 +279,7 @@ impl<S: Store> TreeReader<S> {
         // Find chunks that overlap with [start, actual_end)
         let mut result = Vec::with_capacity((actual_end - start) as usize);
 
-        for (chunk_hash, chunk_start, chunk_size) in &chunks_info {
+        for (cid, chunk_start, chunk_size) in &chunks_info {
             let chunk_start = *chunk_start;
             let chunk_size = *chunk_size;
             let chunk_end = chunk_start + chunk_size;
@@ -315,12 +292,25 @@ impl<S: Store> TreeReader<S> {
                     continue;
                 }
 
-                let chunk_data = self
-                    .store
-                    .get_range(chunk_hash, read_start, read_end_exclusive - 1)
-                    .await
-                    .map_err(|e| ReaderError::Store(e.to_string()))?
-                    .ok_or_else(|| ReaderError::MissingChunk(to_hex(chunk_hash)))?;
+                let chunk_hash = &cid.hash;
+                let chunk_data = if cid.key.is_some() {
+                    let bytes = self.read_link_bytes(cid).await?;
+                    bytes
+                        .get(read_start as usize..read_end_exclusive as usize)
+                        .ok_or_else(|| {
+                            ReaderError::Store(format!(
+                                "invalid chunk size for {}",
+                                to_hex(chunk_hash)
+                            ))
+                        })?
+                        .to_vec()
+                } else {
+                    self.store
+                        .get_range(chunk_hash, read_start, read_end_exclusive - 1)
+                        .await
+                        .map_err(|e| ReaderError::Store(e.to_string()))?
+                        .ok_or_else(|| ReaderError::MissingChunk(to_hex(chunk_hash)))?
+                };
 
                 let expected_len = (read_end_exclusive - read_start) as usize;
                 if chunk_data.len() != expected_len {
@@ -349,7 +339,7 @@ impl<S: Store> TreeReader<S> {
     async fn collect_chunk_offsets(
         &self,
         node: &TreeNode,
-    ) -> Result<Vec<(Hash, u64, u64)>, ReaderError> {
+    ) -> Result<Vec<(Cid, u64, u64)>, ReaderError> {
         let mut chunks = Vec::new();
         let mut offset = 0u64;
         self.collect_chunk_offsets_recursive(node, &mut chunks, &mut offset)
@@ -360,22 +350,17 @@ impl<S: Store> TreeReader<S> {
     async fn collect_chunk_offsets_recursive(
         &self,
         node: &TreeNode,
-        chunks: &mut Vec<(Hash, u64, u64)>,
+        chunks: &mut Vec<(Cid, u64, u64)>,
         offset: &mut u64,
     ) -> Result<(), ReaderError> {
         for link in &node.links {
             if link.link_type == LinkType::Blob {
-                chunks.push((link.hash, *offset, link.size));
+                chunks.push((link.to_cid(), *offset, link.size));
                 *offset += link.size;
                 continue;
             }
 
-            let child_data = self
-                .store
-                .get(&link.hash)
-                .await
-                .map_err(|e| ReaderError::Store(e.to_string()))?
-                .ok_or_else(|| ReaderError::MissingChunk(to_hex(&link.hash)))?;
+            let child_data = self.read_link_bytes(&link.to_cid()).await?;
 
             if let Some(child_node) = Self::decode_linked_file_node(link, &child_data)? {
                 // Intermediate node - recurse
@@ -383,7 +368,7 @@ impl<S: Store> TreeReader<S> {
             } else {
                 // Leaf chunk
                 let size = child_data.len() as u64;
-                chunks.push((link.hash, *offset, size));
+                chunks.push((link.to_cid(), *offset, size));
                 *offset += size;
             }
         }
@@ -395,12 +380,7 @@ impl<S: Store> TreeReader<S> {
         let mut parts: Vec<Vec<u8>> = Vec::new();
 
         for link in &node.links {
-            let child_data = self
-                .store
-                .get(&link.hash)
-                .await
-                .map_err(|e| ReaderError::Store(e.to_string()))?
-                .ok_or_else(|| ReaderError::MissingChunk(to_hex(&link.hash)))?;
+            let child_data = self.read_link_bytes(&link.to_cid()).await?;
 
             if let Some(child_node) = Self::decode_linked_file_node(link, &child_data)? {
                 // Nested tree - recurse
@@ -446,12 +426,7 @@ impl<S: Store> TreeReader<S> {
         let mut chunks = Vec::new();
 
         for link in &node.links {
-            let child_data = self
-                .store
-                .get(&link.hash)
-                .await
-                .map_err(|e| ReaderError::Store(e.to_string()))?
-                .ok_or_else(|| ReaderError::MissingChunk(to_hex(&link.hash)))?;
+            let child_data = self.read_link_bytes(&link.to_cid()).await?;
 
             if let Some(child_node) = Self::decode_linked_file_node(link, &child_data)? {
                 chunks.extend(Box::pin(self.collect_chunks(&child_node)).await?);

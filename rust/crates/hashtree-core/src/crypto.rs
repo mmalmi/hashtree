@@ -47,6 +47,8 @@ pub enum CryptoError {
     DataTooShort,
     #[error("Invalid key length")]
     InvalidKeyLength,
+    #[error("Unsupported encryption suite: {0}")]
+    UnsupportedSuite(u8),
     #[error("Key derivation failed")]
     KeyDerivationFailed,
 }
@@ -116,9 +118,15 @@ pub fn decrypt_chk(ciphertext: &[u8], key: &EncryptionKey) -> Result<Vec<u8>, Cr
     let cipher = Aes256Gcm::new_from_slice(&enc_key)
         .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))?;
 
-    cipher
+    let plaintext = cipher
         .decrypt(&Nonce::from(zero_nonce), ciphertext)
-        .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))
+        .map_err(|e| CryptoError::DecryptionFailed(e.to_string()))?;
+    if content_hash(&plaintext) != *key {
+        return Err(CryptoError::DecryptionFailed(
+            "CHK plaintext hash mismatch".into(),
+        ));
+    }
+    Ok(plaintext)
 }
 
 /// Encrypt with a provided key (non-CHK, random nonce)
