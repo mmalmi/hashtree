@@ -6,6 +6,8 @@ servers or peers, and published under immutable hashes or mutable Nostr names.
 
 [Hashtree source](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree) · [GitHub](https://github.com/mmalmi/hashtree)
 
+Shared protocol specification: [GitHub](https://github.com/mmalmi/hashtree-spec) · [git.iris.to](https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree-spec)
+
 ## Git without a hosting account
 
 Publish, clone, and share repositories with ordinary Git commands. Humans and
