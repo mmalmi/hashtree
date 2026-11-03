@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-cli"
-version = "0.2.157"
+version = "0.3.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -20,12 +20,12 @@ required-features = ["git-remote-wrapper"]
 
 [dependencies]
 # Git remote helper
-git-remote-htree = { version = "=0.2.92", path = "../git-remote-htree" }
+git-remote-htree = { version = "=0.3.0", path = "../git-remote-htree" }
 
 # Core hashtree crates
 hashtree-core.workspace = true
 hashtree-fs.workspace = true
-hashtree-fuse = { version = "0.2.83", path = "../fuse", optional = true, features = ["fuse"] }
+hashtree-fuse = { version = "0.3.0", path = "../fuse", optional = true, features = ["fuse"] }
 hashtree-lmdb = { workspace = true, optional = true }
 hashtree-blossom.workspace = true
 hashtree-config.workspace = true
@@ -33,7 +33,7 @@ hashtree-nostr.workspace = true
 hashtree-nostr-pubsub.workspace = true
 hashtree-fips-transport.workspace = true
 hashtree-network.workspace = true
-hashtree-bittorrent = { version = "0.1.0", path = "../hashtree-bittorrent", optional = true, features = ["libtorrent"] }
+hashtree-bittorrent = { version = "0.2.0", path = "../hashtree-bittorrent", optional = true, features = ["libtorrent"] }
 hashtree-resolver = { workspace = true, features = ["nostr"] }
 hashtree-updater = { workspace = true, features = ["nostr-pubsub"] }
 hashtree-index.workspace = true

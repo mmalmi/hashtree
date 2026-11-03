@@ -255,65 +255,65 @@ fn sorted_link_build_streams_without_reading_existing_nodes() {
 #[test]
 fn link_btree_matches_typescript_fixture_root() {
     block_on(async {
-        let store = Arc::new(MemoryStore::new());
-        let btree = BTree::new(Arc::clone(&store), BTreeOptions { order: Some(4) });
-        let _tree = HashTree::new(HashTreeConfig::new(store));
-
-        let mut root = None;
-        let fixtures = [
-            (
-                "author1:fffffffffffffff5:event-a",
-                cid_from_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"),
-            ),
-            (
-                "author1:fffffffffffffff4:event-b",
-                cid_from_hex("fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0"),
-            ),
-            (
-                "author2:fffffffffffffff6:event-c",
-                cid_from_hex("00070e151c232a31383f464d545b626970777e858c939aa1a8afb6bdc4cbd2d9"),
-            ),
-            (
-                "author1:00000001:fffffffffffffff3:event-d",
-                cid_from_hex("000d1a2734414e5b6875828f9ca9b6c3d0ddeaf704111e2b3845525f6c798693"),
-            ),
-        ];
-
-        for (key, cid) in fixtures {
-            root = Some(btree.insert_link(root.as_ref(), key, &cid).await.unwrap());
+        #[derive(serde::Deserialize)]
+        struct Root {
+            hash: String,
+            key: String,
+            #[serde(default)]
+            blocks: BTreeMap<String, String>,
         }
+        impl Root {
+            fn cid(&self) -> Cid {
+                Cid::encrypted(
+                    cid_from_hex(&self.hash).hash,
+                    hashtree_core::ObjectKey::from_hex(&self.key).unwrap(),
+                )
+            }
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            order: usize,
+            entries: Vec<(String, String)>,
+            legacy: Root,
+            versioned: Root,
+        }
+        let fixture: Fixture =
+            serde_json::from_str(include_str!("fixtures/link-btree.json")).unwrap();
+        let store = Arc::new(MemoryStore::new());
+        let btree = BTree::new(
+            Arc::clone(&store),
+            BTreeOptions {
+                order: Some(fixture.order),
+            },
+        );
+        let mut root = None;
+        for (key, value) in &fixture.entries {
+            root = Some(
+                btree
+                    .insert_link(root.as_ref(), key, &cid_from_hex(value))
+                    .await
+                    .unwrap(),
+            );
+        }
+        assert_eq!(root.unwrap(), fixture.versioned.cid());
 
-        let root = root.expect("root");
-        assert_eq!(
-            hex::encode(root.hash),
-            "2199cfc5fe036befe0932abf001df5cbe24a876e4caee661cba8a217be81f27c"
-        );
-        assert_eq!(
-            root.key.map(hex::encode),
-            Some("3df5002dd988d4c842309e2d79722300b885194229f43ad3a08e09d4285d4e30".to_string())
-        );
-
-        let prefix = btree.prefix_links(&root, "author1:").await.unwrap();
-        assert_eq!(
-            prefix
-                .iter()
-                .map(|(key, cid)| (key.clone(), hex::encode(cid.hash)))
-                .collect::<Vec<_>>(),
-            vec![
-                (
-                    "author1:00000001:fffffffffffffff3:event-d".to_string(),
-                    "000d1a2734414e5b6875828f9ca9b6c3d0ddeaf704111e2b3845525f6c798693".to_string(),
-                ),
-                (
-                    "author1:fffffffffffffff4:event-b".to_string(),
-                    "fffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0".to_string(),
-                ),
-                (
-                    "author1:fffffffffffffff5:event-a".to_string(),
-                    "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f".to_string(),
-                ),
-            ]
-        );
+        // Stored by the published TypeScript index 0.1.14 with core 0.3.2.
+        for (hash, bytes) in &fixture.legacy.blocks {
+            let bytes = hex::decode(bytes).unwrap();
+            assert_eq!(hex::encode(hashtree_core::sha256(&bytes)), *hash);
+            store.put(cid_from_hex(hash).hash, bytes).await.unwrap();
+        }
+        let mut expected = fixture.entries.clone();
+        expected.sort();
+        for root in [fixture.legacy.cid(), fixture.versioned.cid()] {
+            let rows = btree.prefix_links(&root, "author").await.unwrap();
+            assert_eq!(
+                rows.into_iter()
+                    .map(|(key, cid)| (key, hex::encode(cid.hash)))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+        }
     });
 }
 
