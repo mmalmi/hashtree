@@ -116,7 +116,7 @@ vi.mock('@hashtree/core', () => ({
     data === null || data === undefined ? { type: 'no-result' } : { type: 'data', data }
   ),
   createBlobRequest: (hash: Uint8Array, htl = 10) => ({ hash, htl }),
-  decryptChk: vi.fn(),
+  decryptObject: vi.fn(),
   fromHex: vi.fn((value: string) => new Uint8Array(value.length / 2)),
   nhashDecode: vi.fn(),
   nhashEncode: vi.fn(),

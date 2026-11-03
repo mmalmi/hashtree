@@ -1,4 +1,4 @@
-import type { CID } from '@hashtree/core';
+import { type CID } from '@hashtree/core';
 /**
  * Uploads must always point to encrypted content CIDs.
  */

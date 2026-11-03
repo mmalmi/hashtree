@@ -351,6 +351,24 @@ describe('mediaHandler thumbnail aliases', () => {
     expect(nextListDirectory).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['legacy-chk', 'chk-v1', 'rnd-v1'] as const)('uses the authenticated plaintext size for a %s media range', async (mode) => {
+    const realTree = new HashTree({ store: new MemoryStore(), encryptionMode: mode });
+    const payload = Uint8Array.from({ length: 1024 }, (_, index) => index % 251);
+    const { cid } = await realTree.putFile(payload);
+    const postMessage = vi.fn();
+    const port = { postMessage, start: vi.fn() } as unknown as MessagePort;
+    initMediaHandler(realTree);
+    registerMediaPort(port);
+    await port.onmessage?.({ data: {
+      type: 'hashtree-file', requestId: 'suite-range', nhash: nhashEncode(cid),
+      path: 'clip.webm', start: 101, rangeHeader: 'bytes=101-108', mimeType: 'video/webm',
+    } } as MessageEvent);
+    expect(postMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'headers', status: 206, headers: expect.objectContaining({ 'Content-Range': 'bytes 101-108/1024' }),
+    }));
+    expect(postMessage.mock.calls.find(([m]) => m.type === 'chunk')?.[0].data).toEqual(payload.slice(101, 109));
+  });
+
   it('streams the actual file size when directory listings report zero-byte entry sizes', async () => {
     const rootNhash = nhashEncode(ROOT);
     const html = new TextEncoder().encode('<!doctype html><html><body>ok</body></html>');

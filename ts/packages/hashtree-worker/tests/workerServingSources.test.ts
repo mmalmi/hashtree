@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fromHex, HashTree, MemoryStore, sha256, toHex } from '@hashtree/core';
+import { encryptionMode, fromHex, HashTree, MemoryStore, nhashDecode, nhashEncode, sha256, toHex } from '@hashtree/core';
 import { HashtreeWorkerClient } from '../src/client.js';
 import { IdbBlobStorage } from '../src/capabilities/idbStorage.js';
 import { attachHashtreeWorker, type HashtreeWorkerRuntime } from '../src/worker.js';
@@ -188,11 +188,18 @@ describe('worker peer-serving source scope', () => {
       .rejects.toThrow(/incomplete|timed out/i);
   });
 
-  it('creates a local encrypted file that remains safely peer-readable after worker restart', async () => {
-    const { HashTree, MemoryStore, nhashDecode } = await import('@hashtree/core');
-    const file = await client.putFile(payload, { upload: false });
+  it.each(['buffered', 'streaming'])('keeps a %s upload encrypted and readable after restart', async (method) => {
+    let file;
+    if (method === 'buffered') {
+      file = await client.putFile(payload, { upload: true });
+    } else {
+      const stream = await client.beginPutBlobStream();
+      await client.appendPutBlobStream(stream, payload.slice(0, 1));
+      await client.appendPutBlobStream(stream, payload.slice(1));
+      file = await client.finishPutBlobStream(stream);
+    }
     const cid = nhashDecode(file.nhash);
-    expect(cid.key).toHaveLength(32);
+    expect(encryptionMode(cid.key!)).toBe('chk-v1');
     const ciphertext = await client.getBlobForPeer(file.hashHex, { sourceIds: [] });
     expect(ciphertext).not.toBeNull();
     expect(ciphertext).not.toEqual(payload);
@@ -202,6 +209,32 @@ describe('worker peer-serving source scope', () => {
     const reader = new HashTree({ store: remoteStore });
     await expect(reader.readFile(cid)).resolves.toEqual(payload);
     expect(fetch.mock.calls.filter(([, init]) => init?.method !== 'HEAD')).toEqual([]);
+  });
+
+  it.each(['legacy-chk', 'chk-v1', 'rnd-v1'] as const)('serves a viewer range without a size hint for %s', async (mode) => {
+    const writer = new HashTree({ store: worker.runtime!.store!, encryptionMode: mode, chunkSize: 2 });
+    const { cid } = await writer.putFile(payload);
+    const { port1, port2 } = new MessageChannel();
+    try {
+      await client.registerMediaPort(port2);
+      const chunks: number[] = [];
+      const headers: Array<{ status: number; totalSize: number }> = [];
+      const done = new Promise<void>((resolve, reject) => {
+        port1.onmessage = ({ data }) => {
+          if (data.type === 'error') reject(new Error(data.message));
+          if (data.type === 'headers') headers.push({ status: data.status, totalSize: data.totalSize });
+          if (data.type === 'chunk') chunks.push(...data.data);
+          if (data.type === 'done') resolve();
+        };
+      });
+      port1.postMessage({ type: 'hashtree-file', requestId: 'range', nhash: nhashEncode(cid), path: '', rangeHeader: 'bytes=1-2' });
+      await done;
+      expect(headers).toEqual([{ status: 206, totalSize: payload.length }]);
+      expect(chunks).toEqual([...payload.slice(1)]);
+    } finally {
+      port1.close();
+      port2.close();
+    }
   });
 
   it('keeps the existing raw local putBlob operation unencrypted and unshared', async () => {
