@@ -483,6 +483,7 @@ describe('worker media headers', () => {
       16 * 1024 * 1024 - 1,
       256 * 1024,
       4,
+      expect.any(Function),
     );
   });
 

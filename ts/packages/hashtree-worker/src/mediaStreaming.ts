@@ -1,5 +1,7 @@
 import type { CID, HashTree } from '@hashtree/core';
 
+import { readFileStreamWithRetries } from './mediaReadRetry.js';
+
 const DEFAULT_PREFETCH = 2;
 
 /**
@@ -12,7 +14,8 @@ export async function* streamFileRangeChunks(
   start: number,
   endInclusive: number,
   chunkSize: number,
-  prefetch: number = DEFAULT_PREFETCH
+  prefetch: number = DEFAULT_PREFETCH,
+  onRetry?: (offset: number, attempt: number, delayMs: number, error: unknown) => void,
 ): AsyncGenerator<Uint8Array> {
   if (chunkSize <= 0) {
     throw new Error('chunkSize must be > 0');
@@ -25,10 +28,7 @@ export async function* streamFileRangeChunks(
   let pending = new Uint8Array(chunkSize);
   let pendingLength = 0;
 
-  for await (const sourceChunk of tree.readFileStream(cid, { offset: start, prefetch })) {
-    if (remaining <= 0) break;
-    if (sourceChunk.byteLength === 0) continue;
-
+  for await (const sourceChunk of readFileStreamWithRetries(tree, cid, start, prefetch, onRetry)) {
     const consumed = Math.min(sourceChunk.byteLength, remaining);
     const source = consumed === sourceChunk.byteLength ? sourceChunk : sourceChunk.subarray(0, consumed);
     remaining -= consumed;
@@ -55,8 +55,10 @@ export async function* streamFileRangeChunks(
         pendingLength = 0;
       }
     }
+    if (remaining === 0) break;
   }
 
+  if (remaining > 0) throw new Error(`Incomplete media range: missing ${remaining} bytes`);
   if (pendingLength > 0) {
     yield pending.slice(0, pendingLength);
   }
