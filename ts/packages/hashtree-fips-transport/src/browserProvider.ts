@@ -1,4 +1,4 @@
-import { FipsNostrPubsubClient, FipsNostrPubsubEventSource, type FipsNostrPubsubClientOptions, type RuntimeSource } from 'nostr-pubsub';
+import { FipsNostrPubsubClient, FipsNostrPubsubEventSource, openPublicPeerFeedSource, publicPeerSource, type FipsNostrPubsubClientOptions, type RuntimeSource } from 'nostr-pubsub';
 import { fromHex, toHex, type Hash, type Store } from '@hashtree/core';
 import {
   FipsNode,
@@ -20,6 +20,9 @@ import {
 } from './workerProvider.js';
 
 export { openBrowserAnnouncements } from './browserAnnouncements.js';
+
+// One public feed per provider lifetime. Its wire interests never depend on an app route.
+const PUBLIC_FEED_KINDS = [0, 1, 3, 5, 6, 7, 16, 20, 1111, 30023, 30064];
 
 const DEFAULT_STUN_SERVERS = [
   'stun:stun.l.google.com:19302',
@@ -190,7 +193,7 @@ function normalizeWebSocketSeedUrls(seedUrls: readonly string[]): string[] {
 }
 
 export type BrowserHashtreeNostrProviderOptions = BrowserHashtreeFipsProviderOptions & { discoveryProvider?: never } & Pick<
-  FipsNostrPubsubClientOptions, 'retainedEventReader' | 'allowedKinds' | 'limits'
+  FipsNostrPubsubClientOptions, 'allowedKinds' | 'limits'
 > & {
   onNostrError?: FipsNostrPubsubClientOptions['onError'];
   /** Restrict event interests and retained history to application-admitted identities. */
@@ -209,7 +212,7 @@ export async function createBrowserHashtreeNostrProvider(
   if (!supportsBrowserHashtreeFips()) throw new Error('browser FIPS requires WebSocket and RTCPeerConnection');
   const identity = options.identity ?? await identityFromSecretKey(readSecretKey(options.deviceSecretKey));
   const announcements = await openBrowserAnnouncements(toHex(identity.publicKey),
-    options.discoveryApp ?? DEFAULT_FIPS_DISCOVERY_APP, options.relays, options.retainedEventReader,
+    options.discoveryApp ?? DEFAULT_FIPS_DISCOVERY_APP, options.relays, undefined,
     error => options.onNostrError?.(error, { operation: 'receive' }));
   let provider: BrowserHashtreeFipsProvider;
   try {
@@ -231,8 +234,20 @@ export async function createBrowserHashtreeNostrProvider(
     try { await provider.stop(); } finally { await announcements.close(); }
     throw error;
   }
-  const nostrSource = Object.assign(new FipsNostrPubsubEventSource(client), { id: 'fips' });
-  announcements.attach(nostrSource);
+  const transport = new FipsNostrPubsubEventSource(client);
+  // Discovery owns its fixed app namespace on the underlying transport.
+  announcements.attach(transport);
+  const kinds = PUBLIC_FEED_KINDS.filter(kind => !options.allowedKinds || options.allowedKinds.includes(kind));
+  let feed: Awaited<ReturnType<typeof openPublicPeerFeedSource>> | undefined;
+  try {
+    if (kinds.length) feed = await openPublicPeerFeedSource(transport, { type: 'latest', kinds });
+  } catch (error) {
+    try { await announcements.close(); } finally {
+      try { await client.stop(); } finally { await provider.stop(); }
+    }
+    throw error;
+  }
+  const nostrSource = feed ?? publicPeerSource(transport);
   let stopped = false;
   return {
     ...provider,
@@ -241,6 +256,7 @@ export async function createBrowserHashtreeNostrProvider(
     stop: async () => {
       if (stopped) return;
       stopped = true;
+      feed?.close();
       try { await announcements.close(); } finally {
         try { await client.stop(); } finally { await provider.stop(); }
       }

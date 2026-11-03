@@ -117,6 +117,13 @@ Restarted providers load them before network discovery, and ordinary peer REQ
 queries can read the same local cache. Replacement, signature and expiration
 checks still apply. Closing the provider drains storage work.
 
+The application-facing Nostr source keeps one bounded latest feed of public posts,
+profiles and public tree roots for the lifetime of the provider. Application
+queries and subscriptions match this feed locally. A post, profile, search or
+tree lookup cannot change another peer’s feed. Peers can receive events that an
+application publishes and replay public discovery announcements. The browser’s
+relay and browsing cache is private to the device.
+
 Applications composing their own pubsub clients can use
 `openBrowserAnnouncements` from the browser entry point and supply its discovery
 provider, retained reader and lifecycle. Keep private discovery in a separate

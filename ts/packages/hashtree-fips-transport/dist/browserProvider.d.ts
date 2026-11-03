@@ -53,7 +53,7 @@ export declare function supportsBrowserHashtreeFips(): boolean;
 export declare function createBrowserHashtreeFipsProvider(options: BrowserHashtreeFipsProviderOptions): Promise<BrowserHashtreeFipsProvider>;
 export type BrowserHashtreeNostrProviderOptions = BrowserHashtreeFipsProviderOptions & {
     discoveryProvider?: never;
-} & Pick<FipsNostrPubsubClientOptions, 'retainedEventReader' | 'allowedKinds' | 'limits'> & {
+} & Pick<FipsNostrPubsubClientOptions, 'allowedKinds' | 'limits'> & {
     onNostrError?: FipsNostrPubsubClientOptions['onError'];
     /** Restrict event interests and retained history to application-admitted identities. */
     nostrPeers?: () => readonly string[];
