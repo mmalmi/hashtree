@@ -1,5 +1,5 @@
 /// <reference lib="webworker" />
-import { BLOB_NO_RESULT, HashTree, StoreBlobRoute, blobReplyFromNullable, decryptChk, fromHex, nhashDecode, nhashEncode, toHex, tryDecodeTreeNode, } from '@hashtree/core';
+import { BLOB_NO_RESULT, HashTree, StoreBlobRoute, blobReplyFromNullable, fromHex, nhashDecode, nhashEncode, toHex, } from '@hashtree/core';
 import { BlobRouter } from '@hashtree/mesh';
 import { IdbBlobStorage } from './capabilities/idbStorage.js';
 import { BlossomTransport, DEFAULT_BLOSSOM_SERVERS } from './capabilities/blossomTransport.js';
@@ -7,6 +7,7 @@ import { probeConnectivity } from './capabilities/connectivity.js';
 import { resolveRootPathFromRelays, watchRootPathFromRelays } from './capabilities/rootResolver.js';
 import { clearMemoryCache, initTreeRootCache } from './relay/treeRootCache.js';
 import { assertEncryptedUploadCid, markEncryptedHashes, shouldServeHashToPeer } from './privacyGuards.js';
+import { getEncryptedFileSize } from './encryptedFileSize.js';
 import { streamFileRangeChunks } from './mediaStreaming.js';
 import { parseHttpByteRange } from './httpRange.js';
 import { cloneTransferableBytes } from './transferableBytes.js';
@@ -490,20 +491,7 @@ async function getPlaintextFileSize(fileCid) {
     if (!fileCid.key) {
         return tree.getSize(fileCid.hash);
     }
-    const loaded = await loadBlobData(toHex(fileCid.hash));
-    if (!loaded)
-        return null;
-    const decryptedRoot = await decryptChk(loaded.data, fileCid.key);
-    const rootNode = tryDecodeTreeNode(decryptedRoot);
-    if (!rootNode) {
-        return decryptedRoot.byteLength;
-    }
-    const summedSize = rootNode.links.reduce((sum, link) => sum + (link.size ?? 0), 0);
-    if (summedSize > 0) {
-        return summedSize;
-    }
-    const fullData = await tree.readFile(fileCid);
-    return fullData?.byteLength ?? 0;
+    return getEncryptedFileSize(tree, fileCid.hash, fileCid.key);
 }
 function decodeDownloadName(path) {
     try {

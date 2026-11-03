@@ -1,6 +1,4 @@
-import type { CID } from '@hashtree/core';
-
-const ENCRYPTION_KEY_BYTES = 32;
+import { encryptionMode, type CID } from '@hashtree/core';
 
 /**
  * Uploads must always point to encrypted content CIDs.
@@ -9,7 +7,9 @@ export function assertEncryptedUploadCid(cid: CID): void {
   if (!cid.key) {
     throw new Error('Refusing to upload unencrypted CID');
   }
-  if (cid.key.length !== ENCRYPTION_KEY_BYTES) {
+  try {
+    encryptionMode(cid.key);
+  } catch {
     throw new Error('Refusing to upload CID with invalid encryption key');
   }
 }

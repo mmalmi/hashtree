@@ -17,6 +17,17 @@ describe('privacyGuards', () => {
       })).not.toThrow();
     });
 
+    it.each([1, 2])('accepts versioned suite %i', (suite) => {
+      const key = Uint8Array.of(suite, ...fromHex(TEST_HASH_HEX));
+      expect(() => assertEncryptedUploadCid({ hash: fromHex(TEST_HASH_HEX), key })).not.toThrow();
+    });
+
+    it('rejects an unknown suite even with a 32-byte key body', () => {
+      const key = Uint8Array.of(0xff, ...fromHex(TEST_HASH_HEX));
+      expect(() => assertEncryptedUploadCid({ hash: fromHex(TEST_HASH_HEX), key }))
+        .toThrow('Refusing to upload CID with invalid encryption key');
+    });
+
     it('rejects CID without key', () => {
       expect(() => assertEncryptedUploadCid({
         hash: fromHex(TEST_HASH_HEX),

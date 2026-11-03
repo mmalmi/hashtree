@@ -251,7 +251,8 @@ async function verifyFakeBlobData(expectedHash: Uint8Array, data: Uint8Array): P
   return data.slice();
 }
 
-vi.mock('@hashtree/core', () => ({
+vi.mock('@hashtree/core', async (importOriginal) => ({
+  ...await importOriginal<typeof import('@hashtree/core')>(),
   BLOB_DEFAULT_HTL: 10,
   BLOB_MAX_HTL: 10,
   BLOB_NO_RESULT: { type: 'no-result' },
@@ -262,7 +263,7 @@ vi.mock('@hashtree/core', () => ({
     data === null || data === undefined ? { type: 'no-result' } : { type: 'data', data }
   ),
   createBlobRequest: (hash: Uint8Array, htl = 10) => ({ hash, htl }),
-  decryptChk: vi.fn(),
+  decryptObject: vi.fn(),
   fromHex: (value: string) => hexToBytes(value),
   nhashDecode: vi.fn(),
   nhashEncode: ({ hash }: { hash: Uint8Array }) => `nhash1${bytesToHex(hash).slice(0, 8)}`,

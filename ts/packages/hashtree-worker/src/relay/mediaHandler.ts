@@ -15,6 +15,7 @@ import { nhashDecode, toHex } from '@hashtree/core';
 import { readTreeEventSnapshot, resolveSnapshotRootCid } from '@hashtree/nostr';
 import { nip19 } from 'nostr-tools';
 import { LRUCache } from './utils/lruCache';
+import { getEncryptedFileSize } from '../encryptedFileSize.js';
 import { parseHttpByteRange } from '../httpRange';
 
 // Thumbnail filename patterns to look for (in priority order)
@@ -1280,9 +1281,10 @@ async function getFileSize(cid: CID): Promise<number | null> {
     fileSizeLookupCache,
     cidCacheKey(cid),
     async () => {
+      if (cid.key) return getEncryptedFileSize(tree, cid.hash, cid.key);
       const treeNode = await tree.getTreeNode(cid);
       if (treeNode) {
-        // Chunked file - sum link sizes from decrypted tree node
+        // Chunked file - sum link sizes from the file node
         return treeNode.links.reduce((sum, l) => sum + l.size, 0);
       }
 
@@ -1290,8 +1292,7 @@ async function getFileSize(cid: CID): Promise<number | null> {
       const blob = await tree.getBlob(cid.hash);
       if (!blob) return null;
 
-      // For encrypted blobs, decrypted size = encrypted size - 16 (nonce overhead)
-      return cid.key ? Math.max(0, blob.length - 16) : blob.length;
+      return blob.length;
     },
     (value) => getLookupTtlMs(value),
   );

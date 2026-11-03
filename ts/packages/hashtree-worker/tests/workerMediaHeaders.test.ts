@@ -193,7 +193,7 @@ vi.mock('@hashtree/core', () => ({
     data === null || data === undefined ? { type: 'no-result' } : { type: 'data', data }
   ),
   createBlobRequest: (hash: Uint8Array, htl = 10) => ({ hash, htl }),
-  decryptChk: vi.fn(),
+  decryptObject: vi.fn(),
   fromHex: (hex: string) => Uint8Array.from(hex.match(/.{2}/g) ?? [], byte => parseInt(byte, 16)),
   nhashDecode: vi.fn(() => ({ hash: new Uint8Array(32).fill(7) })),
   nhashEncode: vi.fn(),
