@@ -45,7 +45,7 @@ for (const { name, version, filename, sha512 } of inventory) {
 }
 for (const { name, version, filename } of inventory) {
   if (!selected.has(name)) continue;
-  if (!args.has('--dry-run') && await isPublished(name, version)) {
+  if (await isPublished(name, version)) {
     console.log(`Already published: ${name}@${version}`);
     continue;
   }
