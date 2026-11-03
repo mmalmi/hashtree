@@ -33,6 +33,7 @@ import { resolveRootPathFromRelays, watchRootPathFromRelays, type RootNostrSubsc
 import { clearMemoryCache, initTreeRootCache } from './relay/treeRootCache.js';
 import { assertEncryptedUploadCid, markEncryptedHashes, shouldServeHashToPeer } from './privacyGuards.js';
 import { getEncryptedFileSize } from './encryptedFileSize.js';
+import { isTransientMediaReadError, MEDIA_READ_RETRY_DELAYS_MS, readFileStreamWithRetries, waitForMediaRetry } from './mediaReadRetry.js';
 import { streamFileRangeChunks } from './mediaStreaming.js';
 import { parseHttpByteRange } from './httpRange.js';
 import { cloneTransferableBytes } from './transferableBytes.js';
@@ -150,7 +151,6 @@ const SEEK_OPEN_ENDED_RANGE_WINDOW_BYTES = 8 * 1024 * 1024;
 const MEDIA_STREAM_PREFETCH = 4;
 const BLOB_READ_TIMEOUT_MS = P2P_FETCH_TIMEOUT_MS;
 const MEDIA_PATH_RESOLUTION_RETRY_DELAYS_MS = [100, 300, 900] as const;
-const STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS = [250, 1_000, 2_500, 5_000] as const;
 const PEER_SHARED_READ_SOURCE_IDS = ['blossom'] as const;
 
 function getErrorMessage(err: unknown): string {
@@ -188,19 +188,9 @@ function isOpenEndedHttpByteRange(rangeHeader: string | null | undefined): boole
   return /^bytes=\d+-$/i.test(rangeHeader.trim());
 }
 
-function isTransientMissingChunkError(error: unknown): boolean {
-  return getErrorMessage(error).toLowerCase().startsWith('missing chunk:');
-}
-
 function shouldSendMediaHeadersBeforeFirstChunk(mimeType: string | null | undefined): boolean {
   const normalized = `${mimeType ?? ''}`.trim().toLowerCase();
   return normalized.startsWith('audio/') || normalized.startsWith('video/');
-}
-
-async function waitForMediaRetry(ms: number): Promise<void> {
-  await new Promise((resolve) => {
-    setTimeout(resolve, Math.max(0, ms));
-  });
 }
 
 async function readNextNonEmptyMediaChunk(
@@ -225,7 +215,7 @@ async function readStartupMediaRangeWithRetries(
 ): Promise<Uint8Array> {
   let lastError: unknown = null;
 
-  for (let attempt = 0; attempt <= STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS.length; attempt += 1) {
+  for (let attempt = 0; attempt <= MEDIA_READ_RETRY_DELAYS_MS.length; attempt += 1) {
     try {
       const range = await tree.readFileRange(cid, start, endExclusive);
       if (!range) {
@@ -234,10 +224,10 @@ async function readStartupMediaRangeWithRetries(
       return range;
     } catch (error) {
       lastError = error;
-      if (!isTransientMissingChunkError(error) || attempt >= STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS.length) {
+      if (!isTransientMediaReadError(error) || attempt >= MEDIA_READ_RETRY_DELAYS_MS.length) {
         throw error;
       }
-      await waitForMediaRetry(STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS[attempt] ?? 0);
+      await waitForMediaRetry(MEDIA_READ_RETRY_DELAYS_MS[attempt] ?? 0);
     }
   }
 
@@ -306,47 +296,6 @@ async function detectMediaDirectoryWithRetries(
   }
 
   return false;
-}
-
-async function* readFileStreamWithRetries(
-  tree: HashTree,
-  cid: CID,
-  offset: number,
-  requestId: string,
-  prefetch: number = MEDIA_STREAM_PREFETCH,
-): AsyncGenerator<Uint8Array> {
-  let nextOffset = Math.max(0, offset);
-  let attempt = 0;
-
-  while (true) {
-    try {
-      const stream = tree.readFileStream(cid, { offset: nextOffset, prefetch });
-      const iterator = stream[Symbol.asyncIterator]();
-      while (true) {
-        const chunk = await readNextNonEmptyMediaChunk(iterator);
-        if (!chunk) {
-          return;
-        }
-        nextOffset += chunk.byteLength;
-        attempt = 0;
-        yield chunk;
-      }
-    } catch (error) {
-      if (!isTransientMissingChunkError(error) || attempt >= STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS.length) {
-        throw error;
-      }
-      const delayMs = STARTUP_MEDIA_RANGE_RETRY_DELAYS_MS[attempt] ?? 0;
-      emitDiagnostic('debug', 'media', 'stream-retry', 'Retrying media stream after a transient missing chunk', {
-        requestId,
-        offset: nextOffset,
-        attempt: attempt + 1,
-        delayMs,
-        error: getErrorMessage(error),
-      });
-      attempt += 1;
-      await waitForMediaRetry(delayMs);
-    }
-  }
 }
 
 const EMPTY_BLOSSOM_BANDWIDTH: BlossomBandwidthState = {
@@ -710,6 +659,11 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
     return;
   }
   const requestTree = mediaTree ?? tree;
+  const onReadRetry = (offset: number, attempt: number, delayMs: number, error: unknown) => {
+    emitDiagnostic('debug', 'media', 'stream-retry', 'Retrying media stream after a transient read error', {
+      requestId: request.requestId, offset, attempt, delayMs, error: getErrorMessage(error),
+    });
+  };
 
   let rootCid: CID;
   try {
@@ -849,7 +803,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
       port.postMessage(chunkMessage, [transferableChunk.buffer]);
     }
 
-    const stream = readFileStreamWithRetries(requestTree, cid, startupBytesSent, request.requestId, MEDIA_STREAM_PREFETCH);
+    const stream = readFileStreamWithRetries(requestTree, cid, startupBytesSent, MEDIA_STREAM_PREFETCH, onReadRetry);
     for await (const chunk of stream) {
       const transferableChunk = cloneTransferableBytes(chunk);
       const chunkMessage: MediaChunkResponse = {
@@ -1028,7 +982,7 @@ async function handleMediaFileRequest(port: MessagePort, request: MediaFileReque
   }
 
   if (!request.head) {
-    const stream = streamFileRangeChunks(requestTree, cid, start, end, MEDIA_CHUNK_SIZE, MEDIA_STREAM_PREFETCH);
+    const stream = streamFileRangeChunks(requestTree, cid, start, end, MEDIA_CHUNK_SIZE, MEDIA_STREAM_PREFETCH, onReadRetry);
     const iterator = stream[Symbol.asyncIterator]();
     let firstChunk: Uint8Array | null = null;
     if (sendHeadersBeforeFirstChunk) {

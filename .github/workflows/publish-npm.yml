@@ -84,5 +84,7 @@ jobs:
       - name: Publish verified archives using OIDC
         working-directory: ts
         env:
+          # npm reports the OIDC exchange failure reason only at verbose level.
+          NPM_CONFIG_LOGLEVEL: verbose
           NPM_PACKAGES: ${{ inputs.packages }}
         run: node scripts/publish-npm.mjs --prepared --packages="$NPM_PACKAGES"

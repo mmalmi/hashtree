@@ -496,8 +496,8 @@ describe('worker peer blob sharing', () => {
   });
 
   it('keeps waiting for a late peer blob instead of failing at the old worker timeout', async () => {
-    vi.useFakeTimers();
     const { attachHashtreeWorker } = await import('../src/worker.js');
+    vi.useFakeTimers();
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
 
@@ -550,8 +550,8 @@ describe('worker peer blob sharing', () => {
   });
 
   it('expires unanswered p2p fetches at the mesh read timeout', async () => {
-    vi.useFakeTimers();
     const { attachHashtreeWorker } = await import('../src/worker.js');
+    vi.useFakeTimers();
     const ctx = globalThis.self as FakeWorkerGlobal;
     attachHashtreeWorker(ctx);
 
