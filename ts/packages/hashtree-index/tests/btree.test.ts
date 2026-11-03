@@ -1,6 +1,7 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { BTree, escapeKey, unescapeKey } from '../src/btree.js';
-import { MemoryStore, HashTree, LinkType, type CID } from '@hashtree/core';
+import { MemoryStore, HashTree, LinkType, fromHex, toHex, type CID } from '@hashtree/core';
 
 function sequenceRandom(sequence: number[]): () => number {
   let index = 0;
@@ -796,11 +797,7 @@ describe('BTree', () => {
     it('should handle CID with encryption key', async () => {
       // Create a CID with an encryption key
       const data = new TextEncoder().encode('encrypted content');
-      const { cid: targetCid } = await tree.putFile(data);
-      const cidWithKey: CID = {
-        hash: targetCid.hash,
-        key: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]),
-      };
+      const { cid: cidWithKey } = await tree.putFile(data);
 
       const root = await btree.insertLink(null, 'encrypted', cidWithKey);
       const retrieved = await btree.getLink(root, 'encrypted');
@@ -812,8 +809,8 @@ describe('BTree', () => {
 
     it('should detect CID equality including encryption key', async () => {
       const hash = new Uint8Array(32).fill(1);
-      const key1 = new Uint8Array(16).fill(2);
-      const key2 = new Uint8Array(16).fill(3);
+      const key1 = new Uint8Array(32).fill(2);
+      const key2 = new Uint8Array(32).fill(3);
 
       const cid1: CID = { hash };
       const cid2: CID = { hash, key: key1 };
@@ -941,4 +938,30 @@ describe('BTree', () => {
       expect(names).toContain('émoji🎉');
     });
   });
+});
+
+it('matches the versioned Rust B-tree root and reads published legacy blocks', async () => {
+  const fixture = JSON.parse(readFileSync(new URL(
+    '../../../../rust/crates/hashtree-index/tests/fixtures/link-btree.json', import.meta.url,
+  ), 'utf8')) as {
+    order: number;
+    entries: [string, string][];
+    legacy: { hash: string; key: string; blocks: Record<string, string> };
+    versioned: { hash: string; key: string };
+  };
+  const store = new MemoryStore();
+  const tree = new BTree(store, { order: fixture.order });
+  let built: CID | null = null;
+  for (const [key, hash] of fixture.entries) built = await tree.insertLink(built, key, { hash: fromHex(hash) });
+  expect({ hash: toHex(built!.hash), key: toHex(built!.key!) }).toEqual(fixture.versioned);
+
+  for (const [hash, block] of Object.entries(fixture.legacy.blocks)) await store.put(fromHex(hash), fromHex(block));
+  const expected = [...fixture.entries].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+  for (const { hash, key } of [fixture.legacy, fixture.versioned]) {
+    const rows = [];
+    for await (const [k, value] of tree.prefixLinks({ hash: fromHex(hash), key: fromHex(key) }, 'author')) {
+      rows.push([k, toHex(value.hash)]);
+    }
+    expect(rows).toEqual(expected);
+  }
 });

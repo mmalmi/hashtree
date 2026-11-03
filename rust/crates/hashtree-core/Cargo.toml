@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-core"
-version = "0.2.91"
+version = "0.3.0"
 edition.workspace = true
 rust-version = "1.85"
 license.workspace = true

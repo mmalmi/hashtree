@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/worker",
-  "version": "0.4.16",
+  "version": "0.4.17",
   "description": "Modular browser worker for hashtree blob caching, tree-root state, and Blossom connectivity",
   "type": "module",
   "main": "dist/index.js",
@@ -89,15 +89,15 @@
     "url": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree?tab=issues"
   },
   "dependencies": {
-    "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.9/hashtree-core-0.3.2.tgz",
-    "@hashtree/dexie": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.26/hashtree-dexie-0.1.12.tgz",
-    "@hashtree/mesh": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.9/hashtree-mesh-0.3.2.tgz",
-    "@hashtree/nostr": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.9/hashtree-nostr-0.2.5.tgz",
+    "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-core-0.4.0.tgz",
+    "@hashtree/dexie": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-dexie-0.1.13.tgz",
+    "@hashtree/mesh": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-mesh-0.3.3.tgz",
+    "@hashtree/nostr": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-nostr-0.2.6.tgz",
     "@msgpack/msgpack": "^3.1.2",
     "dexie": "4.4.2",
     "nostr-tools": "^2.23.3",
     "nostr-pubsub": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.20/nostr-pubsub-0.5.20.tgz",
-    "@hashtree/nostr-pubsub": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.21/hashtree-nostr-pubsub-0.1.8.tgz"
+    "@hashtree/nostr-pubsub": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-nostr-pubsub-0.1.9.tgz"
   },
   "peerDependencies": {
     "nostr-social-graph": "*"
