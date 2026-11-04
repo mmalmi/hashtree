@@ -5,12 +5,16 @@ permissions:
   contents: read
 jobs:
   windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        sample: [1, 2]
     runs-on: windows-2022
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: d868f22bb2b4112094572580ae63d132005f6674
+          ref: ${{ github.sha }}
       - name: Record native SDK assumptions
         shell: pwsh
         run: |
@@ -26,15 +30,6 @@ jobs:
         shell: bash
         working-directory: rust
         run: |
-          python3 - <<'PYCODE'
-          import json
-          from pathlib import Path
-          p=Path('release-inputs.json')
-          lock=json.loads(p.read_text())
-          sdk=lock['native']['x86_64-pc-windows-msvc']['sdk']
-          sdk.update(image_version='20261101.353.1', visual_studio_version='17.14.37827.9')
-          p.write_text(json.dumps(lock))
-          PYCODE
           python3 scripts/release_inputs.py native --target x86_64-pc-windows-msvc
       - name: Compile and execute minimal target
         shell: bash
@@ -48,7 +43,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: prebuilt-inputs-windows
+          name: prebuilt-inputs-windows-${{ matrix.sample }}
           path: |
             inventory/*.json
             inventory/*.txt
