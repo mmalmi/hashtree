@@ -27,16 +27,25 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def published_asset_url(base_url, asset_base_url, name, relative_path):
+    if asset_base_url and relative_path.startswith("assets/"):
+        return f"{asset_base_url.rstrip('/')}/{name}"
+    return f"{base_url.rstrip('/')}/{relative_path}"
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--commit", required=True)
     parser.add_argument("--base-url", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--asset-base-url", default="",
+                        help="Archive directory when assets are served outside BASE_URL/assets")
     args = parser.parse_args()
     assert re.fullmatch(r"v\d+\.\d+\.\d+", args.tag), "expected a stable release tag"
     assert re.fullmatch(r"[0-9a-f]{40}", args.commit), "expected an exact source commit"
     assert args.base_url.startswith("https://"), "expected a published HTTPS URL"
+    assert not args.asset_base_url or args.asset_base_url.startswith("https://")
 
     release = json.loads(download(
         f"https://api.github.com/repos/mmalmi/hashtree/releases/tags/{args.tag}"
@@ -46,7 +55,8 @@ def main():
     assets = {asset["name"]: asset for asset in release["assets"]}
 
     def verified_download(name, relative_path):
-        data = download(f"{args.base_url.rstrip('/')}/{relative_path}")
+        data = download(published_asset_url(
+            args.base_url, args.asset_base_url, name, relative_path))
         asset = assets[name]
         assert len(data) == asset["size"], f"wrong size: {name}"
         assert asset["digest"] == f"sha256:{sha256(data)}", f"wrong digest: {name}"
@@ -64,6 +74,8 @@ def main():
     entry = next(asset for asset in manifest["assets"] if asset["name"] == archive_name)
     assert entry["path"] == f"assets/{archive_name}"
     archive = verified_download(archive_name, entry["path"])
+    assert len(archive) == entry["size"]
+    assert sha256(archive) == entry["sha256"], "archive differs from release manifest"
 
     with tempfile.TemporaryDirectory(prefix="hashtree-published-install-") as directory:
         work = Path(directory)
@@ -113,6 +125,12 @@ def main():
         htree, cashu, helper = [str(installed / name) for name in names]
         assert run([htree, "--version"]).strip() == f"htree {args.tag[1:]}"
         assert "Usage:" in run([cashu, "--help"])
+        # Product tags follow the CLI. The standalone Git helper has its own crate version.
+        component_versions = manifest.get("components", {})
+        if "git-remote-htree" in component_versions:
+            helper_info = json.loads(run([helper, "--publisher-capabilities"]))
+            assert helper_info["version"] == component_versions["git-remote-htree"]
+            assert "complete-blob-dag-v1" in helper_info["capabilities"]
         capabilities = run([helper, "origin", "htree://self/release-smoke"], "capabilities\n\n")
         assert {"fetch", "push", "option"}.issubset(capabilities.splitlines())
         run([htree, "stats"])

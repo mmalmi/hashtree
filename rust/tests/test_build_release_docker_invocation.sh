@@ -78,7 +78,7 @@ grep -F -- "-v ${TARGET_DIR}:/target-dir" "${LOG_DIR}/docker.log" >/dev/null
 ! grep -F -- ":/fips" "${LOG_DIR}/docker.log" >/dev/null
 ! grep -F -- ":/cashu-service" "${LOG_DIR}/docker.log" >/dev/null
 ! grep -F -- ":/nostr-social-graph" "${LOG_DIR}/docker.log" >/dev/null
-grep -F -- "rust:1.97-alpine3.22" "${LOG_DIR}/docker.log" >/dev/null
+grep -F -- "rust:1.97-alpine3.22@sha256:df4efa4e0cdfb5245fa06e3f431387b2bcc96782ce5681b7fb6b0297d745bc29" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "--target x86_64-unknown-linux-musl" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "--jobs \"\${CARGO_BUILD_JOBS:-4}\"" "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "--locked" "${LOG_DIR}/docker.log" >/dev/null
@@ -87,7 +87,9 @@ if grep -F -- 'hashtree-cli/fuse' "${LOG_DIR}/docker.log" >/dev/null; then
     echo "release Docker build must not enable optional FUSE support" >&2
     exit 1
 fi
-grep -F -- "apk add --no-cache build-base" "${LOG_DIR}/docker.log" >/dev/null
+grep -F -- 'sha256sum -c -' "${LOG_DIR}/docker.log" >/dev/null
+grep -F -- 'apk add --no-network' "${LOG_DIR}/docker.log" >/dev/null
+! grep -F -- 'apk add --no-cache build-base' "${LOG_DIR}/docker.log" >/dev/null
 grep -F -- "mkdir -p /target-dir/release /target-dir/x86_64-unknown-linux-musl/release" "${LOG_DIR}/docker.log" >/dev/null
 
 test -f "${OUTPUT_DIR}/hashtree-x86_64-unknown-linux-musl.tar.gz"

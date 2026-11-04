@@ -10,8 +10,11 @@ on:
         description: 'Exact 40-character release source commit'
         required: true
       release_url:
-        description: 'Canonical HTTPS version directory containing release.json'
+        description: 'HTTPS version directory containing release.json'
         required: true
+      asset_url:
+        description: 'Optional archive directory for a flat GitHub release'
+        required: false
 
 permissions:
   contents: read
@@ -26,7 +29,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, macos-14, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.source }}
       - uses: actions/setup-python@v5
@@ -38,12 +41,13 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag }}
           RELEASE_SOURCE: ${{ inputs.source }}
           RELEASE_URL: ${{ inputs.release_url }}
+          ASSET_URL: ${{ inputs.asset_url }}
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_SOURCE"
           python rust/scripts/verify_published_install.py \
             --tag "$RELEASE_TAG" --commit "$RELEASE_SOURCE" \
-            --base-url "$RELEASE_URL" --output receipt.json
-      - uses: actions/upload-artifact@v4
+            --base-url "$RELEASE_URL" --asset-base-url "$ASSET_URL" --output receipt.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: published-install-${{ matrix.os }}
           path: receipt.json
