@@ -31,15 +31,17 @@ jobs:
         working-directory: rust
         run: |
           python3 scripts/release_inputs.py native --target x86_64-pc-windows-msvc
-      - name: Compile and execute minimal target
-        shell: bash
+      - name: Compile and execute minimal target in the product build shell
+        shell: pwsh
         run: |
-          rustc --version > inventory/rustc.txt
-          cargo --version > inventory/cargo.txt
-          printf '%s\n' 'fn main() { println!("pinned-toolchain-smoke"); }' > inventory/smoke.rs
-          rustc --target x86_64-pc-windows-msvc inventory/smoke.rs -o "$RUNNER_TEMP/toolchain-smoke.exe"
-          "$RUNNER_TEMP/toolchain-smoke.exe" > inventory/output.txt
-          test "$(cat inventory/output.txt)" = pinned-toolchain-smoke
+          rustc --version | Set-Content inventory/rustc.txt
+          cargo --version | Set-Content inventory/cargo.txt
+          'fn main() { println!("pinned-toolchain-smoke"); }' | Set-Content inventory/smoke.rs
+          Get-Command link.exe | Select-Object -ExpandProperty Source | Set-Content inventory/linker.txt
+          rustc --target x86_64-pc-windows-msvc inventory/smoke.rs -o "$env:RUNNER_TEMP/toolchain-smoke.exe"
+          if ($LASTEXITCODE -ne 0) { throw "Compilation failed" }
+          & "$env:RUNNER_TEMP/toolchain-smoke.exe" | Set-Content inventory/output.txt
+          if ($LASTEXITCODE -ne 0 -or (Get-Content inventory/output.txt) -ne "pinned-toolchain-smoke") { throw "Executable smoke failed" }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
