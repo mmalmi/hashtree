@@ -17,6 +17,7 @@ import tomllib
 REPOSITORY = "mmalmi/hashtree"
 CANDIDATE = "f19cb5d0cf78e61533cd086f29ba83d7f0193b27"
 TAG = "v0.3.1"
+RELEASE_ID = 434388035
 COMPONENTS = {"hashtree-cli": "0.3.1", "git-remote-htree": "0.3.0",
               "hashtree-core": "0.3.0", "hashtree-cashu-cli": "0.3.0"}
 TARGETS = ("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl",
@@ -48,7 +49,8 @@ def api(endpoint, environment):
 
 
 def release_snapshot(environment):
-    release = api(f"repos/{REPOSITORY}/releases/tags/{TAG}", environment)
+    release = api(f"repos/{REPOSITORY}/releases/{RELEASE_ID}", environment)
+    require(release["id"] == RELEASE_ID, "Release identity changed")
     require(release["draft"] is True and release["tag_name"] == TAG and not release["prerelease"],
             "Expected the stable v0.3.1 draft")
     assets = release["assets"]
