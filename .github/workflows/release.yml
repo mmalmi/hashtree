@@ -56,8 +56,11 @@ jobs:
           docker run --rm --platform '${{ matrix.platform }}' -v "$PWD/inventory:/out" "$BUILD_IMAGE" sh -ec '
             apk update
             while IFS= read -r spec; do
-              apk fetch --output /out/packages "$spec"
-              apk fetch --url "$spec" >> /out/package-urls.txt
+              name="${spec%%=*}"
+              version="${spec#*=}"
+              apk fetch --output /out/packages "$name"
+              test -f "/out/packages/$name-$version.apk"
+              apk fetch --url "$name" >> /out/package-urls.txt
             done < /out/changed-packages.txt
           '
           docker run --rm --platform '${{ matrix.platform }}' -v "$PWD/inventory:/out" "$BUILD_IMAGE" sh -ec '
@@ -87,35 +90,3 @@ jobs:
             inventory/*.json
             inventory/*.txt
           if-no-files-found: error
-  macos:
-    runs-on: macos-14
-    timeout-minutes: 5
-    steps:
-      - name: Record native SDK assumptions
-        run: |
-          mkdir -p inventory
-          { uname -m; sw_vers; xcodebuild -version; xcrun --sdk macosx --show-sdk-version; printf '%s\n' "$ImageOS" "$ImageVersion"; ls -d /Applications/Xcode*.app; } > inventory/macos-sdk.txt
-          cat inventory/macos-sdk.txt
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: prebuilt-inputs-macos
-          path: inventory/*.txt
-  windows:
-    runs-on: windows-2022
-    timeout-minutes: 5
-    steps:
-      - name: Record native SDK assumptions
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory inventory
-          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
-          $installations = & $vswhere -format json | ConvertFrom-Json
-          $entries = foreach ($installation in $installations) {
-            @{ version = $installation.installationVersion; toolsets = @(Get-ChildItem "$($installation.installationPath)/VC/Tools/MSVC" | Select-Object -ExpandProperty Name) }
-          }
-          @{ imageOS = $env:ImageOS; imageVersion = $env:ImageVersion; visualStudio = @($entries); sdk = @(Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/Lib" | Select-Object -ExpandProperty Name) } | ConvertTo-Json -Depth 5 | Set-Content inventory/windows-sdk.json
-          Get-Content inventory/windows-sdk.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: prebuilt-inputs-windows
-          path: inventory/*.json
