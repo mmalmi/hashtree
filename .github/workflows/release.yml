@@ -19,7 +19,10 @@ jobs:
           path: qualification
           persist-credentials: false
           sparse-checkout-cone-mode: false
-          sparse-checkout: rust/scripts/qualify_github_draft.py
+          sparse-checkout: |
+            rust/scripts/qualify_github_draft.py
+            rust/scripts/publish_installer_fixture.py
+            rust/scripts/read_fixture_root.mjs
 
       - name: Checkout exact public product metadata
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
@@ -50,6 +53,29 @@ jobs:
             --phase install \
             --source candidate \
             --output "$RUNNER_TEMP/draft-qualification/receipt.json"
+
+      - name: Publish isolated public installer fixture
+        shell: bash
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+        run: |
+          python3 qualification/rust/scripts/publish_installer_fixture.py \
+            --qualification-receipt "$RUNNER_TEMP/draft-qualification/receipt.json" \
+            --bin-dir "$RUNNER_TEMP/draft-qualification/linux-install/installed" \
+            --event-reader "$GITHUB_WORKSPACE/qualification/rust/scripts/read_fixture_root.mjs" \
+            --output-dir "$RUNNER_TEMP/installer-fixture-public"
+      - name: Retain public fixture handoff
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: installer-fixture-public
+          path: |
+            ${{ runner.temp }}/installer-fixture-public/fixture.json
+            ${{ runner.temp }}/installer-fixture-public/root-event.json
+          if-no-files-found: warn
+          retention-days: 14
+
 
       - name: Retain the small draft receipt
         if: always()
