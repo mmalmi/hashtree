@@ -4,7 +4,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  # GitHub requires push access even to read a draft; all authenticated operations below are GETs.
+  contents: write
   attestations: read
 
 jobs:

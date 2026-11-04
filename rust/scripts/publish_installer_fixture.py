@@ -65,6 +65,12 @@ def run(stage, args, *, env, cwd=None, data=None, timeout=60):
     return stdout
 
 
+def self_npub(output):
+    matches = re.findall(rb"^(npub1[ac-hj-np-z02-9]{58})[ ]+\(self\)$", output, re.MULTILINE)
+    require(len(matches) == 1, "Fresh identity did not return one self identity")
+    return matches[0].decode()
+
+
 def npub_hex(npub):
     """Decode the public CLI output with a strict Bech32 checksum, no key access."""
     alphabet = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
@@ -182,9 +188,7 @@ def main():
                     "Public fixture object bytes differ")
 
             user = run("Fresh test identity initialization", [str(args.bin_dir / "htree"), "user"], env=environment)
-            matches = re.findall(rb"\bnpub1[ac-hj-np-z02-9]{58}\b", user)
-            require(len(set(matches)) == 1, "Fresh identity did not return one public npub")
-            npub = matches[0].decode()
+            npub = self_npub(user)
             pubkey = npub_hex(npub)
             key_stat = (config / "keys").stat()
             require(stat.S_ISREG(key_stat.st_mode) and stat.S_IMODE(key_stat.st_mode) == 0o600,
