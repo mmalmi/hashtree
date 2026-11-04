@@ -1,0 +1,33 @@
+{
+  "previous_master": "533594120fd00510f394926fdccadcff4e8e51db",
+  "master": "471cd939a1e52adab5d101fa3d2f931787ddf900",
+  "head": "refs/heads/master",
+  "refs": {
+    "refs/heads/codex/haps-query-cancellation": "435400fab747e7314b3c870c4ac578258d16f2a5",
+    "refs/heads/codex/ios-lmdb-locking": "b1f0e059576536543a99cef645db73ace8caf26e",
+    "refs/heads/codex/release-prebuilt-031": "f19cb5d0cf78e61533cd086f29ba83d7f0193b27",
+    "refs/heads/master": "471cd939a1e52adab5d101fa3d2f931787ddf900",
+    "refs/tags/haps-source/5b1f6c036a9b2756a25df9420fe79880707e6a3b": "5b1f6c036a9b2756a25df9420fe79880707e6a3b",
+    "refs/tags/haps-source/876abcd67dc613efd43945ce82cac2d701317162": "876abcd67dc613efd43945ce82cac2d701317162",
+    "refs/tags/hashtree-client-v0.1.0": "46ed89864d90728e9368732f7bcebfd5e6fa50d0",
+    "refs/tags/hashtree-client-v0.1.1": "a72e5eaf9b90cf106c6727032d2d5da6be70be9c",
+    "refs/tags/hashtree-client-v0.1.2": "0909e0a49742ebff73936b3648526bf547c0dd54",
+    "refs/tags/hashtree-core-v0.2.91": "7c6604a163850f93cbffaadfaca9a6915863cbcc",
+    "refs/tags/hashtree-fips-transport-v0.4.27": "717eee3c755fe123aa8c24bfa8efee8d16f9edc2",
+    "refs/tags/hashtree-fips-transport-v0.4.28": "91157df02a01bfbc1d3892b301a98802412e085e",
+    "refs/tags/hashtree-fs-v0.2.83": "790c7e46a1077ae0e35aa5aac9c99fae8d95c727",
+    "refs/tags/hashtree-nostr-v0.2.90": "3cb2a06b4461dc8248fca267373504ef8e10c427",
+    "refs/tags/hashtree-ts-runtime-v0.5.21": "62b9794288552eb2ad7d75b31f60c53764ed2604",
+    "refs/tags/hashtree-ts-runtime-v0.5.27": "9eb201a26dd6a0a914f9a480b6a33621ca9e635e",
+    "refs/tags/hashtree-ts-runtime-v0.5.28": "65f9a8145100c152f716edcba7c5bd05e1c0e9a5",
+    "refs/tags/hashtree-ts-runtime-v0.5.29": "cc45bb74ef12c9cc5b4325a3c67522c6700e415b",
+    "refs/tags/library-prep-v0.2.154": "d91ae6227ddd5e981f9e753ea3d47075f82f0cfb",
+    "refs/tags/v0.2.152": "8c0205a62f221cb6f74bb1e0cd6923798e7fc3ee",
+    "refs/tags/v0.2.153": "6c706eae6d1e944901eaa179731c20b93b27308e",
+    "refs/tags/v0.3.1": "a020090724e3ec5cf929350ea1bffef3bb4fcb11"
+  },
+  "objects": 33086,
+  "object_ids_sha256": "3c0b7336e03dc6acaaf707f30514e2301ecbf794aad81c309d0b30bb05bccfef",
+  "payloads_sha256": "2a2956e9c78f9d256595e066457909761b70de4727c9cbf4901333a1680d480c",
+  "payload_bytes": 509498010
+}
