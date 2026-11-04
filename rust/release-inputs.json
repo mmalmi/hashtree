@@ -3,7 +3,8 @@
   "rust_version": "1.97.1",
   "inventory": {
     "native": "https://github.com/mmalmi/hashtree/actions/runs/41881952905",
-    "linux": "https://github.com/mmalmi/hashtree/actions/runs/41882238833"
+    "linux": "https://github.com/mmalmi/hashtree/actions/runs/41882238833",
+    "cargo": "https://github.com/mmalmi/hashtree/actions/runs/41884369905"
   },
   "linux": {
     "aarch64-unknown-linux-musl": {
@@ -807,5 +808,6 @@
       },
       "target_std": {}
     }
-  }
+  },
+  "cargo_version": "1.97.1"
 }

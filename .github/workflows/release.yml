@@ -581,7 +581,7 @@ jobs:
           manifest = json.loads(path.read_text())
           assert manifest["tag"] == "v" + components["hashtree-cli"]
           manifest["components"] = components
-          pathlib.Path("artifacts/hashtree/release.json").write_text(json.dumps(manifest, indent=2) + "\\n")
+          pathlib.Path("artifacts/hashtree/release.json").write_text(json.dumps(manifest, indent=2) + "\n")
           PY
 
       - name: Attest every release asset

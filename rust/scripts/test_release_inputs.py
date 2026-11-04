@@ -42,6 +42,24 @@ class ReleaseInputsTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
 
+    def test_cargo_uses_its_own_locked_version(self):
+        host = "aarch64-apple-darwin"
+        lock = {"rust_version": "1.97.1", "cargo_version": "1.97.0",
+                "native": {host: {"archive": {}, "sdk": {}}}}
+        environment = {"RUNNER_TEMP": str(self.root),
+                       "GITHUB_ENV": str(self.root / "env"),
+                       "GITHUB_PATH": str(self.root / "path")}
+        with patch.dict(release_inputs.os.environ, environment), \
+                patch.object(release_inputs.platform, "system", return_value="Darwin"), \
+                patch.object(release_inputs.platform, "machine", return_value="arm64"), \
+                patch.object(release_inputs, "configure_macos"), \
+                patch.object(release_inputs, "install_component"), \
+                patch.object(release_inputs, "run", side_effect=[
+                    "rustc 1.97.1 (fixture)", "cargo 1.97.0 (fixture)"]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            release_inputs.install_native(lock, host, host)
+        self.assertIn("HASHTREE_PINNED_TOOLCHAIN=1", (self.root / "env").read_text())
+
     def test_verified_archive_reaches_installer(self):
         data = archive_bytes([(ROOT + "/install.sh", "file", "#!/bin/sh\nexit 0\n")])
         entry = {"url": URL, "sha256": hashlib.sha256(data).hexdigest()}

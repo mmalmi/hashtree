@@ -187,7 +187,8 @@ def install_native(lock, host, target):
     suffix = ".exe" if os.name == "nt" else ""
     rustc, cargo = prefix / "bin" / f"rustc{suffix}", prefix / "bin" / f"cargo{suffix}"
     require(run([str(rustc), "--version"]).split()[:2] == ["rustc", version], "Installed Rust version mismatch")
-    require(run([str(cargo), "--version"]).split()[:2] == ["cargo", version], "Installed Cargo version mismatch")
+    require(run([str(cargo), "--version"]).split()[:2] == ["cargo", lock["cargo_version"]],
+            "Installed Cargo version mismatch")
     append_actions_file("GITHUB_PATH", [str(prefix / "bin")])
     export_environment({"HASHTREE_PINNED_TOOLCHAIN": "1", "RUSTC": str(rustc),
                         "RUSTDOC": str(prefix / "bin" / f"rustdoc{suffix}")})
