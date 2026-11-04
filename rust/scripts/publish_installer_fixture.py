@@ -61,7 +61,9 @@ def run(stage, args, *, env, cwd=None, data=None, timeout=60, evidence=None):
         if stage == "Fixture publication":
             text = stderr.decode("utf-8", errors="replace")
             published = re.findall(r"Published to: (htree://npub1[a-z0-9]+/hashtree-installer-fixture-[0-9a-f]{16})", text)
-            details["reportedRemoteMatches"] = published == [evidence["publicRemote"]]
+            cli_refs = re.findall(r"^\s*published:\s+(\S+)$", stdout.decode("utf-8", errors="replace"), re.MULTILINE)
+            details["reportedRemoteMatches"] = (published == [evidence["publicRemote"]]
+                or cli_refs == [evidence["publicRemote"].removeprefix("htree://")])
             # This operation has only a fresh test identity and the fixed public graph.
             # Retain actual helper errors, removing execution paths and any key-like text.
             errors = re.findall(r"(?:Push to refs/heads/main failed|error|fatal): (.+)", text)
@@ -230,16 +232,44 @@ def main():
             public_receipt.update(status="prepared", publicNpub=npub, publicKey=pubkey,
                                   repositoryName=name, publicRemote="htree://" + npub + "/" + name)
             save()  # A public recovery address survives a publication/readback timeout.
-            run("Fixture publication", [git, "push", "htree://self/" + name,
-                                         "refs/heads/main:refs/heads/main"],
-                env=environment, cwd=repository, timeout=600, evidence=public_receipt)
-            public_receipt["status"] = "push_completed_readback_pending"
+            # This is a brand-new fixture identity and name. Materialize only the verified
+            # public Git object graph, then use the ordinary versioned-tree CLI publisher.
+            # Existing-repository Git discovery/overwrite guards are left intact.
+            fixture_tree = work / "fixture-tree"
+            fixture_git = fixture_tree / ".git"
+            (fixture_git / "refs/heads").mkdir(parents=True)
+            shutil.copytree(repository / ".git/objects", fixture_git / "objects")
+            require(not (fixture_git / "objects/info/alternates").exists(), "Fixture must not use alternates")
+            (fixture_git / "HEAD").write_text("ref: refs/heads/main\n")
+            (fixture_git / "refs/heads/main").write_text(HEAD + "\n")
+            def fixture_git_run(*arguments, data=None):
+                return run("Canonical public Git fixture validation", [git, "--git-dir=" + str(fixture_git), *arguments],
+                           env=environment, cwd=fixture_tree, data=data)
+            fixture_git_run("fsck", "--strict", "--full")
+            require(fixture_git_run("cat-file", "--batch", data=("\n".join(objects) + "\n").encode()) == serialized,
+                    "Minimal fixture graph differs from the verified public graph")
+            inventory = fixture_git_run("cat-file", "--batch-all-objects", "--batch-check=%(objectname)").decode().splitlines()
+            require(sorted(inventory) == objects, "Minimal fixture has unexpected additional objects")
+            public_receipt["publicationMethod"] = "qualified CLI add --no-ignore --publish of minimal canonical Git tree"
+            publication = run("Fixture publication", [str(args.bin_dir / "htree"), "add", "--no-ignore",
+                              "--publish", name, str(fixture_tree)],
+                              env=environment, timeout=600, evidence=public_receipt)
+            output_text = publication.decode("utf-8")
+            hashes = re.findall(r"^\s*hash:\s+([0-9a-f]{64})$", output_text, re.MULTILINE)
+            keys = re.findall(r"^\s*key:\s+(01[0-9a-f]{64})$", output_text, re.MULTILINE)
+            published = re.findall(r"^\s*published:\s+(\S+)$", output_text, re.MULTILINE)
+            require(len(hashes) == 1 and len(keys) == 1 and published == [npub + "/" + name],
+                    "CLI did not report the exact new versioned public root")
+            public_receipt.update(producedRootHash=hashes[0], producedRootKey=keys[0])
+            public_receipt["status"] = "publication_completed_readback_pending"
             save()
             event_path = args.output_dir / "root-event.json"
             run("Public root readback", [node, str(args.event_reader), pubkey, name, str(event_path)],
                 env=environment, timeout=65, evidence=public_receipt)
             event = json.loads(event_path.read_text())
             tag = lambda key: next(item[1] for item in event["tags"] if item[0] == key)
+            require(tag("hash") == public_receipt["producedRootHash"] and tag("key") == public_receipt["producedRootKey"],
+                    "Observed signed envelope differs from the published versioned tree")
             public_receipt.update(status="published_envelope_observed", eventId=event["id"],
                                   rootHash=tag("hash"), rootKey=tag("key"),
                                   eventReceiptSha256=sha256(event_path))
