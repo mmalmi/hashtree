@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import subprocess
+import sys
 import tarfile
 import tempfile
 from urllib.parse import urlparse
@@ -16,9 +17,14 @@ from urllib.request import urlopen
 
 
 def run(arguments, **kwargs):
-    return subprocess.run(
-        arguments, check=True, text=True, capture_output=True, **kwargs
-    ).stdout.strip()
+    try:
+        return subprocess.run(
+            arguments, check=True, text=True, capture_output=True, **kwargs
+        ).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        if error.stderr:
+            print(error.stderr, end="", file=sys.stderr)
+        raise
 
 
 def require(condition, message):
@@ -105,9 +111,16 @@ def configure_macos(sdk):
 
 
 def configure_windows(sdk):
+    profiles = sdk.get("profiles", [sdk])
+    for profile in profiles:
+        require(re.fullmatch(r"[0-9]{8}\.[0-9]+\.[0-9]+", profile["image_version"]),
+                "Invalid Windows runner image profile")
+    matching_profiles = [profile for profile in profiles
+                         if profile["image_version"] == os.environ.get("ImageVersion")]
+    require(len(matching_profiles) == 1, "Windows runner image has no unique locked environment")
+    sdk = matching_profiles[0]
     for key in ("msvc_tools_version", "windows_sdk_version", "visual_studio_version"):
         require(re.fullmatch(r"[0-9.]+", sdk[key]), f"Invalid {key}")
-    require(os.environ.get("ImageVersion") == sdk["image_version"], "Windows runner image changed")
     program_files = Path(os.environ["ProgramFiles(x86)"])
     vswhere = program_files / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     installations = json.loads(run([
@@ -123,16 +136,17 @@ def configure_windows(sdk):
             "The exact Windows SDK is unavailable")
     script = visual_studio / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
     require('"' not in str(script), "Unexpected compiler setup path")
-    command = (f'call "{script}" amd64 {sdk["windows_sdk_version"]} '
-               f'-vcvars_ver={sdk["msvc_tools_version"]} >nul && set')
-    configured = dict(line.split("=", 1) for line in run(
-        ["cmd.exe", "/d", "/s", "/c", command]
-    ).splitlines() if "=" in line and not line.startswith("="))
+    # A raw Windows command line keeps batch-path quotes out of list2cmdline.
+    command = (f'cmd.exe /d /s /c "call "{script}" amd64 {sdk["windows_sdk_version"]} '
+               f'-vcvars_ver={sdk["msvc_tools_version"]} >nul && set"')
+    configured = dict(line.split("=", 1) for line in run(command).splitlines()
+                      if "=" in line and not line.startswith("="))
     by_name = {key.upper(): value for key, value in configured.items()}
     require(by_name.get("VCTOOLSVERSION", "").rstrip("\\/") == sdk["msvc_tools_version"],
             "vcvarsall selected a different MSVC toolset")
     require(by_name.get("WINDOWSSDKVERSION", "").rstrip("\\/") == sdk["windows_sdk_version"],
             "vcvarsall selected a different Windows SDK")
+    print("Verified Windows build environment: " + json.dumps(sdk, sort_keys=True))
     selected = ("INCLUDE", "LIB", "LIBPATH", "VCINSTALLDIR", "VCTOOLSINSTALLDIR",
                 "VCTOOLSVERSION", "VSINSTALLDIR", "WINDOWSSDKDIR", "WINDOWSSDKVERSION",
                 "WINDOWSSDKLIBVERSION", "UCRTVERSION", "UNIVERSALCRTSDKDIR")
@@ -148,10 +162,16 @@ def install_component(entry, archive_name, root_name, components, prefix, tempor
     checked_download(entry, archive, archive_name)
     directory = checked_extract(archive, temporary, root_name)
     install_prefix = str(prefix)
+    shell = "bash"
     if os.name == "nt":
-        install_prefix = run(["bash", "-c", 'cygpath -u "$1"', "release-inputs", str(prefix)])
+        git_root = os.path.join(os.environ["ProgramFiles"], "Git")
+        shell = os.path.join(git_root, "bin", "bash.exe")
+        converter = os.path.join(git_root, "usr", "bin", "cygpath.exe")
+        require(os.path.isfile(shell) and os.path.isfile(converter),
+                "The recorded Git for Windows shell tools are unavailable")
+        install_prefix = run([converter, "-u", str(prefix)])
     subprocess.run([
-        "bash", "./install.sh", f"--prefix={install_prefix}",
+        shell, "./install.sh", f"--prefix={install_prefix}",
         f"--components={','.join(components)}", "--disable-ldconfig",
     ], cwd=directory, check=True)
 

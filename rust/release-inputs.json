@@ -801,10 +801,20 @@
         "sha256": "a1cdfcfd1e351ba21823d6bd454a297fa95190abca2f432a372e3c47bef8b863"
       },
       "sdk": {
-        "msvc_tools_version": "14.44.35207",
-        "windows_sdk_version": "10.0.26100.0",
-        "visual_studio_version": "17.14.37824.6",
-        "image_version": "20261026.347.1"
+        "profiles": [
+          {
+            "msvc_tools_version": "14.44.35207",
+            "windows_sdk_version": "10.0.26100.0",
+            "visual_studio_version": "17.14.37824.6",
+            "image_version": "20261026.347.1"
+          },
+          {
+            "msvc_tools_version": "14.44.35207",
+            "windows_sdk_version": "10.0.26100.0",
+            "visual_studio_version": "17.14.37827.9",
+            "image_version": "20261101.353.1"
+          }
+        ]
       },
       "target_std": {}
     }

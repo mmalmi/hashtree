@@ -2,7 +2,9 @@ import contextlib
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -59,6 +61,28 @@ class ReleaseInputsTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             release_inputs.install_native(lock, host, host)
         self.assertIn("HASHTREE_PINNED_TOOLCHAIN=1", (self.root / "env").read_text())
+
+    def test_failed_command_prints_only_captured_stderr(self):
+        error = subprocess.CalledProcessError(
+            1, "cmd.exe", output="PRIVATE_ENVIRONMENT=value\n", stderr="compiler setup failed\n"
+        )
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(release_inputs.subprocess, "run", side_effect=error), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                release_inputs.run("cmd.exe")
+        self.assertIs(raised.exception, error)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "compiler setup failed\n")
+
+    def test_successful_command_keeps_captured_output_quiet(self):
+        result = subprocess.CompletedProcess("fixture", 0, stdout=" result\n", stderr="quiet warning\n")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(release_inputs.subprocess, "run", return_value=result), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            self.assertEqual(release_inputs.run("fixture"), "result")
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_verified_archive_reaches_installer(self):
         data = archive_bytes([(ROOT + "/install.sh", "file", "#!/bin/sh\nexit 0\n")])
@@ -171,6 +195,121 @@ class ReleaseInputsTests(unittest.TestCase):
                     release_inputs.checked_download({"url": url, "sha256": "a" * 64},
                                                     self.root / "download", FILENAME)
                 download.assert_not_called()
+
+
+class WindowsEnvironmentProfileTests(unittest.TestCase):
+    def setUp(self):
+        self.old_profile = {
+            "image_version": "20261026.347.1",
+            "visual_studio_version": "17.14.37824.6",
+            "msvc_tools_version": "14.44.35207",
+            "windows_sdk_version": "10.0.26100.0",
+        }
+        self.new_profile = dict(self.old_profile, image_version="20261101.353.1",
+                                visual_studio_version="17.14.37827.9")
+        self.sdk = {"profiles": [self.old_profile, self.new_profile]}
+
+    def configure(self, expected, sdk=None, visual_studio=None, msvc=None, windows_sdk=None,
+                  installation_path="/fixture/visual-studio"):
+        environment = {"ImageVersion": expected["image_version"],
+                       "ProgramFiles(x86)": "/fixture/program-files", "PATH": "/fixture/original"}
+        installations = json.dumps([{
+            "installationPath": installation_path,
+            "installationVersion": visual_studio or expected["visual_studio_version"],
+        }])
+        compiler = "\n".join([
+            "VCToolsVersion=" + (msvc or expected["msvc_tools_version"]),
+            "WindowsSDKVersion=" + (windows_sdk or expected["windows_sdk_version"]) + "\\",
+            "Path=/fixture/compiler" + os.pathsep + "/fixture/original",
+            "INCLUDE=/fixture/include",
+        ])
+        with patch.dict(release_inputs.os.environ, environment), \
+                patch.object(release_inputs.Path, "is_dir", return_value=True), \
+                patch.object(release_inputs, "run", side_effect=[installations, compiler]) as execute, \
+                patch.object(release_inputs, "export_environment") as export, \
+                patch.object(release_inputs, "append_actions_file"):
+            release_inputs.configure_windows(self.sdk if sdk is None else sdk)
+        return execute, export
+
+    def test_each_locked_image_selects_its_exact_visual_studio(self):
+        for profile in self.sdk["profiles"]:
+            with self.subTest(image=profile["image_version"]):
+                execute, export = self.configure(profile)
+                command = execute.call_args.args[0]
+                self.assertIn("-vcvars_ver=" + profile["msvc_tools_version"], command)
+                self.assertIn(profile["windows_sdk_version"], command)
+                self.assertEqual(export.call_args.args[0]["VCTOOLSVERSION"], profile["msvc_tools_version"])
+
+    def test_batch_path_quotes_reach_cmd_without_list_escaping(self):
+        installation = r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
+        execute, _ = self.configure(self.new_profile, installation_path=installation)
+        command = execute.call_args.args[0]
+        script = Path(installation) / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
+        self.assertIsInstance(command, str)
+        self.assertEqual(
+            command,
+            f'cmd.exe /d /s /c "call "{script}" amd64 10.0.26100.0 '
+            '-vcvars_ver=14.44.35207 >nul && set"',
+        )
+        self.assertNotIn('\\"', command)
+
+    def test_previous_single_profile_format_still_works(self):
+        execute, _ = self.configure(self.old_profile, sdk=self.old_profile)
+        self.assertEqual(execute.call_count, 2)
+
+    def test_unknown_image_stops_before_compiler_discovery(self):
+        with patch.dict(release_inputs.os.environ, {"ImageVersion": "20261109.400.1"}), \
+                patch.object(release_inputs, "run") as execute:
+            with self.assertRaisesRegex(ValueError, "no unique locked environment"):
+                release_inputs.configure_windows(self.sdk)
+        execute.assert_not_called()
+
+    def test_duplicate_matching_profiles_are_rejected(self):
+        sdk = {"profiles": [self.old_profile, dict(self.old_profile)]}
+        with patch.dict(release_inputs.os.environ, {"ImageVersion": self.old_profile["image_version"]}), \
+                patch.object(release_inputs, "run") as execute:
+            with self.assertRaisesRegex(ValueError, "no unique locked environment"):
+                release_inputs.configure_windows(sdk)
+        execute.assert_not_called()
+
+    def test_wildcard_image_profile_is_rejected(self):
+        sdk = {"profiles": [dict(self.old_profile, image_version="202611*.1")]}
+        with patch.object(release_inputs, "run") as execute:
+            with self.assertRaisesRegex(ValueError, "Invalid Windows runner image profile"):
+                release_inputs.configure_windows(sdk)
+        execute.assert_not_called()
+
+    def test_different_visual_studio_is_rejected_for_locked_image(self):
+        with self.assertRaisesRegex(ValueError, "exact Visual Studio installation"):
+            self.configure(self.new_profile, visual_studio=self.old_profile["visual_studio_version"])
+
+    def test_different_compiler_or_sdk_still_fails_after_profile_selection(self):
+        for changed in ({"msvc": "14.44.35208"}, {"windows_sdk": "10.0.26100.1"}):
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, "selected a different"):
+                self.configure(self.new_profile, **changed)
+
+
+class WindowsInstallerShellTests(unittest.TestCase):
+    def test_installer_uses_git_bash_and_cygpath_by_absolute_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prefix = root / "prefix"
+            directory = root / "distribution"
+            expected_shell = os.path.join("/fixture/Program Files", "Git", "bin", "bash.exe")
+            expected_converter = os.path.join("/fixture/Program Files", "Git", "usr", "bin", "cygpath.exe")
+            with patch.object(release_inputs.os, "name", "nt"), \
+                    patch.dict(release_inputs.os.environ, {"ProgramFiles": "/fixture/Program Files"}), \
+                    patch.object(release_inputs.os.path, "isfile", return_value=True), \
+                    patch.object(release_inputs, "checked_download"), \
+                    patch.object(release_inputs, "checked_extract", return_value=directory), \
+                    patch.object(release_inputs, "run", return_value="/d/pinned-rust") as convert, \
+                    patch.object(release_inputs.subprocess, "run") as install:
+                release_inputs.install_component({}, "rust.tar.xz", "rust", ["cargo"], prefix, root)
+            convert.assert_called_once_with([expected_converter, "-u", str(prefix)])
+            self.assertEqual(install.call_args.args[0],
+                             [expected_shell, "./install.sh", "--prefix=/d/pinned-rust",
+                              "--components=cargo", "--disable-ldconfig"])
+            self.assertEqual(install.call_args.kwargs["cwd"], directory)
 
 
 if __name__ == "__main__":

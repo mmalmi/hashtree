@@ -571,6 +571,7 @@ jobs:
           python3 - <<'PY'
           import json
           import pathlib
+          import shutil
           import tomllib
           root = pathlib.Path("rust/crates")
           components = {}
@@ -582,6 +583,7 @@ jobs:
           assert manifest["tag"] == "v" + components["hashtree-cli"]
           manifest["components"] = components
           pathlib.Path("artifacts/hashtree/release.json").write_text(json.dumps(manifest, indent=2) + "\n")
+          shutil.copyfile("staged-release/notes.md", "artifacts/hashtree/notes.md")
           PY
 
       - name: Attest every release asset

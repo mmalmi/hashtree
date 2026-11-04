@@ -47,12 +47,16 @@ class PublishedAssetUrls(unittest.TestCase):
             (root / "staged-release").mkdir()
             (root / "artifacts/hashtree").mkdir(parents=True)
             (root / "staged-release/release.json").write_text(json.dumps(
-                {"tag": "v0.3.1", "commit": "a" * 40, "assets": []}))
+                {"tag": "v0.3.1", "commit": "a" * 40, "assets": [], "notes_file": "notes.md"}))
+            notes = b"## Installation\r\n\nPinned release notes.\n"
+            (root / "staged-release/notes.md").write_bytes(notes)
             subprocess.run([sys.executable, "-"], input=textwrap.dedent(body),
                            cwd=root, text=True, check=True, capture_output=True)
             result = json.loads((root / "artifacts/hashtree/release.json").read_text())
             self.assertEqual(result["components"], versions)
             self.assertEqual(result["tag"], "v0.3.1")
+            self.assertTrue((root / "artifacts/hashtree/release.json").read_bytes().endswith(b"\n"))
+            self.assertEqual((root / "artifacts/hashtree" / result["notes_file"]).read_bytes(), notes)
 
 
 if __name__ == "__main__":
