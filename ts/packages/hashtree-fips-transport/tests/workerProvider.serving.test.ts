@@ -163,7 +163,7 @@ describe('authenticated inbound blob serving', () => {
     let release: ((data: Uint8Array) => void) | undefined;
     const serve = vi.fn(() => new Promise<Uint8Array>((resolve) => { release = resolve; }));
     const fixture = await pair(serve, true, undefined, 5_500);
-    const pending = fixture.providers[1].fetch(toHex(hash));
+    const pending = fixture.providers[1].transport.get(hash, [fixture.ids[0]]);
     void pending.catch(() => {});
     try {
       await vi.waitFor(() => expect(release).toBeTypeOf('function'));
