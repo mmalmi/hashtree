@@ -217,8 +217,18 @@ def main():
             run('produce-public-blobs', ['git', '-C', str(source), 'push', '--mirror', 'htree://self/hashtree'], producer)
             events = json.loads((root / 'events.json').read_text())
             roots = [event for event in events if event['kind'] == 30064 and ['d', 'hashtree'] in event['tags']]
-            assert len(roots) == 1, 'Expected exactly one final root announcement'
-            event = roots[0]
+            (OUTPUT / 'root-events.json').write_text(json.dumps(roots, indent=2) + '\n')
+            # The ordinary helper publishes after each pushed ref. Only the final
+            # root may contain the entire requested ref set; the cold clone below
+            # must prove that set and its complete object closure.
+            assert roots, 'No source root announcement was captured'
+            latest = max(event['created_at'] for event in roots)
+            final = [event for event in roots if event['created_at'] == latest]
+            bindings = {tuple((tag[0], tag[1]) for tag in event['tags']
+                              if len(tag) > 1 and tag[0] in ('hash', 'key')) for event in final}
+            assert len(bindings) == 1, 'Ambiguous final source roots at the same timestamp'
+            event = min(final, key=lambda event: event['id'])
+            receipt['incremental_root_announcements'] = len(roots)
             tags = {tag[0]: tag[1] for tag in event['tags'] if len(tag) > 1}
             assert re.fullmatch('[0-9a-f]{64}', tags['hash'])
             assert re.fullmatch('[0-9a-f]{64}', tags['key']), 'Preserve the accepted legacy key format'
