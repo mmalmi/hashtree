@@ -1,147 +1,61 @@
-name: Cold public source proof
+name: Qualify Hashtree 0.3.1 draft
+
 on:
   workflow_dispatch:
-    inputs:
-      source:
-        required: true
-        description: Reviewed full source commit
-      mirror:
-        required: true
-        description: Preserved public mirror master commit
-      refs_sha256:
-        required: true
-        description: Expected canonical JSON digest of signed public refs
-      payloads_sha256:
-        required: true
-        description: Expected sorted Git object payload digest
-      object_count:
-        required: true
-        description: Expected reachable object count
+
 permissions:
   contents: read
+  attestations: read
+
 jobs:
-  cold-source:
+  qualify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Checkout the public verification recipe
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ inputs.source }}
-      - name: Verify an empty-store clone through public WebSocket relays
+          ref: ${{ github.sha }}
+          path: qualification
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: rust/scripts/qualify_github_draft.py
+
+      - name: Checkout exact public product metadata
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: f19cb5d0cf78e61533cd086f29ba83d7f0193b27
+          path: candidate
+          persist-credentials: false
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            rust/release-inputs.json
+            rust/crates/hashtree-cli/Cargo.toml
+            rust/crates/git-remote-htree/Cargo.toml
+            rust/crates/hashtree-core/Cargo.toml
+            rust/crates/hashtree-cashu-cli/Cargo.toml
+
+      - name: Verify draft bytes and provenance
         env:
-          EXPECTED_SOURCE: ${{ inputs.source }}
-          EXPECTED_MIRROR: ${{ inputs.mirror }}
-          EXPECTED_REFS: ${{ inputs.refs_sha256 }}
-          EXPECTED_PAYLOADS: ${{ inputs.payloads_sha256 }}
-          EXPECTED_OBJECTS: ${{ inputs.object_count }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
-          test "$(df -B1 --output=avail / | tail -1)" -gt 25769803776
-          python3 - <<'PYCODE'
-          import hashlib, json, os, pathlib, re, signal, subprocess, tarfile, time, urllib.request
-          source = os.environ['EXPECTED_SOURCE']
-          assert re.fullmatch('[a-f0-9]{40}', source)
-          assert re.fullmatch('[a-f0-9]{40}', os.environ['EXPECTED_MIRROR'])
-          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == source
-          for key in ('EXPECTED_REFS','EXPECTED_PAYLOADS'):
-              assert re.fullmatch('[a-f0-9]{64}', os.environ[key])
-          owner = re.search(r'git\.iris\.to/#/(npub1[a-z0-9]+)/hashtree\)', pathlib.Path('README.md').read_text())[1]
-          work = pathlib.Path('cold-proof').resolve()
-          assert not work.exists()
-          work.mkdir()
-          archive = work / 'reader.tar.gz'
-          url = 'https://github.com/mmalmi/hashtree/releases/download/v0.2.150/hashtree-x86_64-unknown-linux-musl.tar.gz'
-          with urllib.request.urlopen(url,timeout=120) as response, archive.open('wb') as output:
-              while chunk := response.read(1048576): output.write(chunk)
-          with archive.open('rb') as stream:
-              assert hashlib.file_digest(stream,'sha256').hexdigest() == 'd309f938ead838fabaf1c072c89d9b844bfdfb7d3a3549f90804109a26f536de'
-          tools = work / 'tools'; tools.mkdir()
-          with tarfile.open(archive) as package:
-              for name in ('htree','git-remote-htree'):
-                  entry = package.getmember('hashtree/' + name)
-                  assert entry.isfile()
-                  path = tools / name
-                  path.write_bytes(package.extractfile(entry).read())
-                  path.chmod(0o755)
-          config = work / 'config'; config.mkdir()
-          (config / 'config.toml').write_text('[nostr]\nrelays = ["wss://upload.iris.to/ws", "wss://cdn.iris.to/ws"]\n[blossom]\nread_servers = ["https://upload.iris.to", "https://cdn.iris.to", "https://blossom.primal.net"]\nwrite_servers = []\n')
-          environment = dict(os.environ, PATH=str(tools)+':'+os.environ['PATH'], HTREE_CONFIG_DIR=str(config), HTREE_DATA_DIR=str(work/'data'), HTREE_SERVER_URL='', JWT='', NOSTR_RELAYS='wss://upload.iris.to/ws,wss://cdn.iris.to/ws', HTREE_LOCAL_DAEMON_ONLY='0', HTREE_PREFER_LOCAL_DAEMON='0', NOSTR_PREFER_LOCAL='0', HTREE_PREFER_LOCAL_RELAY='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_NO_REPLACE_OBJECTS='1', GIT_NO_LAZY_FETCH='1')
-          for key in ('GIT_DIR','GIT_COMMON_DIR','GIT_OBJECT_DIRECTORY','GIT_ALTERNATE_OBJECT_DIRECTORIES','GIT_CONFIG_COUNT','GIT_CONFIG_PARAMETERS','GIT_WORK_TREE'):
-              environment.pop(key,None)
-          repo = work / 'source.git'
-          def git(*arguments):
-              return subprocess.check_output(['git','-C',str(repo),*arguments],env=environment)
-          subprocess.run(['git','init','--bare','-q',str(repo)],check=True,env=environment)
-          git('config','gc.auto','0'); git('config','maintenance.auto','false')
-          uri = 'htree://' + owner + '/hashtree'
-          fetch_log = work/'fetch.log'
-          def progress_counts(log):
-              units = {'B':1,'KiB':1024,'MiB':1024**2,'GiB':1024**3}
-              entries = [int(value) for value in re.findall(r'Loading objects tree\.\.\. (\d+) entries',log)]
-              prepared = [int(value) for value in re.findall(r'Prepared (\d+) objects',log)]
-              packs = [int(value) for value in re.findall(r'Loading git packs: (\d+)/',log)]
-              transferred = [int(float(value)*units[unit]) for value,unit in re.findall(r'Loading git packs: \d+/\d+ \(([0-9.]+) (B|KiB|MiB|GiB)/',log)]
-              return tuple(max(values,default=0) for values in (entries,prepared,packs,transferred))
-          fetch_start = last_progress = last_report = time.monotonic()
-          last_counts = (0,0,0,0)
-          with fetch_log.open('wb') as output:
-              process = subprocess.Popen(['git','-C',str(repo),'fetch','--no-tags','--no-recurse-submodules',uri,'+refs/*:refs/*'],env=environment,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
-              try:
-                  while process.poll() is None:
-                      time.sleep(5)
-                      log = fetch_log.read_text(errors='replace')
-                      counts = progress_counts(log)
-                      now = time.monotonic()
-                      if any(current>previous for current,previous in zip(counts,last_counts)):
-                          last_progress = now
-                          last_counts = tuple(max(a,b) for a,b in zip(counts,last_counts))
-                      if now-last_report>=30:
-                          lines=log.splitlines()
-                          print(f'Cold fetch elapsed={int(now-fetch_start)}s idle={int(now-last_progress)}s: '+(lines[-1] if lines else 'waiting for first object progress'),flush=True)
-                          last_report=now
-                      if now-last_progress>180:
-                          raise TimeoutError('Cold fetch made no advancing object or byte progress for 180 seconds')
-                      if now-fetch_start>2100:
-                          raise TimeoutError('Cold fetch exceeded its bounded 35-minute budget')
-                  assert process.returncode==0, f'Cold fetch exited {process.returncode}'
-              finally:
-                  if process.poll() is None:
-                      os.killpg(process.pid,signal.SIGTERM)
-                      try: process.wait(timeout=5)
-                      except subprocess.TimeoutExpired:
-                          os.killpg(process.pid,signal.SIGKILL)
-                          process.wait()
-          fetch_seconds = round(time.monotonic()-fetch_start,2)
-          refs = {ref:oid for oid,ref in (row.split() for row in git('show-ref').decode().splitlines())}
-          refs_bytes = json.dumps(dict(sorted(refs.items())),separators=(',',':')).encode()
-          refs_digest = hashlib.sha256(refs_bytes).hexdigest()
-          assert refs_digest == os.environ['EXPECTED_REFS']
-          assert refs['refs/heads/codex/release-prebuilt-031'] == source
-          assert refs['refs/heads/master'] == os.environ['EXPECTED_MIRROR']
-          assert git('rev-parse','refs/tags/v0.3.1^{}').decode().strip() == source
-          assert git('rev-parse','--is-shallow-repository').strip() == b'false'
-          assert not (repo/'objects/info/alternates').exists()
-          with (work/'fsck.log').open('wb') as output:
-              subprocess.run(['git','-C',str(repo),'fsck','--full','--strict'],env=environment,stdout=output,stderr=subprocess.STDOUT,check=True)
-          ids = sorted({row.split(b' ',1)[0] for row in git('rev-list','--objects',*sorted(set(refs.values()))).splitlines()})
-          assert len(ids) == int(os.environ['EXPECTED_OBJECTS'])
-          objects = work/'object-ids'; objects.write_bytes(b'\n'.join(ids)+b'\n')
-          digest = hashlib.sha256()
-          with objects.open('rb') as input_file:
-              process = subprocess.Popen(['git','-C',str(repo),'cat-file','--batch'],env=environment,stdin=input_file,stdout=subprocess.PIPE)
-              while chunk := process.stdout.read(1048576): digest.update(chunk)
-              assert process.wait() == 0
-          assert digest.hexdigest() == os.environ['EXPECTED_PAYLOADS']
-          receipt = {'source':source,'htree_master':refs['refs/heads/master'],'refs':len(refs),'refs_sha256':refs_digest,'reachable_objects':len(ids),'payloads_sha256':digest.hexdigest(),'strict_fsck':True,'shallow':False,'alternates':False,'empty_initial_store':True,'public_websocket_relays':True,'fetch_seconds':fetch_seconds,'idle_limit_seconds':180,'fetch_budget_seconds':2100}
-          (work/'receipt.json').write_text(json.dumps(receipt,indent=2))
-          print(json.dumps(receipt))
-          PYCODE
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+          python3 qualification/rust/scripts/qualify_github_draft.py \
+            --phase assets \
+            --source candidate \
+            --output "$RUNNER_TEMP/draft-qualification/receipt.json"
+
+      - name: Verify draft Linux installation without a GitHub token
+        run: |
+          python3 qualification/rust/scripts/qualify_github_draft.py \
+            --phase install \
+            --source candidate \
+            --output "$RUNNER_TEMP/draft-qualification/receipt.json"
+
+      - name: Retain the small draft receipt
         if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: prebuilt-cold-source
-          path: |
-            cold-proof/receipt.json
-            cold-proof/fetch.log
-            cold-proof/fsck.log
+          name: hashtree-0.3.1-draft-qualification
+          path: ${{ runner.temp }}/draft-qualification/receipt.json
           if-no-files-found: warn
+          retention-days: 14
