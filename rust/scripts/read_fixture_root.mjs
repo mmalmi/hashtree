@@ -8,7 +8,8 @@ const [author, repository, output] = process.argv.slice(2);
 assert.match(author ?? '', /^[0-9a-f]{64}$/);
 assert.match(repository ?? '', /^hashtree-installer-fixture-[0-9a-f]{16}$/);
 assert(output && typeof WebSocket === 'function');
-const relays = ['wss://upload.iris.to/ws', 'wss://cdn.iris.to/ws'];
+const relays = ['wss://upload.iris.to/ws', 'wss://cdn.iris.to/ws',
+  'wss://temp.iris.to', 'wss://nos.lol', 'wss://relay.snort.social'];
 const sessions = [];
 
 function observe(relay) {

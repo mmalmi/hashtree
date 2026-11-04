@@ -19,7 +19,8 @@ import subprocess
 import tempfile
 
 CANDIDATE = "f19cb5d0cf78e61533cd086f29ba83d7f0193b27"
-RELAYS = ["wss://upload.iris.to/ws", "wss://cdn.iris.to/ws"]
+RELAYS = ["wss://upload.iris.to/ws", "wss://cdn.iris.to/ws",
+          "wss://temp.iris.to", "wss://nos.lol", "wss://relay.snort.social"]
 READ_SERVERS = ["https://upload.iris.to", "https://cdn.iris.to"]
 WRITE_SERVERS = ["https://upload.iris.to"]
 SOURCE = "https://github.com/mmalmi/hashtree-spec.git"

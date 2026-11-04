@@ -1,70 +1,37 @@
-name: Qualify Hashtree 0.3.1 draft
-
+name: Publish qualified Hashtree installer fixture
 on:
   workflow_dispatch:
-
 permissions:
-  # GitHub requires push access even to read a draft; all authenticated operations below are GETs.
-  contents: write
-  attestations: read
-
+  contents: write # Draft reads require push access; this workflow only performs authenticated GETs.
+  actions: read
 jobs:
-  qualify:
+  fixture:
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 20
     steps:
-      - name: Checkout the public verification recipe
+      - name: Checkout the public fixture recipe
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
-          path: qualification
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
-            rust/scripts/qualify_github_draft.py
+            rust/scripts/reuse_qualified_fixture_input.py
             rust/scripts/publish_installer_fixture.py
             rust/scripts/read_fixture_root.mjs
-
-      - name: Checkout exact public product metadata
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-        with:
-          ref: f19cb5d0cf78e61533cd086f29ba83d7f0193b27
-          path: candidate
-          persist-credentials: false
-          sparse-checkout-cone-mode: false
-          sparse-checkout: |
-            rust/release-inputs.json
-            rust/crates/hashtree-cli/Cargo.toml
-            rust/crates/git-remote-htree/Cargo.toml
-            rust/crates/hashtree-core/Cargo.toml
-            rust/crates/hashtree-cashu-cli/Cargo.toml
-
-      - name: Verify draft bytes and provenance
+      - name: Retrieve already qualified immutable input bytes
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          python3 qualification/rust/scripts/qualify_github_draft.py \
-            --phase assets \
-            --source candidate \
-            --output "$RUNNER_TEMP/draft-qualification/receipt.json"
-
-      - name: Verify draft Linux installation without a GitHub token
-        run: |
-          python3 qualification/rust/scripts/qualify_github_draft.py \
-            --phase install \
-            --source candidate \
-            --output "$RUNNER_TEMP/draft-qualification/receipt.json"
-
+        run: python3 rust/scripts/reuse_qualified_fixture_input.py
       - name: Publish isolated public installer fixture
-        shell: bash
         env:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
         run: |
-          python3 qualification/rust/scripts/publish_installer_fixture.py \
+          python3 rust/scripts/publish_installer_fixture.py \
             --qualification-receipt "$RUNNER_TEMP/draft-qualification/receipt.json" \
             --bin-dir "$RUNNER_TEMP/draft-qualification/linux-install/installed" \
-            --event-reader "$GITHUB_WORKSPACE/qualification/rust/scripts/read_fixture_root.mjs" \
+            --event-reader "$GITHUB_WORKSPACE/rust/scripts/read_fixture_root.mjs" \
             --output-dir "$RUNNER_TEMP/installer-fixture-public"
       - name: Retain public fixture handoff
         if: always()
@@ -74,15 +41,5 @@ jobs:
           path: |
             ${{ runner.temp }}/installer-fixture-public/fixture.json
             ${{ runner.temp }}/installer-fixture-public/root-event.json
-          if-no-files-found: warn
-          retention-days: 14
-
-
-      - name: Retain the small draft receipt
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: hashtree-0.3.1-draft-qualification
-          path: ${{ runner.temp }}/draft-qualification/receipt.json
           if-no-files-found: warn
           retention-days: 14
