@@ -162,10 +162,16 @@ def install_component(entry, archive_name, root_name, components, prefix, tempor
     checked_download(entry, archive, archive_name)
     directory = checked_extract(archive, temporary, root_name)
     install_prefix = str(prefix)
+    shell = "bash"
     if os.name == "nt":
-        install_prefix = run(["bash", "-c", 'cygpath -u "$1"', "release-inputs", str(prefix)])
+        git_root = os.path.join(os.environ["ProgramFiles"], "Git")
+        shell = os.path.join(git_root, "bin", "bash.exe")
+        converter = os.path.join(git_root, "usr", "bin", "cygpath.exe")
+        require(os.path.isfile(shell) and os.path.isfile(converter),
+                "The recorded Git for Windows shell tools are unavailable")
+        install_prefix = run([converter, "-u", str(prefix)])
     subprocess.run([
-        "bash", "./install.sh", f"--prefix={install_prefix}",
+        shell, "./install.sh", f"--prefix={install_prefix}",
         f"--components={','.join(components)}", "--disable-ldconfig",
     ], cwd=directory, check=True)
 

@@ -289,5 +289,28 @@ class WindowsEnvironmentProfileTests(unittest.TestCase):
                 self.configure(self.new_profile, **changed)
 
 
+class WindowsInstallerShellTests(unittest.TestCase):
+    def test_installer_uses_git_bash_and_cygpath_by_absolute_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            prefix = root / "prefix"
+            directory = root / "distribution"
+            expected_shell = os.path.join("/fixture/Program Files", "Git", "bin", "bash.exe")
+            expected_converter = os.path.join("/fixture/Program Files", "Git", "usr", "bin", "cygpath.exe")
+            with patch.object(release_inputs.os, "name", "nt"), \
+                    patch.dict(release_inputs.os.environ, {"ProgramFiles": "/fixture/Program Files"}), \
+                    patch.object(release_inputs.os.path, "isfile", return_value=True), \
+                    patch.object(release_inputs, "checked_download"), \
+                    patch.object(release_inputs, "checked_extract", return_value=directory), \
+                    patch.object(release_inputs, "run", return_value="/d/pinned-rust") as convert, \
+                    patch.object(release_inputs.subprocess, "run") as install:
+                release_inputs.install_component({}, "rust.tar.xz", "rust", ["cargo"], prefix, root)
+            convert.assert_called_once_with([expected_converter, "-u", str(prefix)])
+            self.assertEqual(install.call_args.args[0],
+                             [expected_shell, "./install.sh", "--prefix=/d/pinned-rust",
+                              "--components=cargo", "--disable-ldconfig"])
+            self.assertEqual(install.call_args.kwargs["cwd"], directory)
+
+
 if __name__ == "__main__":
     unittest.main()
