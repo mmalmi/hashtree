@@ -62,6 +62,16 @@ def run(stage, args, *, env, cwd=None, data=None, timeout=60, evidence=None):
             text = stderr.decode("utf-8", errors="replace")
             published = re.findall(r"Published to: (htree://npub1[a-z0-9]+/hashtree-installer-fixture-[0-9a-f]{16})", text)
             details["reportedRemoteMatches"] = published == [evidence["publicRemote"]]
+            # This operation has only a fresh test identity and the fixed public graph.
+            # Retain actual helper errors, removing execution paths and any key-like text.
+            errors = re.findall(r"(?:Push to refs/heads/main failed|error|fatal): (.+)", text)
+            sanitized = []
+            for error in errors[:4]:
+                error = error.replace(env.get("TMPDIR", "__no_task_path__"), "<ephemeral-dir>")
+                error = re.sub(r"(?:/home/runner|/tmp|/var/tmp)/[^\s,;]+", "<ephemeral-path>", error)
+                error = re.sub(r"nsec1[a-z0-9]+", "<redacted-key>", error)
+                sanitized.append(error[:2048])
+            details["errors"] = sanitized
             for label in ("Relays", "Relays failed", "Blossom", "Blossom failed"):
                 lines = re.findall(r"^\s*" + re.escape(label) + r": (.+)$", text, re.MULTILINE)
                 allowed = set(RELAYS + READ_SERVERS)
