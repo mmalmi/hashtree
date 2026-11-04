@@ -246,8 +246,8 @@ impl HashtreeStore {
         #[cfg(unix)] mut cache: Option<&mut super::add_cache::DirectoryCache>,
         #[cfg(not(unix))] _cache: Option<()>,
     ) -> Result<Cid> {
-        // Build directory structure from flat file list - store full Cid with key
-        let mut dir_contents: HashMap<String, Vec<(String, Cid)>> = HashMap::new();
+        // Preserve the stored plaintext size alongside each file's CID.
+        let mut dir_contents: HashMap<String, Vec<(String, Cid, u64)>> = HashMap::new();
         dir_contents.insert(String::new(), Vec::new()); // Root
 
         let walker = crate::ignore_rules::build_content_walker(current_path, respect_gitignore);
@@ -280,9 +280,9 @@ impl HashtreeStore {
                     None => None,
                 };
                 #[cfg(not(unix))]
-                let cached_cid: Option<Cid> = None;
-                let cid = if let Some(cid) = cached_cid {
-                    cid
+                let cached_cid: Option<(Cid, u64)> = None;
+                let (cid, size) = if let Some(file) = cached_cid {
+                    file
                 } else {
                     let file = std::fs::File::open(path)
                         .with_context(|| format!("Failed to open file {}", path.display()))?;
@@ -291,7 +291,7 @@ impl HashtreeStore {
                             progress.record_file_discovered(metadata.len());
                         }
                     }
-                    let (cid, _size) = tree
+                    let (cid, size) = tree
                         .put_stream_with_progress(AllowStdIo::new(file), |bytes| {
                             if let Some(progress) = progress {
                                 progress.record_bytes(bytes);
@@ -304,7 +304,7 @@ impl HashtreeStore {
                     if let Some(progress) = progress {
                         progress.record_file_finished();
                     }
-                    cid
+                    (cid, size)
                 };
 
                 // Get parent directory path and file name
@@ -317,7 +317,10 @@ impl HashtreeStore {
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_default();
 
-                dir_contents.entry(parent).or_default().push((name, cid));
+                dir_contents
+                    .entry(parent)
+                    .or_default()
+                    .push((name, cid, size));
             } else if path.is_dir() {
                 // Ensure directory entry exists
                 let dir_path = relative.to_string_lossy().to_string();
@@ -332,7 +335,7 @@ impl HashtreeStore {
     async fn build_directory_tree<S: Store>(
         &self,
         tree: &HashTree<S>,
-        dir_contents: &mut HashMap<String, Vec<(String, Cid)>>,
+        dir_contents: &mut HashMap<String, Vec<(String, Cid, u64)>>,
     ) -> Result<Cid> {
         // Sort directories by depth (deepest first) to build bottom-up
         let mut dirs: Vec<String> = dir_contents.keys().cloned().collect();
@@ -349,7 +352,9 @@ impl HashtreeStore {
 
             let mut entries: Vec<hashtree_core::DirEntry> = files
                 .into_iter()
-                .map(|(name, cid)| hashtree_core::DirEntry::from_cid(name, &cid))
+                .map(|(name, cid, size)| {
+                    hashtree_core::DirEntry::from_cid(name, &cid).with_size(size)
+                })
                 .collect();
 
             // Add subdirectory entries
