@@ -1,51 +1,105 @@
-name: Windows release input drift qualification
+name: Cold public source proof
 on:
   workflow_dispatch:
+    inputs:
+      source:
+        required: true
+        description: Reviewed full source commit
+      refs_sha256:
+        required: true
+        description: Expected canonical JSON digest of signed public refs
+      payloads_sha256:
+        required: true
+        description: Expected sorted Git object payload digest
+      object_count:
+        required: true
+        description: Expected reachable object count
 permissions:
   contents: read
 jobs:
-  windows:
-    strategy:
-      fail-fast: false
-      matrix:
-        sample: [1, 2]
-    runs-on: windows-2022
+  cold-source:
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          ref: ${{ github.sha }}
-      - name: Record native SDK assumptions
-        shell: pwsh
+          ref: ${{ inputs.source }}
+      - name: Verify an empty-store clone through public WebSocket relays
+        env:
+          EXPECTED_SOURCE: ${{ inputs.source }}
+          EXPECTED_REFS: ${{ inputs.refs_sha256 }}
+          EXPECTED_PAYLOADS: ${{ inputs.payloads_sha256 }}
+          EXPECTED_OBJECTS: ${{ inputs.object_count }}
         run: |
-          New-Item -ItemType Directory inventory
-          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
-          $installations = & $vswhere -format json | ConvertFrom-Json
-          $entries = foreach ($installation in $installations) {
-            @{ version = $installation.installationVersion; toolsets = @(Get-ChildItem "$($installation.installationPath)/VC/Tools/MSVC" | Select-Object -ExpandProperty Name) }
-          }
-          @{ imageOS = $env:ImageOS; imageVersion = $env:ImageVersion; visualStudio = @($entries); sdk = @(Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/Lib" | Select-Object -ExpandProperty Name) } | ConvertTo-Json -Depth 5 | Set-Content inventory/windows-sdk.json
-          Get-Content inventory/windows-sdk.json
-      - name: Run exact native helper with the observed Windows profile
-        shell: bash
-        working-directory: rust
-        run: |
-          python3 scripts/release_inputs.py native --target x86_64-pc-windows-msvc
-      - name: Compile and execute minimal target in the product build shell
-        shell: pwsh
-        run: |
-          rustc --version | Set-Content inventory/rustc.txt
-          cargo --version | Set-Content inventory/cargo.txt
-          'fn main() { println!("pinned-toolchain-smoke"); }' | Set-Content inventory/smoke.rs
-          Get-Command link.exe | Select-Object -ExpandProperty Source | Set-Content inventory/linker.txt
-          rustc --target x86_64-pc-windows-msvc inventory/smoke.rs -o "$env:RUNNER_TEMP/toolchain-smoke.exe"
-          if ($LASTEXITCODE -ne 0) { throw "Compilation failed" }
-          & "$env:RUNNER_TEMP/toolchain-smoke.exe" | Set-Content inventory/output.txt
-          if ($LASTEXITCODE -ne 0 -or (Get-Content inventory/output.txt) -ne "pinned-toolchain-smoke") { throw "Executable smoke failed" }
+          set -euo pipefail
+          test "$(df -B1 --output=avail / | tail -1)" -gt 25769803776
+          python3 - <<'PYCODE'
+          import hashlib, json, os, pathlib, re, subprocess, tarfile, urllib.request
+          source = os.environ['EXPECTED_SOURCE']
+          assert re.fullmatch('[a-f0-9]{40}', source)
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip() == source
+          for key in ('EXPECTED_REFS','EXPECTED_PAYLOADS'):
+              assert re.fullmatch('[a-f0-9]{64}', os.environ[key])
+          owner = re.search(r'git\.iris\.to/#/(npub1[a-z0-9]+)/hashtree\)', pathlib.Path('README.md').read_text())[1]
+          work = pathlib.Path('cold-proof').resolve()
+          assert not work.exists()
+          work.mkdir()
+          archive = work / 'reader.tar.gz'
+          url = 'https://github.com/mmalmi/hashtree/releases/download/v0.2.150/hashtree-x86_64-unknown-linux-musl.tar.gz'
+          with urllib.request.urlopen(url,timeout=120) as response, archive.open('wb') as output:
+              while chunk := response.read(1048576): output.write(chunk)
+          with archive.open('rb') as stream:
+              assert hashlib.file_digest(stream,'sha256').hexdigest() == 'd309f938ead838fabaf1c072c89d9b844bfdfb7d3a3549f90804109a26f536de'
+          tools = work / 'tools'; tools.mkdir()
+          with tarfile.open(archive) as package:
+              for name in ('htree','git-remote-htree'):
+                  entry = package.getmember('hashtree/' + name)
+                  assert entry.isfile()
+                  path = tools / name
+                  path.write_bytes(package.extractfile(entry).read())
+                  path.chmod(0o755)
+          config = work / 'config'; config.mkdir()
+          (config / 'config.toml').write_text('[nostr]\nrelays = ["wss://upload.iris.to/ws", "wss://cdn.iris.to/ws"]\n[blossom]\nread_servers = ["https://upload.iris.to", "https://cdn.iris.to", "https://blossom.primal.net"]\nwrite_servers = []\n')
+          environment = dict(os.environ, PATH=str(tools)+':'+os.environ['PATH'], HTREE_CONFIG_DIR=str(config), HTREE_DATA_DIR=str(work/'data'), HTREE_SERVER_URL='', JWT='', NOSTR_RELAYS='wss://upload.iris.to/ws,wss://cdn.iris.to/ws', HTREE_LOCAL_DAEMON_ONLY='0', HTREE_PREFER_LOCAL_DAEMON='0', NOSTR_PREFER_LOCAL='0', HTREE_PREFER_LOCAL_RELAY='0', GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL=os.devnull, GIT_NO_REPLACE_OBJECTS='1', GIT_NO_LAZY_FETCH='1')
+          for key in ('GIT_DIR','GIT_COMMON_DIR','GIT_OBJECT_DIRECTORY','GIT_ALTERNATE_OBJECT_DIRECTORIES','GIT_CONFIG_COUNT','GIT_CONFIG_PARAMETERS','GIT_WORK_TREE'):
+              environment.pop(key,None)
+          repo = work / 'source.git'
+          def git(*arguments):
+              return subprocess.check_output(['git','-C',str(repo),*arguments],env=environment)
+          subprocess.run(['git','init','--bare','-q',str(repo)],check=True,env=environment)
+          git('config','gc.auto','0'); git('config','maintenance.auto','false')
+          uri = 'htree://' + owner + '/hashtree'
+          with (work/'fetch.log').open('wb') as output:
+              subprocess.run(['git','-C',str(repo),'fetch','--no-tags','--no-recurse-submodules',uri,'+refs/*:refs/*'],env=environment,stdout=output,stderr=subprocess.STDOUT,check=True,timeout=600)
+          refs = {ref:oid for oid,ref in (row.split() for row in git('show-ref').decode().splitlines())}
+          refs_bytes = json.dumps(dict(sorted(refs.items())),separators=(',',':')).encode()
+          refs_digest = hashlib.sha256(refs_bytes).hexdigest()
+          assert refs_digest == os.environ['EXPECTED_REFS']
+          assert refs['refs/heads/codex/release-prebuilt-031'] == source
+          assert git('rev-parse','refs/tags/v0.3.1^{}').decode().strip() == source
+          assert git('rev-parse','--is-shallow-repository').strip() == b'false'
+          assert not (repo/'objects/info/alternates').exists()
+          with (work/'fsck.log').open('wb') as output:
+              subprocess.run(['git','-C',str(repo),'fsck','--full','--strict'],env=environment,stdout=output,stderr=subprocess.STDOUT,check=True)
+          ids = sorted({row.split(b' ',1)[0] for row in git('rev-list','--objects',*sorted(set(refs.values()))).splitlines()})
+          assert len(ids) == int(os.environ['EXPECTED_OBJECTS'])
+          objects = work/'object-ids'; objects.write_bytes(b'\n'.join(ids)+b'\n')
+          digest = hashlib.sha256()
+          with objects.open('rb') as input_file:
+              process = subprocess.Popen(['git','-C',str(repo),'cat-file','--batch'],env=environment,stdin=input_file,stdout=subprocess.PIPE)
+              while chunk := process.stdout.read(1048576): digest.update(chunk)
+              assert process.wait() == 0
+          assert digest.hexdigest() == os.environ['EXPECTED_PAYLOADS']
+          receipt = {'source':source,'refs':len(refs),'refs_sha256':refs_digest,'reachable_objects':len(ids),'payloads_sha256':digest.hexdigest(),'strict_fsck':True,'shallow':False,'alternates':False,'empty_initial_store':True,'public_websocket_relays':True}
+          (work/'receipt.json').write_text(json.dumps(receipt,indent=2))
+          print(json.dumps(receipt))
+          PYCODE
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: prebuilt-inputs-windows-${{ matrix.sample }}
+          name: prebuilt-cold-source
           path: |
-            inventory/*.json
-            inventory/*.txt
+            cold-proof/receipt.json
+            cold-proof/fetch.log
+            cold-proof/fsck.log
+          if-no-files-found: warn
