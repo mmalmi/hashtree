@@ -1,44 +1,54 @@
-name: Pinned native toolchain qualification
+name: Windows release input drift qualification
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  toolchain:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-14
-            target: x86_64-apple-darwin
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
-    runs-on: ${{ matrix.os }}
+  windows:
+    runs-on: windows-2022
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: d868f22bb2b4112094572580ae63d132005f6674
-      - name: Execute the reviewed native setup entry point
+      - name: Record native SDK assumptions
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory inventory
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $installations = & $vswhere -format json | ConvertFrom-Json
+          $entries = foreach ($installation in $installations) {
+            @{ version = $installation.installationVersion; toolsets = @(Get-ChildItem "$($installation.installationPath)/VC/Tools/MSVC" | Select-Object -ExpandProperty Name) }
+          }
+          @{ imageOS = $env:ImageOS; imageVersion = $env:ImageVersion; visualStudio = @($entries); sdk = @(Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/Lib" | Select-Object -ExpandProperty Name) } | ConvertTo-Json -Depth 5 | Set-Content inventory/windows-sdk.json
+          Get-Content inventory/windows-sdk.json
+      - name: Run exact native helper with the observed Windows profile
         shell: bash
         working-directory: rust
-        run: python3 scripts/release_inputs.py native --target '${{ matrix.target }}'
-      - name: Compile and execute a minimal target binary
+        run: |
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+          p=Path('release-inputs.json')
+          lock=json.loads(p.read_text())
+          sdk=lock['native']['x86_64-pc-windows-msvc']['sdk']
+          sdk.update(image_version='20261101.353.1', visual_studio_version='17.14.37827.9')
+          p.write_text(json.dumps(lock))
+          PYCODE
+          python3 scripts/release_inputs.py native --target x86_64-pc-windows-msvc
+      - name: Compile and execute minimal target
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p qualification
-          rustc --version > qualification/rustc.txt
-          cargo --version > qualification/cargo.txt
-          rustc --print target-libdir --target '${{ matrix.target }}' > qualification/target.txt
-          printf '%s\n' 'fn main() { println!("pinned-toolchain-smoke"); }' > qualification/smoke.rs
-          binary="$RUNNER_TEMP/toolchain-smoke${{ runner.os == 'Windows' && '.exe' || '' }}"
-          rustc --target '${{ matrix.target }}' qualification/smoke.rs -o "$binary"
-          "$binary" > qualification/output.txt
-          test "$(cat qualification/output.txt)" = pinned-toolchain-smoke
+          rustc --version > inventory/rustc.txt
+          cargo --version > inventory/cargo.txt
+          printf '%s\n' 'fn main() { println!("pinned-toolchain-smoke"); }' > inventory/smoke.rs
+          rustc --target x86_64-pc-windows-msvc inventory/smoke.rs -o "$RUNNER_TEMP/toolchain-smoke.exe"
+          "$RUNNER_TEMP/toolchain-smoke.exe" > inventory/output.txt
+          test "$(cat inventory/output.txt)" = pinned-toolchain-smoke
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: native-toolchain-${{ matrix.target }}
-          path: qualification/*.txt
-          if-no-files-found: warn
+          name: prebuilt-inputs-windows
+          path: |
+            inventory/*.json
+            inventory/*.txt
