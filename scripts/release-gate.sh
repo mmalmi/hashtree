@@ -83,6 +83,8 @@ require_rust_tools() {
 
 run_static_gate() {
   git -C "$repo_root" diff --check || return $?
+  python3 "$repo_root/rust/scripts/test_release_inputs.py" || return $?
+  python3 "$repo_root/rust/scripts/test_published_install.py" || return $?
 
   bash "$repo_root/scripts/test-release-script-defaults.sh" || return $?
   bash "$repo_root/scripts/tests/test_publish_release_wrapper.sh" || return $?

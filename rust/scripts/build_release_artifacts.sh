@@ -297,6 +297,15 @@ ensure_rust_target() {
     if [ "$PACKAGE_ONLY" -eq 1 ]; then
         return
     fi
+    if [ "${HASHTREE_PINNED_TOOLCHAIN:-}" = "1" ]; then
+        local library_dir
+        library_dir="$(rustc --print target-libdir --target "$target")"
+        test -d "$library_dir" || {
+            echo "Pinned Rust target is missing: $target" >&2
+            exit 1
+        }
+        return
+    fi
     require_command rustup
     rustup target add "$target" >/dev/null
 }

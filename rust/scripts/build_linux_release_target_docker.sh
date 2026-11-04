@@ -15,7 +15,7 @@ Options:
   --repo-dir <dir>                 Repository root (default: inferred)
   --docker-bin <path>              Docker binary to use (default: docker)
   --docker-rust-image <image>      Rust Alpine image to use
-  --cargo-bin <path>               Host cargo binary used only to infer a default Rust image
+  --cargo-bin <path>               Accepted for compatibility with the shared builder
   -h, --help                       Show this help
 EOF
 }
@@ -47,19 +47,7 @@ docker_platform_for_target() {
 }
 
 default_docker_rust_image() {
-    local version=""
-    if command -v "$CARGO_BIN" >/dev/null 2>&1; then
-        version="$("$CARGO_BIN" --version 2>/dev/null | awk 'NR == 1 { print $2 }')"
-    fi
-    if [ -z "$version" ]; then
-        version="1.94"
-    else
-        # Official Rust images publish stable minor tags before every patch-level
-        # Alpine tag. Following the installed patch version made release builds
-        # race Docker Hub whenever rustup advanced first (for example 1.97.1).
-        version="${version%.*}"
-    fi
-    printf 'rust:%s-alpine3.22\n' "$version"
+    python3 "${SCRIPT_DIR}/release_inputs.py" linux-image --target "$TARGET"
 }
 
 require_command() {
@@ -123,6 +111,7 @@ if [ -z "$DOCKER_RUST_IMAGE" ]; then
 fi
 
 platform="$(docker_platform_for_target "$TARGET")"
+package_inputs="$(python3 "${SCRIPT_DIR}/release_inputs.py" linux-packages --target "$TARGET")"
 docker_mounts=(
     -v "${REPO_DIR}:/work"
     -v "${TARGET_DIR}:/target-dir"
@@ -131,7 +120,22 @@ docker_mounts=(
 read -r -d '' build_command <<EOF || true
 set -euo pipefail
 export PATH="\${CARGO_HOME:-/usr/local/cargo}/bin:\$PATH"
-apk add --no-cache build-base clang clang-dev lld musl-dev linux-headers pkgconf cmake perl git >/dev/null
+package_dir="/target-dir/release-apks/${TARGET}"
+mkdir -p "\$package_dir"
+cat > "\$package_dir/inputs.txt" <<'PINNED_APKS'
+${package_inputs}
+PINNED_APKS
+set --
+while read -r digest filename url; do
+    package="\$package_dir/\$filename"
+    if ! echo "\$digest  \$package" | sha256sum -c - >/dev/null 2>&1; then
+        wget -q -T 60 -O "\$package.part" "\$url"
+        echo "\$digest  \$package.part" | sha256sum -c -
+        mv "\$package.part" "\$package"
+    fi
+    set -- "\$@" "\$package"
+done < "\$package_dir/inputs.txt"
+apk add --no-network "\$@" >/dev/null
 mkdir -p /target-dir/release /target-dir/${TARGET}/release
 locked_flag=""
 if [ -f /work/rust/Cargo.lock ]; then
