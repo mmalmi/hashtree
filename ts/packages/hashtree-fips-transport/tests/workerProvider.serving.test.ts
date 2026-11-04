@@ -157,6 +157,28 @@ describe('authenticated inbound blob serving', () => {
     }
   });
 
+  it('cancels an authenticated outbound read while the remote source remains held', async () => {
+    const data = new Uint8Array([17]);
+    const hash = await sha256(data);
+    let release: ((data: Uint8Array) => void) | undefined;
+    const serve = vi.fn(() => new Promise<Uint8Array>((resolve) => { release = resolve; }));
+    const fixture = await pair(serve, true, undefined, 5_500);
+    const pending = fixture.providers[1].transport.get(hash, [fixture.ids[0]]);
+    void pending.catch(() => {});
+    try {
+      await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+      const started = performance.now();
+      await fixture.providers[1].transport.close();
+      await expect(pending).rejects.toThrow('closed');
+      expect(performance.now() - started).toBeLessThan(500);
+      expect(serve).toHaveBeenCalledOnce();
+      await expect(fixture.stores[1].get(hash)).resolves.toBeNull();
+    } finally {
+      release?.(data);
+      await fixture.close();
+    }
+  });
+
   it('paces a real authenticated response larger than the upload bucket', async () => {
     const data = new Uint8Array(1536).fill(7);
     const limit = vi.fn(() => 1024);

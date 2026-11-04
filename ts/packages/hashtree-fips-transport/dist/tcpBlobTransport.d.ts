@@ -25,12 +25,16 @@ export declare class TcpBlobTransport {
     private readonly timeoutMs;
     private readonly timer;
     private pumping;
-    private closed;
+    private readonly lifetime;
+    private readonly outgoing;
+    private closing?;
+    private get closed();
     private readonly serving;
     private readonly uploadRateLimiter;
     constructor(options: TcpBlobTransportOptions);
     get(hash: Hash, peerIds: readonly string[], htl?: number): Promise<Uint8Array | null>;
     close(): Promise<void>;
+    private whileOpen;
     /** A valid authenticated response proves the peer implements the blob service. */
     probe(peerId: string): Promise<boolean>;
     private fetchFromPeer;
