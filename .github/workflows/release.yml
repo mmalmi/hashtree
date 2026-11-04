@@ -1,92 +1,47 @@
-name: Prebuilt input inventory
+name: Native Cargo version inventory
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/prebuilt-input-inventory-031]
 permissions:
   contents: read
 jobs:
-  linux:
+  cargo:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
-            arch: x86_64
-            platform: linux/amd64
-          - os: ubuntu-24.04-arm
-            arch: aarch64
-            platform: linux/arm64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            sha256: 2d84a74e9558192a7de674aca6aa3ab7464bed2df97e0377156ddb7e09a0fd7a
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            sha256: 1180ac0cd30ee98af682528c10505f5cba118f122aec9b7ca18ae605b1db38a0
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Resolve and verify immutable package inputs
+      - name: Execute the locked Cargo version probe
+        shell: bash
         env:
-          BUILD_IMAGE: rust:1.97-alpine3.22@sha256:df4efa4e0cdfb5245fa06e3f431387b2bcc96782ce5681b7fb6b0297d745bc29
+          CARGO_TARGET: ${{ matrix.target }}
+          CARGO_SHA256: ${{ matrix.sha256 }}
         run: |
-          set -euo pipefail
-          test "$(df -B1 --output=avail / | tail -1)" -gt 15000000000
-          mkdir -p inventory/packages
-          chmod 777 inventory inventory/packages
-          docker pull --platform '${{ matrix.platform }}' "$BUILD_IMAGE"
-          docker run --rm --platform '${{ matrix.platform }}' -v "$PWD/inventory:/out" "$BUILD_IMAGE" sh -ec '
-            rustc --version > /out/rust-version.txt
-            apk info -vv | sort > /out/base-packages.txt
-            cp /lib/apk/db/installed /out/base-installed.txt
-            apk update
-            apk add build-base clang clang-dev lld musl-dev linux-headers pkgconf cmake perl git
-            apk info -vv | sort > /out/final-packages.txt
-            cp /lib/apk/db/installed /out/final-installed.txt
-          '
-          python3 - <<'PYCODE'
-          import pathlib
-          root = pathlib.Path('inventory')
-          def installed(path):
-              entries = {}
-              for block in path.read_text().split('\n\n'):
-                  fields = dict(line.split(':', 1) for line in block.splitlines() if ':' in line)
-                  if 'P' in fields:
-                      entries[fields['P']] = fields['V']
-              return entries
-          before = installed(root / 'base-installed.txt')
-          after = installed(root / 'final-installed.txt')
-          (root / 'changed-packages.txt').write_text(''.join(name + '=' + version + '\n' for name, version in sorted(after.items()) if before.get(name) != version))
-          PYCODE
-          docker run --rm --platform '${{ matrix.platform }}' -v "$PWD/inventory:/out" "$BUILD_IMAGE" sh -ec '
-            apk update
-            while IFS= read -r spec; do
-              name="${spec%%=*}"
-              version="${spec#*=}"
-              apk fetch --output /out/packages "$name"
-              test -f "/out/packages/$name-$version.apk"
-              apk fetch --url "$name" >> /out/package-urls.txt
-            done < /out/changed-packages.txt
-          '
-          docker run --rm --platform '${{ matrix.platform }}' -v "$PWD/inventory:/out" "$BUILD_IMAGE" sh -ec '
-            apk add --no-network /out/packages/*.apk
-            apk info -vv | sort > /out/verified-packages.txt
-          '
-          cmp inventory/final-packages.txt inventory/verified-packages.txt
-          python3 - <<'PYCODE'
-          import hashlib, json, pathlib, urllib.parse
-          root = pathlib.Path('inventory')
-          urls = {pathlib.PurePosixPath(urllib.parse.urlparse(url.strip()).path).name: url.strip() for url in (root / 'package-urls.txt').read_text().splitlines() if url.startswith('https://')}
-          specs = dict(line.split('=', 1) for line in (root / 'changed-packages.txt').read_text().splitlines())
-          packages = []
-          for name, version in sorted(specs.items()):
-              path = root / 'packages' / f'{name}-{version}.apk'
-              with path.open('rb') as stream:
-                  digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-              packages.append({'name': name, 'version': version, 'url': urls[path.name], 'sha256': digest, 'size': path.stat().st_size})
-          assert packages and len(packages) == len(urls)
-          (root / 'apk-lock.json').write_text(json.dumps({'schema': 1, 'architecture': '${{ matrix.arch }}', 'image': 'rust:1.97-alpine3.22@sha256:df4efa4e0cdfb5245fa06e3f431387b2bcc96782ce5681b7fb6b0297d745bc29', 'packages': packages}, indent=2) + '\n')
-          print(f'Verified {len(packages)} packages and identical offline installation')
+          ${{ runner.os == 'Windows' && 'python' || 'python3' }} - <<'PYCODE'
+          import hashlib, json, os, pathlib, subprocess, tarfile, urllib.request
+          target = os.environ['CARGO_TARGET']
+          name = f'cargo-1.97.1-{target}'
+          url = f'https://static.rust-lang.org/dist/2026-07-16/{name}.tar.xz'
+          data = urllib.request.urlopen(url, timeout=120).read()
+          assert hashlib.sha256(data).hexdigest() == os.environ['CARGO_SHA256']
+          archive = pathlib.Path(name + '.tar.xz')
+          archive.write_bytes(data)
+          with tarfile.open(archive) as package:
+              package.extractall('probe', filter='data')
+          binary = pathlib.Path('probe') / name / 'cargo/bin' / ('cargo.exe' if os.name == 'nt' else 'cargo')
+          output = subprocess.check_output([str(binary.resolve()), '--version'], text=True).strip()
+          receipt = {'target': target, 'url': url, 'sha256': os.environ['CARGO_SHA256'], 'version': output}
+          pathlib.Path('cargo-version.json').write_text(json.dumps(receipt, indent=2))
+          print(json.dumps(receipt))
           PYCODE
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: prebuilt-inputs-${{ matrix.arch }}
-          path: |
-            inventory/*.json
-            inventory/*.txt
-          if-no-files-found: error
+          name: cargo-version-${{ matrix.target }}
+          path: cargo-version.json
