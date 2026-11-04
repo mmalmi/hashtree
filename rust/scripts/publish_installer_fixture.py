@@ -142,11 +142,11 @@ def main():
     try:
         with tempfile.TemporaryDirectory(prefix="hashtree-installer-identity-", dir=os.environ["RUNNER_TEMP"]) as scratch:
             work = Path(scratch)
-            home, config, data, repository = [work / name for name in ("home", "config", "data", "repo")]
-            for directory in (home, config, data, repository):
+            config, data, repository = [work / name for name in ("config", "data", "repo")]
+            for directory in (config, data, repository):
                 directory.mkdir(mode=0o700)
             environment = {"PATH": str(args.bin_dir) + ":/usr/local/bin:/usr/bin:/bin",
-                           "HOME": str(home), "TMPDIR": str(work), "LANG": "C.UTF-8",
+                           "TMPDIR": str(work), "LANG": "C.UTF-8",
                            "HTREE_CONFIG_DIR": str(config), "HTREE_DATA_DIR": str(data),
                            "NOSTR_RELAYS": ",".join(RELAYS), "NOSTR_PREFER_LOCAL": "0",
                            "HTREE_PREFER_LOCAL_DAEMON": "0", "RUST_LOG": "warn",

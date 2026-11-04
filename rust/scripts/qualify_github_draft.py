@@ -127,17 +127,18 @@ def linux_draft_install(assets, working):
             (extracted / name).write_bytes(archive.extractfile(matches[0]).read())
             (extracted / name).chmod(0o755)
     before = {name: digest(extracted / name) for name in names}
-    config, data, home = working / "config", working / "data", working / "home"
-    for directory in (config, data, home):
+    config, data = working / "config", working / "data"
+    for directory in (config, data):
         directory.mkdir()
     (config / "config.toml").write_text(
         "[updater]\nauto_check = false\n[nostr]\nenabled = false\nrelays = []\n"
         "[server]\nenable_fips = false\nenable_fips_lan_discovery = false\n"
     )
     # The draft executables receive an isolated environment without Actions/GitHub credentials.
-    environment = {"PATH": str(installed) + ":/usr/bin:/bin", "HOME": str(home), "TMPDIR": str(working),
+    environment = {"PATH": str(installed) + ":/usr/bin:/bin", "TMPDIR": str(working),
                    "LANG": "C.UTF-8", "HTREE_CONFIG_DIR": str(config), "HTREE_DATA_DIR": str(data),
-                   "NOSTR_RELAYS": "", "NOSTR_PREFER_LOCAL": "0", "RUST_LOG": "warn"}
+                   "NOSTR_RELAYS": "", "NOSTR_PREFER_LOCAL": "0", "RUST_LOG": "warn",
+                   "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": "/dev/null"}
     command(["bash", "install.sh", str(installed)], cwd=extracted, env=environment, timeout=60)
     require({name: digest(installed / name) for name in names} == before, "Installed draft bytes changed")
     htree, cashu, helper = [str(installed / name) for name in names]
