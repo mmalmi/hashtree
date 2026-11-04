@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath
 import platform
 import re
 import subprocess
+import sys
 import tarfile
 import tempfile
 from urllib.parse import urlparse
@@ -16,9 +17,14 @@ from urllib.request import urlopen
 
 
 def run(arguments, **kwargs):
-    return subprocess.run(
-        arguments, check=True, text=True, capture_output=True, **kwargs
-    ).stdout.strip()
+    try:
+        return subprocess.run(
+            arguments, check=True, text=True, capture_output=True, **kwargs
+        ).stdout.strip()
+    except subprocess.CalledProcessError as error:
+        if error.stderr:
+            print(error.stderr, end="", file=sys.stderr)
+        raise
 
 
 def require(condition, message):
@@ -130,11 +136,11 @@ def configure_windows(sdk):
             "The exact Windows SDK is unavailable")
     script = visual_studio / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
     require('"' not in str(script), "Unexpected compiler setup path")
-    command = (f'call "{script}" amd64 {sdk["windows_sdk_version"]} '
-               f'-vcvars_ver={sdk["msvc_tools_version"]} >nul && set')
-    configured = dict(line.split("=", 1) for line in run(
-        ["cmd.exe", "/d", "/s", "/c", command]
-    ).splitlines() if "=" in line and not line.startswith("="))
+    # A raw Windows command line keeps batch-path quotes out of list2cmdline.
+    command = (f'cmd.exe /d /s /c "call "{script}" amd64 {sdk["windows_sdk_version"]} '
+               f'-vcvars_ver={sdk["msvc_tools_version"]} >nul && set"')
+    configured = dict(line.split("=", 1) for line in run(command).splitlines()
+                      if "=" in line and not line.startswith("="))
     by_name = {key.upper(): value for key, value in configured.items()}
     require(by_name.get("VCTOOLSVERSION", "").rstrip("\\/") == sdk["msvc_tools_version"],
             "vcvarsall selected a different MSVC toolset")

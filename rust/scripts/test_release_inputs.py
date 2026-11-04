@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import tarfile
 import tempfile
 import unittest
@@ -60,6 +61,28 @@ class ReleaseInputsTests(unittest.TestCase):
                 contextlib.redirect_stdout(io.StringIO()):
             release_inputs.install_native(lock, host, host)
         self.assertIn("HASHTREE_PINNED_TOOLCHAIN=1", (self.root / "env").read_text())
+
+    def test_failed_command_prints_only_captured_stderr(self):
+        error = subprocess.CalledProcessError(
+            1, "cmd.exe", output="PRIVATE_ENVIRONMENT=value\n", stderr="compiler setup failed\n"
+        )
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(release_inputs.subprocess, "run", side_effect=error), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            with self.assertRaises(subprocess.CalledProcessError) as raised:
+                release_inputs.run("cmd.exe")
+        self.assertIs(raised.exception, error)
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "compiler setup failed\n")
+
+    def test_successful_command_keeps_captured_output_quiet(self):
+        result = subprocess.CompletedProcess("fixture", 0, stdout=" result\n", stderr="quiet warning\n")
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(release_inputs.subprocess, "run", return_value=result), \
+                contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            self.assertEqual(release_inputs.run("fixture"), "result")
+        self.assertEqual(stdout.getvalue(), "")
+        self.assertEqual(stderr.getvalue(), "")
 
     def test_verified_archive_reaches_installer(self):
         data = archive_bytes([(ROOT + "/install.sh", "file", "#!/bin/sh\nexit 0\n")])
@@ -186,11 +209,12 @@ class WindowsEnvironmentProfileTests(unittest.TestCase):
                                 visual_studio_version="17.14.37827.9")
         self.sdk = {"profiles": [self.old_profile, self.new_profile]}
 
-    def configure(self, expected, sdk=None, visual_studio=None, msvc=None, windows_sdk=None):
+    def configure(self, expected, sdk=None, visual_studio=None, msvc=None, windows_sdk=None,
+                  installation_path="/fixture/visual-studio"):
         environment = {"ImageVersion": expected["image_version"],
                        "ProgramFiles(x86)": "/fixture/program-files", "PATH": "/fixture/original"}
         installations = json.dumps([{
-            "installationPath": "/fixture/visual-studio",
+            "installationPath": installation_path,
             "installationVersion": visual_studio or expected["visual_studio_version"],
         }])
         compiler = "\n".join([
@@ -211,10 +235,23 @@ class WindowsEnvironmentProfileTests(unittest.TestCase):
         for profile in self.sdk["profiles"]:
             with self.subTest(image=profile["image_version"]):
                 execute, export = self.configure(profile)
-                command = execute.call_args.args[0][-1]
+                command = execute.call_args.args[0]
                 self.assertIn("-vcvars_ver=" + profile["msvc_tools_version"], command)
                 self.assertIn(profile["windows_sdk_version"], command)
                 self.assertEqual(export.call_args.args[0]["VCTOOLSVERSION"], profile["msvc_tools_version"])
+
+    def test_batch_path_quotes_reach_cmd_without_list_escaping(self):
+        installation = r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
+        execute, _ = self.configure(self.new_profile, installation_path=installation)
+        command = execute.call_args.args[0]
+        script = Path(installation) / "VC" / "Auxiliary" / "Build" / "vcvarsall.bat"
+        self.assertIsInstance(command, str)
+        self.assertEqual(
+            command,
+            f'cmd.exe /d /s /c "call "{script}" amd64 10.0.26100.0 '
+            '-vcvars_ver=14.44.35207 >nul && set"',
+        )
+        self.assertNotIn('\\"', command)
 
     def test_previous_single_profile_format_still_works(self):
         execute, _ = self.configure(self.old_profile, sdk=self.old_profile)
