@@ -1,0 +1,69 @@
+name: Directory Upload Sizes
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, codex/upload-directory-sizes]
+    paths:
+      - '.github/workflows/directory-upload-sizes.yml'
+      - 'rust/crates/hashtree-cli/src/storage/**'
+      - 'rust/crates/hashtree-cli/tests/directory_upload_sizes.rs'
+      - 'rust/crates/hashtree-cli/tests/add_packed_git.rs'
+      - 'rust/scripts/check_directory_upload_sizes.py'
+
+permissions:
+  contents: read
+
+jobs:
+  regression:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/rust/target
+      RUSTC_WRAPPER: ''
+      RUSTC_WORKSPACE_WRAPPER: ''
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+      - name: Install Linux test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.97.1
+      - name: Record source and toolchain
+        run: |
+          mkdir -p "$RUNNER_TEMP/upload-size-logs"
+          git rev-parse HEAD > "$RUNNER_TEMP/upload-size-logs/source.txt"
+          rustc -Vv > "$RUNNER_TEMP/upload-size-logs/toolchain.txt"
+          cargo -V >> "$RUNNER_TEMP/upload-size-logs/toolchain.txt"
+          dpkg-query -W > "$RUNNER_TEMP/upload-size-logs/system-packages.txt"
+          df -Pk .
+      - name: Verify regressions fail on the accepted public baseline
+        if: github.ref == 'refs/heads/codex/upload-directory-sizes'
+        working-directory: rust
+        run: |
+          set -euo pipefail
+          files=(crates/hashtree-cli/src/storage/upload.rs crates/hashtree-cli/src/storage/add_cache.rs)
+          trap 'git restore --source="$GITHUB_SHA" -- "${files[@]}"' EXIT
+          for file in "${files[@]}"; do
+            git show "f19cb5d0cf78e61533cd086f29ba83d7f0193b27:rust/$file" > "$file"
+          done
+          python3 scripts/check_directory_upload_sizes.py --expect-failure --logs "$RUNNER_TEMP/upload-size-logs/baseline"
+      - name: Verify corrected uploads and ordinary packed Git clone
+        working-directory: rust
+        run: |
+          python3 scripts/check_directory_upload_sizes.py --logs "$RUNNER_TEMP/upload-size-logs/candidate"
+          git diff --exit-code
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: directory-upload-size-evidence
+          path: ${{ runner.temp }}/upload-size-logs
+          if-no-files-found: error

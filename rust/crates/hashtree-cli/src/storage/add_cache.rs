@@ -34,8 +34,8 @@ mod tests {
         let mut cache = DirectoryCache::open(tree, source, store, true, cache).await?;
         let mut entries = Vec::new();
         for name in ["old", "new"] {
-            let cid = cache.file(tree, Path::new(name), Some(&progress)).await?;
-            entries.push(DirEntry::from_cid(name, &cid));
+            let (cid, size) = cache.file(tree, Path::new(name), Some(&progress)).await?;
+            entries.push(DirEntry::from_cid(name, &cid).with_size(size));
         }
         let root = tree.put_directory(entries).await?;
         cache.save(&root)?;
@@ -353,7 +353,7 @@ impl DirectoryCache {
         tree: &HashTree<S>,
         relative: &Path,
         progress: Option<&super::AddProgress>,
-    ) -> Result<Cid> {
+    ) -> Result<(Cid, u64)> {
         let file = self.open_file(relative)?;
         let stamp = Stamp::of(&file.metadata()?)?;
         if let Some(progress) = progress {
@@ -369,11 +369,11 @@ impl DirectoryCache {
             Some(cid) if tree.get_store().has(&cid.hash).await? => Some(cid),
             _ => None,
         };
-        let cid = if let Some(cid) = cached {
-            cid
+        let (cid, size) = if let Some(cid) = cached {
+            (cid, stamp.size)
         } else {
             let check = file.try_clone()?;
-            let (cid, _) = tree
+            let (cid, size) = tree
                 .put_stream_with_progress(futures::io::AllowStdIo::new(file), |bytes| {
                     if let Some(progress) = progress {
                         progress.record_bytes(bytes);
@@ -384,7 +384,7 @@ impl DirectoryCache {
                 stamp == Stamp::of(&check.metadata()?)?,
                 "source changed during cached add"
             );
-            cid
+            (cid, size)
         };
         ensure!(
             stamp == Stamp::of(&self.open_file(relative)?.metadata()?)?,
@@ -400,7 +400,7 @@ impl DirectoryCache {
         if let Some(progress) = progress {
             progress.record_file_finished();
         }
-        Ok(cid)
+        Ok((cid, size))
     }
 
     pub(super) fn save(mut self, root: &Cid) -> Result<()> {
