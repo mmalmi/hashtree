@@ -18,16 +18,18 @@ function observe(relay) {
     const socket = new WebSocket(relay);
     const timer = setTimeout(() => reject(new Error('Public root observation timed out')), 45000);
     sessions.push({ socket, id, timer });
-    socket.addEventListener('open', () => socket.send(JSON.stringify([
-      'REQ', id, { kinds: [30064], authors: [author], '#d': [repository], limit: 10 },
-    ])));
-    socket.addEventListener('error', () => reject(new Error('Public relay transport failed')));
+    socket.addEventListener('open', () => {
+      console.log(JSON.stringify({relay, phase: 'open'}));
+      socket.send(JSON.stringify(['REQ', id, { kinds: [30064], authors: [author], '#d': [repository], limit: 10 }]));
+    });
+    socket.addEventListener('error', () => { console.log(JSON.stringify({relay, phase: 'error'})); reject(new Error('Public relay transport failed')); });
     socket.addEventListener('close', () => reject(new Error('Public relay closed before root observation')));
     socket.addEventListener('message', ({ data }) => {
       // EOSE is not evidence of absence: keep the subscription open for a live root.
       if (typeof data !== 'string' || data.length > 65536) return;
       try {
         const message = JSON.parse(data);
+        if (message[0] === 'EOSE' && message[1] === id) console.log(JSON.stringify({relay, phase: 'eose'}));
         if (message[0] !== 'EVENT' || message[1] !== id) return;
         const event = message[2];
         if (event.kind !== 30064 || event.pubkey !== author || !Array.isArray(event.tags)
@@ -41,6 +43,7 @@ function observe(relay) {
             || !/^01[0-9a-f]{64}$/.test(tag('key') ?? '') || !/^[0-9a-f]{128}$/.test(event.sig ?? '')) return;
         const canonical = JSON.stringify([0, author, event.created_at, event.kind, event.tags, event.content]);
         if (event.id !== createHash('sha256').update(canonical).digest('hex')) return;
+        console.log(JSON.stringify({relay, phase: 'accepted'}));
         resolve(event);
       } catch { /* Malformed events are not accepted, and do not terminate the subscription. */ }
     });

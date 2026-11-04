@@ -41,7 +41,7 @@ def sha256(path):
         return hashlib.file_digest(source, "sha256").hexdigest()
 
 
-def run(stage, args, *, env, cwd=None, data=None, timeout=60):
+def run(stage, args, *, env, cwd=None, data=None, timeout=60, evidence=None):
     child = subprocess.Popen(args, env=env, cwd=cwd, stdin=subprocess.PIPE,
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              start_new_session=True)
@@ -56,6 +56,28 @@ def run(stage, args, *, env, cwd=None, data=None, timeout=60):
             os.killpg(child.pid, signal.SIGKILL)
             child.communicate()
         raise RuntimeError(stage + " timed out; publication state may be indeterminate") from None
+    if evidence is not None:
+        details = {"stage": stage, "exit": child.returncode}
+        if stage == "Fixture publication":
+            text = stderr.decode("utf-8", errors="replace")
+            published = re.findall(r"Published to: (htree://npub1[a-z0-9]+/hashtree-installer-fixture-[0-9a-f]{16})", text)
+            details["reportedRemoteMatches"] = published == [evidence["publicRemote"]]
+            for label in ("Relays", "Relays failed", "Blossom", "Blossom failed"):
+                lines = re.findall(r"^\s*" + re.escape(label) + r": (.+)$", text, re.MULTILINE)
+                allowed = set(RELAYS + READ_SERVERS)
+                details[label] = sorted({url.strip() for line in lines for url in line.split(",")
+                                         if url.strip() in allowed})
+        elif stage == "Public root readback":
+            observations = []
+            for line in stdout.decode("utf-8", errors="replace").splitlines():
+                try:
+                    item = json.loads(line)
+                except ValueError:
+                    continue
+                if item.get("relay") in RELAYS and item.get("phase") in ("open", "eose", "error", "closed", "accepted"):
+                    observations.append({key: item[key] for key in ("relay", "phase")})
+            details["observations"] = observations[:30]
+        evidence.setdefault("transportEvidence", []).append(details)
     if child.returncode:
         # Do not copy tool logs, process environment, local paths or identity data
         # into the public receipt. HTTP status classes can identify write refusal.
@@ -200,12 +222,12 @@ def main():
             save()  # A public recovery address survives a publication/readback timeout.
             run("Fixture publication", [git, "push", "htree://self/" + name,
                                          "refs/heads/main:refs/heads/main"],
-                env=environment, cwd=repository, timeout=600)
+                env=environment, cwd=repository, timeout=600, evidence=public_receipt)
             public_receipt["status"] = "push_completed_readback_pending"
             save()
             event_path = args.output_dir / "root-event.json"
             run("Public root readback", [node, str(args.event_reader), pubkey, name, str(event_path)],
-                env=environment, timeout=65)
+                env=environment, timeout=65, evidence=public_receipt)
             event = json.loads(event_path.read_text())
             tag = lambda key: next(item[1] for item in event["tags"] if item[0] == key)
             public_receipt.update(status="published_envelope_observed", eventId=event["id"],
