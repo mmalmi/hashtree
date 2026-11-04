@@ -1,45 +1,36 @@
-name: Publish qualified Hashtree installer fixture
+name: Diagnose published installer fixture lookup
 on:
   workflow_dispatch:
 permissions:
-  contents: write # Draft reads require push access; this workflow only performs authenticated GETs.
+  contents: read
   actions: read
 jobs:
-  fixture:
+  diagnose:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
-      - name: Checkout the public fixture recipe
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
           sparse-checkout-cone-mode: false
           sparse-checkout: |
             rust/scripts/reuse_qualified_fixture_input.py
-            rust/scripts/publish_installer_fixture.py
-            rust/scripts/read_fixture_root.mjs
-      - name: Retrieve already qualified immutable input bytes
+            rust/scripts/diagnose_installer_fixture.py
+      - name: Retrieve already qualified public input bytes
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 rust/scripts/reuse_qualified_fixture_input.py
-      - name: Publish isolated public installer fixture
+      - name: Diagnose existing address without a signing identity
         env:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
-        run: |
-          python3 rust/scripts/publish_installer_fixture.py \
-            --qualification-receipt "$RUNNER_TEMP/draft-qualification/receipt.json" \
-            --bin-dir "$RUNNER_TEMP/draft-qualification/linux-install/installed" \
-            --event-reader "$GITHUB_WORKSPACE/rust/scripts/read_fixture_root.mjs" \
-            --output-dir "$RUNNER_TEMP/installer-fixture-public"
-      - name: Retain public fixture handoff
+        run: python3 rust/scripts/diagnose_installer_fixture.py
+      - name: Retain redacted diagnosis
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: installer-fixture-public
-          path: |
-            ${{ runner.temp }}/installer-fixture-public/fixture.json
-            ${{ runner.temp }}/installer-fixture-public/root-event.json
-          if-no-files-found: warn
+          name: fixture-readonly-diagnosis
+          path: ${{ runner.temp }}/fixture-readonly-diagnosis.json
+          if-no-files-found: error
           retention-days: 14
