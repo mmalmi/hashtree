@@ -1,588 +1,121 @@
-name: Release
-
+name: Prebuilt input inventory
 on:
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to release (e.g. v0.2.3)'
-        required: true
-      library_preparation:
-        description: 'Verify a library-prep-v* tag without creating a product release'
-        type: boolean
-        default: false
-
-env:
-  CARGO_TERM_COLOR: always
-  RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-
+  push:
+    branches: [codex/prebuilt-input-inventory-031]
+permissions:
+  contents: read
 jobs:
-  source-ci:
-    name: Source CI Evidence
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-      contents: read
-    outputs:
-      sha: ${{ steps.commit.outputs.sha }}
-      reuse: ${{ steps.evidence.outputs.reuse }}
-    steps:
-      - name: Validate release mode
-        shell: bash
-        env:
-          LIBRARY_PREPARATION: ${{ inputs.library_preparation }}
-        run: |
-          set -euo pipefail
-          if [[ "$LIBRARY_PREPARATION" == true ]]; then
-            pattern='^library-prep-v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
-          elif [[ "$LIBRARY_PREPARATION" == false ]]; then
-            pattern='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'
-          else
-            exit 1
-          fi
-          [[ "$RELEASE_TAG" =~ $pattern ]] || { echo 'Release tag does not match the selected mode' >&2; exit 1; }
-
-      - name: Checkout release tag
-        uses: actions/checkout@v4
-        with:
-          ref: refs/tags/${{ github.event.inputs.tag }}
-
-      - name: Resolve release commit
-        id: commit
-        run: echo "sha=$(git rev-parse 'HEAD^{commit}')" >> "${GITHUB_OUTPUT}"
-
-      - name: Check successful source CI
-        id: evidence
-        uses: actions/github-script@v7
-        env:
-          RELEASE_SHA: ${{ steps.commit.outputs.sha }}
-        with:
-          script: |
-            core.setOutput('reuse', 'false');
-            try {
-              const { findReusableCiRun } = await import(`${process.env.GITHUB_WORKSPACE}/rust/scripts/release_ci_evidence.mjs`);
-              const run = await findReusableCiRun({
-                github,
-                repository: `${context.repo.owner}/${context.repo.repo}`,
-                sha: process.env.RELEASE_SHA,
-              });
-              if (run) {
-                core.setOutput('reuse', 'true');
-                core.notice(`Reusing successful source CI: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${run.id} (attempt ${run.run_attempt})`);
-              } else {
-                core.notice('No complete matching source CI evidence; running all release source gates.');
-              }
-            } catch (error) {
-              core.setOutput('reuse', 'false');
-              core.warning(`Source CI evidence unavailable; running all release source gates: ${error.message}`);
-            }
-
-  mesh-resource:
-    name: Relayless recovery and resource budgets
-    if: ${{ !inputs.library_preparation }}
-    needs: source-ci
-    uses: irislib/iris-stack/.github/workflows/product-lab.yml@cec9501659b9cf08f9600e3f14987cad6ca1e7d3
-    with:
-      lab_rev: cec9501659b9cf08f9600e3f14987cad6ca1e7d3
-      htree_rev: ${{ needs.source-ci.outputs.sha }}
-      chat_rev: 2270f5778fecf1e2eea7d47a4c382aacad63d551
-      drive_rev: 7cb74966ddaecf90fb91b8f36a44ecc4bbda7b02
-
-  gate-static:
-    needs: source-ci
-    if: needs.source-ci.outputs.reuse != 'true'
-    name: Static Release Gate
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.source-ci.outputs.sha }}
-
-      - name: Run static release gate
-        run: bash scripts/release-gate.sh --lane static
-
-  gate-typescript:
-    needs: source-ci
-    if: needs.source-ci.outputs.reuse != 'true'
-    name: TypeScript Release Gate
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.source-ci.outputs.sha }}
-
-      - name: Install FIPS transport system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libdbus-1-dev \
-            pkg-config
-
-      - name: Setup Rust for TCP blob interoperability
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          package_json_file: ts/package.json
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: ts/pnpm-lock.yaml
-
-      - name: Cache Rust interoperability fixture
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            rust/target/
-          key: ${{ runner.os }}-cargo-typescript-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-typescript-
-
-      - name: Run TypeScript release gate
-        run: bash scripts/release-gate.sh --lane typescript
-
-  gate-rust:
-    needs: source-ci
-    if: needs.source-ci.outputs.reuse != 'true'
-    name: Rust Release Gate
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.source-ci.outputs.sha }}
-
-      - name: Reclaim runner disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          sudo docker image prune -af || true
-          df -h /
-
-      - name: Install Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            fuse3 \
-            libdbus-1-dev \
-            libfuse3-dev \
-            pkg-config
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            rust/target/
-          key: ${{ runner.os }}-cargo-gate-rust-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-gate-rust-
-            ${{ runner.os }}-cargo-
-
-      - name: Run default-feature Rust release gate
-        run: bash scripts/release-gate.sh --lane rust
-
-      - name: Compile the locked publishable CLI package
-        working-directory: rust
-        run: |
-          cargo package --locked -p hashtree-nostr
-          cargo package --locked -p hashtree-cli
-
-      - name: Preserve the verified package
-        uses: actions/upload-artifact@v4
-        with:
-          name: verified-cli-package
-          path: rust/target/package/hashtree-cli-*.crate
-          if-no-files-found: error
-
-  gate-rust-peripheral:
-    needs: source-ci
-    if: needs.source-ci.outputs.reuse != 'true'
-    name: Peripheral Rust Release Gate
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.source-ci.outputs.sha }}
-
-      - name: Reclaim runner disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          sudo docker image prune -af || true
-          df -h /
-
-      - name: Install peripheral system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libayatana-appindicator3-dev \
-            libdbus-1-dev \
-            libgtk-3-dev \
-            librsvg2-dev \
-            libwebkit2gtk-4.1-dev \
-            patchelf \
-            pkg-config
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            rust/target/
-          key: ${{ runner.os }}-cargo-gate-peripheral-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-gate-peripheral-
-            ${{ runner.os }}-cargo-
-
-      - name: Run peripheral Rust release gate
-        run: bash scripts/release-gate.sh --lane rust-peripheral
-
-  gate-fips:
-    needs: source-ci
-    if: needs.source-ci.outputs.reuse != 'true'
-    name: FIPS WebRTC Release Gate
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.source-ci.outputs.sha }}
-
-      - name: Reclaim runner disk space
-        run: |
-          df -h /
-          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache/CodeQL
-          sudo docker image prune -af || true
-          df -h /
-
-      - name: Install FIPS system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libdbus-1-dev \
-            pkg-config
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install cargo-nextest
-        uses: taiki-e/install-action@nextest
-
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            rust/target/
-          key: ${{ runner.os }}-cargo-gate-fips-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-gate-fips-
-            ${{ runner.os }}-cargo-
-
-      - name: Run isolated FIPS WebRTC release gate
-        run: bash scripts/release-gate.sh --lane fips
-
-  pool-migration-systemd:
-    needs: source-ci
-    if: needs.source-ci.outputs.reuse != 'true'
-    name: Pool Migration Systemd Release Gate
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.source-ci.outputs.sha }}
-
-      - name: Install Linux system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libdbus-1-dev \
-            libfuse3-dev \
-            pkg-config
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            rust/target/
-          key: ${{ runner.os }}-cargo-pool-migration-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-pool-migration-
-            ${{ runner.os }}-cargo-
-
-      - name: Run Pool migration systemd release gate
-        run: bash scripts/release-gate.sh --lane pool-migration-systemd
-
-  build:
-    name: Build ${{ matrix.target }}
-    # Skipped source gates are allowed only with complete CI evidence.
-    if: >-
-      ${{ always() && !cancelled() && needs['source-ci'].result == 'success' &&
-          (needs['source-ci'].outputs.reuse == 'true' ||
-           (needs['gate-static'].result == 'success' && needs['gate-typescript'].result == 'success' &&
-            needs['gate-rust'].result == 'success' && needs['gate-rust-peripheral'].result == 'success' &&
-            needs['gate-fips'].result == 'success' && needs['pool-migration-systemd'].result == 'success')) }}
-    needs:
-      - source-ci
-      - gate-static
-      - gate-typescript
-      - gate-rust
-      - gate-rust-peripheral
-      - gate-fips
-      - pool-migration-systemd
-    runs-on: ${{ matrix.os }}
+  linux:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
-            os: ubuntu-latest
-            linux_docker: true
-          - target: aarch64-unknown-linux-musl
-            os: ubuntu-24.04-arm
-            linux_docker: true
-          - target: x86_64-apple-darwin
-            os: macos-14
-            linux_docker: false
-          - target: aarch64-apple-darwin
-            os: macos-14
-            linux_docker: false
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            linux_docker: false
-    defaults:
-      run:
-        working-directory: rust
+          - os: ubuntu-24.04
+            arch: x86_64
+            platform: linux/amd64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            platform: linux/arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Resolve and verify immutable package inputs
+        env:
+          BUILD_IMAGE: rust:1.97-alpine3.22@sha256:df4efa4e0cdfb5245fa06e3f431387b2bcc96782ce5681b7fb6b0297d745bc29
+        run: |
+          set -euo pipefail
+          test "$(df -B1 --output=avail / | tail -1)" -gt 15000000000
+          mkdir -p inventory/packages
+          chmod 777 inventory inventory/packages
+          docker pull --platform '${{ matrix.platform }}' "$BUILD_IMAGE"
+          docker run --rm --platform '${{ matrix.platform }}' -v "$PWD/inventory:/out" "$BUILD_IMAGE" sh -ec '
+            rustc --version > /out/rust-version.txt
+            apk info -vv | sort > /out/base-packages.txt
+            cp /lib/apk/db/installed /out/base-installed.txt
+            apk update
+            apk add build-base clang clang-dev lld musl-dev linux-headers pkgconf cmake perl git
+            apk info -vv | sort > /out/final-packages.txt
+            cp /lib/apk/db/installed /out/final-installed.txt
+          '
+          python3 - <<'PYCODE'
+          import pathlib
+          root = pathlib.Path('inventory')
+          def installed(path):
+              entries = {}
+              for block in path.read_text().split('\n\n'):
+                  fields = dict(line.split(':', 1) for line in block.splitlines() if ':' in line)
+                  if 'P' in fields:
+                      entries[fields['P']] = fields['V']
+              return entries
+          before = installed(root / 'base-installed.txt')
+          after = installed(root / 'final-installed.txt')
+          (root / 'changed-packages.txt').write_text(''.join(name + '=' + version + '\n' for name, version in sorted(after.items()) if before.get(name) != version))
+          PYCODE
+          docker run --rm --platform '${{ matrix.platform }}' -v "$PWD/inventory:/out" "$BUILD_IMAGE" sh -ec '
+            apk update
+            while IFS= read -r spec; do
+              apk fetch --output /out/packages "$spec"
+              apk fetch --url "$spec" >> /out/package-urls.txt
+            done < /out/changed-packages.txt
+          '
+          docker run --rm --platform '${{ matrix.platform }}' -v "$PWD/inventory:/out" "$BUILD_IMAGE" sh -ec '
+            apk add --no-network /out/packages/*.apk
+            apk info -vv | sort > /out/verified-packages.txt
+          '
+          cmp inventory/final-packages.txt inventory/verified-packages.txt
+          python3 - <<'PYCODE'
+          import hashlib, json, pathlib, urllib.parse
+          root = pathlib.Path('inventory')
+          urls = {pathlib.PurePosixPath(urllib.parse.urlparse(url.strip()).path).name: url.strip() for url in (root / 'package-urls.txt').read_text().splitlines() if url.startswith('https://')}
+          specs = dict(line.split('=', 1) for line in (root / 'changed-packages.txt').read_text().splitlines())
+          packages = []
+          for name, version in sorted(specs.items()):
+              path = root / 'packages' / f'{name}-{version}.apk'
+              with path.open('rb') as stream:
+                  digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+              packages.append({'name': name, 'version': version, 'url': urls[path.name], 'sha256': digest, 'size': path.stat().st_size})
+          assert packages and len(packages) == len(urls)
+          (root / 'apk-lock.json').write_text(json.dumps({'schema': 1, 'architecture': '${{ matrix.arch }}', 'image': 'rust:1.97-alpine3.22@sha256:df4efa4e0cdfb5245fa06e3f431387b2bcc96782ce5681b7fb6b0297d745bc29', 'packages': packages}, indent=2) + '\n')
+          print(f'Verified {len(packages)} packages and identical offline installation')
+          PYCODE
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          ref: ${{ needs.source-ci.outputs.sha }}
-
-      - name: Setup Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v4
-        with:
+          name: prebuilt-inputs-${{ matrix.arch }}
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            rust/target/
-            rust/target-release/
-          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.target }}-cargo-
-
-      - name: Build and Package (Unix)
-        if: runner.os != 'Windows'
-        run: |
-          # Linux release builds use Docker-native musl containers so the
-          # published binaries are built in a predictable target environment.
-          if [ "${{ matrix.linux_docker }}" = "true" ]; then
-            bash scripts/build_release_artifacts.sh \
-              --version "${RELEASE_TAG}" \
-              --targets "${{ matrix.target }}" \
-              --output-dir dist/release-artifacts \
-              --target-dir target-release \
-              --linux-builder docker
-          else
-            bash scripts/build_release_artifacts.sh \
-              --version "${RELEASE_TAG}" \
-              --targets "${{ matrix.target }}" \
-              --output-dir dist/release-artifacts \
-              --target-dir target-release
-          fi
-          bash scripts/smoke_release_webrtc_unix.sh \
-            "dist/release-artifacts/hashtree-${{ matrix.target }}.tar.gz"
-
-      - name: Build release binaries (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          cargo build --release --locked --target ${{ matrix.target }} `
-            -p git-remote-htree `
-            -p hashtree-cashu-cli `
-            -p hashtree-cli `
-            --features hashtree-cli/fips-webrtc
-
-      - name: Package (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path dist/release-artifacts/hashtree
-          Copy-Item target/${{ matrix.target }}/release/git-remote-htree.exe dist/release-artifacts/hashtree/
-          Copy-Item target/${{ matrix.target }}/release/htree-cashu.exe dist/release-artifacts/hashtree/
-          Copy-Item target/${{ matrix.target }}/release/htree.exe dist/release-artifacts/hashtree/
-
-          @"
-          hashtree - Git over Nostr via Merkle trees
-          ==========================================
-
-          Binaries included:
-            htree.exe             - CLI and daemon for hashtree operations
-            htree-cashu.exe       - Cashu wallet helper for htree cashu
-            git-remote-htree.exe  - Git remote helper for htree:// URLs
-
-          Install:
-            Copy all three .exe files to a directory in your PATH, e.g.:
-            C:\Users\<you>\AppData\Local\Microsoft\WindowsApps\
-
-          Usage:
-            htree add <file>                    # add file to hashtree
-            htree get <hash>                    # download by hash
-            htree start                         # start P2P daemon
-            htree cashu balance                 # inspect Cashu wallet
-            git clone htree://npub1.../repo     # clone git repo
-
-          More info: https://github.com/mmalmi/hashtree
-          "@ | Out-File -FilePath dist/release-artifacts/hashtree/README.txt -Encoding UTF8
-
-          Compress-Archive -Path dist/release-artifacts/hashtree -DestinationPath dist/release-artifacts/hashtree-${{ matrix.target }}.zip
-          Remove-Item -Recurse dist/release-artifacts/hashtree
-
-      - name: Smoke packaged WebRTC startup (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          ./scripts/smoke_release_webrtc_windows.ps1 -ArchivePath "dist/release-artifacts/hashtree-${{ matrix.target }}.zip"
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: hashtree-${{ matrix.target }}
-          path: rust/dist/release-artifacts/*
-          retention-days: 7
-
-  release:
-    name: Create Release
-    if: ${{ !inputs.library_preparation && !cancelled() && needs.source-ci.result == 'success' && needs.build.result == 'success' && needs.mesh-resource.result == 'success' }}
-    needs:
-      - source-ci
-      - build
-      - mesh-resource
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+            inventory/*.json
+            inventory/*.txt
+          if-no-files-found: error
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 5
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.source-ci.outputs.sha }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Resolve release commit
-        id: release_commit
-        shell: bash
+      - name: Record native SDK assumptions
         run: |
-          set -euo pipefail
-          git fetch --no-tags --depth=1 origin "refs/tags/${RELEASE_TAG}"
-          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$(git rev-parse HEAD)"
-          echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+          mkdir -p inventory
+          { uname -m; sw_vers; xcodebuild -version; xcrun --sdk macosx --show-sdk-version; printf '%s\n' "$ImageOS" "$ImageVersion"; ls -d /Applications/Xcode*.app; } > inventory/macos-sdk.txt
+          cat inventory/macos-sdk.txt
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          pattern: hashtree-*
-          path: artifacts/hashtree
-          merge-multiple: true
-
-      - name: List artifacts
-        shell: bash
-        run: find artifacts -maxdepth 2 -type f | sort
-
-      - name: Write release install bootstrap
-        shell: bash
+          name: prebuilt-inputs-macos
+          path: inventory/*.txt
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - name: Record native SDK assumptions
+        shell: pwsh
         run: |
-          set -euo pipefail
-          bash rust/scripts/write_release_bootstrap_installer.sh \
-            --path artifacts/hashtree/install.sh \
-            --base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}" \
-            --asset-base-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}"
-
-      - name: Prepare release assets and notes
-        id: release_assets
-        shell: bash
-        run: |
-          set -euo pipefail
-          shopt -s nullglob
-
-          files=()
-          for file in artifacts/hashtree/*; do
-            if [ -f "${file}" ] && [[ "${file}" != *.sha256 ]]; then
-              files+=("${file}")
-            fi
-          done
-
-          if [ "${#files[@]}" -eq 0 ]; then
-            echo "No release files found"
-            exit 1
-          fi
-
-          {
-            echo "files<<EOF"
-            printf '%s\n' "${files[@]}"
-            echo "EOF"
-          } >> "${GITHUB_OUTPUT}"
-
-          node scripts/render_repo_release_notes.mjs \
-            --tag "${{ github.event.inputs.tag || github.ref_name }}" \
-            --commit "${{ steps.release_commit.outputs.sha }}" \
-            --cli-dir artifacts/hashtree \
-            --changelog-file rust/CHANGELOG.md \
-            --output-file release-body.md \
-            --install-url "https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}/install.sh"
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+          New-Item -ItemType Directory inventory
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $installations = & $vswhere -format json | ConvertFrom-Json
+          $entries = foreach ($installation in $installations) {
+            @{ version = $installation.installationVersion; toolsets = @(Get-ChildItem "$($installation.installationPath)/VC/Tools/MSVC" | Select-Object -ExpandProperty Name) }
+          }
+          @{ imageOS = $env:ImageOS; imageVersion = $env:ImageVersion; visualStudio = @($entries); sdk = @(Get-ChildItem "${env:ProgramFiles(x86)}/Windows Kits/10/Lib" | Select-Object -ExpandProperty Name) } | ConvertTo-Json -Depth 5 | Set-Content inventory/windows-sdk.json
+          Get-Content inventory/windows-sdk.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: ${{ github.event.inputs.tag || github.ref_name }}
-          draft: true
-          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
-          files: ${{ steps.release_assets.outputs.files }}
-          body_path: release-body.md
+          name: prebuilt-inputs-windows
+          path: inventory/*.json
