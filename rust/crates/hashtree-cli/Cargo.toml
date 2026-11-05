@@ -129,6 +129,7 @@ experimental-decentralized-pubsub = []
 public-provider-stress = []
 
 [dev-dependencies]
+negentropy = "0.5.2"
 nvpn-fips-core = "=0.4.119"
 tempfile.workspace = true
 walkdir = "2"

@@ -3752,6 +3752,7 @@ dependencies = [
  "ignore",
  "libc",
  "lru 0.12.5",
+ "negentropy",
  "nostr",
  "nostr-pubsub",
  "nostr-pubsub-fips",
