@@ -169,6 +169,36 @@ describe('rootResolver capability', () => {
     expect([...new Set(socketSendMock.mock.calls.map(([relayUrl]) => relayUrl))]).toEqual(['wss://relay.only']);
   });
 
+  it('uses public defaults only when relay configuration is absent', async () => {
+    decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
+    for (const configured of [undefined, [], ['  '], ['wss://relay.only']]) {
+      socketPlanMock.mockClear();
+      socketSendMock.mockClear();
+      const resolved = await resolveRootPathFromRelays(
+        { resolvePath: vi.fn() }, configured, NPUB, 'missing-root', 10, 1,
+      );
+      expect(resolved).toBeNull();
+      const selected = socketPlanMock.mock.calls.map(([, url]) => url);
+      if (configured === undefined) {
+        expect(selected[0]).toBe('wss://relay.ditto.pub');
+        expect(selected).toContain('wss://relay.damus.io');
+      } else {
+        expect(selected).toEqual(configured.map(value => value.trim()).filter(Boolean));
+      }
+    }
+  });
+
+  it('keeps empty root-watch relay choices offline', async () => {
+    decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
+    const watch = await watchRootPathFromRelays(
+      { resolvePath: vi.fn() }, [], NPUB, 'missing-root', vi.fn(), 10, 1,
+    );
+    expect(watch.initialCid).toBeNull();
+    await watch.close();
+    expect(socketPlanMock).not.toHaveBeenCalled();
+    expect(socketSendMock).not.toHaveBeenCalled();
+  });
+
   it('returns a cached tree root without opening relay subscriptions', async () => {
     decodeMock.mockReturnValue({ type: 'npub', data: PUBKEY });
     await setCachedRoot(NPUB, 'audio-catalog', { hash: fromHex(ROOT_HASH) });
