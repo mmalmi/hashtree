@@ -18,6 +18,7 @@ import { initNostrRuntime, addSource, removeSource, query as queryNostr, ingestE
 import { initIdentity, setIdentity, clearIdentity } from './identity';
 import { setResponseSender, signEvent, handleSignedResponse, handleEncryptedResponse, handleDecryptedResponse, } from './signing';
 import { SocialGraph } from 'nostr-social-graph';
+import { loadGraphBootstrap, startGraphSync } from 'nostr-social-graph/publicGraphSync';
 import { cloneTransferableBytes } from '../transferableBytes';
 import Dexie from 'dexie';
 import { getErrorMessage } from './utils/errorMessage';

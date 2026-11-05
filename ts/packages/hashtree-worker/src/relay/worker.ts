@@ -39,6 +39,7 @@ import {
   handleDecryptedResponse,
 } from './signing';
 import { SocialGraph, type NostrEvent as SocialGraphNostrEvent } from 'nostr-social-graph';
+import { loadGraphBootstrap, startGraphSync } from 'nostr-social-graph/publicGraphSync';
 import { cloneTransferableBytes } from '../transferableBytes';
 import Dexie from 'dexie';
 import { getErrorMessage } from './utils/errorMessage';
