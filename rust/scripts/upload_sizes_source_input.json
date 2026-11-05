@@ -1,12 +1,12 @@
 {
-  "previous_master": "d3772e27f57454a7451a5b7b23c38c93fde4abcc",
-  "master": "aa2bf0d7130d8467a7f46c5260d16afa1e4e1940",
+  "previous_master": "aa2bf0d7130d8467a7f46c5260d16afa1e4e1940",
+  "master": "f06683c5c65c1967dc59ab57a6fb4fda4a91ef09",
   "head": "refs/heads/master",
   "refs": {
     "refs/heads/codex/haps-query-cancellation": "435400fab747e7314b3c870c4ac578258d16f2a5",
     "refs/heads/codex/ios-lmdb-locking": "b1f0e059576536543a99cef645db73ace8caf26e",
     "refs/heads/codex/release-prebuilt-031": "f19cb5d0cf78e61533cd086f29ba83d7f0193b27",
-    "refs/heads/master": "aa2bf0d7130d8467a7f46c5260d16afa1e4e1940",
+    "refs/heads/master": "f06683c5c65c1967dc59ab57a6fb4fda4a91ef09",
     "refs/tags/haps-source/5b1f6c036a9b2756a25df9420fe79880707e6a3b": "5b1f6c036a9b2756a25df9420fe79880707e6a3b",
     "refs/tags/haps-source/876abcd67dc613efd43945ce82cac2d701317162": "876abcd67dc613efd43945ce82cac2d701317162",
     "refs/tags/hashtree-client-v0.1.0": "46ed89864d90728e9368732f7bcebfd5e6fa50d0",
@@ -33,16 +33,8 @@
     "refs/tags/hashtree-cli-v0.4.0": "76a3927ecbfab84c68b722ccccb9d83abfb111c3",
     "refs/tags/hashtree-embedded-v0.4.0": "a4844d3950a4dad5d4dda722d5a3c9eba9d7eeb6"
   },
-  "objects": 33406,
-  "object_ids_sha256": "b462286c20b8d39b23c1baf19cdcfd96fe0bd71bc0dd3f4c1d2dd5f785a8c7eb",
-  "payloads_sha256": "0016effafe86b6fa7bb01fc7d524f677f3977fab2c2c13db8454bd8e37aaed42",
-  "payload_bytes": 513751269,
-  "publication": {
-    "hash": "da355292204176aed85eaf22a1587a13f5db62d8b274b01ed1abb8d713db76ce",
-    "key": "1ac7d6b20e5af84be7a27fcd3aee9cb4df7badddea57542cc4b33536dfb8b97b",
-    "nhash": "nhash1qqsd5d2jjgsyza4wmp027g4ptpap8awmvtvtya9srmg6hwxhz0dhdns9yqdv044jped0sjl85flu6whwnj6d77admh49w4pvcjen2dklhzuhk3xjls9",
-    "producer_run": "42093288591",
-    "producer_receipt_sha256": "934fb893b17363b94ce6bf48ed16322c665adcd1f248c90292b0f32ee99b5442",
-    "author": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
-  }
+  "objects": 33417,
+  "object_ids_sha256": "64dcafeb36ad84042f4f3ee813befd73af338cd772ae2977dba958060c05e1d1",
+  "payloads_sha256": "8d3b7a5ef8b69175e327e7e03d36d59d6b254a01655a8aae149684bc72721e30",
+  "payload_bytes": 513801431
 }
