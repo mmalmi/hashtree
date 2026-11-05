@@ -99,7 +99,9 @@ def download(url, expected, target):
 def environment(root, role, relay, tools, writer=False):
     config = root / f'{role}-config'
     config.mkdir()
-    relays = [relay] if relay else ['wss://relay.ditto.pub', 'wss://temp.iris.to', 'wss://relay.snort.social']
+    relays = [relay] if relay else ['wss://upload.iris.to/ws', 'wss://cdn.iris.to/ws',
+                                  'wss://relay.ditto.pub', 'wss://temp.iris.to',
+                                  'wss://relay.snort.social']
     (config / 'config.toml').write_text(
         '[server]\nenable_fips = false\nbind_address = "127.0.0.1:0"\n'
         '[nostr]\nrelays = ' + json.dumps(relays) + '\n'
