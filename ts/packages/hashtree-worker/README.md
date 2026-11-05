@@ -240,6 +240,21 @@ That lets the service worker map fetches back to the correct worker port when mu
 
 ## Exports
 
+### Public social graph updates
+
+The relay worker retains its IndexedDB graph across root changes. With the optional
+`nostr-social-graph` 4.x peer installed, it also reconciles signed public follow
+lists (kind 3) and mute lists (kind 10000) against the configured relays. Each pass
+rotates through at most 500 authors and uses a 2 MiB transfer budget, every 15
+minutes. Relays without NIP-77 use bounded ordinary requests. Prefer a relay with
+NIP-77 support when selecting public graph relays to avoid repeated event downloads.
+
+Set `graphReconciliation: false` in the relay worker configuration to disable this
+optional catch-up and fresh cold bootstrap. Existing live subscriptions remain
+available. Saved graphs are loaded first; snapshots never replace a retained
+personal crawl, and signed revision IDs survive restart. Private contacts and
+encrypted list content do not enter this public graph.
+
 - `@hashtree/worker` — `createHtreeRuntime`, `resolveRuntimeEndpoints`, and `HashtreeWorkerClient`
 - `@hashtree/worker/relay-client` — `RelayWorkerClient` plus relay-backed tree-root metadata types
 - `@hashtree/worker/worker` — `attachHashtreeWorker(...)` for embedding the worker protocol into a custom worker
