@@ -46,6 +46,8 @@ jobs:
         run: bash ../scripts/release-gate.sh --lane typescript
       - name: Build npm archives and verify their contents
         run: pnpm run publish:packages:dry-run > npm-pack.log 2>&1 || { tail -100 npm-pack.log; exit 1; }
+      - name: Install browser for worker policy checks
+        run: pnpm exec playwright install --with-deps chromium
       - name: Verify worker behavior and default IIFE consumer bundles
         run: pnpm --filter @hashtree/worker test
       - name: Check examples and build API reference
