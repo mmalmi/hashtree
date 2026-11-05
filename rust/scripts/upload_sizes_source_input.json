@@ -36,5 +36,13 @@
   "objects": 33417,
   "object_ids_sha256": "64dcafeb36ad84042f4f3ee813befd73af338cd772ae2977dba958060c05e1d1",
   "payloads_sha256": "8d3b7a5ef8b69175e327e7e03d36d59d6b254a01655a8aae149684bc72721e30",
-  "payload_bytes": 513801431
+  "payload_bytes": 513801431,
+  "publication": {
+    "hash": "00e043cf6c98e29db660342fe29a3e1183d61378d62654822fde432dd3c69879",
+    "key": "b33e3ef4789133b64ba3187b987ad57a169339a396c648d98e088276584fbcca",
+    "nhash": "nhash1qqsqpczreakf3c5akesrgtlznglprq7kzdudvfj5sghaused60rfs7g9yzenu0h50zgn8djt5vv8hxr664apdyee5wtvvjxe3cygyajcf77v5xn6ukh",
+    "producer_run": "42113995681",
+    "producer_receipt_sha256": "a9f64fe7a515c550bab1f6cd19b56ad9c71839cd0281246533ced6904417fd23",
+    "author": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
+  }
 }
