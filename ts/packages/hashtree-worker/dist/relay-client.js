@@ -471,8 +471,11 @@ export class RelayWorkerClient {
             throw new Error(res.error);
         }
     }
-    async setRelays(relays) {
-        const res = await this.request({ type: 'setRelays', relays });
+    /** Relay changes revoke fixed HTTP bootstrap unless explicitly allowed again. */
+    async setRelays(relays, policy = {}) {
+        this.config.relays = [...relays];
+        this.config.graphBootstrap = policy.graphBootstrap === true;
+        const res = await this.request({ type: 'setRelays', relays, graphBootstrap: policy.graphBootstrap === true });
         if (res.type !== 'void') {
             throw new Error('Unexpected setRelays response');
         }

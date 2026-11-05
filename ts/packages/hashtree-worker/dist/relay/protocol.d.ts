@@ -204,6 +204,7 @@ export type WorkerRequest = {
     type: 'setRelays';
     id: string;
     relays: string[];
+    graphBootstrap?: boolean;
 } | {
     type: 'pushToBlossom';
     id: string;
@@ -306,8 +307,10 @@ export interface WorkerConfig {
     pubkey: string;
     nsec?: string;
     storeName?: string;
-    /** Set false to disable bounded public follow/mute catch-up and fresh cold bootstrap. */
+    /** Set false to disable bounded public follow/mute catch-up on the configured relays. */
     graphReconciliation?: boolean;
+    /** Explicitly allow the fixed public HTTP seed when no local graph is retained. Defaults to false. */
+    graphBootstrap?: boolean;
     /** Opt-in background NIP-77 recovery against the worker's retained event store. */
     reconciliation?: Omit<RuntimeReconciliationOptions, 'fetch'>;
 }
