@@ -8,8 +8,8 @@ use heed::byteorder::BigEndian;
 use heed::types::{Bytes, SerdeBincode, Str, U32, U64};
 use heed::{Database, Env, EnvFlags, EnvOpenOptions, RoTxn};
 use nostr_social_graph::{
-    accepts_list_revision, valid_event_id, GraphStats, ListRevision, NostrEvent, SocialGraph,
-    SocialGraphBackend, SocialGraphError, SocialGraphState,
+    GraphStats, ListRevision, NostrEvent, SocialGraph, SocialGraphBackend, SocialGraphError,
+    SocialGraphState, accepts_list_revision, valid_event_id,
 };
 
 #[cfg(target_pointer_width = "64")]
