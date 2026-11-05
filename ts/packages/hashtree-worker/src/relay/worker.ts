@@ -394,7 +394,7 @@ function configureGraphCatchup() {
   stopGraphCatchup?.(); stopGraphCatchup = undefined;
   if (!_config?.relays.length || _config.graphReconciliation === false) return;
   const relays = [..._config.relays];
-  void import('nostr-social-graph/publicGraphSync').then(({ startGraphSync }) => {
+  void Promise.resolve().then(() => {
     if (generation !== graphCatchupGeneration) return;
     stopGraphCatchup = startGraphSync({ getGraph: () => socialGraph, relays,
       maxAuthors: 500, maxBytes: 2 * 1024 * 1024,
@@ -855,7 +855,6 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
     if (_config !== cfg) return;
     if (!loaded && cfg.relays.length && cfg.graphReconciliation !== false) {
       try {
-        const { loadGraphBootstrap } = await import('nostr-social-graph/publicGraphSync');
         const fresh = await loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY });
         if (_config !== cfg) return;
         // This is a cold bootstrap only; a saved personal graph always wins.
