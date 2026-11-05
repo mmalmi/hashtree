@@ -54,16 +54,21 @@ def main(output, receipt):
     receipt['systemPackages'] = subprocess.check_output(['dpkg-query', '-W'], text=True)
     receipt['memoryBefore'] = subprocess.check_output(['free', '-b'], text=True)
     lock = tomllib.loads(Path('Cargo.lock').read_text())
-    expected = {'nostr-pubsub-fips': '0.5.50', 'nvpn-fips-core': '0.4.118',
-                'nvpn-fips-tcp-endpoint': '0.2.53', 'nvpn-fips-tcp': '0.2.6'}
-    for name, version in expected.items():
+    expected = {
+        'nostr-pubsub-fips': ('0.5.51', '15c52b732331c717b85165ddee1234e09fdd42793a539d9d543fa1983ec6de9b'),
+        'nvpn-fips-core': ('0.4.119', 'ba0e1a75a2b7fb5d71e4a602c41d8a1ed163417e56798e2198df1dfe3f73cda2'),
+        'nvpn-fips-tcp-endpoint': ('0.2.54', '5a6e31c1319cb5ef6dc754905828436c7a1596a6f4888b16223673330f23bf8e'),
+        'nvpn-fips-tcp': ('0.2.6', '299df22559c4af63e7d276fcb90cf000f2f1cd5546c213f17d8860154c1383d7'),
+    }
+    for name, (version, checksum) in expected.items():
         entries = [p for p in lock['package'] if p['name'] == name]
         assert len(entries) == 1 and entries[0]['version'] == version, name
-        if name == 'nostr-pubsub-fips':
-            assert entries[0]['checksum'] == '228f2f4bbd5b1b9e1a1d30204734a8bd4385314d0ef58bf0756ddb6c700eeabf'
-    receipt['cohort'] = expected
+        assert entries[0]['checksum'] == checksum, name
+    receipt['cohort'] = {name: version for name, (version, _) in expected.items()}
+    receipt['cohortChecksums'] = {name: checksum for name, (_, checksum) in expected.items()}
     command = ['cargo', 'test', '--locked', '-p', 'hashtree-cli', '-p',
-               'hashtree-fips-transport', '--features', 'hashtree-cli/fips-webrtc',
+               'hashtree-fips-transport', '--features',
+               'hashtree-cli/fips-webrtc,hashtree-cli/git-remote-wrapper',
                '--lib', '--test', 'provider_route', '--no-run', '--message-format=json']
     receipt['buildCommand'] = command
     artifacts = run('build', command, output, receipt, 2400)
