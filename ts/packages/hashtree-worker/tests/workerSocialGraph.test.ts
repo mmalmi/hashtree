@@ -1,6 +1,9 @@
 import 'fake-indexeddb/auto';
 import Dexie from 'dexie';
 import { once } from 'node:events';
+import { createRequire } from 'node:module';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { WebSocket, WebSocketServer } from 'ws';
 import { SocialGraph } from 'nostr-social-graph';
 import { finalizeEvent, getPublicKey } from 'nostr-tools/pure';
@@ -71,30 +74,61 @@ it('reconciles optional public lists and accepts mutes independently of newer fo
     finalizeEvent({ kind: 3, created_at: 200, content: '', tags: [['p', muted]] }, key),
     finalizeEvent({ kind: 10000, created_at: 150, content: '', tags: [['p', friend]] }, key),
   ];
-  let negotiations = 0;
-  relay.on('connection', socket => socket.on('message', bytes => {
-    const frame = JSON.parse(bytes.toString());
-    if (frame[0] === 'NEG-OPEN') {
-      negotiations++;
-      socket.send(JSON.stringify(['NEG-ERR', frame[1], 'unsupported']));
-    }
-    if (frame[0] !== 'REQ') return;
-    for (const event of heads) if (frame.slice(2).some((filter: { kinds?: number[]; authors?: string[]; ids?: string[] }) =>
-      (!filter.kinds || filter.kinds.includes(event.kind)) && (!filter.authors || filter.authors.includes(event.pubkey)) && (!filter.ids || filter.ids.includes(event.id)))) {
-      socket.send(JSON.stringify(['EVENT', frame[1], event]));
-    }
-    socket.send(JSON.stringify(['EOSE', frame[1]]));
-  }));
+  const require = createRequire(import.meta.url);
+  const codec = await import(pathToFileURL(path.join(path.dirname(require.resolve('nostr-social-graph/package.json')), 'src/vendor/negentropy.js')).href);
+  let negotiations = 0, releaseMute!: () => void, observed: SocialGraph | undefined;
+  const pendingMute = new Promise<void>(resolve => { releaseMute = resolve; });
+  const exactIds: string[] = [], errors: string[] = [];
+  const handleEvent = SocialGraph.prototype.handleEvent;
+  const ingest = vi.spyOn(SocialGraph.prototype, 'handleEvent').mockImplementation(function(...args) {
+    const result = handleEvent.apply(this, args);
+    if (this.getListRevision(owner, 3)?.id === heads[0]!.id) observed = this;
+    return result;
+  });
+  relay.on('connection', socket => {
+    const sessions = new Map<string, any>(); let queue = Promise.resolve(), negotiated = false;
+    socket.on('message', bytes => {
+      queue = queue.then(async () => {
+        const frame = JSON.parse(bytes.toString()), id = frame[1];
+        if (frame[0] === 'NEG-OPEN') {
+          negotiations++; negotiated = true;
+          const storage = new codec.NegentropyStorageVector();
+          for (const event of heads) if (frame[2].authors.includes(event.pubkey) && frame[2].kinds.includes(event.kind)) storage.insert(event.created_at, event.id);
+          storage.seal(); const session = new codec.Negentropy(storage, 16384); sessions.set(id, session);
+          socket.send(JSON.stringify(['NEG-MSG', id, (await session.reconcile(frame[3]))[0]]));
+        } else if (frame[0] === 'NEG-MSG') {
+          socket.send(JSON.stringify(['NEG-MSG', id, (await sessions.get(id).reconcile(frame[2]))[0]]));
+        } else if (frame[0] === 'REQ') {
+          if (negotiated) {
+            expect(frame.slice(2).every((filter: any) => Array.isArray(filter.ids) && Object.keys(filter).every(key => key === 'ids'))).toBe(true);
+            for (const event of heads) if (frame.slice(2).some((filter: any) => filter.ids.includes(event.id))) {
+              if (event.kind === 10000) await pendingMute;
+              exactIds.push(event.id); socket.send(JSON.stringify(['EVENT', id, event]));
+            }
+          }
+          // The ordinary live subscription cannot make this reconciliation test pass.
+          socket.send(JSON.stringify(['EOSE', id]));
+        }
+      }).catch(error => { errors.push(String(error)); socket.close(); });
+    });
+  });
   const store = `graph-relay-${crypto.randomUUID()}`;
   try {
     await init(store, [`ws://127.0.0.1:${address.port}`], true);
     await expect.poll(() => negotiations, { timeout: 5000 }).toBeGreaterThan(0);
     await expect.poll(async () => (await request({ type: 'getFollows', pubkey: owner }) as { pubkeys?: string[] })?.pubkeys).toEqual([muted]);
+    // A received follow does not establish that the independently delivered mute arrived.
+    expect(observed?.getListRevision(owner, 10000)?.id).not.toBe(heads[1]!.id);
+    releaseMute();
+    await expect.poll(() => observed?.getListRevision(owner, 10000)?.id).toBe(heads[1]!.id);
+    expect([...observed!.getMutedByUser(owner)]).toEqual([friend]);
     await request({ type: 'close' });
     const graph = await saved();
+    expect(exactIds.sort()).toEqual(heads.map(event => event.id).sort()); expect(errors).toEqual([]);
     expect(graph.getListRevision(owner, 3)?.id).toBe(heads[0]!.id);
     expect(graph.getListRevision(owner, 10000)?.id).toBe(heads[1]!.id);
   } finally {
+    releaseMute(); ingest.mockRestore();
     await request({ type: 'close' });
     for (const socket of relay.clients) socket.terminate();
     await new Promise<void>(resolve => relay.close(() => resolve()));
