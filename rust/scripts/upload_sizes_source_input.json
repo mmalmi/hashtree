@@ -1,12 +1,12 @@
 {
-  "previous_master": "f06683c5c65c1967dc59ab57a6fb4fda4a91ef09",
-  "master": "c98f89854cfdf87756e1b759a39fac185babde9a",
+  "previous_master": "c98f89854cfdf87756e1b759a39fac185babde9a",
+  "master": "6bfca912d7a72f84bfdc79ba51243beb46838f9c",
   "head": "refs/heads/master",
   "refs": {
     "refs/heads/codex/haps-query-cancellation": "435400fab747e7314b3c870c4ac578258d16f2a5",
     "refs/heads/codex/ios-lmdb-locking": "b1f0e059576536543a99cef645db73ace8caf26e",
     "refs/heads/codex/release-prebuilt-031": "f19cb5d0cf78e61533cd086f29ba83d7f0193b27",
-    "refs/heads/master": "c98f89854cfdf87756e1b759a39fac185babde9a",
+    "refs/heads/master": "6bfca912d7a72f84bfdc79ba51243beb46838f9c",
     "refs/tags/haps-source/5b1f6c036a9b2756a25df9420fe79880707e6a3b": "5b1f6c036a9b2756a25df9420fe79880707e6a3b",
     "refs/tags/haps-source/876abcd67dc613efd43945ce82cac2d701317162": "876abcd67dc613efd43945ce82cac2d701317162",
     "refs/tags/hashtree-client-v0.1.0": "46ed89864d90728e9368732f7bcebfd5e6fa50d0",
@@ -32,18 +32,11 @@
     "refs/tags/git-remote-htree-v0.4.0": "b96680ccb0c09ac01a405bf07d550741f25a6180",
     "refs/tags/hashtree-cli-v0.4.0": "76a3927ecbfab84c68b722ccccb9d83abfb111c3",
     "refs/tags/hashtree-embedded-v0.4.0": "a4844d3950a4dad5d4dda722d5a3c9eba9d7eeb6",
-    "refs/tags/hashtree-ts-runtime-v0.5.36": "7e086c2e5d5611564f99c49ce3f4ed7a3cda0771"
+    "refs/tags/hashtree-ts-runtime-v0.5.36": "7e086c2e5d5611564f99c49ce3f4ed7a3cda0771",
+    "refs/tags/hashtree-ts-runtime-v0.5.37": "f89303978e1a30c86efec0d63ab453460fa17215"
   },
-  "objects": 33462,
-  "object_ids_sha256": "e5a33684503ea805e90d96602e1b052b99237cde1c8a4f3e85002b0f0375d59e",
-  "payloads_sha256": "366aa52e0b8ba400157e597b94e7db52c92b347f3ae43bc519c5420539350c5f",
-  "payload_bytes": 514597189,
-  "publication": {
-    "hash": "92f6eb933cd52610e4965cd08c83228116ac512d6a853b1901a003cc0a327a0b",
-    "key": "51c388811191292aacb9dcf3ca6e2f1a5265058be8e7c6c14eab4835e0a05099",
-    "nhash": "nhash1qqsf9ahtjv7d2fssujt9e5yvsv3gz94v2ykk4pfmryq6qq7vpge85zc9ypgu8zypzxgjj24vh8w08jnw9ud9yeg9305w03kpf645sd0q5pgfjul6x0l",
-    "producer_run": "42121431905",
-    "producer_receipt_sha256": "c622b96d04df36e728f1ba1791256a030b4ec01919a190aa4a5d75f3cd901b1e",
-    "author": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
-  }
+  "objects": 33509,
+  "object_ids_sha256": "855dd718f3ea603d5df712159c02e6b88a3be4f6b8328a8de0046a9a52d38507",
+  "payloads_sha256": "3479a433997193af6f6bd423762437bcd3f006a72abedf321a379946fe59eac5",
+  "payload_bytes": 514989833
 }
