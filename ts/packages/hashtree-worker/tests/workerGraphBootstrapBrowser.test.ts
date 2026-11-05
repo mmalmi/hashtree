@@ -35,7 +35,7 @@ beforeAll(async () => {
         const { id, pubkey } = event.data;
         self.postMessage({ type: 'fixtureGraphState', id,
           follow: socialGraph.getListRevision(pubkey, 3), mute: socialGraph.getListRevision(pubkey, 10000),
-          muted: [...socialGraph.getMutedByUser(pubkey)] });
+          followed: [...socialGraph.getFollowedByUser(pubkey)], muted: [...socialGraph.getMutedByUser(pubkey)] });
       });`;
     } }] }, build: { write: false, minify: false, rollupOptions: { input: path.join(fixture, 'main.js') } } });
   const outputs = (Array.isArray(result) ? result : [result]).flatMap(result => result.output);
@@ -69,6 +69,17 @@ async function request(page: Page, payload: Record<string, unknown>) {
     };
     worker.addEventListener('message', listener); worker.postMessage({ ...payload, id });
   }), payload);
+}
+
+async function expectIngestedLists(page: Page, followEvent: ReturnType<typeof finalizeEvent>, muteEvent: ReturnType<typeof finalizeEvent>) {
+  await expect.poll(async () => {
+    const state = await request(page, { type: 'fixtureGraphState', pubkey: owner });
+    return { followId: state.follow?.id, followTime: state.follow?.created_at,
+      muteId: state.mute?.id, muteTime: state.mute?.created_at, followed: state.followed, muted: state.muted };
+  }).toEqual({ followId: followEvent.id, followTime: followEvent.created_at,
+    muteId: muteEvent.id, muteTime: muteEvent.created_at,
+    followed: followEvent.tags.filter(tag => tag[0] === 'p').map(tag => tag[1]),
+    muted: muteEvent.tags.filter(tag => tag[0] === 'p').map(tag => tag[1]) });
 }
 
 async function retainedBytes(page: Page) {
@@ -124,6 +135,8 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
     const handoff = mode === 'root-switch' || mode === 'pending-root-switch' || mode === 'pending-identity-switch';
     const negotiations: any[] = [], negotiationPaths: string[] = [];
     const active = new Map<any, Map<string, any[]>>(), negSockets = new Set<any>();
+    const delayedInitialMute = mode === 'custom-default' || mode === 'switch-to-custom';
+    let initialMuteReleased = false; const pendingInitialMutes: Array<() => void> = [];
     relay.on('connection', (socket, connection) => socket.on('message', bytes => {
       const frame = JSON.parse(bytes.toString());
       if (frame[0] === 'NEG-OPEN') {
@@ -137,7 +150,9 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
       if (mode === 'custom-default' || handoff || (mode === 'switch-to-custom' && connection.url === '/custom')) for (const event of [localFollow, localMute]) {
         if (frame.slice(2).some((filter: any) => (!filter.kinds || filter.kinds.includes(event.kind)) &&
           (!filter.authors || filter.authors.includes(event.pubkey)) && (!filter.ids || filter.ids.includes(event.id)))) {
-          socket.send(JSON.stringify(['EVENT', frame[1], event]));
+          const send = () => { if (socket.readyState === 1) socket.send(JSON.stringify(['EVENT', frame[1], event])); };
+          if (delayedInitialMute && event.kind === 10000 && !initialMuteReleased) pendingInitialMutes.push(send);
+          else send();
         }
       }
       socket.send(JSON.stringify(['EOSE', frame[1]]));
@@ -189,9 +204,11 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
         // Exercise the real five-second persistence debounce, then a later update
         // and close flush: a conflict/invalid row must block every later save.
         await request(page, { type: 'handleSocialGraphEvents', events: [follow(400), mute(390)] });
+        await expectIngestedLists(page, follow(400), mute(390));
         await page.waitForTimeout(5500);
         expect(await retainedBytes(page)).toEqual([...bytes]);
         await request(page, { type: 'handleSocialGraphEvents', events: [follow(500), mute(490)] });
+        await expectIngestedLists(page, follow(500), mute(490));
         await request(page, { type: 'close' });
         expect(await retainedBytes(page)).toEqual([...bytes]);
         expect(httpRequests).toBe(mode === 'other-tab' ? 1 : 0);
@@ -202,6 +219,15 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
       if (mode === 'switch-to-custom') expect(negotiationPaths.every(path => path === '/custom')).toBe(true);
       expect(negotiations[0].kinds).toEqual([3, 10000]); expect(negotiations.some(filter => filter.authors.includes(owner))).toBe(true);
       await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: owner })).pubkeys).toEqual([friend]);
+      if (delayedInitialMute) {
+        // Reproduce the CI race deterministically: follow readiness cannot imply mute ingestion.
+        const beforeMute = await request(page, { type: 'fixtureGraphState', pubkey: owner });
+        expect(beforeMute.follow.id).toBe(localFollow.id); expect(beforeMute.followed).toEqual([friend]);
+        expect(beforeMute.mute).toBeUndefined(); expect(beforeMute.muted).toEqual([]);
+        initialMuteReleased = true; for (const send of pendingInitialMutes.splice(0)) send();
+      }
+      const seeded = mode === 'explicit-bootstrap' || mode === 'unchanged-root';
+      await expectIngestedLists(page, seeded ? seedFollow : localFollow, seeded ? seedMute : localMute);
       let lateFollow: ReturnType<typeof finalizeEvent> | undefined, lateMute: ReturnType<typeof finalizeEvent> | undefined;
       if (handoff) {
         // Wait for the bounded NEG sockets to close, then deliver new
@@ -219,10 +245,7 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
         expect(beforeMute.follow.id).toBe(lateFollow.id); expect(beforeMute.mute.id).toBe(localMute.id);
         expect(beforeMute.muted).toEqual([muted]);
         for (const { socket, id } of listeners()) socket.send(JSON.stringify(['EVENT', id, lateMute]));
-        await expect.poll(async () => {
-          const state = await request(page, { type: 'fixtureGraphState', pubkey: owner });
-          return { follow: state.follow?.id, mute: state.mute?.id, muted: state.muted };
-        }).toEqual({ follow: lateFollow.id, mute: lateMute.id, muted: [friend] });
+        await expectIngestedLists(page, lateFollow, lateMute);
         // Close immediately after exact ingestion: this still tests the pending debounce flush.
       }
       await request(page, { type: 'close' });
@@ -345,6 +368,7 @@ for (const phase of ['pending-http', 'pending-idb', 'catchup', 'changed-signer',
         await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: owner })).pubkeys).toEqual([friend]);
         await expect.poll(() => negotiations.length).toBeGreaterThan(0);
         await expect.poll(() => negotiations.every(record => record.closed)).toBe(true);
+        await expectIngestedLists(page, phase === 'catchup' ? nextFollow : seedFollow, phase === 'catchup' ? nextMute : seedMute);
         await request(page, { type: 'close' }); const graph = await saved(page);
         expect(graph.getListRevision(owner, 3)).toMatchObject({ id: phase === 'catchup' ? nextFollow.id : seedFollow.id, complete: true });
         expect(graph.getListRevision(owner, 10000)).toMatchObject({ id: phase === 'catchup' ? nextMute.id : seedMute.id, complete: true });
