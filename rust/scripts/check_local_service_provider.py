@@ -95,7 +95,7 @@ def main(output, receipt):
             assert re.search(rf'test result: ok\. {count} passed; 0 failed; 0 ignored;', result)
             receipt['tests'][name] = {'passed': count, 'binarySha256': digest(Path(binary)),
                                       'loopbackOnly': True}
-        except (RuntimeError, AssertionError) as error:
+        except RuntimeError as error:
             failures.append(f'{name}: {error}')
     assert receipt['cargoLockSha256'] == digest(Path('Cargo.lock'))
     run('source-unchanged', ['git', 'diff', '--exit-code'], output, receipt, 30)
