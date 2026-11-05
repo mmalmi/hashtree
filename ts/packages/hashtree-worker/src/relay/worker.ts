@@ -953,6 +953,12 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
  * Handle identity change (account switch)
  */
 async function handleSetIdentity(id: string, pubkey: string, nsec?: string) {
+  // Initial app hydration may repeat the credentials supplied to init. Keep the
+  // ongoing cache load, permitted seed, and reconciliation owned by that init.
+  if (_config?.pubkey === pubkey && _config.nsec === nsec) {
+    respond({ type: 'void', id });
+    return;
+  }
   const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
   stopSocialGraphSubscriptions();
   socialGraphLoading = false;
