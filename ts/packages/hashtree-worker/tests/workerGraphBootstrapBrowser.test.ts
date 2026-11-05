@@ -27,7 +27,17 @@ beforeAll(async () => {
   const entry = fileURLToPath(new URL('../src/relay-entry.ts', import.meta.url));
   await writeFile(path.join(fixture, 'main.js'), `import Worker from ${JSON.stringify(`${entry}?worker`)}; new Worker();`);
   const result = await build({ configFile: false, root: fixture, publicDir: false, logLevel: 'silent',
-    worker: { format: 'iife' }, build: { write: false, minify: false, rollupOptions: { input: path.join(fixture, 'main.js') } } });
+    worker: { format: 'iife', plugins: () => [{ name: 'readonly-graph-fixture-observer', transform(source: string, id: string) {
+      if (id !== fileURLToPath(new URL('../src/relay/worker.ts', import.meta.url))) return;
+      // Test-only observation of the actual live instance. No production API or lifecycle changes.
+      return source + `\nself.addEventListener('message', event => {
+        if (event.data.type !== 'fixtureGraphState') return;
+        const { id, pubkey } = event.data;
+        self.postMessage({ type: 'fixtureGraphState', id,
+          follow: socialGraph.getListRevision(pubkey, 3), mute: socialGraph.getListRevision(pubkey, 10000),
+          muted: [...socialGraph.getMutedByUser(pubkey)] });
+      });`;
+    } }] }, build: { write: false, minify: false, rollupOptions: { input: path.join(fixture, 'main.js') } } });
   const outputs = (Array.isArray(result) ? result : [result]).flatMap(result => result.output);
   const asset = outputs.find(output => output.type === 'asset' && String(output.source).includes('NEG-OPEN'));
   if (!asset || asset.type !== 'asset') throw new Error('Production worker bundle missing');
@@ -194,7 +204,7 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
       await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: owner })).pubkeys).toEqual([friend]);
       let lateFollow: ReturnType<typeof finalizeEvent> | undefined, lateMute: ReturnType<typeof finalizeEvent> | undefined;
       if (handoff) {
-        // Wait for the bounded NEG/fallback sockets to close, then deliver new
+        // Wait for the bounded NEG sockets to close, then deliver new
         // signed events only over the surviving ordinary live subscription.
         await expect.poll(() => [...negSockets].every(socket => socket.readyState === 3)).toBe(true);
         const listeners = () => [...active].flatMap(([socket, subscriptions]) => socket.readyState === 1
@@ -202,10 +212,18 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
         await expect.poll(() => listeners().length, { timeout: 5000 }).toBeGreaterThan(0);
         lateFollow = finalizeEvent({ kind: 3, created_at: 900, content: '', tags: [['p', muted]] }, key);
         lateMute = finalizeEvent({ kind: 10000, created_at: 890, content: '', tags: [['p', friend]] }, key);
-        const versions = await page.evaluate(() => (window as any).policyVersions.length);
-        for (const { socket, id } of listeners()) for (const event of [lateFollow, lateMute]) socket.send(JSON.stringify(['EVENT', id, event]));
+        for (const { socket, id } of listeners()) socket.send(JSON.stringify(['EVENT', id, lateFollow]));
         await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: owner })).pubkeys).toEqual([muted]);
-        await expect.poll(() => page.evaluate(() => (window as any).policyVersions.length)).toBeGreaterThanOrEqual(versions + 2);
+        // Deterministic delayed-second-event control: follow readiness still has the old mute.
+        const beforeMute = await request(page, { type: 'fixtureGraphState', pubkey: owner });
+        expect(beforeMute.follow.id).toBe(lateFollow.id); expect(beforeMute.mute.id).toBe(localMute.id);
+        expect(beforeMute.muted).toEqual([muted]);
+        for (const { socket, id } of listeners()) socket.send(JSON.stringify(['EVENT', id, lateMute]));
+        await expect.poll(async () => {
+          const state = await request(page, { type: 'fixtureGraphState', pubkey: owner });
+          return { follow: state.follow?.id, mute: state.mute?.id, muted: state.muted };
+        }).toEqual({ follow: lateFollow.id, mute: lateMute.id, muted: [friend] });
+        // Close immediately after exact ingestion: this still tests the pending debounce flush.
       }
       await request(page, { type: 'close' });
       const graph = await saved(page);

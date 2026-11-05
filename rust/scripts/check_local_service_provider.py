@@ -55,7 +55,7 @@ def main(output, receipt):
     receipt['memoryBefore'] = subprocess.check_output(['free', '-b'], text=True)
     lock = tomllib.loads(Path('Cargo.lock').read_text())
     expected = {
-        'nostr-pubsub-fips': ('0.6.0', 'f5774e279e0511b5a94e68704b01eb28fd5ca9b2203ab54bb7727f9eff8f179a'),
+        'nostr-pubsub-fips': ('0.6.1', '23568533712a3635e45e86ed79895e42f87a11dfcd43ba9bcf02a5e9b90db90f'),
         'nostr-pubsub-social-graph': ('0.3.0', 'e9dd2d0a1cdacf1ea254ea05d7f63dd6624ff4ee6dae62c4c4000dd4db8b9666'),
         'nostr-social-graph': ('0.2.0', '83a7c3e6dedf8c0474c9e09938496abde4a9c77cd38ec4832d9b56ee9602b8f8'),
         'nostr-social-memory': ('0.2.0', '39fb16cde2e5bb0e6eeed1c5c8740b01a3c90daa277c30c397715e84aa7a89c9'),
