@@ -1,12 +1,12 @@
 {
-  "previous_master": "c98f89854cfdf87756e1b759a39fac185babde9a",
-  "master": "6bfca912d7a72f84bfdc79ba51243beb46838f9c",
+  "previous_master": "6bfca912d7a72f84bfdc79ba51243beb46838f9c",
+  "master": "661852f0a824ee03143fab11dc8eb3edbe23726e",
   "head": "refs/heads/master",
   "refs": {
     "refs/heads/codex/haps-query-cancellation": "435400fab747e7314b3c870c4ac578258d16f2a5",
     "refs/heads/codex/ios-lmdb-locking": "b1f0e059576536543a99cef645db73ace8caf26e",
     "refs/heads/codex/release-prebuilt-031": "f19cb5d0cf78e61533cd086f29ba83d7f0193b27",
-    "refs/heads/master": "6bfca912d7a72f84bfdc79ba51243beb46838f9c",
+    "refs/heads/master": "661852f0a824ee03143fab11dc8eb3edbe23726e",
     "refs/tags/haps-source/5b1f6c036a9b2756a25df9420fe79880707e6a3b": "5b1f6c036a9b2756a25df9420fe79880707e6a3b",
     "refs/tags/haps-source/876abcd67dc613efd43945ce82cac2d701317162": "876abcd67dc613efd43945ce82cac2d701317162",
     "refs/tags/hashtree-client-v0.1.0": "46ed89864d90728e9368732f7bcebfd5e6fa50d0",
@@ -33,18 +33,13 @@
     "refs/tags/hashtree-cli-v0.4.0": "76a3927ecbfab84c68b722ccccb9d83abfb111c3",
     "refs/tags/hashtree-embedded-v0.4.0": "a4844d3950a4dad5d4dda722d5a3c9eba9d7eeb6",
     "refs/tags/hashtree-ts-runtime-v0.5.36": "7e086c2e5d5611564f99c49ce3f4ed7a3cda0771",
-    "refs/tags/hashtree-ts-runtime-v0.5.37": "f89303978e1a30c86efec0d63ab453460fa17215"
+    "refs/tags/hashtree-ts-runtime-v0.5.37": "f89303978e1a30c86efec0d63ab453460fa17215",
+    "refs/tags/hashtree-ts-runtime-v0.5.38": "5b8e784357db6da44e89b4b6b7d780f9d50d4d8f",
+    "refs/tags/hashtree-cli-v0.4.1": "c2112f3513b0509de693233009ea022f6fdee871",
+    "refs/tags/hashtree-embedded-v0.4.1": "055b23e53f35235797dea7344eac5c4937c419cf"
   },
-  "objects": 33509,
-  "object_ids_sha256": "855dd718f3ea603d5df712159c02e6b88a3be4f6b8328a8de0046a9a52d38507",
-  "payloads_sha256": "3479a433997193af6f6bd423762437bcd3f006a72abedf321a379946fe59eac5",
-  "payload_bytes": 514989833,
-  "publication": {
-    "hash": "9b683af70c73526a0a3e466879a4e571814764fb2458b890bde3a6196dbf4a53",
-    "key": "b04dc1b86db4b8b59bd3b02c07cf48e6d5d1161a817723f17688798de114865e",
-    "nhash": "nhash1qqsfk6p67ux8x5n2pglyv6re5njhrq28vnajgk9cjz778fsedkl555c9yzcymsdcdk6t3dvm6wczcp70frndt5gkr2qhwgl3w6y8nr0pzjr9u5gdjvj",
-    "producer_run": 42125513768,
-    "producer_receipt_sha256": "529ad9c9de04d2eaa97f584d69a8fbe18df7ff0249586f0fc25a0c9933ae16a5",
-    "author": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
-  }
+  "objects": 33520,
+  "object_ids_sha256": "c90c3fc605fba3d9734a2bb92b30eafd1c2b1d20c8a4365b73bbbcea85710997",
+  "payloads_sha256": "8f620c278a3d34076221a184a74c587c72aa824d6fe726c80a550d4db524395b",
+  "payload_bytes": 515023920
 }
