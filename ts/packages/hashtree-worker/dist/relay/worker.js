@@ -18,6 +18,7 @@ import { initNostrRuntime, addSource, removeSource, query as queryNostr, ingestE
 import { initIdentity, setIdentity, clearIdentity } from './identity';
 import { setResponseSender, signEvent, handleSignedResponse, handleEncryptedResponse, handleDecryptedResponse, } from './signing';
 import { SocialGraph } from 'nostr-social-graph';
+import { loadGraphBootstrap, startGraphSync } from 'nostr-social-graph/publicGraphSync';
 import { cloneTransferableBytes } from '../transferableBytes';
 import Dexie from 'dexie';
 import { getErrorMessage } from './utils/errorMessage';
@@ -331,7 +332,7 @@ function configureGraphCatchup() {
     if (!_config?.relays.length || _config.graphReconciliation === false)
         return;
     const relays = [..._config.relays];
-    void import('nostr-social-graph/publicGraphSync').then(({ startGraphSync }) => {
+    void Promise.resolve().then(() => {
         if (generation !== graphCatchupGeneration)
             return;
         stopGraphCatchup = startGraphSync({ getGraph: () => socialGraph, relays,
@@ -762,7 +763,6 @@ async function handleInit(id, cfg, hasP2PProvider, peerListSupported = true) {
             return;
         if (!loaded && cfg.relays.length && cfg.graphReconciliation !== false) {
             try {
-                const { loadGraphBootstrap } = await import('nostr-social-graph/publicGraphSync');
                 const fresh = await loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY });
                 if (_config !== cfg)
                     return;
