@@ -162,9 +162,19 @@ async fn check_strict_reader(
         let mut subscription = reader
             .subscribe(vec![NostrRootResolver::filter_for_key(key)?])
             .await?;
-        let event = timeout(Duration::from_secs(15), subscription.recv())
-            .await
-            .context("strict reader did not receive the daemon's stored root")?
+        let received = timeout(Duration::from_secs(15), subscription.recv()).await;
+        if received.is_err() {
+            let provider = daemon.pubsub_client.as_ref().context("daemon pubsub")?;
+            let reader_connections = endpoint.peers().await?.iter().filter(|peer| peer.connected).count();
+            let provider_connections = daemon.endpoint.peers().await?.iter().filter(|peer| peer.connected).count();
+            eprintln!(
+                "strict root read timed out: connected reader={reader_connections}, provider={provider_connections}; reader={:?}, provider={:?}; errors reader={}, provider={}; subscriptions={:?}",
+                reader.delivery_snapshot(), provider.delivery_snapshot(),
+                reader.transport_error_count(), provider.transport_error_count(),
+                provider.peer_subscription_count(),
+            );
+        }
+        let event = received.context("strict reader did not receive the daemon's stored root")?
             .context("strict reader subscription closed")?;
         anyhow::ensure!(
             event.event.as_event().as_json() == root.as_json(),

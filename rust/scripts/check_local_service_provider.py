@@ -78,6 +78,7 @@ def main(output, receipt):
                 binaries[name] = entry['executable']
     assert binaries.keys() == selected.keys(), 'Required consumer test binary missing'
     receipt['tests'] = {}
+    failures = []
     for name, filters in selected.items():
         binary = binaries[name]
         listing = subprocess.check_output([binary, *filters, '--list'], text=True)
@@ -89,12 +90,16 @@ def main(output, receipt):
                    'ip link set lo up\nexec setpriv --reuid="$1" --regid="$2" --init-groups "$3" "${@:4}"',
                    'local-service-provider', str(os.getuid()), str(os.getgid()),
                    binary, *filters, '--nocapture', '--test-threads=1']
-        result = run(name, command, output, receipt, 600)
-        assert re.search(rf'test result: ok\. {count} passed; 0 failed; 0 ignored;', result)
-        receipt['tests'][name] = {'passed': count, 'binarySha256': digest(Path(binary)),
-                                  'loopbackOnly': True}
+        try:
+            result = run(name, command, output, receipt, 600)
+            assert re.search(rf'test result: ok\. {count} passed; 0 failed; 0 ignored;', result)
+            receipt['tests'][name] = {'passed': count, 'binarySha256': digest(Path(binary)),
+                                      'loopbackOnly': True}
+        except (RuntimeError, AssertionError) as error:
+            failures.append(f'{name}: {error}')
     assert receipt['cargoLockSha256'] == digest(Path('Cargo.lock'))
     run('source-unchanged', ['git', 'diff', '--exit-code'], output, receipt, 30)
+    assert not failures, '; '.join(failures)
 
 
 if __name__ == '__main__':
