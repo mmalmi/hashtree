@@ -21,22 +21,29 @@ export function supportsBrowserHashtreeFips() {
  * then exposes Hashtree's worker-provider surface over authenticated FIPS data.
  */
 export async function createBrowserHashtreeFipsProvider(options) {
+    return createBrowserProvider(options, resolveBrowserTransports(options));
+}
+function resolveBrowserTransports(options, hasDiscovery = !!options.discoveryProvider) {
     if (!supportsBrowserHashtreeFips()) {
         throw new Error('browser FIPS requires WebSocket and RTCPeerConnection');
     }
     const relays = normalizeRelayUrls(options.relays);
-    if (relays.length === 0 && !options.discoveryProvider) {
+    if (relays.length === 0 && !hasDiscovery) {
         throw new Error('browser FIPS requires at least one Nostr relay');
     }
-    const identity = options.identity ?? await identityFromSecretKey(readSecretKey(options.deviceSecretKey));
-    const websocketSeedUrls = normalizeWebSocketSeedUrls(options.websocketSeedUrls ?? DEFAULT_FIPS_WEBSOCKET_SEED_URLS);
-    if (websocketSeedUrls.length === 0) {
+    const requestedSeeds = options.websocketSeedUrls ?? DEFAULT_FIPS_WEBSOCKET_SEED_URLS;
+    const websocketSeedUrls = normalizeWebSocketSeedUrls(requestedSeeds);
+    if (requestedSeeds.length && !websocketSeedUrls.length) {
         throw new Error('browser FIPS requires at least one WebSocket bootstrap seed');
     }
-    const webSocketTransport = new WebSocketTransport({
+    const webSocketTransport = websocketSeedUrls.length ? new WebSocketTransport({
         seedUrls: websocketSeedUrls,
         logger: options.logger,
-    });
+    }) : undefined;
+    return { relays, webSocketTransport };
+}
+async function createBrowserProvider(options, { relays, webSocketTransport }) {
+    const identity = options.identity ?? await identityFromSecretKey(readSecretKey(options.deviceSecretKey));
     const webRtcTransport = new WebRtcTransport({
         relays,
         discoveryProvider: options.discoveryProvider,
@@ -54,7 +61,7 @@ export async function createBrowserHashtreeFipsProvider(options) {
     });
     const node = new FipsNode({
         identity,
-        transports: [webSocketTransport, webRtcTransport],
+        transports: webSocketTransport ? [webSocketTransport, webRtcTransport] : [webRtcTransport],
         forwarding: options.forwarding ?? true,
         routingMode: 'reply_learned',
         logger: options.logger,
@@ -119,8 +126,12 @@ function normalizeRelayUrls(relays) {
     const normalized = new Set();
     for (const relay of relays) {
         const value = relay.trim().replace(/\/+$/, '');
-        if (value)
+        if (value) {
+            const url = new URL(value);
+            if (url.protocol !== 'ws:' && url.protocol !== 'wss:')
+                throw new Error('Nostr relay URL must use ws: or wss:');
             normalized.add(value);
+        }
     }
     return [...normalized];
 }
@@ -135,14 +146,15 @@ function normalizeWebSocketSeedUrls(seedUrls) {
 }
 /** Files and events share one authenticated FIPS node, identity and set of links. */
 export async function createBrowserHashtreeNostrProvider(options) {
-    if (!supportsBrowserHashtreeFips())
-        throw new Error('browser FIPS requires WebSocket and RTCPeerConnection');
+    // Validate before opening durable announcements, even when only local/FIPS
+    // carriers are chosen. This provider supplies its own retained discovery.
+    const transports = resolveBrowserTransports(options, true);
     const identity = options.identity ?? await identityFromSecretKey(readSecretKey(options.deviceSecretKey));
     const announcements = await openBrowserAnnouncements(toHex(identity.publicKey), options.discoveryApp ?? DEFAULT_FIPS_DISCOVERY_APP, options.relays, undefined, error => options.onNostrError?.(error, { operation: 'receive' }));
     let provider;
     try {
-        provider = await createBrowserHashtreeFipsProvider({ ...options, identity, deviceSecretKey: undefined,
-            discoveryProvider: announcements.discovery });
+        provider = await createBrowserProvider({ ...options, identity, deviceSecretKey: undefined,
+            discoveryProvider: announcements.discovery }, transports);
     }
     catch (error) {
         await announcements.close();

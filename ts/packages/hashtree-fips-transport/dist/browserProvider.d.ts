@@ -15,7 +15,7 @@ interface BrowserHashtreeFipsProviderBaseOptions {
     serveBlob?: (hash: Hash, peerId: string, signal: AbortSignal, htl: number) => Promise<Uint8Array | null>;
     discoveryApp?: string;
     stunServers?: readonly string[];
-    /** Explicit authenticated first-adjacency seeds used to bootstrap WebRTC negotiation. */
+    /** Authenticated first-adjacency seeds. [] disables WebSocket bootstrap; omission uses the public defaults. */
     websocketSeedUrls?: readonly string[];
     maxConnections?: number;
     connectTimeoutMs?: number;
@@ -42,7 +42,7 @@ export interface BrowserHashtreeFipsProvider extends HashtreeWorkerP2PProvider {
     readonly localPeerId: string;
     listConnectedPeerIds(): string[];
     readonly webRtcTransport: WebRtcTransport;
-    readonly webSocketTransport: WebSocketTransport;
+    readonly webSocketTransport?: WebSocketTransport;
     stop(): Promise<void>;
 }
 export declare function supportsBrowserHashtreeFips(): boolean;
