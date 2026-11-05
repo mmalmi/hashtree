@@ -328,6 +328,12 @@ let graphCatchupGeneration = 0;
 let graphBootstrapGeneration = 0;
 let graphBootstrapAbort;
 let graphBootstrapEligible = false;
+const rootGraphSubscriptions = new Set();
+function stopSocialGraphSubscriptions() {
+    for (const id of rootGraphSubscriptions)
+        nostrUnsubscribe(id);
+    rootGraphSubscriptions.clear();
+}
 let graphLifecycleGeneration = 0;
 let graphPersistenceBlocked = true;
 let expectedGraphRow;
@@ -878,6 +884,7 @@ async function handleInit(id, cfg, hasP2PProvider, peerListSupported = true) {
  */
 async function handleSetIdentity(id, pubkey, nsec) {
     const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
+    stopSocialGraphSubscriptions();
     socialGraphLoading = false;
     graphCatchupGeneration++;
     stopGraphCatchup?.();
@@ -899,6 +906,7 @@ async function handleSetIdentity(id, pubkey, nsec) {
         if (lifecycle !== graphLifecycleGeneration)
             return;
     }
+    setupSocialGraphSubscription(pubkey);
     configureGraphCatchup();
     notifySocialGraphVersionUpdate();
     console.log('[Worker] SocialGraph root updated:', pubkey.slice(0, 16) + '...');
@@ -967,6 +975,7 @@ function emitBlossomBandwidthSnapshot() {
 }
 async function handleClose(id) {
     graphLifecycleGeneration++;
+    stopSocialGraphSubscriptions();
     socialGraphLoading = false;
     cancelGraphBootstrap();
     graphBootstrapEligible = false;
@@ -1403,6 +1412,7 @@ async function changeSocialGraphRoot(pubkey) {
     if (pubkey === socialGraph.getRoot())
         return true;
     const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
+    stopSocialGraphSubscriptions();
     socialGraphLoading = false;
     cancelGraphBootstrap();
     graphBootstrapEligible = false;
@@ -1419,6 +1429,7 @@ async function changeSocialGraphRoot(pubkey) {
         if (lifecycle !== graphLifecycleGeneration)
             return false;
     }
+    setupSocialGraphSubscription(pubkey);
     configureGraphCatchup();
     notifySocialGraphVersionUpdate();
     return true;
@@ -1677,7 +1688,9 @@ function subscribeToFollowsContactLists(pubkeys, depth) {
         const batchSize = 50;
         for (let i = 0; i < newPubkeys.length; i += batchSize) {
             const batch = newPubkeys.slice(i, i + batchSize);
-            nostrSubscribe(`socialgraph-depth${depth}-${i}`, [{
+            const id = `socialgraph-depth${depth}-${i}`;
+            rootGraphSubscriptions.add(id);
+            nostrSubscribe(id, [{
                     kinds: [KIND_CONTACTS, 10000],
                     authors: batch,
                 }]);
@@ -1688,6 +1701,7 @@ function subscribeToFollowsContactLists(pubkeys, depth) {
  * Subscribe to kind:3 contact list events for social graph
  */
 function setupSocialGraphSubscription(rootPubkey) {
+    stopSocialGraphSubscriptions();
     if (!rootPubkey || rootPubkey.length !== 64) {
         console.warn('[Worker] Invalid pubkey for social graph subscription:', rootPubkey);
         return;
@@ -1706,6 +1720,7 @@ function setupSocialGraphSubscription(rootPubkey) {
             authors.push(DEFAULT_BOOTSTRAP_PUBKEY);
             subscribedPubkeys.add(DEFAULT_BOOTSTRAP_PUBKEY);
         }
+        rootGraphSubscriptions.add('socialgraph-contacts');
         nostrSubscribe('socialgraph-contacts', [{
                 kinds: [KIND_CONTACTS, 10000],
                 authors,

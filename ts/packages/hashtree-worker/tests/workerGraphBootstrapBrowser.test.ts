@@ -91,7 +91,7 @@ async function retain(page: Page, bytes: Uint8Array) {
   }, [...bytes]);
 }
 
-for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 'switch-to-custom', 'other-tab', 'invalid-cache', 'root-switch', 'pending-root-switch', 'unchanged-root'] as const) {
+for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 'switch-to-custom', 'other-tab', 'invalid-cache', 'root-switch', 'pending-root-switch', 'unchanged-root', 'pending-identity-switch'] as const) {
   it(`uses the actual browser worker with ${mode} policy`, async () => {
     const context = await browser.newContext({ serviceWorkers: 'block' });
     const page = await context.newPage(), errors: string[] = [];
@@ -108,17 +108,23 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
     context.on('requestfailed', request => { if (request.url().startsWith('https://graph-api.iris.to/')) abortedHttp++; });
     await context.route('https://graph-api.iris.to/**', async route => {
       httpRequests++;
-      if (mode === 'switch-to-custom' || mode === 'other-tab' || mode === 'pending-root-switch' || mode === 'unchanged-root') await pendingHttp;
+      if (mode === 'switch-to-custom' || mode === 'other-tab' || mode === 'pending-root-switch' || mode === 'pending-identity-switch' || mode === 'unchanged-root') await pendingHttp;
       await route.fulfill({ body: Buffer.from(seedBytes), contentType: 'application/octet-stream', headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'x-graph-root', 'x-graph-root': DEFAULT_BOOTSTRAP_PUBKEY } }).catch(() => {});
     });
+    const handoff = mode === 'root-switch' || mode === 'pending-root-switch' || mode === 'pending-identity-switch';
     const negotiations: any[] = [], negotiationPaths: string[] = [];
+    const active = new Map<any, Map<string, any[]>>(), negSockets = new Set<any>();
     relay.on('connection', (socket, connection) => socket.on('message', bytes => {
       const frame = JSON.parse(bytes.toString());
       if (frame[0] === 'NEG-OPEN') {
+        negSockets.add(socket);
         negotiations.push(frame[2]); negotiationPaths.push(connection.url ?? '/'); socket.send(JSON.stringify(['NEG-ERR', frame[1], 'unsupported']));
       }
+      if (frame[0] === 'CLOSE') { active.get(socket)?.delete(frame[1]); return; }
       if (frame[0] !== 'REQ') return;
-      if (mode === 'custom-default' || mode === 'root-switch' || mode === 'pending-root-switch' || (mode === 'switch-to-custom' && connection.url === '/custom')) for (const event of [localFollow, localMute]) {
+      if (!active.has(socket)) active.set(socket, new Map());
+      active.get(socket)!.set(frame[1], frame.slice(2));
+      if (mode === 'custom-default' || handoff || (mode === 'switch-to-custom' && connection.url === '/custom')) for (const event of [localFollow, localMute]) {
         if (frame.slice(2).some((filter: any) => (!filter.kinds || filter.kinds.includes(event.kind)) &&
           (!filter.authors || filter.authors.includes(event.pubkey)) && (!filter.ids || filter.ids.includes(event.id)))) {
           socket.send(JSON.stringify(['EVENT', frame[1], event]));
@@ -133,8 +139,11 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
         await retain(page, await local.toBinary());
       }
       if (mode === 'invalid-cache') await retain(page, new Uint8Array([0, 1, 2]));
-      await page.evaluate(() => { (window as any).policyWorker = new Worker('/worker.js'); });
-      await request(page, { type: 'init', config: { pubkey: mode.includes('root-switch') ? muted : owner, storeName: `policy-${mode}`, relays: [`ws://127.0.0.1:${address.port}/initial`],
+      await page.evaluate(() => {
+        const win = window as any; win.policyVersions = []; win.policyWorker = new Worker('/worker.js');
+        win.policyWorker.addEventListener('message', (event: MessageEvent) => { if (event.data.type === 'socialGraphVersion') win.policyVersions.push(event.data.version); });
+      });
+      await request(page, { type: 'init', config: { pubkey: handoff ? muted : owner, storeName: `policy-${mode}`, relays: [`ws://127.0.0.1:${address.port}/initial`],
         ...(mode !== 'custom-default' && mode !== 'root-switch' ? { graphBootstrap: true } : {}), blossomServers: [] } });
       if (mode === 'switch-to-custom') {
         await expect.poll(() => httpRequests).toBe(1);
@@ -148,11 +157,11 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
         await request(page, { type: 'setSocialGraphRoot', pubkey: owner });
         expect(abortedHttp).toBe(0); releaseHttp!();
       }
-      if (mode === 'root-switch' || mode === 'pending-root-switch') {
+      if (handoff) {
         if (mode === 'root-switch') await expect.poll(() => negotiations.some(filter => filter.authors?.includes(muted))).toBe(true);
         else await expect.poll(() => httpRequests).toBe(1);
-        await request(page, { type: 'setSocialGraphRoot', pubkey: owner });
-        if (mode === 'pending-root-switch') {
+        await request(page, { type: mode === 'pending-identity-switch' ? 'setIdentity' : 'setSocialGraphRoot', pubkey: owner });
+        if (mode !== 'root-switch') {
           await expect.poll(() => abortedHttp).toBe(1); releaseHttp!();
         }
         await expect.poll(() => negotiations.some(filter => filter.authors?.includes(owner)), { timeout: 5000 }).toBe(true);
@@ -183,14 +192,29 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
       if (mode === 'switch-to-custom') expect(negotiationPaths.every(path => path === '/custom')).toBe(true);
       expect(negotiations[0].kinds).toEqual([3, 10000]); expect(negotiations.some(filter => filter.authors.includes(owner))).toBe(true);
       await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: owner })).pubkeys).toEqual([friend]);
+      let lateFollow: ReturnType<typeof finalizeEvent> | undefined, lateMute: ReturnType<typeof finalizeEvent> | undefined;
+      if (handoff) {
+        // Wait for the bounded NEG/fallback sockets to close, then deliver new
+        // signed events only over the surviving ordinary live subscription.
+        await expect.poll(() => [...negSockets].every(socket => socket.readyState === 3)).toBe(true);
+        const listeners = () => [...active].flatMap(([socket, subscriptions]) => socket.readyState === 1
+          ? [...subscriptions].filter(([, filters]) => filters.some(filter => filter.authors?.includes(owner) && !filter.ids && filter.kinds?.includes(3) && filter.kinds?.includes(10000))).map(([id]) => ({ socket, id })) : []);
+        await expect.poll(() => listeners().length, { timeout: 5000 }).toBeGreaterThan(0);
+        lateFollow = finalizeEvent({ kind: 3, created_at: 900, content: '', tags: [['p', muted]] }, key);
+        lateMute = finalizeEvent({ kind: 10000, created_at: 890, content: '', tags: [['p', friend]] }, key);
+        const versions = await page.evaluate(() => (window as any).policyVersions.length);
+        for (const { socket, id } of listeners()) for (const event of [lateFollow, lateMute]) socket.send(JSON.stringify(['EVENT', id, event]));
+        await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: owner })).pubkeys).toEqual([muted]);
+        await expect.poll(() => page.evaluate(() => (window as any).policyVersions.length)).toBeGreaterThanOrEqual(versions + 2);
+      }
       await request(page, { type: 'close' });
       const graph = await saved(page);
-      expect(httpRequests).toBe((mode === 'explicit-bootstrap' || mode === 'unchanged-root') || mode === 'switch-to-custom' || mode === 'pending-root-switch' ? 1 : 0);
-      expect(graph.getListRevision(owner, 3)).toMatchObject({ id: (mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? seedFollow.id : localFollow.id,
-        created_at: (mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? 100 : 300, complete: mode !== 'retained-partial' });
-      expect(graph.getListRevision(owner, 10000)).toMatchObject({ id: (mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? seedMute.id : localMute.id,
-        created_at: (mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? 90 : 270, complete: true });
-      expect([...graph.getMutedByUser(owner)]).toEqual([muted]); expect(errors).toEqual([]);
+      expect(httpRequests).toBe((mode === 'explicit-bootstrap' || mode === 'unchanged-root') || mode === 'switch-to-custom' || mode === 'pending-root-switch' || mode === 'pending-identity-switch' ? 1 : 0);
+      expect(graph.getListRevision(owner, 3)).toMatchObject({ id: lateFollow?.id ?? ((mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? seedFollow.id : localFollow.id),
+        created_at: lateFollow?.created_at ?? ((mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? 100 : 300), complete: mode !== 'retained-partial' });
+      expect(graph.getListRevision(owner, 10000)).toMatchObject({ id: lateMute?.id ?? ((mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? seedMute.id : localMute.id),
+        created_at: lateMute?.created_at ?? ((mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? 90 : 270), complete: true });
+      expect([...graph.getMutedByUser(owner)]).toEqual([handoff ? friend : muted]); expect(errors).toEqual([]);
     } finally {
       releaseHttp?.();
       await context.close(); for (const socket of relay.clients) socket.terminate();

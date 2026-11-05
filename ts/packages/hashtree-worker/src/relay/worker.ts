@@ -393,6 +393,11 @@ let graphCatchupGeneration = 0;
 let graphBootstrapGeneration = 0;
 let graphBootstrapAbort: AbortController | undefined;
 let graphBootstrapEligible = false;
+const rootGraphSubscriptions = new Set<string>();
+function stopSocialGraphSubscriptions() {
+  for (const id of rootGraphSubscriptions) nostrUnsubscribe(id);
+  rootGraphSubscriptions.clear();
+}
 let graphLifecycleGeneration = 0;
 let graphPersistenceBlocked = true;
 let expectedGraphRow: { data: Uint8Array; updatedAt: number } | undefined;
@@ -949,6 +954,7 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
  */
 async function handleSetIdentity(id: string, pubkey: string, nsec?: string) {
   const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
+  stopSocialGraphSubscriptions();
   socialGraphLoading = false;
   graphCatchupGeneration++;
   stopGraphCatchup?.(); stopGraphCatchup = undefined;
@@ -969,6 +975,7 @@ async function handleSetIdentity(id: string, pubkey: string, nsec?: string) {
     await loadSocialGraph(pubkey, lifecycle);
     if (lifecycle !== graphLifecycleGeneration) return;
   }
+  setupSocialGraphSubscription(pubkey);
   configureGraphCatchup();
   notifySocialGraphVersionUpdate();
   console.log('[Worker] SocialGraph root updated:', pubkey.slice(0, 16) + '...');
@@ -1044,6 +1051,7 @@ function emitBlossomBandwidthSnapshot(): void {
 
 async function handleClose(id: string) {
   graphLifecycleGeneration++;
+  stopSocialGraphSubscriptions();
   socialGraphLoading = false;
   cancelGraphBootstrap();
   graphBootstrapEligible = false;
@@ -1541,6 +1549,7 @@ async function handleGetStorageStats(id: string) {
 async function changeSocialGraphRoot(pubkey: string): Promise<boolean> {
   if (pubkey === socialGraph.getRoot()) return true;
   const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
+  stopSocialGraphSubscriptions();
   socialGraphLoading = false;
   cancelGraphBootstrap();
   graphBootstrapEligible = false;
@@ -1554,6 +1563,7 @@ async function changeSocialGraphRoot(pubkey: string): Promise<boolean> {
     await loadSocialGraph(pubkey, lifecycle);
     if (lifecycle !== graphLifecycleGeneration) return false;
   }
+  setupSocialGraphSubscription(pubkey);
   configureGraphCatchup();
   notifySocialGraphVersionUpdate();
   return true;
@@ -1826,7 +1836,9 @@ function subscribeToFollowsContactLists(pubkeys: string[], depth: number): void 
     const batchSize = 50;
     for (let i = 0; i < newPubkeys.length; i += batchSize) {
       const batch = newPubkeys.slice(i, i + batchSize);
-      nostrSubscribe(`socialgraph-depth${depth}-${i}`, [{
+      const id = `socialgraph-depth${depth}-${i}`;
+      rootGraphSubscriptions.add(id);
+      nostrSubscribe(id, [{
         kinds: [KIND_CONTACTS, 10000],
         authors: batch,
       }]);
@@ -1838,6 +1850,7 @@ function subscribeToFollowsContactLists(pubkeys: string[], depth: number): void 
  * Subscribe to kind:3 contact list events for social graph
  */
 function setupSocialGraphSubscription(rootPubkey: string): void {
+  stopSocialGraphSubscriptions();
   if (!rootPubkey || rootPubkey.length !== 64) {
     console.warn('[Worker] Invalid pubkey for social graph subscription:', rootPubkey);
     return;
@@ -1860,6 +1873,7 @@ function setupSocialGraphSubscription(rootPubkey: string): void {
       authors.push(DEFAULT_BOOTSTRAP_PUBKEY);
       subscribedPubkeys.add(DEFAULT_BOOTSTRAP_PUBKEY);
     }
+    rootGraphSubscriptions.add('socialgraph-contacts');
     nostrSubscribe('socialgraph-contacts', [{
       kinds: [KIND_CONTACTS, 10000],
       authors,
