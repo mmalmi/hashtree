@@ -306,6 +306,8 @@ export interface WorkerConfig {
     pubkey: string;
     nsec?: string;
     storeName?: string;
+    /** Set false to disable bounded public follow/mute catch-up and fresh cold bootstrap. */
+    graphReconciliation?: boolean;
     /** Opt-in background NIP-77 recovery against the worker's retained event store. */
     reconciliation?: Omit<RuntimeReconciliationOptions, 'fetch'>;
 }

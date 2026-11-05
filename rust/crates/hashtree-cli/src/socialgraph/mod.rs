@@ -1259,6 +1259,13 @@ pub trait SocialGraphBackend: Send + Sync {
     fn users_by_follow_distance(&self, distance: u32) -> Result<Vec<[u8; 32]>>;
     fn follow_distance(&self, pk_bytes: &[u8; 32]) -> Result<Option<u32>>;
     fn follow_list_created_at(&self, owner: &[u8; 32]) -> Result<Option<u64>>;
+    /// Complete accepted list heads, for download-only reconciliation.
+    fn list_revision_items(
+        &self,
+        _owners: &[[u8; 32]],
+    ) -> Result<Vec<(nostr::EventId, nostr::Timestamp)>> {
+        Ok(Vec::new())
+    }
     fn followed_targets(&self, owner: &[u8; 32]) -> Result<UserSet>;
     fn is_overmuted_user(&self, user_pk: &[u8; 32], threshold: f64) -> Result<bool>;
     fn profile_search_root(&self) -> Result<Option<Cid>> {
@@ -3328,6 +3335,29 @@ impl SocialGraphBackend for SocialGraphStore {
         SocialGraphStore::apply_graph_events_only(self, events)
     }
 
+    fn list_revision_items(
+        &self,
+        owners: &[[u8; 32]],
+    ) -> Result<Vec<(nostr::EventId, nostr::Timestamp)>> {
+        let graph = self.graph.lock().unwrap();
+        let mut items = Vec::with_capacity(owners.len() * 2);
+        for owner in owners {
+            let owner = hex::encode(owner);
+            for kind in [3, 10_000] {
+                if let Some(revision) = graph
+                    .get_list_revision(&owner, kind)?
+                    .filter(|revision| revision.complete)
+                {
+                    items.push((
+                        nostr::EventId::from_hex(&revision.id)?,
+                        nostr::Timestamp::from(revision.created_at),
+                    ));
+                }
+            }
+        }
+        Ok(items)
+    }
+
     fn query_events(&self, filter: &Filter, limit: usize) -> Result<Vec<Event>> {
         SocialGraphStore::query_events(self, filter, limit)
     }
@@ -3335,6 +3365,17 @@ impl SocialGraphBackend for SocialGraphStore {
 
 impl NostrSocialGraphBackend for SocialGraphStore {
     type Error = UpstreamGraphBackendError;
+
+    fn get_list_revisions(
+        &self,
+    ) -> std::result::Result<Vec<(String, u32, nostr_social_graph::ListRevision)>, Self::Error>
+    {
+        self.graph
+            .lock()
+            .unwrap()
+            .get_list_revisions()
+            .map_err(|err| UpstreamGraphBackendError(err.to_string()))
+    }
 
     fn get_root(&self) -> std::result::Result<String, Self::Error> {
         let graph = self.graph.lock().unwrap();
@@ -3465,6 +3506,13 @@ impl<T> SocialGraphBackend for Arc<T>
 where
     T: SocialGraphBackend + ?Sized,
 {
+    fn list_revision_items(
+        &self,
+        owners: &[[u8; 32]],
+    ) -> Result<Vec<(nostr::EventId, nostr::Timestamp)>> {
+        self.as_ref().list_revision_items(owners)
+    }
+
     fn stats(&self) -> Result<SocialGraphStats> {
         self.as_ref().stats()
     }

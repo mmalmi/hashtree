@@ -177,6 +177,8 @@ export interface WorkerConfig {
   pubkey: string;  // User's pubkey (required - user always logged in)
   nsec?: string;  // Hex-encoded secret key (only for nsec login, not extension)
   storeName?: string;  // IndexedDB database name, defaults to 'hashtree-worker'
+  /** Set false to disable bounded public follow/mute catch-up and fresh cold bootstrap. */
+  graphReconciliation?: boolean;
   /** Opt-in background NIP-77 recovery against the worker's retained event store. */
   reconciliation?: Omit<RuntimeReconciliationOptions, 'fetch'>;
 }

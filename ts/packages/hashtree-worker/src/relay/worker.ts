@@ -41,7 +41,6 @@ import {
 import { SocialGraph, type NostrEvent as SocialGraphNostrEvent } from 'nostr-social-graph';
 import { cloneTransferableBytes } from '../transferableBytes';
 import Dexie from 'dexie';
-import { LRUCache } from './utils/lruCache';
 import { getErrorMessage } from './utils/errorMessage';
 import { DEFAULT_BOOTSTRAP_PUBKEY } from './utils/constants';
 import { nip19 } from 'nostr-tools';
@@ -388,6 +387,22 @@ let socialGraph: SocialGraph = new SocialGraph(DEFAULT_BOOTSTRAP_PUBKEY);
 let socialGraphVersion = 0;
 let socialGraphSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 let socialGraphDirty = false;
+let stopGraphCatchup: (() => void) | undefined;
+let graphCatchupGeneration = 0;
+function configureGraphCatchup() {
+  const generation = ++graphCatchupGeneration;
+  stopGraphCatchup?.(); stopGraphCatchup = undefined;
+  if (!_config?.relays.length || _config.graphReconciliation === false) return;
+  const relays = [..._config.relays];
+  void import('nostr-social-graph/publicGraphSync').then(({ startGraphSync }) => {
+    if (generation !== graphCatchupGeneration) return;
+    stopGraphCatchup = startGraphSync({ getGraph: () => socialGraph, relays,
+      maxAuthors: 500, maxBytes: 2 * 1024 * 1024,
+      onChange: notifySocialGraphVersionUpdate,
+      onError: error => console.warn('[Worker] Public graph catch-up unavailable', error),
+    });
+  }).catch(error => console.warn('[Worker] Public graph catch-up unavailable', error));
+}
 
 function notifySocialGraphVersionUpdate() {
   socialGraphVersion++;
@@ -435,8 +450,13 @@ async function loadSocialGraph(rootPubkey: string): Promise<boolean> {
   try {
     const row = await socialGraphDB.socialGraph.get('main');
     if (row?.data) {
+      const expectedGraph = socialGraph;
       const loaded = await SocialGraph.fromBinary(rootPubkey, row.data);
-      await socialGraph.merge(loaded);
+      if (socialGraph !== expectedGraph || _config?.pubkey !== rootPubkey) return false;
+      // Merge only events that arrived during the disk read, not thousands of
+      // cached owners into an empty graph one timer at a time.
+      if (socialGraph.size().follows || socialGraph.size().mutes) await loaded.merge(socialGraph);
+      socialGraph = loaded;
       console.log('[Worker] Loaded social graph from IndexedDB, age:', Math.round((Date.now() - row.updatedAt) / 1000), 'seconds, size:', socialGraph.size());
       return true;
     }
@@ -621,6 +641,8 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
       // Relay configuration
       case 'setRelays':
         await nostrSetRelays(msg.relays);
+        if (_config) _config.relays = msg.relays;
+        configureGraphCatchup();
         console.log('[Worker] Relay configuration updated:', msg.relays.length, 'relays');
         respond({ type: 'void', id: msg.id });
         break;
@@ -786,7 +808,7 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
       respond({ type: 'event', subId, event, info });
 
       // Route to SocialGraph handler (all socialgraph-* subscriptions)
-      if (subId.startsWith('socialgraph-') && event.kind === KIND_CONTACTS) {
+      if (subId.startsWith('socialgraph-') && (event.kind === KIND_CONTACTS || event.kind === 10000)) {
         handleSocialGraphEvent(event);
       }
     });
@@ -830,6 +852,18 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
     // Load persisted social graph from IndexedDB, THEN set up subscriptions
     // This ensures we only subscribe for users whose follow lists we don't already have
     const loaded = await loadSocialGraph(cfg.pubkey);
+    if (_config !== cfg) return;
+    if (!loaded && cfg.relays.length && cfg.graphReconciliation !== false) {
+      try {
+        const { loadGraphBootstrap } = await import('nostr-social-graph/publicGraphSync');
+        const fresh = await loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY });
+        if (_config !== cfg) return;
+        // This is a cold bootstrap only; a saved personal graph always wins.
+        await socialGraph.merge(fresh);
+        notifySocialGraphVersionUpdate();
+      } catch { /* Existing relay crawling remains the offline-safe fallback. */ }
+    }
+    if (_config !== cfg) return;
     if (loaded) {
       notifySocialGraphVersionUpdate();
       console.log('[Worker] Social graph loaded, setting up subscriptions with existing data');
@@ -837,6 +871,7 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
     // Subscribe to kind:3 (contact list) events for social graph
     // Do this AFTER load so we can skip users we already have
     setupSocialGraphSubscription(cfg.pubkey);
+    configureGraphCatchup();
   } catch (err) {
     const error = getErrorMessage(err);
     respond({ type: 'error', id, error });
@@ -857,6 +892,7 @@ function handleSetIdentity(id: string, pubkey: string, nsec?: string) {
 
   // Update SocialGraph root
   socialGraph.setRoot(pubkey);
+  configureGraphCatchup();
   notifySocialGraphVersionUpdate();
   console.log('[Worker] SocialGraph root updated:', pubkey.slice(0, 16) + '...');
 
@@ -930,12 +966,17 @@ function emitBlossomBandwidthSnapshot(): void {
 }
 
 async function handleClose(id: string) {
+  graphCatchupGeneration++;
+  stopGraphCatchup?.(); stopGraphCatchup = undefined;
   // Close event subscriptions and connections
   for (const query of nostrQueries.values()) query.abort();
   nostrQueries.clear();
   for (const bridge of nostrSourceBridges.values()) bridge.close();
   nostrSourceBridges.clear();
   await closeNostrRuntime();
+  if (socialGraphSaveTimeout) clearTimeout(socialGraphSaveTimeout);
+  socialGraphSaveTimeout = null;
+  await saveSocialGraph();
   // Clear identity
   clearIdentity();
   // Clear caches
@@ -1419,7 +1460,7 @@ async function handleGetStorageStats(id: string) {
 function handleInitSocialGraph(id: string, rootPubkey?: string) {
   try {
     if (rootPubkey) {
-      socialGraph = new SocialGraph(rootPubkey);
+      socialGraph.setRoot(rootPubkey);
     }
     const size = socialGraph.size();
     respond({ type: 'socialGraphInit', id, version: socialGraphVersion, size });
@@ -1588,10 +1629,6 @@ function handleFetchUserFollowers(id: string, pubkey: string) {
 // SocialGraph Subscription
 // ============================================================================
 
-// Track latest event per pubkey to avoid processing old events (for social graph)
-// Limited to 1000 entries to prevent memory leak from encountering many unique pubkeys
-const socialGraphLatestByPubkey = new LRUCache<string, number>(1000);
-
 // Track which pubkeys we've already subscribed to for follow lists
 const subscribedPubkeys = new Set<string>();
 
@@ -1604,12 +1641,8 @@ const MAX_SOCIAL_GRAPH_SIZE = 10000;
 function handleSocialGraphEvent(event: SignedEvent): void {
   const rootPubkey = socialGraph.getRoot();
 
-  const prevTime = socialGraphLatestByPubkey.get(event.pubkey) || 0;
-  if (event.created_at > prevTime) {
-    socialGraphLatestByPubkey.set(event.pubkey, event.created_at);
-
-    // allowUnknownAuthors=true lets us track followers of any user, not just those connected to root
-    socialGraph.handleEvent(event as SocialGraphNostrEvent, true);
+  if (socialGraph.handleEvent(event as SocialGraphNostrEvent, true)) {
+    if (event.kind === 10000) { notifySocialGraphVersionUpdate(); return; }
 
     // If this is the root user's contact list, subscribe to kind:3 from their follows.
     if (event.pubkey === rootPubkey) {
@@ -1632,7 +1665,7 @@ function handleSocialGraphEvent(event: SignedEvent): void {
     } else {
       // For non-root users at depth 1, subscribe to their follows (depth 2)
       // But only if graph isn't already at max size
-      if (socialGraph.size() < MAX_SOCIAL_GRAPH_SIZE) {
+      if (socialGraph.size().users < MAX_SOCIAL_GRAPH_SIZE) {
         try {
           const distance = socialGraph.getFollowDistance(event.pubkey);
           if (distance === 1) {
@@ -1660,7 +1693,7 @@ function subscribeToFollowsContactLists(pubkeys: string[], depth: number): void 
   }
 
   // Stop crawling if graph is already large enough
-  const currentSize = socialGraph.size();
+  const currentSize = socialGraph.size().users;
   if (currentSize >= MAX_SOCIAL_GRAPH_SIZE) {
     return;
   }
@@ -1695,7 +1728,7 @@ function subscribeToFollowsContactLists(pubkeys: string[], depth: number): void 
     for (let i = 0; i < newPubkeys.length; i += batchSize) {
       const batch = newPubkeys.slice(i, i + batchSize);
       nostrSubscribe(`socialgraph-depth${depth}-${i}`, [{
-        kinds: [KIND_CONTACTS],
+        kinds: [KIND_CONTACTS, 10000],
         authors: batch,
       }]);
     }
@@ -1721,15 +1754,15 @@ function setupSocialGraphSubscription(rootPubkey: string): void {
   const rootFollows = socialGraph.getFollowedByUser(rootPubkey);
   const hasRootFollows = rootFollows.size > 0;
 
-  // Subscribe to root user's contact list if we don't have it
-  if (!hasRootFollows) {
-    const authors = [rootPubkey];
-    if (rootPubkey !== DEFAULT_BOOTSTRAP_PUBKEY) {
+  // Keep root and nearby public opinions live even when a cached list exists.
+  {
+    const authors = [rootPubkey, ...Array.from(rootFollows).slice(0, 64)];
+    if (!hasRootFollows && rootPubkey !== DEFAULT_BOOTSTRAP_PUBKEY) {
       authors.push(DEFAULT_BOOTSTRAP_PUBKEY);
       subscribedPubkeys.add(DEFAULT_BOOTSTRAP_PUBKEY);
     }
     nostrSubscribe('socialgraph-contacts', [{
-      kinds: [KIND_CONTACTS],
+      kinds: [KIND_CONTACTS, 10000],
       authors,
     }]);
   }

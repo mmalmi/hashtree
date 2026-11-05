@@ -13,7 +13,8 @@ use super::{
     LocalListFileState, SocialGraphBackend,
 };
 
-const DEFAULT_AUTHOR_BATCH_SIZE: usize = 500;
+const DEFAULT_AUTHOR_BATCH_SIZE: usize = 128;
+const MAX_GRAPH_BATCH_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_CONCURRENT_BATCHES: usize = 4;
 const GRAPH_FETCH_TIMEOUT: Duration = Duration::from_secs(15);
 const RELAY_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -42,6 +43,7 @@ pub struct SocialGraphCrawler {
     author_batch_size: usize,
     concurrent_batches: usize,
     full_recrawl: bool,
+    negentropy: bool,
     known_since: Option<Timestamp>,
 }
 
@@ -61,6 +63,7 @@ impl SocialGraphCrawler {
             author_batch_size: DEFAULT_AUTHOR_BATCH_SIZE,
             concurrent_batches: DEFAULT_CONCURRENT_BATCHES,
             full_recrawl: false,
+            negentropy: false,
             known_since: None,
         }
     }
@@ -71,12 +74,19 @@ impl SocialGraphCrawler {
     }
 
     pub fn with_author_batch_size(mut self, author_batch_size: usize) -> Self {
-        self.author_batch_size = author_batch_size.max(1);
+        self.author_batch_size = author_batch_size.clamp(1, 128);
         self
     }
 
     pub fn with_concurrent_batches(mut self, concurrent_batches: usize) -> Self {
         self.concurrent_batches = concurrent_batches.max(1);
+        self
+    }
+
+    /// Reconcile complete follow/mute IDs before downloading changed lists.
+    /// Unsupported relays fall back to the bounded ordinary request.
+    pub fn with_negentropy(mut self, enabled: bool) -> Self {
+        self.negentropy = enabled;
         self
     }
 
@@ -175,21 +185,67 @@ impl SocialGraphCrawler {
         pubkeys: &[[u8; 32]],
         since: Option<Timestamp>,
     ) -> Vec<nostr::Event> {
-        let Some(filter) = Self::graph_filter_for_pubkeys(pubkeys, since) else {
+        use nostr::JsonUtil;
+        // Reconciliation covers the complete current heads, including old events
+        // absent from a partial snapshot. A `since` filter could hide those gaps.
+        let Some(filter) =
+            Self::graph_filter_for_pubkeys(pubkeys, if self.negentropy { None } else { since })
+        else {
             return Vec::new();
         };
-
-        match client.fetch_events(filter, GRAPH_FETCH_TIMEOUT).await {
-            Ok(events) => events.to_vec(),
-            Err(err) => {
-                tracing::debug!(
-                    "Failed to fetch graph events for {} authors: {}",
-                    pubkeys.len(),
-                    err
-                );
-                Vec::new()
+        let limit = pubkeys.len().saturating_mul(2).max(1);
+        let mut query = filter.clone().limit(limit);
+        if self.negentropy {
+            let items = self
+                .graph_store
+                .list_revision_items(pubkeys)
+                .unwrap_or_default();
+            let options = nostr_sdk::SyncOptions::new()
+                .dry_run()
+                .initial_timeout(Duration::from_secs(1));
+            let mut missing = HashSet::new();
+            let mut supported = false;
+            let mut fallback = false;
+            // Dry-run only exchanges IDs: the SDK must never upload local events.
+            for relay in client.relays().await.into_values().take(2) {
+                match tokio::time::timeout(
+                    GRAPH_FETCH_TIMEOUT,
+                    relay.sync_with_items(filter.clone(), items.clone(), &options),
+                )
+                .await
+                {
+                    Ok(Ok(result)) => {
+                        supported = true;
+                        missing.extend(result.remote);
+                    }
+                    _ => fallback = true,
+                }
+            }
+            if supported && !fallback {
+                if missing.is_empty() {
+                    return Vec::new();
+                }
+                if missing.len() <= limit {
+                    query = nostr::Filter::new().ids(missing).limit(limit);
+                }
             }
         }
+        let Ok(mut stream) = client.stream_events(query, GRAPH_FETCH_TIMEOUT).await else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        let mut bytes = 0usize;
+        while let Some(event) = stream.next().await {
+            if !filter.match_event(&event, Default::default()) {
+                continue;
+            }
+            bytes = bytes.saturating_add(event.as_json().len());
+            if bytes > MAX_GRAPH_BATCH_BYTES || events.len() >= limit {
+                break;
+            }
+            events.push(event);
+        }
+        events
     }
 
     async fn fetch_contact_lists_for_pubkeys(
@@ -232,7 +288,7 @@ impl SocialGraphCrawler {
 
         let mut new_authors = Vec::new();
         let mut known_authors = Vec::new();
-        let refresh_known_authors = self.known_since.is_some();
+        let refresh_known_authors = self.negentropy || self.known_since.is_some();
         for pk_bytes in users {
             match self
                 .graph_store
@@ -430,7 +486,8 @@ pub fn spawn_social_graph_tasks(
         let spambox = spambox.clone();
         async move {
             tokio::time::sleep(CRAWLER_STARTUP_DELAY).await;
-            let mut crawler = SocialGraphCrawler::new(graph_store.clone(), keys, relays, max_depth);
+            let mut crawler = SocialGraphCrawler::new(graph_store.clone(), keys, relays, max_depth)
+                .with_negentropy(true);
             if let Some(spambox) = spambox {
                 crawler = crawler.with_spambox(spambox);
             }
@@ -482,7 +539,7 @@ pub fn spawn_social_graph_tasks(
 
                         if outcome.contacts_changed {
                             let mut crawler =
-                                SocialGraphCrawler::new(graph_store.clone(), keys.clone(), relays.clone(), max_depth);
+                                SocialGraphCrawler::new(graph_store.clone(), keys.clone(), relays.clone(), max_depth).with_negentropy(true);
                             if let Some(spambox) = spambox.clone() {
                                 crawler = crawler.with_spambox(spambox);
                             }
@@ -529,6 +586,8 @@ mod tests {
         events: Vec<nostr::Event>,
         request_author_counts: Vec<usize>,
         requested_authors: Vec<Vec<String>>,
+        negentropy: bool,
+        published_events: usize,
     }
 
     struct TestRelay {
@@ -543,6 +602,8 @@ mod tests {
                 events,
                 request_author_counts: Vec::new(),
                 requested_authors: Vec::new(),
+                negentropy: true,
+                published_events: 0,
             }));
             let (shutdown, _) = broadcast::channel(1);
 
@@ -653,6 +714,7 @@ mod tests {
         };
         let (mut write, mut read) = ws_stream.split();
 
+        let mut sessions = std::collections::HashMap::new();
         while let Some(message) = read.next().await {
             let text = match message {
                 Ok(Message::Text(text)) => text,
@@ -670,6 +732,74 @@ mod tests {
             };
 
             match parsed {
+                nostr::ClientMessage::Event(_) => {
+                    state.lock().unwrap().published_events += 1;
+                }
+                nostr::ClientMessage::NegOpen {
+                    subscription_id,
+                    filter,
+                    initial_message,
+                    ..
+                } => {
+                    let subscription_id = subscription_id.into_owned();
+                    if !state.lock().unwrap().negentropy {
+                        send_relay_message(
+                            &mut write,
+                            nostr::RelayMessage::NegErr {
+                                subscription_id: std::borrow::Cow::Owned(subscription_id),
+                                message: "unsupported".into(),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                    let mut storage = negentropy::NegentropyStorageVector::new();
+                    for event in matching_events(&state, &[filter.into_owned()]) {
+                        storage
+                            .insert(
+                                event.created_at.as_secs(),
+                                negentropy::Id::from_byte_array(event.id.to_bytes()),
+                            )
+                            .unwrap();
+                    }
+                    storage.seal().unwrap();
+                    let mut neg = negentropy::Negentropy::owned(storage, 4096).unwrap();
+                    let reply = neg
+                        .reconcile(&hex::decode(initial_message.as_ref()).unwrap())
+                        .unwrap();
+                    send_relay_message(
+                        &mut write,
+                        nostr::RelayMessage::NegMsg {
+                            subscription_id: std::borrow::Cow::Owned(subscription_id.clone()),
+                            message: hex::encode(reply).into(),
+                        },
+                    )
+                    .await;
+                    sessions.insert(subscription_id, neg);
+                }
+                nostr::ClientMessage::NegMsg {
+                    subscription_id,
+                    message,
+                } => {
+                    if let Some(neg) = sessions.get_mut(subscription_id.as_ref()) {
+                        let reply = neg
+                            .reconcile(&hex::decode(message.as_ref()).unwrap())
+                            .unwrap();
+                        send_relay_message(
+                            &mut write,
+                            nostr::RelayMessage::NegMsg {
+                                subscription_id: std::borrow::Cow::Owned(
+                                    subscription_id.into_owned(),
+                                ),
+                                message: hex::encode(reply).into(),
+                            },
+                        )
+                        .await;
+                    }
+                }
+                nostr::ClientMessage::NegClose { subscription_id } => {
+                    sessions.remove(subscription_id.as_ref());
+                }
                 nostr::ClientMessage::Req {
                     subscription_id,
                     filters,
@@ -739,6 +869,77 @@ mod tests {
             serde_json::to_string(pubkeys).expect("serialize contacts"),
         )
         .expect("write contacts file");
+    }
+
+    #[tokio::test]
+    async fn negentropy_refreshes_both_heads_and_falls_back_without_uploads() {
+        let _guard = crate::socialgraph::test_lock().await;
+        let tmp = TempDir::new().unwrap();
+        let store = crate::socialgraph::open_test_social_graph_store(tmp.path()).unwrap();
+        let keys = nostr::Keys::generate();
+        let owner = keys.public_key().to_bytes();
+        crate::socialgraph::set_social_graph_root(&store, &owner);
+        let follow = EventBuilder::new(Kind::ContactList, "")
+            .custom_created_at(Timestamp::from(10))
+            .sign_with_keys(&keys)
+            .unwrap();
+        let mute = EventBuilder::new(Kind::MuteList, "")
+            .custom_created_at(Timestamp::from(11))
+            .sign_with_keys(&keys)
+            .unwrap();
+        crate::socialgraph::ingest_parsed_event(&store, &follow).unwrap();
+        let relay = TestRelay::new(vec![follow.clone(), mute.clone()]);
+        let crawler = SocialGraphCrawler::new(store.clone(), keys, vec![relay.url()], 1)
+            .with_negentropy(true);
+        let client = crawler.connect_client().await.unwrap();
+        client.wait_for_connection(Duration::from_secs(2)).await;
+        // An old missing mute head must be fetched even with a recent cursor.
+        let changed = crawler
+            .fetch_graph_events_for_pubkeys(&client, &[owner], Some(Timestamp::from(100)))
+            .await;
+        assert_eq!(
+            changed.iter().map(|event| event.id).collect::<Vec<_>>(),
+            vec![mute.id]
+        );
+        crate::socialgraph::ingest_parsed_events(&store, &changed).unwrap();
+        assert_eq!(store.list_revision_items(&[owner]).unwrap().len(), 2);
+        let requests = relay.request_author_counts().len();
+        assert!(crawler
+            .fetch_graph_events_for_pubkeys(&client, &[owner], None)
+            .await
+            .is_empty());
+        assert_eq!(
+            relay.request_author_counts().len(),
+            requests,
+            "unchanged heads require no event download"
+        );
+        {
+            let mut graph = store.graph.lock().unwrap();
+            let mut state = graph.export_state().unwrap();
+            state
+                .list_revisions
+                .iter_mut()
+                .find(|(_, kind, _)| *kind == 10_000)
+                .unwrap()
+                .2
+                .complete = false;
+            graph.replace_state(&state).unwrap();
+        }
+        assert_eq!(store.list_revision_items(&[owner]).unwrap().len(), 1);
+        let repaired = crawler
+            .fetch_graph_events_for_pubkeys(&client, &[owner], None)
+            .await;
+        assert_eq!(
+            repaired.iter().map(|event| event.id).collect::<Vec<_>>(),
+            vec![mute.id]
+        );
+        relay.state.lock().unwrap().negentropy = false;
+        let fallback = crawler
+            .fetch_graph_events_for_pubkeys(&client, &[owner], None)
+            .await;
+        assert_eq!(fallback.len(), 2);
+        assert_eq!(relay.state.lock().unwrap().published_events, 0);
+        client.disconnect().await;
     }
 
     #[tokio::test]

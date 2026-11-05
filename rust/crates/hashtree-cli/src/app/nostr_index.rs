@@ -2266,6 +2266,7 @@ async fn warm_social_graph(
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let crawler = SocialGraphCrawler::new(graph_store, keys, relays, crawl_depth)
         .with_concurrent_batches(concurrent_batches)
+        .with_negentropy(true)
         .with_full_recrawl(full_graph_recrawl);
     let mut handle = tokio::spawn(async move {
         crawler.crawl(shutdown_rx).await;

@@ -605,6 +605,7 @@ pub(crate) async fn run_socialgraph_warm(
         )
         .with_author_batch_size(author_batch_size)
         .with_concurrent_batches(concurrent_batches)
+        .with_negentropy(true)
         .with_full_recrawl(full_graph_recrawl)
         .with_known_since(cycle_known_since);
 
