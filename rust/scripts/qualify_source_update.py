@@ -207,6 +207,30 @@ def main():
             producer = environment(root, 'producer', url, tools, writer=True)
             identity = run('disposable-identity', [str(tools / 'htree'), 'user'], producer, timeout=30)
             npub = re.search(r'npub1[a-z0-9]+', identity).group(0)
+            # Reuse the previously accepted complete public tree. Publishing into
+            # an empty namespace with the old helper can omit historical objects.
+            # This announcement is signed only by the disposable fixture identity
+            # and stays on the loopback relay. It does not change the real source.
+            seed = INPUT['seed_root']
+            assert seed['refs']['refs/heads/master'] == INPUT['previous_master']
+            assert re.fullmatch('[0-9a-f]{64}', seed['hash'])
+            assert re.fullmatch('[0-9a-f]{64}', seed['key'])
+            run('seed-accepted-public-tree', [str(tools / 'htree'), 'publish', 'hashtree',
+                                            seed['hash'], '--key', seed['key']], producer, timeout=180)
+            advertised = run('verify-seed-refs', ['git', 'ls-remote', '--symref',
+                                                 f'htree://{npub}/hashtree'], producer, cwd=root, timeout=180)
+            seed_refs = {}
+            for line in advertised.splitlines():
+                value, ref = line.split('\t')
+                if ref == 'HEAD':
+                    if value.startswith('ref: '):
+                        assert value[5:] == INPUT['head']
+                    else:
+                        assert value == INPUT['previous_master']
+                elif not ref.endswith('^{}'):
+                    seed_refs[ref] = value
+            assert seed_refs == seed['refs'], 'Accepted seed ref binding changed'
+            receipt['seed_refs_verified'] = True
             source = root / 'input.git'
             run('init-input', ['git', 'init', '--bare', str(source)], producer, timeout=30)
             refspecs = [f'+{value}:{name}' for name, value in INPUT['refs'].items()]
