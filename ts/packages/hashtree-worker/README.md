@@ -152,7 +152,9 @@ await graphClient.setRelays(['wss://relay.example']);
 await graphClient.setRelays(['wss://relay.damus.io'], { graphBootstrap: true });
 ```
 
-A relay change, identity change, or close cancels pending HTTP seeding. Retained
+A relay change, identity change, graph root change, or close cancels pending HTTP
+seeding. Root changes immediately restart reconciliation for the new root;
+setting the same root again leaves an allowed initial seed in progress. Retained
 local snapshots take priority, including partial lists and unreadable stored
 bytes. Persistence compares the previously observed snapshot atomically and stops
 writing if another tab has replaced it. Raw `setRelays` messages use a flat

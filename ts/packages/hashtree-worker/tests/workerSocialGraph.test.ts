@@ -140,3 +140,65 @@ for (const action of ['setIdentity', 'close'] as const) {
     }
   });
 }
+
+it('preserves a newer local event arriving during the retained graph merge', async () => {
+  const db = new Dexie('hashtree-social-graph'); db.version(1).stores({ socialGraph: '&id' });
+  const retained = new SocialGraph(owner); retained.handleEvent(finalizeEvent({ kind: 3, created_at: 600, content: '', tags: [['p', friend]] }, key), true);
+  const bytes = await retained.toBinary(); await db.table('socialGraph').put({ id: 'main', data: bytes, updatedAt: 1 });
+  let readRelease!: () => void, mergeRelease!: () => void, reading = false, merging = false;
+  const readWait = new Promise<void>(resolve => { readRelease = resolve; });
+  const mergeWait = new Promise<void>(resolve => { mergeRelease = resolve; });
+  const fromBinary = SocialGraph.fromBinary, merge = SocialGraph.prototype.merge;
+  const decode = vi.spyOn(SocialGraph, 'fromBinary').mockImplementation(async (...args) => {
+    const result = await fromBinary(...args); reading = true; await readWait; return result;
+  });
+  const mergingGraph = vi.spyOn(SocialGraph.prototype, 'merge').mockImplementation(async function(...args) {
+    const result = await merge.apply(this, args); merging = true; await mergeWait; return result;
+  });
+  const store = `graph-merge-race-${crypto.randomUUID()}`;
+  let pending: Promise<unknown> | undefined;
+  try {
+    pending = init(store); await expect.poll(() => reading).toBe(true);
+    await request({ type: 'handleSocialGraphEvents', events: [finalizeEvent({ kind: 3, created_at: 650, content: '', tags: [['p', friend]] }, key)] });
+    readRelease(); await expect.poll(() => merging).toBe(true);
+    await request({ type: 'handleSocialGraphEvents', events: [finalizeEvent({ kind: 3, created_at: 700, content: '', tags: [['p', muted]] }, key)] });
+    mergeRelease(); await pending;
+    expect(await request({ type: 'getFollows', pubkey: owner })).toMatchObject({ pubkeys: [muted] });
+    await request({ type: 'close' });
+    expect((await db.table('socialGraph').get('main')).data).toEqual(bytes);
+  } finally {
+    readRelease(); mergeRelease(); await pending; decode.mockRestore(); mergingGraph.mockRestore();
+    await request({ type: 'close' }); db.close(); await Dexie.delete(store); await Dexie.delete(`${store}-nostr-index`);
+  }
+});
+
+it('does not restart graph reconciliation after close invalidates a pending relay change', async () => {
+  const runtime = await import('../src/relay/nostrRuntime.js');
+  const relay = new WebSocketServer({ port: 0 }); await once(relay, 'listening');
+  const address = relay.address(); if (!address || typeof address === 'string') throw new Error('Missing relay');
+  let connections = 0; relay.on('connection', () => { connections++; });
+  const store = `graph-relays-close-${crypto.randomUUID()}`;
+  await init(store, [], true);
+  let relayRelease!: () => void, closeRelease!: () => void, closing = false;
+  const relayWait = new Promise<void>(resolve => { relayRelease = resolve; });
+  const closeWait = new Promise<void>(resolve => { closeRelease = resolve; });
+  const originalClose = runtime.closeNostrRuntime;
+  const relays = vi.spyOn(runtime, 'setRelays').mockImplementation(() => relayWait as any);
+  const close = vi.spyOn(runtime, 'closeNostrRuntime').mockImplementation(async () => { closing = true; await closeWait; await originalClose(); });
+  let changing: Promise<unknown> | undefined, stopping: Promise<unknown> | undefined;
+  try {
+    changing = request({ type: 'setRelays', relays: [`ws://127.0.0.1:${address.port}`], graphBootstrap: true });
+    stopping = request({ type: 'close' }); await expect.poll(() => closing).toBe(true);
+    relayRelease(); await changing; await Promise.resolve();
+    await new Promise(resolve => setTimeout(resolve, 150));
+    expect(connections).toBe(0);
+    closeRelease(); await stopping;
+  } finally {
+    relayRelease(); closeRelease(); await changing; await stopping;
+    relays.mockRestore(); close.mockRestore();
+    await request({ type: 'close' });
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>(resolve => relay.close(() => resolve()));
+    await Dexie.delete(store); await Dexie.delete(`${store}-nostr-index`);
+  }
+});

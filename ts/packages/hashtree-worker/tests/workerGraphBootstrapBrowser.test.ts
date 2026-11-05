@@ -91,7 +91,7 @@ async function retain(page: Page, bytes: Uint8Array) {
   }, [...bytes]);
 }
 
-for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 'switch-to-custom', 'other-tab', 'invalid-cache'] as const) {
+for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 'switch-to-custom', 'other-tab', 'invalid-cache', 'root-switch', 'pending-root-switch', 'unchanged-root'] as const) {
   it(`uses the actual browser worker with ${mode} policy`, async () => {
     const context = await browser.newContext({ serviceWorkers: 'block' });
     const page = await context.newPage(), errors: string[] = [];
@@ -108,7 +108,7 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
     context.on('requestfailed', request => { if (request.url().startsWith('https://graph-api.iris.to/')) abortedHttp++; });
     await context.route('https://graph-api.iris.to/**', async route => {
       httpRequests++;
-      if (mode === 'switch-to-custom' || mode === 'other-tab') await pendingHttp;
+      if (mode === 'switch-to-custom' || mode === 'other-tab' || mode === 'pending-root-switch' || mode === 'unchanged-root') await pendingHttp;
       await route.fulfill({ body: Buffer.from(seedBytes), contentType: 'application/octet-stream', headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'x-graph-root', 'x-graph-root': DEFAULT_BOOTSTRAP_PUBKEY } }).catch(() => {});
     });
     const negotiations: any[] = [], negotiationPaths: string[] = [];
@@ -118,7 +118,7 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
         negotiations.push(frame[2]); negotiationPaths.push(connection.url ?? '/'); socket.send(JSON.stringify(['NEG-ERR', frame[1], 'unsupported']));
       }
       if (frame[0] !== 'REQ') return;
-      if (mode === 'custom-default' || (mode === 'switch-to-custom' && connection.url === '/custom')) for (const event of [localFollow, localMute]) {
+      if (mode === 'custom-default' || mode === 'root-switch' || mode === 'pending-root-switch' || (mode === 'switch-to-custom' && connection.url === '/custom')) for (const event of [localFollow, localMute]) {
         if (frame.slice(2).some((filter: any) => (!filter.kinds || filter.kinds.includes(event.kind)) &&
           (!filter.authors || filter.authors.includes(event.pubkey)) && (!filter.ids || filter.ids.includes(event.id)))) {
           socket.send(JSON.stringify(['EVENT', frame[1], event]));
@@ -134,14 +134,28 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
       }
       if (mode === 'invalid-cache') await retain(page, new Uint8Array([0, 1, 2]));
       await page.evaluate(() => { (window as any).policyWorker = new Worker('/worker.js'); });
-      await request(page, { type: 'init', config: { pubkey: owner, storeName: `policy-${mode}`, relays: [`ws://127.0.0.1:${address.port}/initial`],
-        ...(mode !== 'custom-default' ? { graphBootstrap: true } : {}), blossomServers: [] } });
+      await request(page, { type: 'init', config: { pubkey: mode.includes('root-switch') ? muted : owner, storeName: `policy-${mode}`, relays: [`ws://127.0.0.1:${address.port}/initial`],
+        ...(mode !== 'custom-default' && mode !== 'root-switch' ? { graphBootstrap: true } : {}), blossomServers: [] } });
       if (mode === 'switch-to-custom') {
         await expect.poll(() => httpRequests).toBe(1);
         // Omitting the update policy must revoke the earlier explicit permission.
         await request(page, { type: 'setRelays', relays: [`ws://127.0.0.1:${address.port}/custom`] });
         await expect.poll(() => abortedHttp).toBe(1);
         releaseHttp!();
+      }
+      if (mode === 'unchanged-root') {
+        await expect.poll(() => httpRequests).toBe(1);
+        await request(page, { type: 'setSocialGraphRoot', pubkey: owner });
+        expect(abortedHttp).toBe(0); releaseHttp!();
+      }
+      if (mode === 'root-switch' || mode === 'pending-root-switch') {
+        if (mode === 'root-switch') await expect.poll(() => negotiations.some(filter => filter.authors?.includes(muted))).toBe(true);
+        else await expect.poll(() => httpRequests).toBe(1);
+        await request(page, { type: 'setSocialGraphRoot', pubkey: owner });
+        if (mode === 'pending-root-switch') {
+          await expect.poll(() => abortedHttp).toBe(1); releaseHttp!();
+        }
+        await expect.poll(() => negotiations.some(filter => filter.authors?.includes(owner)), { timeout: 5000 }).toBe(true);
       }
       if (mode === 'other-tab' || mode === 'invalid-cache') {
         let bytes: Uint8Array;
@@ -167,15 +181,15 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
       }
       await expect.poll(() => negotiations.length, { timeout: 10000 }).toBeGreaterThan(0);
       if (mode === 'switch-to-custom') expect(negotiationPaths.every(path => path === '/custom')).toBe(true);
-      expect(negotiations[0].kinds).toEqual([3, 10000]); expect(negotiations[0].authors).toContain(owner);
+      expect(negotiations[0].kinds).toEqual([3, 10000]); expect(negotiations.some(filter => filter.authors.includes(owner))).toBe(true);
       await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: owner })).pubkeys).toEqual([friend]);
       await request(page, { type: 'close' });
       const graph = await saved(page);
-      expect(httpRequests).toBe(mode === 'explicit-bootstrap' || mode === 'switch-to-custom' ? 1 : 0);
-      expect(graph.getListRevision(owner, 3)).toMatchObject({ id: mode === 'explicit-bootstrap' ? seedFollow.id : localFollow.id,
-        created_at: mode === 'explicit-bootstrap' ? 100 : 300, complete: mode !== 'retained-partial' });
-      expect(graph.getListRevision(owner, 10000)).toMatchObject({ id: mode === 'explicit-bootstrap' ? seedMute.id : localMute.id,
-        created_at: mode === 'explicit-bootstrap' ? 90 : 270, complete: true });
+      expect(httpRequests).toBe((mode === 'explicit-bootstrap' || mode === 'unchanged-root') || mode === 'switch-to-custom' || mode === 'pending-root-switch' ? 1 : 0);
+      expect(graph.getListRevision(owner, 3)).toMatchObject({ id: (mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? seedFollow.id : localFollow.id,
+        created_at: (mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? 100 : 300, complete: mode !== 'retained-partial' });
+      expect(graph.getListRevision(owner, 10000)).toMatchObject({ id: (mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? seedMute.id : localMute.id,
+        created_at: (mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? 90 : 270, complete: true });
       expect([...graph.getMutedByUser(owner)]).toEqual([muted]); expect(errors).toEqual([]);
     } finally {
       releaseHttp?.();

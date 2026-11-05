@@ -498,7 +498,8 @@ type GraphLoadResult = 'loaded' | 'missing' | 'failed' | 'cancelled';
 async function loadSocialGraph(rootPubkey: string, lifecycle: number): Promise<GraphLoadResult> {
   socialGraphLoading = true;
   graphPersistenceBlocked = true;
-  const current = () => lifecycle === graphLifecycleGeneration && _config?.pubkey === rootPubkey;
+  const cfg = _config;
+  const current = () => lifecycle === graphLifecycleGeneration && _config === cfg && cfg !== null;
   try {
     const row = await socialGraphDB.socialGraph.get('main');
     if (!current()) return 'cancelled';
@@ -506,8 +507,9 @@ async function loadSocialGraph(rootPubkey: string, lifecycle: number): Promise<G
       const expectedGraph = socialGraph;
       const loaded = await SocialGraph.fromBinary(rootPubkey, row.data);
       if (!current() || socialGraph !== expectedGraph) return 'cancelled';
+      const version = socialGraphVersion;
       if (socialGraph.size().follows || socialGraph.size().mutes) await loaded.merge(socialGraph);
-      if (!current() || socialGraph !== expectedGraph) return 'cancelled';
+      if (!current() || socialGraph !== expectedGraph || socialGraphVersion !== version) return 'cancelled';
       expectedGraphRow = { data: row.data.slice(), updatedAt: row.updatedAt };
       graphPersistenceBlocked = false;
       socialGraph = loaded;
@@ -697,17 +699,21 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
         break;
 
       // Relay configuration
-      case 'setRelays':
+      case 'setRelays': {
         cancelGraphBootstrap();
         graphCatchupGeneration++;
         stopGraphCatchup?.(); stopGraphCatchup = undefined;
         if (_config) { _config.relays = msg.relays; _config.graphBootstrap = msg.graphBootstrap === true; }
+        const lifecycle = graphLifecycleGeneration, cfg = _config, generation = graphBootstrapGeneration;
         await nostrSetRelays(msg.relays);
-        configureGraphCatchup();
-        void configureGraphBootstrap();
+        if (lifecycle === graphLifecycleGeneration && _config === cfg && generation === graphBootstrapGeneration) {
+          configureGraphCatchup();
+          void configureGraphBootstrap();
+        }
         console.log('[Worker] Relay configuration updated:', msg.relays.length, 'relays');
         respond({ type: 'void', id: msg.id });
         break;
+      }
 
       // Blossom upload
       case 'pushToBlossom':
@@ -737,10 +743,10 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
 
       // SocialGraph operations
       case 'initSocialGraph':
-        handleInitSocialGraph(msg.id, msg.rootPubkey);
+        await handleInitSocialGraph(msg.id, msg.rootPubkey);
         break;
       case 'setSocialGraphRoot':
-        handleSetSocialGraphRoot(msg.id, msg.pubkey);
+        await handleSetSocialGraphRoot(msg.id, msg.pubkey);
         break;
       case 'handleSocialGraphEvents':
         handleSocialGraphEvents(msg.id, msg.events);
@@ -1532,11 +1538,30 @@ async function handleGetStorageStats(id: string) {
 // SocialGraph Handlers
 // ============================================================================
 
-function handleInitSocialGraph(id: string, rootPubkey?: string) {
+async function changeSocialGraphRoot(pubkey: string): Promise<boolean> {
+  if (pubkey === socialGraph.getRoot()) return true;
+  const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
+  socialGraphLoading = false;
+  cancelGraphBootstrap();
+  graphBootstrapEligible = false;
+  graphCatchupGeneration++;
+  stopGraphCatchup?.(); stopGraphCatchup = undefined;
+  await socialGraph.setRoot(pubkey);
+  if (lifecycle !== graphLifecycleGeneration) return false;
+  // A root change during the initial read replaces only that pending read.
+  // Existing cache ownership/conflict state is otherwise left untouched.
+  if (wasLoading) {
+    await loadSocialGraph(pubkey, lifecycle);
+    if (lifecycle !== graphLifecycleGeneration) return false;
+  }
+  configureGraphCatchup();
+  notifySocialGraphVersionUpdate();
+  return true;
+}
+
+async function handleInitSocialGraph(id: string, rootPubkey?: string) {
   try {
-    if (rootPubkey) {
-      socialGraph.setRoot(rootPubkey);
-    }
+    if (rootPubkey && !await changeSocialGraphRoot(rootPubkey)) return;
     const size = socialGraph.size();
     respond({ type: 'socialGraphInit', id, version: socialGraphVersion, size });
   } catch (err) {
@@ -1544,10 +1569,9 @@ function handleInitSocialGraph(id: string, rootPubkey?: string) {
   }
 }
 
-function handleSetSocialGraphRoot(id: string, pubkey: string) {
+async function handleSetSocialGraphRoot(id: string, pubkey: string) {
   try {
-    socialGraph.setRoot(pubkey);
-    notifySocialGraphVersionUpdate();
+    if (!await changeSocialGraphRoot(pubkey)) return;
     respond({ type: 'void', id });
   } catch (err) {
     respond({ type: 'void', id, error: getErrorMessage(err) });
