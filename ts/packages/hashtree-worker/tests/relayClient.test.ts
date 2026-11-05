@@ -101,6 +101,25 @@ afterEach(() => {
 });
 
 describe('RelayWorkerClient', () => {
+  it('keeps bootstrap revocation across close and re-init while the relay update is pending', async () => {
+    const workers: FakeRelayWorker[] = [];
+    const client = new RelayWorkerClient((class {
+      constructor() { const worker = new FakeRelayWorker(); workers.push(worker); return worker; }
+    }) as unknown as new () => Worker, {
+      relays: ['wss://default.example'], graphBootstrap: true, pubkey: '11'.repeat(32),
+    });
+    await client.init();
+    const update = client.setRelays(['wss://custom.example']).catch(error => error);
+    await vi.waitFor(() => expect(workers[0]!.messages.at(-1)).toMatchObject({
+      type: 'setRelays', relays: ['wss://custom.example'], graphBootstrap: false,
+    }));
+    await client.close(); await update; await client.init();
+    expect(workers[1]!.messages[0]).toMatchObject({
+      type: 'init', config: { relays: ['wss://custom.example'], graphBootstrap: false },
+    });
+    await client.close();
+  });
+
   it('returns tree root info through the relay worker protocol', async () => {
     const client = new RelayWorkerClient(FakeRelayWorker as unknown as new () => Worker, {
       storeName: 'demo-sites-worker',

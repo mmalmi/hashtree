@@ -61,8 +61,8 @@ async function request(page: Page, payload: Record<string, unknown>) {
   }), payload);
 }
 
-async function saved(page: Page) {
-  const bytes = await page.evaluate(async () => {
+async function retainedBytes(page: Page) {
+  return page.evaluate(async () => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open('hashtree-social-graph');
       request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
@@ -74,10 +74,24 @@ async function saved(page: Page) {
       });
     } finally { db.close(); }
   });
-  return SocialGraph.fromBinary(owner, new Uint8Array(bytes));
+}
+async function saved(page: Page) { return SocialGraph.fromBinary(owner, new Uint8Array(await retainedBytes(page))); }
+async function retain(page: Page, bytes: Uint8Array) {
+  await page.evaluate(async bytes => {
+    const db = await new Promise<IDBDatabase>((resolve, reject) => {
+      const request = indexedDB.open('hashtree-social-graph', 10);
+      request.onupgradeneeded = () => request.result.createObjectStore('socialGraph', { keyPath: 'id' });
+      request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+    });
+    try { await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction('socialGraph', 'readwrite');
+      tx.objectStore('socialGraph').put({ id: 'main', data: new Uint8Array(bytes), updatedAt: Date.now() });
+      tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
+    }); } finally { db.close(); }
+  }, [...bytes]);
 }
 
-for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 'switch-to-custom'] as const) {
+for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 'switch-to-custom', 'other-tab', 'invalid-cache'] as const) {
   it(`uses the actual browser worker with ${mode} policy`, async () => {
     const context = await browser.newContext({ serviceWorkers: 'block' });
     const page = await context.newPage(), errors: string[] = [];
@@ -94,7 +108,7 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
     context.on('requestfailed', request => { if (request.url().startsWith('https://graph-api.iris.to/')) abortedHttp++; });
     await context.route('https://graph-api.iris.to/**', async route => {
       httpRequests++;
-      if (mode === 'switch-to-custom') await pendingHttp;
+      if (mode === 'switch-to-custom' || mode === 'other-tab') await pendingHttp;
       await route.fulfill({ body: Buffer.from(seedBytes), contentType: 'application/octet-stream', headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'x-graph-root', 'x-graph-root': DEFAULT_BOOTSTRAP_PUBKEY } }).catch(() => {});
     });
     const negotiations: any[] = [], negotiationPaths: string[] = [];
@@ -116,19 +130,9 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
       await page.goto(origin);
       if (mode === 'retained-partial') {
         const local = new SocialGraph(owner); local.handleEvent([localFollow, localMute], true); local.markListIncomplete(owner, 3);
-        await page.evaluate(async bytes => {
-          const db = await new Promise<IDBDatabase>((resolve, reject) => {
-            const request = indexedDB.open('hashtree-social-graph', 10);
-            request.onupgradeneeded = () => request.result.createObjectStore('socialGraph', { keyPath: 'id' });
-            request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
-          });
-          try { await new Promise<void>((resolve, reject) => {
-            const tx = db.transaction('socialGraph', 'readwrite');
-            tx.objectStore('socialGraph').put({ id: 'main', data: new Uint8Array(bytes), updatedAt: Date.now() });
-            tx.oncomplete = () => resolve(); tx.onerror = () => reject(tx.error);
-          }); } finally { db.close(); }
-        }, [...await local.toBinary()]);
+        await retain(page, await local.toBinary());
       }
+      if (mode === 'invalid-cache') await retain(page, new Uint8Array([0, 1, 2]));
       await page.evaluate(() => { (window as any).policyWorker = new Worker('/worker.js'); });
       await request(page, { type: 'init', config: { pubkey: owner, storeName: `policy-${mode}`, relays: [`ws://127.0.0.1:${address.port}/initial`],
         ...(mode !== 'custom-default' ? { graphBootstrap: true } : {}), blossomServers: [] } });
@@ -138,6 +142,28 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
         await request(page, { type: 'setRelays', relays: [`ws://127.0.0.1:${address.port}/custom`] });
         await expect.poll(() => abortedHttp).toBe(1);
         releaseHttp!();
+      }
+      if (mode === 'other-tab' || mode === 'invalid-cache') {
+        let bytes: Uint8Array;
+        if (mode === 'other-tab') {
+          await expect.poll(() => httpRequests).toBe(1);
+          const otherTab = await context.newPage(); await otherTab.goto(origin);
+          const local = new SocialGraph(owner); local.handleEvent([localFollow, localMute], true); local.markListIncomplete(owner, 3);
+          bytes = await local.toBinary(); await retain(otherTab, bytes); await otherTab.close();
+          releaseHttp!();
+          await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: owner })).pubkeys).toEqual([friend]);
+        } else bytes = new Uint8Array([0, 1, 2]);
+        // Exercise the real five-second persistence debounce, then a later update
+        // and close flush: a conflict/invalid row must block every later save.
+        await request(page, { type: 'handleSocialGraphEvents', events: [follow(400), mute(390)] });
+        await page.waitForTimeout(5500);
+        expect(await retainedBytes(page)).toEqual([...bytes]);
+        await request(page, { type: 'handleSocialGraphEvents', events: [follow(500), mute(490)] });
+        await request(page, { type: 'close' });
+        expect(await retainedBytes(page)).toEqual([...bytes]);
+        expect(httpRequests).toBe(mode === 'other-tab' ? 1 : 0);
+        expect(errors).toEqual([]);
+        return;
       }
       await expect.poll(() => negotiations.length, { timeout: 10000 }).toBeGreaterThan(0);
       if (mode === 'switch-to-custom') expect(negotiationPaths.every(path => path === '/custom')).toBe(true);

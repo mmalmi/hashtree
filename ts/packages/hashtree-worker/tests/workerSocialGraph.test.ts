@@ -101,3 +101,42 @@ it('reconciles optional public lists and accepts mutes independently of newer fo
     await Dexie.delete(store); await Dexie.delete(`${store}-nostr-index`);
   }
 });
+
+for (const action of ['setIdentity', 'close'] as const) {
+  it(`does not resume stale initialization after ${action} during the retained-cache read`, async () => {
+    const db = new Dexie('hashtree-social-graph'); db.version(1).stores({ socialGraph: '&id' });
+    await db.table('socialGraph').clear();
+    const graph = new SocialGraph(owner); graph.handleEvent(finalizeEvent({ kind: 3, created_at: 600, content: '', tags: [['p', friend]] }, key), true);
+    const retained = { id: 'main', data: await graph.toBinary(), updatedAt: Date.now() };
+    const proto = Object.getPrototypeOf(Object.getPrototypeOf(db.table('socialGraph')));
+    const original = proto.get;
+    let release: (() => void) | undefined, waiting = false;
+    const barrier = new Promise<void>(resolve => { release = resolve; });
+    const read = vi.spyOn(proto, 'get').mockImplementation(function(this: any, ...args: any[]) {
+      if (!waiting && this.db.name === 'hashtree-social-graph' && args[0] === 'main') {
+        waiting = true;
+        return barrier.then(() => action === 'close' ? retained : undefined);
+      }
+      return original.apply(this, args);
+    });
+    const fetch = vi.fn().mockRejectedValue(new Error('Unexpected stale bootstrap'));
+    vi.stubGlobal('fetch', fetch);
+    const store = `graph-cancel-${action}-${crypto.randomUUID()}`;
+    let pending: Promise<unknown> | undefined;
+    try {
+      pending = request({ type: 'init', config: { storeName: store, pubkey: owner, relays: ['ws://127.0.0.1:1'], graphBootstrap: true, graphReconciliation: false, blossomServers: [] } });
+      await expect.poll(() => waiting).toBe(true);
+      await request({ type: action, pubkey: friend });
+      const versions = responses.filter(message => message.type === 'socialGraphVersion').length;
+      release!(); await pending;
+      expect(fetch).not.toHaveBeenCalled();
+      expect(responses.filter(message => message.type === 'socialGraphVersion')).toHaveLength(versions);
+      if (action === 'setIdentity') expect(await request({ type: 'getFollows', pubkey: owner })).toMatchObject({ pubkeys: [] });
+    } finally {
+      release?.(); await pending; read.mockRestore(); vi.unstubAllGlobals();
+      vi.stubGlobal('self', scope); vi.stubGlobal('WebSocket', WebSocket);
+      await request({ type: 'close' }); db.close();
+      await Dexie.delete(store); await Dexie.delete(`${store}-nostr-index`);
+    }
+  });
+}
