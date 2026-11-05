@@ -55,7 +55,10 @@ def main(output, receipt):
     receipt['memoryBefore'] = subprocess.check_output(['free', '-b'], text=True)
     lock = tomllib.loads(Path('Cargo.lock').read_text())
     expected = {
-        'nostr-pubsub-fips': ('0.5.51', '15c52b732331c717b85165ddee1234e09fdd42793a539d9d543fa1983ec6de9b'),
+        'nostr-pubsub-fips': ('0.6.0', 'f5774e279e0511b5a94e68704b01eb28fd5ca9b2203ab54bb7727f9eff8f179a'),
+        'nostr-pubsub-social-graph': ('0.3.0', 'e9dd2d0a1cdacf1ea254ea05d7f63dd6624ff4ee6dae62c4c4000dd4db8b9666'),
+        'nostr-social-graph': ('0.2.0', '83a7c3e6dedf8c0474c9e09938496abde4a9c77cd38ec4832d9b56ee9602b8f8'),
+        'nostr-social-memory': ('0.2.0', '39fb16cde2e5bb0e6eeed1c5c8740b01a3c90daa277c30c397715e84aa7a89c9'),
         'nvpn-fips-core': ('0.4.119', 'ba0e1a75a2b7fb5d71e4a602c41d8a1ed163417e56798e2198df1dfe3f73cda2'),
         'nvpn-fips-tcp-endpoint': ('0.2.54', '5a6e31c1319cb5ef6dc754905828436c7a1596a6f4888b16223673330f23bf8e'),
         'nvpn-fips-tcp': ('0.2.6', '299df22559c4af63e7d276fcb90cf000f2f1cd5546c213f17d8860154c1383d7'),
@@ -66,14 +69,29 @@ def main(output, receipt):
         assert entries[0]['checksum'] == checksum, name
     receipt['cohort'] = {name: version for name, (version, _) in expected.items()}
     receipt['cohortChecksums'] = {name: checksum for name, (_, checksum) in expected.items()}
+    wrappers = {}
+    for name in ('git-remote-htree', 'hashtree-cli', 'hashtree-embedded'):
+        manifest = tomllib.loads(Path('crates', name, 'Cargo.toml').read_text())
+        assert manifest['package']['version'] == '0.4.0', name
+        wrappers[name] = manifest
+    assert wrappers['git-remote-htree']['features']['default'] == ['lmdb']
+    assert wrappers['hashtree-cli']['dependencies']['git-remote-htree']['version'] == '=0.4.0'
+    embedded_cli = wrappers['hashtree-embedded']['dependencies']['hashtree-cli']
+    assert embedded_cli['version'] == '0.4.0'
+    assert embedded_cli['default-features'] is False
+    assert embedded_cli['features'] == ['lmdb', 'fips-webrtc']
+    receipt['wrappers'] = {name: manifest['package']['version'] for name, manifest in wrappers.items()}
+    receipt['embeddedCliFeatures'] = embedded_cli['features']
     command = ['cargo', 'test', '--locked', '-p', 'hashtree-cli', '-p',
+               'hashtree-embedded', '-p', 'git-remote-htree', '-p',
                'hashtree-fips-transport', '--features',
                'hashtree-cli/fips-webrtc,hashtree-cli/git-remote-wrapper',
                '--lib', '--test', 'provider_route', '--no-run', '--message-format=json']
     receipt['buildCommand'] = command
     artifacts = run('build', command, output, receipt, 2400)
     selected = {'hashtree_cli': ['fips_transport::'], 'hashtree_fips_transport': [],
-                'provider_route': []}
+                'provider_route': [], 'hashtree_embedded': [],
+                'git_remote_htree': ['root_observation', 'standalone_lookup']}
     binaries = {}
     for line in artifacts.splitlines():
         entry = json.loads(line)
@@ -91,6 +109,10 @@ def main(output, receipt):
         assert count > 0, 'Empty test selection'
         if name == 'hashtree_cli':
             assert 'strict_public_author_receiver_reads_daemon_root_and_revokes_provider: test' in listing
+        if name == 'hashtree_embedded':
+            assert 'host_runtime_serves_initial_keyed_root_from_upstream_blossom: test' in listing
+        if name == 'git_remote_htree':
+            assert count == 4, 'Changed Nostr adapter boundary test selection'
         command = ['sudo', 'unshare', '--net', 'bash', '-ec',
                    'ip link set lo up\nexec setpriv --reuid="$1" --regid="$2" --init-groups "$3" "${@:4}"',
                    'local-service-provider', str(os.getuid()), str(os.getgid()),
