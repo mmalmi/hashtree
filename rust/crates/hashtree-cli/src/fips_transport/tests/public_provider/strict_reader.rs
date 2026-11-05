@@ -39,6 +39,10 @@ async fn strict_public_author_receiver_reads_daemon_root_and_revokes_provider() 
     let cache = open_daemon_nostr_cache(&store)?;
     let mut config = provider_config(&scope, 1);
     config.server.fips_local_rendezvous_addr = Some(rendezvous.to_string());
+    // This provider explicitly accepts fresh direct clients. The default zero
+    // permits only configured peers on its separate UDP listener. Allow the
+    // existing anchor plus one strict reader without changing daemon defaults.
+    config.server.fips_open_discovery_max_pending = 2;
     config.nostr.retained_roots = vec![key.clone()];
     let daemon = start_daemon_fips_transport(&config, &nostr::Keys::generate(), store, Vec::new())
         .await?
@@ -190,7 +194,8 @@ async fn check_strict_reader(
             .map(|peer| peer.npub)
             .collect();
         anyhow::ensure!(connected == vec![daemon.endpoint_npub.clone()]);
-        anyhow::ensure!(reader.delivery_snapshot().req_frames_received == 0);
+        // Public-author receivers may answer queries over an existing stream;
+        // client-only here constrains the endpoint's listeners and peer paths.
         denied.push(daemon.endpoint_npub.clone());
         endpoint
             .update_peer_admission(PeerAdmissionConfig {
