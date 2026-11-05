@@ -1,12 +1,12 @@
 {
-  "previous_master": "6bfca912d7a72f84bfdc79ba51243beb46838f9c",
-  "master": "661852f0a824ee03143fab11dc8eb3edbe23726e",
+  "previous_master": "661852f0a824ee03143fab11dc8eb3edbe23726e",
+  "master": "c99eaf934db3f86c6986663385cdbff7bd28ad07",
   "head": "refs/heads/master",
   "refs": {
     "refs/heads/codex/haps-query-cancellation": "435400fab747e7314b3c870c4ac578258d16f2a5",
     "refs/heads/codex/ios-lmdb-locking": "b1f0e059576536543a99cef645db73ace8caf26e",
     "refs/heads/codex/release-prebuilt-031": "f19cb5d0cf78e61533cd086f29ba83d7f0193b27",
-    "refs/heads/master": "661852f0a824ee03143fab11dc8eb3edbe23726e",
+    "refs/heads/master": "c99eaf934db3f86c6986663385cdbff7bd28ad07",
     "refs/tags/haps-source/5b1f6c036a9b2756a25df9420fe79880707e6a3b": "5b1f6c036a9b2756a25df9420fe79880707e6a3b",
     "refs/tags/haps-source/876abcd67dc613efd43945ce82cac2d701317162": "876abcd67dc613efd43945ce82cac2d701317162",
     "refs/tags/hashtree-client-v0.1.0": "46ed89864d90728e9368732f7bcebfd5e6fa50d0",
@@ -36,18 +36,11 @@
     "refs/tags/hashtree-ts-runtime-v0.5.37": "f89303978e1a30c86efec0d63ab453460fa17215",
     "refs/tags/hashtree-ts-runtime-v0.5.38": "5b8e784357db6da44e89b4b6b7d780f9d50d4d8f",
     "refs/tags/hashtree-cli-v0.4.1": "c2112f3513b0509de693233009ea022f6fdee871",
-    "refs/tags/hashtree-embedded-v0.4.1": "055b23e53f35235797dea7344eac5c4937c419cf"
+    "refs/tags/hashtree-embedded-v0.4.1": "055b23e53f35235797dea7344eac5c4937c419cf",
+    "refs/tags/hashtree-ts-runtime-v0.5.39": "340a203a7e4aea1ae400a4df0241c015f0770462"
   },
-  "objects": 33520,
-  "object_ids_sha256": "c90c3fc605fba3d9734a2bb92b30eafd1c2b1d20c8a4365b73bbbcea85710997",
-  "payloads_sha256": "8f620c278a3d34076221a184a74c587c72aa824d6fe726c80a550d4db524395b",
-  "payload_bytes": 515023920,
-  "publication": {
-    "hash": "66093f7b12c05c503462d79319e2559004732a4a4d6f5c228f975b1a3ef821c9",
-    "key": "0909c5cd8550a0ec196a8c36ff910d6e4663a8ddbdac982b46feec1aa177bf76",
-    "nhash": "nhash1qqsxvzfl0vfvqhzsx33d0yceuf2eqprn9f9y6m6uy28ewkc68muzrjg9yqysn3wds4g2pmqed2xrdlu3p4hyvcagmk76exptgmlwcx4pw7lhvhde23x",
-    "producer_run": 42127878685,
-    "producer_receipt_sha256": "ec631048ac1038041e926029a949e51ae3f4208131c0ba2b903e0b04f01ba969",
-    "author": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
-  }
+  "objects": 33533,
+  "object_ids_sha256": "608fa1cadf05d8dca3a03b12d2bf200f890ba261165c0aab1f68de5b3b557a9e",
+  "payloads_sha256": "d930f7866286647b336a89e82ce88275115b17ea1fc8c1a3971ad002588b549e",
+  "payload_bytes": 515065957
 }
