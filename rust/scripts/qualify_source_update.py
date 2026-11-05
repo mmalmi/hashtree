@@ -19,7 +19,7 @@ import threading
 import time
 import urllib.request
 
-from packed_source_update import produce_complete_tree
+from packed_source_update import install_sdk, produce_complete_tree
 
 
 HERE = Path(__file__).resolve().parent
@@ -32,6 +32,15 @@ TOOLS = {
 }
 WS_URL = 'https://registry.npmjs.org/ws/-/ws-8.21.1.tgz'
 WS_SHA = 'bb0f7e58ba1f64746672734d36175fe185f226491e336abc0743e2a8f4472ec1'
+# These versions also match the existing TypeScript workspace lockfile.
+ROOT_PROOF_PACKAGES = [
+    ('@noble/curves', '1.9.7',
+     'https://registry.npmjs.org/@noble/curves/-/curves-1.9.7.tgz',
+     'c4c5545645b8d58a080d2faf84982f6fe5dc3a0516e11de8dc571b38cab565e9'),
+    ('@noble/hashes', '1.8.0',
+     'https://registry.npmjs.org/@noble/hashes/-/hashes-1.8.0.tgz',
+     'e8a765d92c04faaccba8776411c5038cb195f812ee629fce07e1d2e6aec80ea0'),
+]
 PUBLIC_REF = 'htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree'
 FLOOR = 20 * 1024**3
 OUTPUT = Path(os.environ['RUNNER_TEMP']) / 'source-update-evidence'
@@ -185,8 +194,13 @@ def main():
         publication = INPUT.get('publication')
         if publication:
             env = environment(root, 'public-reader', None, tools)
-            info = run('resolve-public-root', [str(tools / 'htree'), 'info', PUBLIC_REF], env, timeout=180)
-            assert publication['nhash'] in info, 'Signed public root differs from the qualified root'
+            install_sdk(root, download, ROOT_PROOF_PACKAGES)
+            event_path = OUTPUT / 'verified-public-root.json'
+            run('verify-signed-public-root', ['node', str(HERE / 'verify_source_root.mjs'),
+                                              str(root), str(HERE / 'upload_sizes_source_input.json'),
+                                              str(event_path)], env, timeout=120)
+            receipt['public_root'] = json.loads(event_path.read_text())
+            receipt['root_verifier_packages'] = ROOT_PROOF_PACKAGES
             repo = root / 'public.git'
             run('public-cold-clone', ['git', 'clone', '--mirror', PUBLIC_REF, str(repo)], env, cwd=root)
             verify(repo, env, 'public-reader')

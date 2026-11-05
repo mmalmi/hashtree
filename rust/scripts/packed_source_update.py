@@ -16,9 +16,9 @@ PACKAGES = [
 ]
 
 
-def install_sdk(root, download):
+def install_sdk(root, download, packages=PACKAGES):
     extracted = 0
-    for name, version, url, digest in PACKAGES:
+    for name, version, url, digest in packages:
         archive = root / (name.replace('/', '-') + '.tgz')
         download(url, digest, archive)
         assert archive.stat().st_size < 2 * 1024**2

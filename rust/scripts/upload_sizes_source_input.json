@@ -36,6 +36,7 @@
     "key": "eac29faabfc3d40f9423ac6d69549136ff30987bac3e13eb88cf01b3886ef952",
     "nhash": "nhash1qqsza735vweucf5lve84h4vm7w8edydvz4rqf68wmhq63mksqv6f8ms9yr4v98a2hlpagru5ywkx6625jym07vyc0wkruylt3r8srvugdmu4y08jwm5",
     "producer_run": 41948998300,
-    "producer_receipt_sha256": "13d88d8cfee159c7c5c2419d329f3a5d0e95235314ddf50957034965605ab426"
+    "producer_receipt_sha256": "13d88d8cfee159c7c5c2419d329f3a5d0e95235314ddf50957034965605ab426",
+    "author": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
   }
 }
