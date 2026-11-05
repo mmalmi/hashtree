@@ -325,6 +325,59 @@ let socialGraphSaveTimeout = null;
 let socialGraphDirty = false;
 let stopGraphCatchup;
 let graphCatchupGeneration = 0;
+let graphBootstrapGeneration = 0;
+let graphBootstrapAbort;
+let graphBootstrapEligible = false;
+const rootGraphSubscriptions = new Set();
+function stopSocialGraphSubscriptions() {
+    for (const id of rootGraphSubscriptions)
+        nostrUnsubscribe(id);
+    rootGraphSubscriptions.clear();
+}
+let graphLifecycleGeneration = 0;
+let graphPersistenceBlocked = true;
+let expectedGraphRow;
+function sameGraphRow(row) {
+    if (expectedGraphRow === undefined)
+        return row === undefined;
+    if (!row || !(row.data instanceof Uint8Array) || row.updatedAt !== expectedGraphRow.updatedAt || row.data.length !== expectedGraphRow.data.length)
+        return false;
+    return row.data.every((byte, index) => byte === expectedGraphRow.data[index]);
+}
+function cancelGraphBootstrap() {
+    graphBootstrapGeneration++;
+    graphBootstrapAbort?.abort();
+    graphBootstrapAbort = undefined;
+}
+async function configureGraphBootstrap() {
+    cancelGraphBootstrap();
+    const cfg = _config;
+    if (cfg?.graphBootstrap !== true || !cfg.relays.length || !graphBootstrapEligible)
+        return;
+    const generation = graphBootstrapGeneration, expectedGraph = socialGraph, version = socialGraphVersion;
+    const abort = graphBootstrapAbort = new AbortController();
+    const current = () => generation === graphBootstrapGeneration && _config === cfg &&
+        cfg.graphBootstrap === true && cfg.relays.length > 0 && graphBootstrapEligible &&
+        socialGraph === expectedGraph && socialGraphVersion === version;
+    try {
+        const fresh = await loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY, signal: abort.signal });
+        if (!current())
+            return;
+        // Prepare away from the active graph: a policy change or local event wins even
+        // while the asynchronous merge is in progress.
+        await fresh.setRoot(expectedGraph.getRoot());
+        await fresh.merge(expectedGraph);
+        if (!current())
+            return;
+        socialGraph = fresh;
+        notifySocialGraphVersionUpdate();
+    }
+    catch { /* Configured-relay catch-up remains available without an HTTP seed. */ }
+    finally {
+        if (graphBootstrapAbort === abort)
+            graphBootstrapAbort = undefined;
+    }
+}
 function configureGraphCatchup() {
     const generation = ++graphCatchupGeneration;
     stopGraphCatchup?.();
@@ -343,6 +396,7 @@ function configureGraphCatchup() {
     }).catch(error => console.warn('[Worker] Public graph catch-up unavailable', error));
 }
 function notifySocialGraphVersionUpdate() {
+    graphBootstrapEligible = false;
     socialGraphVersion++;
     socialGraphDirty = true;
     self.postMessage({ type: 'socialGraphVersion', version: socialGraphVersion });
@@ -358,54 +412,82 @@ function notifySocialGraphVersionUpdate() {
  * Save social graph to IndexedDB
  */
 async function saveSocialGraph() {
-    if (!socialGraphDirty)
+    if (!socialGraphDirty || graphPersistenceBlocked)
         return;
+    const lifecycle = graphLifecycleGeneration, graph = socialGraph, version = socialGraphVersion;
+    const expected = expectedGraphRow;
     try {
-        const data = await socialGraph.toBinary();
-        await socialGraphDB.socialGraph.put({
-            id: 'main',
-            data,
-            updatedAt: Date.now(),
+        const data = await graph.toBinary();
+        if (lifecycle !== graphLifecycleGeneration || graph !== socialGraph || version !== socialGraphVersion)
+            return;
+        const next = { id: 'main', data, updatedAt: Date.now() };
+        const saved = await socialGraphDB.transaction('rw', socialGraphDB.socialGraph, async () => {
+            const row = await socialGraphDB.socialGraph.get('main');
+            if (lifecycle !== graphLifecycleGeneration || graphPersistenceBlocked || expected !== expectedGraphRow)
+                return false;
+            if (!sameGraphRow(row)) {
+                graphPersistenceBlocked = true;
+                graphBootstrapEligible = false;
+                cancelGraphBootstrap();
+                console.warn('[Worker] Retained social graph changed; preserving the other writer');
+                return false;
+            }
+            await socialGraphDB.socialGraph.put(next);
+            return true;
         });
-        socialGraphDirty = false;
+        if (!saved || lifecycle !== graphLifecycleGeneration)
+            return;
+        expectedGraphRow = { data: data.slice(), updatedAt: next.updatedAt };
+        socialGraphDirty = socialGraphVersion !== version;
         console.log('[Worker] Social graph saved to IndexedDB:', data.byteLength, 'bytes');
     }
     catch (err) {
+        // Unknown storage state is not permission to replace a retained snapshot.
+        graphPersistenceBlocked = true;
         console.error('[Worker] Failed to save social graph:', err);
     }
 }
-// Track if social graph is still loading - don't subscribe until done
 let socialGraphLoading = false;
-/**
- * Load social graph from IndexedDB
- * Waits for completion (no timeout race condition)
- */
-async function loadSocialGraph(rootPubkey) {
+async function loadSocialGraph(rootPubkey, lifecycle) {
     socialGraphLoading = true;
+    graphPersistenceBlocked = true;
+    const cfg = _config;
+    const current = () => lifecycle === graphLifecycleGeneration && _config === cfg && cfg !== null;
     try {
         const row = await socialGraphDB.socialGraph.get('main');
-        if (row?.data) {
+        if (!current())
+            return 'cancelled';
+        if (row !== undefined) {
             const expectedGraph = socialGraph;
             const loaded = await SocialGraph.fromBinary(rootPubkey, row.data);
-            if (socialGraph !== expectedGraph || _config?.pubkey !== rootPubkey)
-                return false;
-            // Merge only events that arrived during the disk read, not thousands of
-            // cached owners into an empty graph one timer at a time.
+            if (!current() || socialGraph !== expectedGraph)
+                return 'cancelled';
+            const version = socialGraphVersion;
             if (socialGraph.size().follows || socialGraph.size().mutes)
                 await loaded.merge(socialGraph);
+            if (!current() || socialGraph !== expectedGraph || socialGraphVersion !== version)
+                return 'cancelled';
+            expectedGraphRow = { data: row.data.slice(), updatedAt: row.updatedAt };
+            graphPersistenceBlocked = false;
             socialGraph = loaded;
             console.log('[Worker] Loaded social graph from IndexedDB, age:', Math.round((Date.now() - row.updatedAt) / 1000), 'seconds, size:', socialGraph.size());
-            return true;
+            return 'loaded';
         }
+        expectedGraphRow = undefined;
+        graphPersistenceBlocked = false;
         console.log('[Worker] No saved social graph found, starting fresh');
-        return false;
+        return 'missing';
     }
     catch (err) {
-        console.error('[Worker] Failed to load social graph:', err);
-        return false;
+        if (!current())
+            return 'cancelled';
+        graphPersistenceBlocked = true;
+        console.error('[Worker] Failed to load social graph; preserving existing storage:', err);
+        return 'failed';
     }
     finally {
-        socialGraphLoading = false;
+        if (current())
+            socialGraphLoading = false;
     }
 }
 // Set up response sender for signing module
@@ -461,7 +543,7 @@ self.onmessage = async (e) => {
                 respond({ type: 'void', id: msg.id });
                 break;
             case 'setIdentity':
-                handleSetIdentity(msg.id, msg.pubkey, msg.nsec);
+                await handleSetIdentity(msg.id, msg.pubkey, msg.nsec);
                 break;
             // Heartbeat
             case 'ping':
@@ -570,14 +652,25 @@ self.onmessage = async (e) => {
                 respond({ type: 'void', id: msg.id });
                 break;
             // Relay configuration
-            case 'setRelays':
-                await nostrSetRelays(msg.relays);
-                if (_config)
+            case 'setRelays': {
+                cancelGraphBootstrap();
+                graphCatchupGeneration++;
+                stopGraphCatchup?.();
+                stopGraphCatchup = undefined;
+                if (_config) {
                     _config.relays = msg.relays;
-                configureGraphCatchup();
+                    _config.graphBootstrap = msg.graphBootstrap === true;
+                }
+                const lifecycle = graphLifecycleGeneration, cfg = _config, generation = graphBootstrapGeneration;
+                await nostrSetRelays(msg.relays);
+                if (lifecycle === graphLifecycleGeneration && _config === cfg && generation === graphBootstrapGeneration) {
+                    configureGraphCatchup();
+                    void configureGraphBootstrap();
+                }
                 console.log('[Worker] Relay configuration updated:', msg.relays.length, 'relays');
                 respond({ type: 'void', id: msg.id });
                 break;
+            }
             // Blossom upload
             case 'pushToBlossom':
                 handlePushToBlossom(msg.id, msg.cidHash, msg.cidKey, msg.treeName);
@@ -604,10 +697,10 @@ self.onmessage = async (e) => {
                 break;
             // SocialGraph operations
             case 'initSocialGraph':
-                handleInitSocialGraph(msg.id, msg.rootPubkey);
+                await handleInitSocialGraph(msg.id, msg.rootPubkey);
                 break;
             case 'setSocialGraphRoot':
-                handleSetSocialGraphRoot(msg.id, msg.pubkey);
+                await handleSetSocialGraphRoot(msg.id, msg.pubkey);
                 break;
             case 'handleSocialGraphEvents':
                 handleSocialGraphEvents(msg.id, msg.events);
@@ -676,7 +769,12 @@ function respondWithTransfer(msg, transfer) {
 // Lifecycle Handlers
 // ============================================================================
 async function handleInit(id, cfg, hasP2PProvider, peerListSupported = true) {
+    const lifecycle = ++graphLifecycleGeneration;
+    const current = () => lifecycle === graphLifecycleGeneration && _config === cfg;
     try {
+        graphPersistenceBlocked = true;
+        cancelGraphBootstrap();
+        graphBootstrapEligible = false;
         _config = cfg;
         p2pPeerRoutes.setEnabled(hasP2PProvider, peerListSupported);
         blossomBandwidthTracker.reset();
@@ -704,6 +802,8 @@ async function handleInit(id, cfg, hasP2PProvider, peerListSupported = true) {
             reconciliation: cfg.reconciliation,
             onStorePersisted: runEvictionCheck,
         });
+        if (!current())
+            return;
         runEvictionCheck();
         console.log('[Worker] Nostr runtime initialized with', cfg.relays.length, 'relays');
         // Set up unified event handler for all subscriptions
@@ -758,23 +858,14 @@ async function handleInit(id, cfg, hasP2PProvider, peerListSupported = true) {
         respond({ type: 'ready' });
         // Load persisted social graph from IndexedDB, THEN set up subscriptions
         // This ensures we only subscribe for users whose follow lists we don't already have
-        const loaded = await loadSocialGraph(cfg.pubkey);
-        if (_config !== cfg)
+        const loaded = await loadSocialGraph(cfg.pubkey, lifecycle);
+        if (!current())
             return;
-        if (!loaded && cfg.relays.length && cfg.graphReconciliation !== false) {
-            try {
-                const fresh = await loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY });
-                if (_config !== cfg)
-                    return;
-                // This is a cold bootstrap only; a saved personal graph always wins.
-                await socialGraph.merge(fresh);
-                notifySocialGraphVersionUpdate();
-            }
-            catch { /* Existing relay crawling remains the offline-safe fallback. */ }
-        }
-        if (_config !== cfg)
+        graphBootstrapEligible = loaded === 'missing';
+        await configureGraphBootstrap();
+        if (!current())
             return;
-        if (loaded) {
+        if (loaded === 'loaded') {
             notifySocialGraphVersionUpdate();
             console.log('[Worker] Social graph loaded, setting up subscriptions with existing data');
         }
@@ -791,7 +882,15 @@ async function handleInit(id, cfg, hasP2PProvider, peerListSupported = true) {
 /**
  * Handle identity change (account switch)
  */
-function handleSetIdentity(id, pubkey, nsec) {
+async function handleSetIdentity(id, pubkey, nsec) {
+    const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
+    stopSocialGraphSubscriptions();
+    socialGraphLoading = false;
+    graphCatchupGeneration++;
+    stopGraphCatchup?.();
+    stopGraphCatchup = undefined;
+    cancelGraphBootstrap();
+    graphBootstrapEligible = false;
     setIdentity(pubkey, nsec);
     console.log('[Worker] Identity updated:', pubkey.slice(0, 16) + '...');
     if (_config) {
@@ -799,7 +898,15 @@ function handleSetIdentity(id, pubkey, nsec) {
         _config.nsec = nsec;
     }
     // Update SocialGraph root
-    socialGraph.setRoot(pubkey);
+    await socialGraph.setRoot(pubkey);
+    if (lifecycle !== graphLifecycleGeneration)
+        return;
+    if (wasLoading) {
+        await loadSocialGraph(pubkey, lifecycle);
+        if (lifecycle !== graphLifecycleGeneration)
+            return;
+    }
+    setupSocialGraphSubscription(pubkey);
     configureGraphCatchup();
     notifySocialGraphVersionUpdate();
     console.log('[Worker] SocialGraph root updated:', pubkey.slice(0, 16) + '...');
@@ -867,6 +974,11 @@ function emitBlossomBandwidthSnapshot() {
     respond({ type: 'blossomBandwidth', stats: blossomBandwidthTracker.getStats() });
 }
 async function handleClose(id) {
+    graphLifecycleGeneration++;
+    stopSocialGraphSubscriptions();
+    socialGraphLoading = false;
+    cancelGraphBootstrap();
+    graphBootstrapEligible = false;
     graphCatchupGeneration++;
     stopGraphCatchup?.();
     stopGraphCatchup = undefined;
@@ -1296,11 +1408,36 @@ async function handleGetStorageStats(id) {
 // ============================================================================
 // SocialGraph Handlers
 // ============================================================================
-function handleInitSocialGraph(id, rootPubkey) {
+async function changeSocialGraphRoot(pubkey) {
+    if (pubkey === socialGraph.getRoot())
+        return true;
+    const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
+    stopSocialGraphSubscriptions();
+    socialGraphLoading = false;
+    cancelGraphBootstrap();
+    graphBootstrapEligible = false;
+    graphCatchupGeneration++;
+    stopGraphCatchup?.();
+    stopGraphCatchup = undefined;
+    await socialGraph.setRoot(pubkey);
+    if (lifecycle !== graphLifecycleGeneration)
+        return false;
+    // A root change during the initial read replaces only that pending read.
+    // Existing cache ownership/conflict state is otherwise left untouched.
+    if (wasLoading) {
+        await loadSocialGraph(pubkey, lifecycle);
+        if (lifecycle !== graphLifecycleGeneration)
+            return false;
+    }
+    setupSocialGraphSubscription(pubkey);
+    configureGraphCatchup();
+    notifySocialGraphVersionUpdate();
+    return true;
+}
+async function handleInitSocialGraph(id, rootPubkey) {
     try {
-        if (rootPubkey) {
-            socialGraph.setRoot(rootPubkey);
-        }
+        if (rootPubkey && !await changeSocialGraphRoot(rootPubkey))
+            return;
         const size = socialGraph.size();
         respond({ type: 'socialGraphInit', id, version: socialGraphVersion, size });
     }
@@ -1308,10 +1445,10 @@ function handleInitSocialGraph(id, rootPubkey) {
         respond({ type: 'socialGraphInit', id, version: 0, size: 0, error: getErrorMessage(err) });
     }
 }
-function handleSetSocialGraphRoot(id, pubkey) {
+async function handleSetSocialGraphRoot(id, pubkey) {
     try {
-        socialGraph.setRoot(pubkey);
-        notifySocialGraphVersionUpdate();
+        if (!await changeSocialGraphRoot(pubkey))
+            return;
         respond({ type: 'void', id });
     }
     catch (err) {
@@ -1551,7 +1688,9 @@ function subscribeToFollowsContactLists(pubkeys, depth) {
         const batchSize = 50;
         for (let i = 0; i < newPubkeys.length; i += batchSize) {
             const batch = newPubkeys.slice(i, i + batchSize);
-            nostrSubscribe(`socialgraph-depth${depth}-${i}`, [{
+            const id = `socialgraph-depth${depth}-${i}`;
+            rootGraphSubscriptions.add(id);
+            nostrSubscribe(id, [{
                     kinds: [KIND_CONTACTS, 10000],
                     authors: batch,
                 }]);
@@ -1562,6 +1701,7 @@ function subscribeToFollowsContactLists(pubkeys, depth) {
  * Subscribe to kind:3 contact list events for social graph
  */
 function setupSocialGraphSubscription(rootPubkey) {
+    stopSocialGraphSubscriptions();
     if (!rootPubkey || rootPubkey.length !== 64) {
         console.warn('[Worker] Invalid pubkey for social graph subscription:', rootPubkey);
         return;
@@ -1580,6 +1720,7 @@ function setupSocialGraphSubscription(rootPubkey) {
             authors.push(DEFAULT_BOOTSTRAP_PUBKEY);
             subscribedPubkeys.add(DEFAULT_BOOTSTRAP_PUBKEY);
         }
+        rootGraphSubscriptions.add('socialgraph-contacts');
         nostrSubscribe('socialgraph-contacts', [{
                 kinds: [KIND_CONTACTS, 10000],
                 authors,

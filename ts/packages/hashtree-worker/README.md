@@ -132,6 +132,35 @@ const stop = client.onTreeRootUpdate((update) => {
 });
 ```
 
+Social graph follow/mute reconciliation uses the configured relays by default and
+is separate from fixed public HTTP bootstrapping. Metadata-only consumers can set
+`graphReconciliation: false`. HTTP seeding defaults off; an app may explicitly
+allow it for its unchanged shipped public relay set:
+
+```typescript
+const graphClient = new RelayWorkerClient(HashtreeWorker, {
+  storeName: 'demo-social-worker',
+  pubkey: '336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b',
+  relays: ['wss://relay.damus.io'], // This app's complete shipped default set.
+  graphBootstrap: true,
+});
+await graphClient.init();
+// Omitting graphBootstrap on a settings update revokes HTTP seed permission.
+// Configured-relay follow/mute reconciliation continues on this custom relay.
+await graphClient.setRelays(['wss://relay.example']);
+// Restore permission only when the complete shipped default set is restored.
+await graphClient.setRelays(['wss://relay.damus.io'], { graphBootstrap: true });
+```
+
+A relay change, identity change, graph root change, or close cancels pending HTTP
+seeding. Root changes immediately restart reconciliation and the live follow/mute
+subscription for the new root;
+setting the same root again leaves an allowed initial seed in progress. Retained
+local snapshots take priority, including partial lists and unreadable stored
+bytes. Persistence compares the previously observed snapshot atomically and stops
+writing if another tab has replaced it. Raw `setRelays` messages use a flat
+`graphBootstrap` boolean alongside `relays`; absent means false.
+
 When bridging a resolved or persisted root through the `setTreeRootCache` protocol
 message, send `source: 'remote'` with its original `updatedAt` Unix timestamp in
 seconds. This preserves replacement ordering across cache hydration and offline

@@ -129,7 +129,7 @@ export type WorkerRequest =
   | { type: 'setStorageMaxBytes'; id: string; maxBytes: number }
 
   // Relay configuration
-  | { type: 'setRelays'; id: string; relays: string[] }
+  | { type: 'setRelays'; id: string; relays: string[]; graphBootstrap?: boolean }
 
   // Blossom upload
   | { type: 'pushToBlossom'; id: string; cidHash: Uint8Array; cidKey?: Uint8Array; treeName?: string }
@@ -177,8 +177,10 @@ export interface WorkerConfig {
   pubkey: string;  // User's pubkey (required - user always logged in)
   nsec?: string;  // Hex-encoded secret key (only for nsec login, not extension)
   storeName?: string;  // IndexedDB database name, defaults to 'hashtree-worker'
-  /** Set false to disable bounded public follow/mute catch-up and fresh cold bootstrap. */
+  /** Set false to disable bounded public follow/mute catch-up on the configured relays. */
   graphReconciliation?: boolean;
+  /** Explicitly allow the fixed public HTTP seed when no local graph is retained. Defaults to false. */
+  graphBootstrap?: boolean;
   /** Opt-in background NIP-77 recovery against the worker's retained event store. */
   reconciliation?: Omit<RuntimeReconciliationOptions, 'fetch'>;
 }
