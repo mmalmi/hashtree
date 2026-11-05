@@ -390,6 +390,36 @@ let socialGraphSaveTimeout: ReturnType<typeof setTimeout> | null = null;
 let socialGraphDirty = false;
 let stopGraphCatchup: (() => void) | undefined;
 let graphCatchupGeneration = 0;
+let graphBootstrapGeneration = 0;
+let graphBootstrapAbort: AbortController | undefined;
+let graphBootstrapEligible = false;
+function cancelGraphBootstrap() {
+  graphBootstrapGeneration++;
+  graphBootstrapAbort?.abort(); graphBootstrapAbort = undefined;
+}
+async function configureGraphBootstrap() {
+  cancelGraphBootstrap();
+  const cfg = _config;
+  if (cfg?.graphBootstrap !== true || !cfg.relays.length || !graphBootstrapEligible) return;
+  const generation = graphBootstrapGeneration, expectedGraph = socialGraph, version = socialGraphVersion;
+  const abort = graphBootstrapAbort = new AbortController();
+  const current = () => generation === graphBootstrapGeneration && _config === cfg &&
+    cfg.graphBootstrap === true && cfg.relays.length > 0 && graphBootstrapEligible &&
+    socialGraph === expectedGraph && socialGraphVersion === version;
+  try {
+    const fresh = await loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY, signal: abort.signal });
+    if (!current()) return;
+    // Prepare away from the active graph: a policy change or local event wins even
+    // while the asynchronous merge is in progress.
+    await fresh.setRoot(expectedGraph.getRoot());
+    await fresh.merge(expectedGraph);
+    if (!current()) return;
+    socialGraph = fresh;
+    notifySocialGraphVersionUpdate();
+  } catch { /* Configured-relay catch-up remains available without an HTTP seed. */ }
+  finally { if (graphBootstrapAbort === abort) graphBootstrapAbort = undefined; }
+}
+
 function configureGraphCatchup() {
   const generation = ++graphCatchupGeneration;
   stopGraphCatchup?.(); stopGraphCatchup = undefined;
@@ -406,6 +436,7 @@ function configureGraphCatchup() {
 }
 
 function notifySocialGraphVersionUpdate() {
+  graphBootstrapEligible = false;
   socialGraphVersion++;
   socialGraphDirty = true;
   self.postMessage({ type: 'socialGraphVersion', version: socialGraphVersion });
@@ -641,9 +672,13 @@ self.onmessage = async (e: MessageEvent<WorkerRequest>) => {
 
       // Relay configuration
       case 'setRelays':
+        cancelGraphBootstrap();
+        graphCatchupGeneration++;
+        stopGraphCatchup?.(); stopGraphCatchup = undefined;
+        if (_config) { _config.relays = msg.relays; _config.graphBootstrap = msg.graphBootstrap === true; }
         await nostrSetRelays(msg.relays);
-        if (_config) _config.relays = msg.relays;
         configureGraphCatchup();
+        void configureGraphBootstrap();
         console.log('[Worker] Relay configuration updated:', msg.relays.length, 'relays');
         respond({ type: 'void', id: msg.id });
         break;
@@ -756,6 +791,8 @@ function respondWithTransfer(msg: WorkerResponse, transfer: Transferable[]) {
 
 async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean, peerListSupported = true) {
   try {
+    cancelGraphBootstrap();
+    graphBootstrapEligible = false;
     _config = cfg;
     p2pPeerRoutes.setEnabled(hasP2PProvider, peerListSupported);
     blossomBandwidthTracker.reset();
@@ -854,15 +891,8 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
     // This ensures we only subscribe for users whose follow lists we don't already have
     const loaded = await loadSocialGraph(cfg.pubkey);
     if (_config !== cfg) return;
-    if (!loaded && cfg.relays.length && cfg.graphReconciliation !== false) {
-      try {
-        const fresh = await loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY });
-        if (_config !== cfg) return;
-        // This is a cold bootstrap only; a saved personal graph always wins.
-        await socialGraph.merge(fresh);
-        notifySocialGraphVersionUpdate();
-      } catch { /* Existing relay crawling remains the offline-safe fallback. */ }
-    }
+    graphBootstrapEligible = !loaded;
+    await configureGraphBootstrap();
     if (_config !== cfg) return;
     if (loaded) {
       notifySocialGraphVersionUpdate();
@@ -882,6 +912,8 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
  * Handle identity change (account switch)
  */
 function handleSetIdentity(id: string, pubkey: string, nsec?: string) {
+  cancelGraphBootstrap();
+  graphBootstrapEligible = false;
   setIdentity(pubkey, nsec);
   console.log('[Worker] Identity updated:', pubkey.slice(0, 16) + '...');
 
@@ -966,6 +998,8 @@ function emitBlossomBandwidthSnapshot(): void {
 }
 
 async function handleClose(id: string) {
+  cancelGraphBootstrap();
+  graphBootstrapEligible = false;
   graphCatchupGeneration++;
   stopGraphCatchup?.(); stopGraphCatchup = undefined;
   // Close event subscriptions and connections

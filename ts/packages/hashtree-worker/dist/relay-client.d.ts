@@ -53,7 +53,10 @@ export declare class RelayWorkerClient {
     private notifyP2PProviderState;
     setBlossomServers(servers: BlossomServerConfig[]): Promise<void>;
     setStorageMaxBytes(maxBytes: number): Promise<void>;
-    setRelays(relays: string[]): Promise<void>;
+    /** Relay changes revoke fixed HTTP bootstrap unless explicitly allowed again. */
+    setRelays(relays: string[], policy?: {
+        graphBootstrap?: boolean;
+    }): Promise<void>;
     subscribeTreeRoots(pubkey: string): Promise<void>;
     unsubscribeTreeRoots(pubkey: string): Promise<void>;
     onTreeRootUpdate(listener: (update: TreeRootUpdate) => void): () => void;
