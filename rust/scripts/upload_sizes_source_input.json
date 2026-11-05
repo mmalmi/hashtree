@@ -1,12 +1,12 @@
 {
-  "previous_master": "aca09937e8739299bc4ae54869acf64fa1847b0b",
-  "master": "711816c139c9b2564f70c9ee6cceb3011281cb1a",
+  "previous_master": "711816c139c9b2564f70c9ee6cceb3011281cb1a",
+  "master": "d3772e27f57454a7451a5b7b23c38c93fde4abcc",
   "head": "refs/heads/master",
   "refs": {
     "refs/heads/codex/haps-query-cancellation": "435400fab747e7314b3c870c4ac578258d16f2a5",
     "refs/heads/codex/ios-lmdb-locking": "b1f0e059576536543a99cef645db73ace8caf26e",
     "refs/heads/codex/release-prebuilt-031": "f19cb5d0cf78e61533cd086f29ba83d7f0193b27",
-    "refs/heads/master": "711816c139c9b2564f70c9ee6cceb3011281cb1a",
+    "refs/heads/master": "d3772e27f57454a7451a5b7b23c38c93fde4abcc",
     "refs/tags/haps-source/5b1f6c036a9b2756a25df9420fe79880707e6a3b": "5b1f6c036a9b2756a25df9420fe79880707e6a3b",
     "refs/tags/haps-source/876abcd67dc613efd43945ce82cac2d701317162": "876abcd67dc613efd43945ce82cac2d701317162",
     "refs/tags/hashtree-client-v0.1.0": "46ed89864d90728e9368732f7bcebfd5e6fa50d0",
@@ -29,16 +29,8 @@
     "refs/tags/hashtree-ts-runtime-v0.5.33": "56e0ed368d7d41e45ada36c2a8bfb231fe77f7b0",
     "refs/tags/hashtree-ts-runtime-v0.5.34": "a136e56f2b10ab91cc6cf87cca7acacb2506f1dd"
   },
-  "objects": 33286,
-  "object_ids_sha256": "ed5eab6e12d3a4b771b5bdab95d320df75e9998f4aa4f275b489eceaaa745183",
-  "payloads_sha256": "3881704aff4f0ef399f4a0eb49e3d185853188684c78cf170e1748b9f411a945",
-  "payload_bytes": 512117795,
-  "publication": {
-    "hash": "0657772de50340488284d7c6918d0d7b289f23990fadb20b07c0513c5887233a",
-    "key": "fda9f1127e40672b3c304a34c23fbc788d9e753e4803a984573892534925aacd",
-    "nhash": "nhash1qqsqv4mh9hjsxszgs2zd035335xhk2ylywvsltdjpvruq5futzrjxws9yr76nugj0eqxw2euxp9rfs3lh3ugm8n48eyq82vy2uufy56fyk4v6nuulm4",
-    "producer_run": "42053063510",
-    "producer_receipt_sha256": "5589e82ea3fbe35dab79e0f102835bab5e606fdc56b9971ae1a7c818c5c4232c",
-    "author": "336f319763657d6b0e65a5b5876719e8c8dcdcf9396852be71ee26b73368b29b"
-  }
+  "objects": 33315,
+  "object_ids_sha256": "1bafa99d5aac66d0e8455f3877f4d309a938c7041c34d5fe28ba9e2b9dc0dcf7",
+  "payloads_sha256": "249ad98239fbe2700fdfbe3e3914bc88dbd878c50873bf4c7b6b4da4d4321e99",
+  "payload_bytes": 512439641
 }
