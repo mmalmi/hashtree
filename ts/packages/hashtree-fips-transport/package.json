@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/fips-transport",
-  "version": "0.4.30",
+  "version": "0.5.0",
   "description": "Hashtree blob transport over reliable TCP/FIPS streams",
   "type": "module",
   "main": "dist/index.js",
@@ -31,6 +31,7 @@
     "verify:dist": "node ../../scripts/assert-clean.mjs dist",
     "lint": "eslint src tests --max-warnings 0",
     "test": "vitest run",
+    "test:browser": "node tests/browserProvider.browser.mjs",
     "test:watch": "vitest"
   },
   "keywords": [
