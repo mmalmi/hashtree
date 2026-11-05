@@ -1,12 +1,12 @@
 {
   "previous_master": "f06683c5c65c1967dc59ab57a6fb4fda4a91ef09",
-  "master": "ea4104dbd72df6dca8ef3c9187eedae8574a5015",
+  "master": "c98f89854cfdf87756e1b759a39fac185babde9a",
   "head": "refs/heads/master",
   "refs": {
     "refs/heads/codex/haps-query-cancellation": "435400fab747e7314b3c870c4ac578258d16f2a5",
     "refs/heads/codex/ios-lmdb-locking": "b1f0e059576536543a99cef645db73ace8caf26e",
     "refs/heads/codex/release-prebuilt-031": "f19cb5d0cf78e61533cd086f29ba83d7f0193b27",
-    "refs/heads/master": "ea4104dbd72df6dca8ef3c9187eedae8574a5015",
+    "refs/heads/master": "c98f89854cfdf87756e1b759a39fac185babde9a",
     "refs/tags/haps-source/5b1f6c036a9b2756a25df9420fe79880707e6a3b": "5b1f6c036a9b2756a25df9420fe79880707e6a3b",
     "refs/tags/haps-source/876abcd67dc613efd43945ce82cac2d701317162": "876abcd67dc613efd43945ce82cac2d701317162",
     "refs/tags/hashtree-client-v0.1.0": "46ed89864d90728e9368732f7bcebfd5e6fa50d0",
@@ -31,10 +31,11 @@
     "refs/tags/hashtree-ts-runtime-v0.5.35": "8bf1de1272a39fb0616c22133d429ac21d12094f",
     "refs/tags/git-remote-htree-v0.4.0": "b96680ccb0c09ac01a405bf07d550741f25a6180",
     "refs/tags/hashtree-cli-v0.4.0": "76a3927ecbfab84c68b722ccccb9d83abfb111c3",
-    "refs/tags/hashtree-embedded-v0.4.0": "a4844d3950a4dad5d4dda722d5a3c9eba9d7eeb6"
+    "refs/tags/hashtree-embedded-v0.4.0": "a4844d3950a4dad5d4dda722d5a3c9eba9d7eeb6",
+    "refs/tags/hashtree-ts-runtime-v0.5.36": "7e086c2e5d5611564f99c49ce3f4ed7a3cda0771"
   },
-  "objects": 33442,
-  "object_ids_sha256": "0a41175fdcfb6e3dbd565f278d4bdda78f3aa6ac560dd60836f72354c43bd127",
-  "payloads_sha256": "c981c58318f6c06e5a16bce874c9c7af9e94ff1759bc5cd446eef0392badc1b5",
-  "payload_bytes": 514154893
+  "objects": 33462,
+  "object_ids_sha256": "e5a33684503ea805e90d96602e1b052b99237cde1c8a4f3e85002b0f0375d59e",
+  "payloads_sha256": "366aa52e0b8ba400157e597b94e7db52c92b347f3ae43bc519c5420539350c5f",
+  "payload_bytes": 514597189
 }
