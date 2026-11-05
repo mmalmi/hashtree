@@ -1,6 +1,7 @@
 use super::*;
 
 pub(super) struct EventIndexBucket {
+    pub(super) store: Arc<StorageRouter>,
     pub(super) event_store: NostrEventStore<StorageRouter>,
     pub(super) root_path: PathBuf,
 }

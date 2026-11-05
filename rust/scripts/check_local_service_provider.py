@@ -55,6 +55,7 @@ def main(output, receipt):
     receipt['memoryBefore'] = subprocess.check_output(['free', '-b'], text=True)
     lock = tomllib.loads(Path('Cargo.lock').read_text())
     expected = {
+        'negentropy': ('0.5.3', 'fd6f12461d14b5768028d39fab3cdfbcefb0bc7f09e95f413a00b6fdedcc9c2d'),
         'nostr-pubsub-fips': ('0.6.1', '23568533712a3635e45e86ed79895e42f87a11dfcd43ba9bcf02a5e9b90db90f'),
         'nostr-pubsub-social-graph': ('0.3.0', 'e9dd2d0a1cdacf1ea254ea05d7f63dd6624ff4ee6dae62c4c4000dd4db8b9666'),
         'nostr-social-graph': ('0.2.0', '83a7c3e6dedf8c0474c9e09938496abde4a9c77cd38ec4832d9b56ee9602b8f8'),
@@ -90,7 +91,17 @@ def main(output, receipt):
                '--lib', '--test', 'provider_route', '--no-run', '--message-format=json']
     receipt['buildCommand'] = command
     artifacts = run('build', command, output, receipt, 2400)
-    selected = {'hashtree_cli': ['fips_transport::', 'socialgraph::crawler::tests::'], 'hashtree_fips_transport': [],
+    bin_command = ['cargo', 'test', '--locked', '-p', 'hashtree-cli', '--features',
+                   'fips-webrtc,git-remote-wrapper', '--bin', 'htree',
+                   '--no-run', '--message-format=json']
+    receipt['binaryBuildCommand'] = bin_command
+    artifacts += run('build-cli-tests', bin_command, output, receipt, 1200)
+    selected = {'hashtree_cli': ['fips_transport::', 'socialgraph::crawler::tests::',
+                                'nostr_relay::negentropy::tests::',
+                                'nostr_relay::snapshot::tests::',
+                                'server::ws_relay::tests::negentropy_',
+                                'config::tests::ditto_'],
+                'htree': ['app::socialgraph::tests::ditto_'], 'hashtree_fips_transport': [],
                 'provider_route': [], 'hashtree_embedded': [],
                 'git_remote_htree': ['root_observation', 'standalone_lookup']}
     binaries = {}
@@ -113,8 +124,22 @@ def main(output, receipt):
             for required in ('negentropy_rejection_', 'negentropy_timeout_', 'negentropy_malformed_reply_',
                              'negentropy_disconnect_', 'negentropy_mixed_relays_',
                              'negentropy_oversized_difference_', 'negentropy_disabled_',
-                             'negentropy_refreshes_both_heads_'):
+                             'negentropy_refreshes_both_heads_',
+                             'negentropy_fetches_over_200_ids_in_bounded_chunks_and_configured_relay_order',
+                             'negentropy_incomplete_id_download_preserves_cache_without_fallback',
+                             'negentropy_shutdown_drops_inflight_batches_without_download_or_commit',
+                             'negentropy_serves_full_local_sets_above_req_limit_and_retains_live_subscription',
+                             'negentropy_rejects_oversized_snapshots_instead_of_advertising_partial_sets',
+                             'negentropy_corrupt_checkpoint_is_an_error_not_an_empty_set',
+                             'negentropy_reads_persisted_graph_bodies_through_bounded_backend',
+                             'negentropy_bounded_reader_matches_full_graph_filters_and_exact_ids',
+                             'negentropy_bounded_reader_rejects_candidate_and_record_exhaustion',
+                             'negentropy_bounded_reader_applies_body_size_limit_before_decoding',
+                             'negentropy_websocket_roundtrip_and_exact_id_fetch',
+                             'ditto_defaults_do_not_replace_saved_relay_choices'):
                 assert required in listing, 'Missing graph reconciliation protocol test: ' + required
+        if name == 'htree':
+            assert 'ditto_publication_uses_configured_relays_without_injecting_defaults: test' in listing
         if name == 'hashtree_embedded':
             assert 'host_runtime_serves_initial_keyed_root_from_upstream_blossom: test' in listing
         if name == 'git_remote_htree':

@@ -674,6 +674,7 @@ fn default_nostr_archive_history_max_relay_pages() -> usize {
 
 fn default_relays() -> Vec<String> {
     vec![
+        "wss://relay.ditto.pub".to_string(),
         "wss://nos.lol".to_string(),
         "wss://relay.snort.social".to_string(),
         "wss://temp.iris.to".to_string(),
@@ -1091,6 +1092,26 @@ mod tests {
     use super::*;
     use crate::test_support::{test_env_lock, EnvVarGuard};
     use tempfile::TempDir;
+
+    #[test]
+    fn ditto_defaults_do_not_replace_saved_relay_choices() {
+        assert_eq!(Config::default().nostr.relays[0], "wss://relay.ditto.pub");
+        for relays in [
+            Vec::<String>::new(),
+            vec!["wss://custom.example".to_string()],
+        ] {
+            let serialized = format!(
+                "[nostr]\nrelays = {}\n",
+                serde_json::to_string(&relays).unwrap()
+            );
+            let config: Config = toml::from_str(&serialized).unwrap();
+            assert_eq!(config.nostr.relays, relays);
+        }
+        assert_eq!(
+            DEFAULT_FIPS_SIGNAL_RELAYS,
+            ["wss://temp.iris.to", "wss://relay.primal.net"]
+        );
+    }
 
     #[test]
     fn test_config_default() {

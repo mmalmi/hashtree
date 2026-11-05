@@ -560,11 +560,18 @@ fn nostr_responses_for(msg: &NostrClientMessage<'_>) -> Vec<NostrRelayMessage<'s
             let message = if ok { "" } else { "invalid auth" };
             vec![NostrRelayMessage::ok(event.id, ok, message)]
         }
-        NostrClientMessage::NegOpen { .. }
-        | NostrClientMessage::NegMsg { .. }
-        | NostrClientMessage::NegClose { .. } => {
-            vec![NostrRelayMessage::notice("negentropy not supported")]
+        NostrClientMessage::NegOpen {
+            subscription_id, ..
         }
+        | NostrClientMessage::NegMsg {
+            subscription_id, ..
+        } => {
+            vec![NostrRelayMessage::NegErr {
+                subscription_id: subscription_id.clone().into_owned().into(),
+                message: "blocked: local reconciliation store unavailable".into(),
+            }]
+        }
+        NostrClientMessage::NegClose { .. } => Vec::new(),
     }
 }
 
@@ -772,6 +779,148 @@ mod tests {
             )),
             cid_size_cache: Arc::new(std::sync::Mutex::new(super::super::auth::new_lookup_cache())),
         })
+    }
+
+    #[tokio::test]
+    async fn negentropy_websocket_roundtrip_and_exact_id_fetch() -> Result<()> {
+        use negentropy::{Id, Negentropy, NegentropyStorageVector};
+        let tmp = TempDir::new()?;
+        let relay = Arc::new(NostrRelay::new_read_only(
+            tmp.path().to_path_buf(),
+            NostrRelayConfig::default(),
+        ));
+        let event = EventBuilder::new(Kind::ContactList, "").sign_with_keys(&Keys::generate())?;
+        relay.ingest_trusted_event_silent(event.clone()).await?;
+        let state = test_app_state(&tmp, relay, String::new())?;
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        let app = axum::Router::new()
+            .route("/ws", axum::routing::get(ws_data))
+            .with_state(state);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await });
+        let (mut socket, _) = connect_async(format!("ws://{addr}/ws")).await?;
+        let id = SubscriptionId::new("wire-sync");
+        for warm in [false, true] {
+            let mut storage = NegentropyStorageVector::new();
+            if warm {
+                storage.insert(
+                    event.created_at.as_secs(),
+                    Id::from_byte_array(event.id.to_bytes()),
+                )?;
+            }
+            storage.seal()?;
+            let mut client = Negentropy::owned(storage, 4096)?;
+            socket
+                .send(TungsteniteMessage::Text(
+                    NostrClientMessage::NegOpen {
+                        subscription_id: id.clone().into(),
+                        filter: Filter::new().kind(Kind::ContactList).into(),
+                        id_size: None,
+                        initial_message: hex::encode(client.initiate()?).into(),
+                    }
+                    .as_json(),
+                ))
+                .await?;
+            let mut missing = Vec::new();
+            let mut finished = false;
+            for _ in 0..32 {
+                let frame = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+                    .await?
+                    .ok_or_else(|| anyhow::anyhow!("socket closed during reconciliation"))??;
+                let TungsteniteMessage::Text(text) = frame else {
+                    anyhow::bail!("expected NEG-MSG text");
+                };
+                let NostrRelayMessage::NegMsg {
+                    subscription_id,
+                    message,
+                } = NostrRelayMessage::from_json(text)?
+                else {
+                    anyhow::bail!("expected NEG-MSG");
+                };
+                assert_eq!(subscription_id.as_ref(), &id);
+                match client.reconcile_with_ids(
+                    &hex::decode(message.as_ref())?,
+                    &mut Vec::new(),
+                    &mut missing,
+                )? {
+                    Some(message) => {
+                        socket
+                            .send(TungsteniteMessage::Text(
+                                NostrClientMessage::NegMsg {
+                                    subscription_id: id.clone().into(),
+                                    message: hex::encode(message).into(),
+                                }
+                                .as_json(),
+                            ))
+                            .await?
+                    }
+                    None => {
+                        finished = true;
+                        break;
+                    }
+                }
+            }
+            assert!(finished);
+            assert_eq!(
+                missing,
+                if warm {
+                    vec![]
+                } else {
+                    vec![Id::from_byte_array(event.id.to_bytes())]
+                }
+            );
+            socket
+                .send(TungsteniteMessage::Text(
+                    NostrClientMessage::NegClose {
+                        subscription_id: id.clone().into(),
+                    }
+                    .as_json(),
+                ))
+                .await?;
+        }
+        socket
+            .send(TungsteniteMessage::Text(
+                NostrClientMessage::req(id.clone(), vec![Filter::new().id(event.id).limit(1)])
+                    .as_json(),
+            ))
+            .await?;
+        let mut downloaded = Vec::new();
+        loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("socket closed during exact-ID fetch"))??;
+            let TungsteniteMessage::Text(text) = frame else {
+                anyhow::bail!("expected event text");
+            };
+            match NostrRelayMessage::from_json(text)? {
+                NostrRelayMessage::Event { event, .. } => {
+                    event.verify()?;
+                    downloaded.push(event.id);
+                }
+                NostrRelayMessage::EndOfStoredEvents(_) => break,
+                other => anyhow::bail!("unexpected exact-ID reply: {other:?}"),
+            }
+        }
+        assert_eq!(downloaded, vec![event.id]);
+        socket.close(None).await?;
+        server.abort();
+        Ok(())
+    }
+
+    #[test]
+    fn negentropy_without_store_returns_error_and_close_is_silent() {
+        let id = SubscriptionId::new("no-store");
+        let replies = nostr_responses_for(&NostrClientMessage::NegOpen {
+            subscription_id: id.clone().into(),
+            filter: Filter::new().into(),
+            id_size: None,
+            initial_message: "61".into(),
+        });
+        assert!(matches!(&replies[..], [NostrRelayMessage::NegErr { .. }]));
+        assert!(nostr_responses_for(&NostrClientMessage::NegClose {
+            subscription_id: id.into(),
+        })
+        .is_empty());
     }
 
     #[tokio::test]
