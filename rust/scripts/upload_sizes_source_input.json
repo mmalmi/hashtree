@@ -58,6 +58,7 @@
       "refs/tags/v0.2.152": "8c0205a62f221cb6f74bb1e0cd6923798e7fc3ee",
       "refs/tags/v0.2.153": "6c706eae6d1e944901eaa179731c20b93b27308e",
       "refs/tags/v0.3.1": "a020090724e3ec5cf929350ea1bffef3bb4fcb11"
-    }
+    },
+    "head": "refs/heads/codex/release-prebuilt-031"
   }
 }

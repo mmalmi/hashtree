@@ -224,9 +224,9 @@ def main():
                 value, ref = line.split('\t')
                 if ref == 'HEAD':
                     if value.startswith('ref: '):
-                        assert value[5:] == INPUT['head']
+                        assert value[5:] == seed['head'], 'Accepted seed HEAD binding changed'
                     else:
-                        assert value == INPUT['previous_master']
+                        assert value == seed['refs'][seed['head']], 'Accepted seed HEAD target changed'
                 elif not ref.endswith('^{}'):
                     seed_refs[ref] = value
             assert seed_refs == seed['refs'], 'Accepted seed ref binding changed'
