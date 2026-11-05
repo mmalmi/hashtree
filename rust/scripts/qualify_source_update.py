@@ -248,7 +248,11 @@ def main():
             repo = root / 'verified.git'
             run('private-cold-clone', ['git', 'clone', '--mirror', f'htree://{npub}/hashtree', str(repo)], reader, cwd=root)
             verify(repo, reader, 'private-reader')
-            info = run('private-root-info', [str(tools / 'htree'), 'info', f'htree://{npub}/hashtree'], reader, timeout=180)
+            # The ordinary clone above verifies discovery through the fixture relay.
+            # Convert the exact verified root directly; CLI info's name resolver
+            # uses a different discovery path from the Git helper in release .150.
+            info = run('private-root-info', [str(tools / 'htree'), 'info',
+                                             tags['hash'] + ':' + tags['key']], reader, timeout=180)
             nhash = re.search(r'nhash1[a-z0-9]+', info).group(0)
             receipt['root'] = {'hash': tags['hash'], 'key': tags['key'], 'nhash': nhash}
             receipt['private_fixture_event'] = event
