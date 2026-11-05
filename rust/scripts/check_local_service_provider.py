@@ -71,15 +71,15 @@ def main(output, receipt):
     receipt['cohort'] = {name: version for name, (version, _) in expected.items()}
     receipt['cohortChecksums'] = {name: checksum for name, (_, checksum) in expected.items()}
     wrappers = {}
-    for name, version in {'git-remote-htree': '0.4.0', 'hashtree-cli': '0.4.1',
-                          'hashtree-embedded': '0.4.1'}.items():
+    for name, version in {'git-remote-htree': '0.4.0', 'hashtree-cli': '0.4.2',
+                          'hashtree-embedded': '0.4.2'}.items():
         manifest = tomllib.loads(Path('crates', name, 'Cargo.toml').read_text())
         assert manifest['package']['version'] == version, name
         wrappers[name] = manifest
     assert wrappers['git-remote-htree']['features']['default'] == ['lmdb']
     assert wrappers['hashtree-cli']['dependencies']['git-remote-htree']['version'] == '=0.4.0'
     embedded_cli = wrappers['hashtree-embedded']['dependencies']['hashtree-cli']
-    assert embedded_cli['version'] == '0.4.1'
+    assert embedded_cli['version'] == '0.4.2'
     assert embedded_cli['default-features'] is False
     assert embedded_cli['features'] == ['lmdb', 'fips-webrtc']
     receipt['wrappers'] = {name: manifest['package']['version'] for name, manifest in wrappers.items()}
