@@ -3362,7 +3362,7 @@ dependencies = [
 
 [[package]]
 name = "git-remote-htree"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3714,7 +3714,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3759,7 +3759,7 @@ dependencies = [
  "nostr-pubsub-relay",
  "nostr-relay-pool",
  "nostr-sdk",
- "nostr-social-graph 0.2.0",
+ "nostr-social-graph",
  "nvpn-fips-core",
  "page_size",
  "rand 0.8.6",
@@ -3857,7 +3857,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4049,7 +4049,7 @@ dependencies = [
  "nostr",
  "nostr-relay-pool",
  "nostr-sdk",
- "nostr-social-graph 0.2.0",
+ "nostr-social-graph",
  "rmp-serde",
  "serde",
  "serde_json",
@@ -4075,7 +4075,7 @@ name = "hashtree-nostr-social-graph-heed"
 version = "0.2.0-hashtree.1"
 dependencies = [
  "hashtree-heed",
- "nostr-social-graph 0.2.0",
+ "nostr-social-graph",
  "tempfile",
  "thiserror 2.0.18",
 ]
@@ -5458,14 +5458,15 @@ dependencies = [
 
 [[package]]
 name = "nostr-identity"
-version = "0.1.5"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "848aac810edafec01cd47650e31bfe920129a9d1422df0385cca286625caeed4"
+checksum = "c15c2feb8886d6fe7df33dbcf429f835c752cc139d30463741fa0fdd345add6f"
 dependencies = [
  "anyhow",
  "nostr-sdk",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "thiserror 2.0.18",
  "uuid",
 ]
@@ -5485,9 +5486,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-fips"
-version = "0.5.51"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15c52b732331c717b85165ddee1234e09fdd42793a539d9d543fa1983ec6de9b"
+checksum = "f5774e279e0511b5a94e68704b01eb28fd5ca9b2203ab54bb7727f9eff8f179a"
 dependencies = [
  "async-trait",
  "nostr",
@@ -5515,14 +5516,14 @@ dependencies = [
 
 [[package]]
 name = "nostr-pubsub-social-graph"
-version = "0.2.4"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82f49b582d5b174358516a230372196691bd014ff997ff58bc039e554198f7fe"
+checksum = "e9dd2d0a1cdacf1ea254ea05d7f63dd6624ff4ee6dae62c4c4000dd4db8b9666"
 dependencies = [
  "async-trait",
  "nostr",
  "nostr-pubsub",
- "nostr-social-graph 0.1.4",
+ "nostr-social-graph",
  "nostr-social-memory",
  "thiserror 2.0.18",
 ]
@@ -5562,19 +5563,6 @@ dependencies = [
 
 [[package]]
 name = "nostr-social-graph"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fe75a62e7939ca311dce77039443ea14af0c8e0a9969c01746992acf7ef40b17"
-dependencies = [
- "hex",
- "indexmap 2.14.0",
- "serde",
- "thiserror 2.0.18",
- "uuid",
-]
-
-[[package]]
-name = "nostr-social-graph"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "83a7c3e6dedf8c0474c9e09938496abde4a9c77cd38ec4832d9b56ee9602b8f8"
@@ -5588,15 +5576,15 @@ dependencies = [
 
 [[package]]
 name = "nostr-social-memory"
-version = "0.1.1"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d0a51c186658b0602aebc9566ee405adfcc1c92d082c697543d0b50358da7f0f"
+checksum = "39fb16cde2e5bb0e6eeed1c5c8740b01a3c90daa277c30c397715e84aa7a89c9"
 dependencies = [
  "anyhow",
  "chrono",
  "nostr-identity",
  "nostr-sdk",
- "nostr-social-graph 0.1.4",
+ "nostr-social-graph",
  "serde",
  "serde_json",
  "toml 0.8.23",

@@ -304,6 +304,7 @@ fn normalize_server_list(values: Vec<String>) -> Vec<String> {
 mod tests {
     use super::*;
     use base64::Engine;
+    use hashtree_cli::socialgraph::{open_social_graph_store, SocialGraphBackend};
     use hashtree_cli::HashtreeStore;
     use hashtree_core::{from_hex, DirEntry, HashTree, HashTreeConfig, LinkType};
     use nostr::{nips::nip19::ToBech32, EventBuilder, Keys, Kind, Tag, TagKind, Timestamp};
@@ -542,12 +543,11 @@ mod tests {
         )
         .expect("write browser settings");
 
-        let mut runtime = HostDaemonRuntime::start(
-            HostDaemonOptions::new(temp.path())
-                .with_initial_tree_roots(vec![(format!("{npub}/sites"), root_cid)]),
-        )
-        .expect("start daemon");
+        let options = HostDaemonOptions::new(temp.path())
+            .with_initial_tree_roots(vec![(format!("{npub}/sites"), root_cid)]);
+        let mut runtime = HostDaemonRuntime::start(options.clone()).expect("start daemon");
         let status = runtime.status();
+        let keys_before = std::fs::read(status.config_dir.join("keys")).expect("read host keys");
 
         let response = Client::new()
             .get(format!("{}/htree/{npub}/sites/index.html", status.base_url))
@@ -560,6 +560,67 @@ mod tests {
         );
 
         runtime.shutdown();
+        drop(runtime);
+
+        // Keep signed list heads in the same state directory across the wrapper restart.
+        let target = Keys::generate().public_key();
+        let lists: Vec<_> = [Kind::ContactList, Kind::Custom(10000)]
+            .into_iter()
+            .map(|kind| {
+                EventBuilder::new(kind, "")
+                    .tag(Tag::public_key(target))
+                    .sign_with_keys(&route_keys)
+                    .expect("sign retained list")
+            })
+            .collect();
+        {
+            let graph = open_social_graph_store(&status.data_dir).expect("open retained graph");
+            graph.ingest_events(&lists).expect("store retained lists");
+        }
+
+        // The second start must read the keyed tree and blobs from retained storage.
+        let settings_path = status.config_dir.join("browser_settings.json");
+        let mut settings: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings_path).expect("read browser settings"))
+                .expect("parse browser settings");
+        settings["blossomReadServers"] = json!([]);
+        let settings_before = serde_json::to_vec(&settings).expect("serialize offline settings");
+        std::fs::write(&settings_path, &settings_before).expect("save offline settings");
+        let mut restarted = HostDaemonRuntime::start(options).expect("restart retained daemon");
+        assert_eq!(restarted.self_npub(), status.self_npub);
+        assert_eq!(
+            std::fs::read(status.config_dir.join("keys")).expect("read retained host keys"),
+            keys_before
+        );
+        assert_eq!(
+            std::fs::read(&settings_path).expect("read retained settings"),
+            settings_before
+        );
+        let response = Client::new()
+            .get(format!(
+                "{}/htree/{npub}/sites/index.html",
+                restarted.base_url()
+            ))
+            .send()
+            .expect("fetch retained keyed site offline");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.bytes().expect("retained site body").as_ref(),
+            expected_body
+        );
+        restarted.shutdown();
+        drop(restarted);
+        let graph = open_social_graph_store(&status.data_dir).expect("reopen retained graph");
+        let mut actual: Vec<_> = graph
+            .list_revision_items(&[route_keys.public_key().to_bytes()])
+            .expect("read retained list heads")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let mut expected: Vec<_> = lists.iter().map(|event| event.id).collect();
+        actual.sort();
+        expected.sort();
+        assert_eq!(actual, expected);
     }
 
     #[test]
