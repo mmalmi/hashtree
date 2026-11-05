@@ -70,14 +70,15 @@ def main(output, receipt):
     receipt['cohort'] = {name: version for name, (version, _) in expected.items()}
     receipt['cohortChecksums'] = {name: checksum for name, (_, checksum) in expected.items()}
     wrappers = {}
-    for name in ('git-remote-htree', 'hashtree-cli', 'hashtree-embedded'):
+    for name, version in {'git-remote-htree': '0.4.0', 'hashtree-cli': '0.4.1',
+                          'hashtree-embedded': '0.4.1'}.items():
         manifest = tomllib.loads(Path('crates', name, 'Cargo.toml').read_text())
-        assert manifest['package']['version'] == '0.4.0', name
+        assert manifest['package']['version'] == version, name
         wrappers[name] = manifest
     assert wrappers['git-remote-htree']['features']['default'] == ['lmdb']
     assert wrappers['hashtree-cli']['dependencies']['git-remote-htree']['version'] == '=0.4.0'
     embedded_cli = wrappers['hashtree-embedded']['dependencies']['hashtree-cli']
-    assert embedded_cli['version'] == '0.4.0'
+    assert embedded_cli['version'] == '0.4.1'
     assert embedded_cli['default-features'] is False
     assert embedded_cli['features'] == ['lmdb', 'fips-webrtc']
     receipt['wrappers'] = {name: manifest['package']['version'] for name, manifest in wrappers.items()}
@@ -89,7 +90,7 @@ def main(output, receipt):
                '--lib', '--test', 'provider_route', '--no-run', '--message-format=json']
     receipt['buildCommand'] = command
     artifacts = run('build', command, output, receipt, 2400)
-    selected = {'hashtree_cli': ['fips_transport::'], 'hashtree_fips_transport': [],
+    selected = {'hashtree_cli': ['fips_transport::', 'socialgraph::crawler::tests::'], 'hashtree_fips_transport': [],
                 'provider_route': [], 'hashtree_embedded': [],
                 'git_remote_htree': ['root_observation', 'standalone_lookup']}
     binaries = {}
@@ -109,6 +110,11 @@ def main(output, receipt):
         assert count > 0, 'Empty test selection'
         if name == 'hashtree_cli':
             assert 'strict_public_author_receiver_reads_daemon_root_and_revokes_provider: test' in listing
+            for required in ('negentropy_rejection_', 'negentropy_timeout_', 'negentropy_malformed_reply_',
+                             'negentropy_disconnect_', 'negentropy_mixed_relays_',
+                             'negentropy_oversized_difference_', 'negentropy_disabled_',
+                             'negentropy_refreshes_both_heads_'):
+                assert required in listing, 'Missing graph reconciliation protocol test: ' + required
         if name == 'hashtree_embedded':
             assert 'host_runtime_serves_initial_keyed_root_from_upstream_blossom: test' in listing
         if name == 'git_remote_htree':
