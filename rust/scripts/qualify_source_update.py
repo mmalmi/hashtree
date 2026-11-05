@@ -19,6 +19,8 @@ import threading
 import time
 import urllib.request
 
+from packed_source_update import produce_complete_tree
+
 
 HERE = Path(__file__).resolve().parent
 INPUT = json.loads((HERE / 'upload_sizes_source_input.json').read_text())
@@ -52,21 +54,27 @@ def capacity():
         raise RuntimeError('20 GiB physical free-space reserve reached')
 
 
-def run(name, command, env, cwd=None, timeout=2100):
+def run(name, command, env, cwd=None, timeout=2100, input_text=None, output_file=None):
     capacity()
     started = time.monotonic()
-    out = OUTPUT / f'{name}.out'
+    out = output_file or OUTPUT / f'{name}.out'
     err = OUTPUT / f'{name}.log'
     with out.open('wb') as stdout, err.open('wb') as stderr:
         child = subprocess.Popen(command, env=env, cwd=cwd, stdout=stdout, stderr=stderr,
+                                 stdin=subprocess.PIPE if input_text is not None else None,
                                  start_new_session=True)
+        if input_text is not None:
+            child.stdin.write(input_text.encode())
+            child.stdin.close()
         try:
             while child.poll() is None:
                 capacity()
                 if time.monotonic() - started > timeout:
                     raise TimeoutError(name)
-                if out.stat().st_size + err.stat().st_size > 16 * 1024**2:
+                if err.stat().st_size + (0 if output_file else out.stat().st_size) > 16 * 1024**2:
                     raise RuntimeError(f'{name}: log budget exceeded')
+                if output_file and out.stat().st_size > 256 * 1024**2:
+                    raise RuntimeError(f'{name}: pack output budget exceeded')
                 time.sleep(1)
         finally:
             if child.poll() is None:
@@ -77,7 +85,7 @@ def run(name, command, env, cwd=None, timeout=2100):
         print('\n'.join(err.read_text(errors='replace').splitlines()[-40:]))
         raise RuntimeError(f'{name}: exit {code}')
     print(f'{name}: passed', flush=True)
-    return out.read_text()
+    return '' if output_file else out.read_text()
 
 
 def download(url, expected, target):
@@ -154,6 +162,10 @@ def verify(repo, env, name):
 
 def main():
     capacity()
+    assert shutil.disk_usage(OUTPUT).free >= FLOOR + 2 * 1024**3, 'Insufficient space for the bounded producer peak'
+    receipt['node_version'] = subprocess.check_output(['node', '--version'], text=True).strip()
+    receipt['git_version'] = subprocess.check_output(['git', '--version'], text=True).strip()
+    assert receipt['node_version'] == 'v24.11.0'
     with tempfile.TemporaryDirectory(prefix='htree-source-update-', dir=os.environ['RUNNER_TEMP']) as temporary:
         root = Path(temporary)
         tools = root / 'tools'
@@ -207,30 +219,6 @@ def main():
             producer = environment(root, 'producer', url, tools, writer=True)
             identity = run('disposable-identity', [str(tools / 'htree'), 'user'], producer, timeout=30)
             npub = re.search(r'npub1[a-z0-9]+', identity).group(0)
-            # Reuse the previously accepted complete public tree. Publishing into
-            # an empty namespace with the old helper can omit historical objects.
-            # This announcement is signed only by the disposable fixture identity
-            # and stays on the loopback relay. It does not change the real source.
-            seed = INPUT['seed_root']
-            assert seed['refs']['refs/heads/master'] == INPUT['previous_master']
-            assert re.fullmatch('[0-9a-f]{64}', seed['hash'])
-            assert re.fullmatch('[0-9a-f]{64}', seed['key'])
-            run('seed-accepted-public-tree', [str(tools / 'htree'), 'publish', 'hashtree',
-                                            seed['hash'], '--key', seed['key']], producer, timeout=180)
-            advertised = run('verify-seed-refs', ['git', 'ls-remote', '--symref',
-                                                 f'htree://{npub}/hashtree'], producer, cwd=root, timeout=180)
-            seed_refs = {}
-            for line in advertised.splitlines():
-                value, ref = line.split('\t')
-                if ref == 'HEAD':
-                    if value.startswith('ref: '):
-                        assert value[5:] == seed['head'], 'Accepted seed HEAD binding changed'
-                    else:
-                        assert value == seed['refs'][seed['head']], 'Accepted seed HEAD target changed'
-                elif not ref.endswith('^{}'):
-                    seed_refs[ref] = value
-            assert seed_refs == seed['refs'], 'Accepted seed ref binding changed'
-            receipt['seed_refs_verified'] = True
             source = root / 'input.git'
             run('init-input', ['git', 'init', '--bare', str(source)], producer, timeout=30)
             refspecs = [f'+{value}:{name}' for name, value in INPUT['refs'].items()]
@@ -238,25 +226,21 @@ def main():
                                        'https://github.com/mmalmi/hashtree.git', *refspecs], producer)
             run('input-head', ['git', '-C', str(source), 'symbolic-ref', 'HEAD', INPUT['head']], producer, timeout=30)
             verify(source, producer, 'input')
-            run('produce-public-blobs', ['git', '-C', str(source), 'push', '--mirror', 'htree://self/hashtree'], producer)
+            binding = produce_complete_tree(root, tools, producer, source, INPUT, run, download,
+                                            verify, environment, OUTPUT, receipt)
+            run('publish-loopback-fixture', [str(tools / 'htree'), 'publish', 'hashtree',
+                                             binding['hash'], '--key', binding['key']], producer, timeout=180)
             events = json.loads((root / 'events.json').read_text())
             roots = [event for event in events if event['kind'] == 30064 and ['d', 'hashtree'] in event['tags']]
             (OUTPUT / 'root-events.json').write_text(json.dumps(roots, indent=2) + '\n')
-            # The ordinary helper publishes after each pushed ref. Only the final
-            # root may contain the entire requested ref set; the cold clone below
-            # must prove that set and its complete object closure.
-            assert roots, 'No source root announcement was captured'
-            latest = max(event['created_at'] for event in roots)
-            final = [event for event in roots if event['created_at'] == latest]
-            bindings = {tuple((tag[0], tag[1]) for tag in event['tags']
-                              if len(tag) > 1 and tag[0] in ('hash', 'key')) for event in final}
-            assert len(bindings) == 1, 'Ambiguous final source roots at the same timestamp'
-            event = min(final, key=lambda event: event['id'])
-            receipt['incremental_root_announcements'] = len(roots)
+            assert len(roots) == 1, 'Expected one corrected-root fixture announcement'
+            event = roots[0]
+            receipt['fixture_root_announcements'] = len(roots)
             tags = {tag[0]: tag[1] for tag in event['tags'] if len(tag) > 1}
             assert re.fullmatch('[0-9a-f]{64}', tags['hash'])
             assert re.fullmatch('[0-9a-f]{64}', tags['key']), 'Preserve the accepted legacy key format'
-            assert event['content'] == tags['hash']
+            assert tags['hash'] == binding['hash'] and tags['key'] == binding['key']
+            assert event['content'] in ('', tags['hash'])
             serialized = json.dumps([0, event['pubkey'], event['created_at'], event['kind'],
                                      event['tags'], event['content']], separators=(',', ':'), ensure_ascii=False)
             assert hashlib.sha256(serialized.encode()).hexdigest() == event['id']

@@ -14,6 +14,15 @@ jobs:
     timeout-minutes: 80
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install pinned Node.js for metadata encoding
+        run: |
+          test "$(df -Pk . | awk 'NR==2 {print $4}')" -gt 21176320
+          curl --fail --location --output "$RUNNER_TEMP/node.tar.xz" https://nodejs.org/dist/v24.11.0/node-v24.11.0-linux-x64.tar.xz
+          echo "46da9a098973ab7ba4fca76945581ecb2eaf468de347173897044382f10e0a0a  $RUNNER_TEMP/node.tar.xz" | sha256sum --check --strict
+          tar -xJf "$RUNNER_TEMP/node.tar.xz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/node-v24.11.0-linux-x64/bin" >> "$GITHUB_PATH"
       - name: Qualify public source with pinned ordinary Git tools
         run: python3 rust/scripts/qualify_source_update.py
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
