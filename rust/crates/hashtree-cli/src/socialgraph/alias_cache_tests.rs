@@ -93,9 +93,9 @@ fn legacy_alias_migration_precedes_cli_cache_and_list_updates_invalidate_it() {
     let _guard = test_lock_blocking();
     let temp = TempDir::new().unwrap();
     let path = temp.path().join("socialgraph");
-    let root = Keys::parse("01".repeat(32)).unwrap();
-    let friend = Keys::parse("02".repeat(32)).unwrap();
-    let muted = Keys::parse("03".repeat(32)).unwrap();
+    let root = Keys::parse(&"01".repeat(32)).unwrap();
+    let friend = Keys::parse(&"02".repeat(32)).unwrap();
+    let muted = Keys::parse(&"03".repeat(32)).unwrap();
     let root_hex = root.public_key().to_hex();
     legacy_alias_rows(
         &path,
