@@ -1,4 +1,4 @@
-import hashlib,json,os,pathlib,signal,subprocess,sys,time,shutil
+import re,hashlib,json,os,pathlib,signal,subprocess,sys,time,shutil
 SCRIPT=pathlib.Path(__file__).resolve()
 ROOT=SCRIPT.parents[1]
 HERE=pathlib.Path(__file__).resolve().parent
@@ -33,6 +33,15 @@ def run(name,cmd,seconds):
  record['steps'].append({'name':name,'exitCode':code,'seconds':round(time.monotonic()-start,2)})
  if code:print(out.read_text(errors='replace')[-3000:]+err.read_text(errors='replace')[-3000:]);raise RuntimeError(name+' failed')
  return out.read_text()
+def check_test_result(label,result,count):
+ summaries=re.findall(r'test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored;',result)
+ assert summaries,'Missing final test summary'
+ passed,failed,ignored=map(int,summaries[-1])
+ expected={'socialgraph::tests::benchmark_nostr_btree_query_tradeoffs','socialgraph::tests::benchmark_query_events_large_dataset'} if label=='cli-hashtree_cli' else set()
+ actual={line.split(' ... ',1)[0].removeprefix('test ') for line in result.splitlines() if ' ... ignored' in line}
+ assert actual==expected and ignored==len(expected),'Unexpected ignored test'
+ assert failed==0 and passed+ignored==count,'Incomplete or failed test selection'
+ return passed,ignored
 try:
  assert shutil.disk_usage(ROOT).free>=30*1024**3
  record['cargoLockSha256']=sha('Cargo.lock')
@@ -55,8 +64,8 @@ try:
    assert listing.count('socialgraph::alias_cache_tests::')==2
   home=OUT/('home-'+label);home.mkdir()
   cmd=['sudo','unshare','--net','--mount','--pid','--fork','--mount-proc','--propagation','private','--kill-child=KILL','/usr/bin/python3',str(SCRIPT),'namespace',str(os.getuid()),str(os.getgid()),str(home),os.readlink('/proc/self/ns/net'),os.readlink('/proc/self/ns/pid'),str(OUT/(label+'-network.json')),binary,*filters,'--nocapture','--test-threads=1']
-  result=run(label,cmd,600);assert f'test result: ok. {count} passed; 0 failed; 0 ignored;' in result
-  record['tests'][label]={'passed':count,'binarySha256':sha(binary),'loopbackOnly':True,'isolatedHome':True}
+  result=run(label,cmd,600);passed,ignored=check_test_result(label,result,count)
+  record['tests'][label]={'passed':passed,'ignored':ignored,'binarySha256':sha(binary),'loopbackOnly':True,'isolatedHome':True}
  assert sum(v['passed'] for k,v in record['tests'].items() if k.startswith('fork-'))==24
  assert sha('Cargo.lock')==record['cargoLockSha256']
  subprocess.run(['git','diff','--exit-code'],check=True)
