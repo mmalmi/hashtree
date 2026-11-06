@@ -14,7 +14,7 @@ export async function admitIsolatedChatContext(context: BrowserContext) {
   // Firefox files and WebKit files deliberately disable RTC and use the local
   // routed WebSocket seed. No media permission is added to those UI contexts.
   if (engine === 'chromium') {
-    await context.grantPermissions(['microphone'], { origin })
+    await context.grantPermissions(['microphone', 'clipboard-read', 'clipboard-write'], { origin })
     const probe = await context.newPage()
     const url = origin + '/__unsigned_permission_control'
     try {
@@ -28,6 +28,7 @@ export async function admitIsolatedChatContext(context: BrowserContext) {
   }
   appendFileSync(evidence + '/context-permissions.jsonl', JSON.stringify({
     engine, origin, permission: engine === 'chromium' ? 'microphone' : null,
+    clipboardPermissions: engine === 'chromium' ? ['clipboard-read', 'clipboard-write'] : [],
     state, captureInvoked: false, processId: process.pid,
   }) + '\n')
   admitted.add(context)
