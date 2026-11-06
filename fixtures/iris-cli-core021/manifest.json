@@ -1,18 +1,19 @@
 {
   "sourceRepository": "https://github.com/irislib/iris-nostr",
-  "sourceCommit": "3f44bccef921c027b1670290ec18a37604184af1",
-  "sourceParent": "eef0ddca3690dabb261b0a345b416f6abf4c4355",
-  "sourceTree": "96f816cf1ab06b8bde2077eeecc0e6b7a621fc7d",
-  "archiveSha256": "4bda26fa7b5d085d6d267da0fb509ba0cfd9cf26765855a45c8c7ab1d8167927",
-  "archiveBytes": 71672,
+  "sourceCommit": "ed13f4691571f978cca343604b119a078157731d",
+  "sourceParent": "3ba59aeffc47ffc354cbcecef47315b1c092f4cb",
+  "sourceTree": "f7ad175a6337085cbc9aef83e73baeea02efb889",
+  "archiveSha256": "01c4599eaa6c8818b738034f14c6d3a78abc0c7055054eefceaa3539cca5bb1d",
+  "archiveBytes": 1060832,
   "sourceFiles": {
-    "Cargo.toml": "8e2b8a19f68a2204267473b5394f8248deade218619b6fad0aa72d110c8ab6a3",
-    "Cargo.lock": "321e92b9ae059d1de8978f2df0843c1ebf4183ee10a9ebe1b662bc77849a2339",
-    "tests/graph_aliases.rs": "84ed9e27c9f2cc16d01ad18bf1587e6f766e05b6e820156fee8831c0e6848ed9"
+    "Cargo.toml": "525a88d29d14701342990578c46fa0fd62b2331b1cece9f92168eb821bb0a356",
+    "Cargo.lock": "2f105d1dab8098fa731dca2809a2591a7b2b57049a23d4435d59658bae124106",
+    "src/snapshot.rs": "aa297b0ba3949ce222bd9504ff2aa3e349c0979cdab32d5d1aa89fbb75161961",
+    "tests/default_bootstrap.rs": "b641483b427f513e469c431b0f669769041457eaf3b7933ba6cfc2da46bb22fd",
+    "tests/data/default-bootstrap-v4.bin": "9af2ad6aaf830ff08aa14f83233e56c49d1379fb5da05efd1ebe9166aceabcb0"
   },
   "negativeControlFiles": {
-    "Cargo.toml": "e6237323a98ecf641ed68b2723af23fb62f1837865f75cca82fab8860f46e0e6",
-    "Cargo.lock": "56716d7700a44b5c318850403801c70fea17923d4226292bcf69b664d9eb5f55"
+    "src/snapshot.rs": "a333eb32ad9cb6222ba7fb811bb451540ae6a4d18d8d680fa586c86ceac958f4"
   },
   "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
   "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
@@ -21,5 +22,5 @@
     "run": 42217674640,
     "sha256": "3392b0d3e82515b66fb3ba17d37e70c1e6d0d4d1ad59dae04846f1d56a206fb6"
   },
-  "scope": "Native CLI source tests and Cargo packaging only; no binary publication, Haps build or live fixture traffic."
+  "scope": "CLI0.7.2 immutable v4 bootstrap and personal-cache qualification; only old default URL/checksum replaced in negative control. No binary publication/Haps build/live fixture traffic."
 }

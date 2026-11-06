@@ -1,4 +1,4 @@
-"""Extract exact public source and prepare the old-core negative control only."""
+"""Extract exact public source and prepare the old-default negative control only."""
 import hashlib,json,os,pathlib,shutil,tarfile
 here=pathlib.Path(__file__).resolve().parent
 stage=pathlib.Path(os.environ['IRIS_CLI_STAGE']).resolve()
@@ -15,4 +15,4 @@ shutil.copytree(stage/'source',stage/'negative')
 for name,digest in m['negativeControlFiles'].items():
     data=(here/('negative-'+name)).read_bytes();assert hashlib.sha256(data).hexdigest()==digest;(stage/'negative'/name).write_bytes(data)
 (stage/'evidence/source-inputs.json').write_text(json.dumps(m,indent=2)+'\n')
-print('Verified exact source and old-core negative control; no fixture executed')
+print('Verified exact source and old-default negative control; no fixture executed')

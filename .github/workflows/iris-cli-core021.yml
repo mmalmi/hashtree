@@ -1,8 +1,8 @@
-name: Isolated Iris CLI core 0.2.1
+name: Isolated Iris CLI0.7.2 v4 bootstrap
 on:
   workflow_dispatch:
   push:
-    branches: [codex/iris-cli-core021]
+    branches: [codex/iris-cli-bootstrap072]
 permissions:
   contents: read
 jobs:
@@ -15,8 +15,8 @@ jobs:
           persist-credentials: false
       - name: Prepare exact public source
         run: |
-          echo "IRIS_CLI_STAGE=$RUNNER_TEMP/iris-cli-core021" >> "$GITHUB_ENV"
-          IRIS_CLI_STAGE="$RUNNER_TEMP/iris-cli-core021" python3 fixtures/iris-cli-core021/prepare.py
+          echo "IRIS_CLI_STAGE=$RUNNER_TEMP/iris-cli-bootstrap072" >> "$GITHUB_ENV"
+          IRIS_CLI_STAGE="$RUNNER_TEMP/iris-cli-bootstrap072" python3 fixtures/iris-cli-core021/prepare.py
       - name: Prefetch fixed toolchain and locked inputs without executing fixtures
         run: |
           rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
@@ -28,7 +28,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: iris-cli-core021-${{ github.sha }}
-          path: ${{ runner.temp }}/iris-cli-core021/evidence
+          name: iris-cli-bootstrap072-${{ github.sha }}
+          path: ${{ runner.temp }}/iris-cli-bootstrap072/evidence
           if-no-files-found: error
           retention-days: 7

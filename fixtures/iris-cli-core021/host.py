@@ -13,7 +13,7 @@ def inner(config):
             runtime[tool]=subprocess.check_output([tool,'--version'],text=True).strip();assert runtime[tool]==manifest[tool]
             binary=pathlib.Path(subprocess.check_output(['rustup','which',tool],text=True).strip());runtime[tool+'Sha256']=sha(binary)
         commands=[
-            ('negative',['cargo','test','--locked','--offline','--test','graph_aliases','--','--nocapture'],'negative'),
+            ('negative',['cargo','test','--locked','--offline','--test','default_bootstrap','pinned_default_preserves_follow_and_mute_revisions','--','--nocapture'],'negative'),
             ('fmt',['cargo','fmt','--all','--','--check'],'source'),
             ('clippy',['cargo','clippy','--locked','--offline','--all-targets','--','-D','warnings'],'source'),
             ('tests',['cargo','test','--locked','--offline'],'source'),
@@ -26,15 +26,15 @@ def inner(config):
             text=log.read_text(errors='replace');runtime['commands'].append({'name':name,'argv':command,'cwd':directory,'exitCode':result.returncode,'seconds':time.monotonic()-start,'logSha256':sha(log)})
             print(text[-4000:],flush=True)
             if name=='negative':
-                assert result.returncode!=0 and 'test result: FAILED. 0 passed; 2 failed;' in text,'Negative control must fail assertions, not compilation'
-                for test in ['imported_aliases_preserve_offline_filter_mutes_and_native_status','conflicting_imports_fail_without_replacing_personal_snapshot']:assert test in text and 'FAILED' in text
+                assert result.returncode!=0 and 'test result: FAILED. 0 passed; 1 failed;' in text,'Negative control must fail assertions, not compilation'
+                assert 'pinned_default_preserves_follow_and_mute_revisions' in text and 'snapshot SHA-256 mismatch' in text
             else:assert result.returncode==0,name+' failed'
         packages=list((stage/'target/package').glob('iris-nostr-*.crate'));assert len(packages)==1
         runtime['cargoPackage']={'name':packages[0].name,'bytes':packages[0].stat().st_size,'sha256':sha(packages[0])}
         with tarfile.open(packages[0]) as tar:
             names=[pathlib.PurePosixPath(v.name).parts[1:] for v in tar.getmembers() if v.isfile()]
             assert all(parts and '..' not in parts and (parts[0] in ['src','tests'] or '/'.join(parts) in ['Cargo.toml','Cargo.toml.orig','Cargo.lock','README.md','LICENSE','rust-toolchain.toml']) for parts in names)
-            assert ('tests','graph_aliases.rs') in names
+            assert ('tests','graph_aliases.rs') in names and ('tests','default_bootstrap.rs') in names and ('tests','data','default-bootstrap-v4.bin') in names
             runtime['cargoPackage']['files']=['/'.join(parts) for parts in names]
         runtime['passed']=True
     except BaseException as error:
