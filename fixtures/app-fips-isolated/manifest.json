@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Chat exact production-dist, unchanged selected suites in all configured projects; no build or public network",
+  "purpose": "Chat graph4.0.4/worker0.4.25 coherent production dist: SW ordering, retained first-file restart and clipboard/linking in original selected projects; no runtime build or public network",
   "image": "mcr.microsoft.com/playwright@sha256:ee15712262f017b8157421b212b12099146645f44b1bc5c0514cbbe6a229b1d0",
   "imageTagForProvenance": "v1.64.1-noble",
   "imageIndexSha256": "2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f",
@@ -11,65 +11,15 @@
   "apps": [
     {
       "id": "chat",
-      "commit": "82c8101f07ec8896af5a1b28c269baed438d1310",
+      "commit": "7f91f33213a1efdf8a6d47f956f942417446a85a",
       "archive": "archives/chat-source.tar.gz",
-      "archiveSha256": "4109ea123ad85e6e0c7cfbc584b1e97be7b94bfa9832434db0c23cfa391252be",
-      "lockSha256": "d6d6c46c25941c9403457820d7156b6bb109b93eff367f9aaf617d1ba7ee6718",
+      "archiveSha256": "fcb8b3cfdba3b8defbb9f115364116625c116820cf808e8922c86747bca93761",
+      "lockSha256": "fd92d65a18457e786bb5c587a10f46107783ca77d484d604a88ddb86798c4c58",
       "distDir": "dist",
       "distArchive": "archives/chat-dist.tar.gz",
-      "distArchiveSha256": "7c676f364f3d3ec95c1f8ae324770dff7f9163cfcd6dd7b7c9c1d4e8552c3f8b",
+      "distArchiveSha256": "5a2ae4f0da180e7da1bcdc1e3b4be7d4b02f0ae0c214ea6fc20d08e0a1c99a9b",
       "distArchivePrefix": "dist",
       "distFiles": [
-        {
-          "path": "index.html",
-          "sha256": "ca5dedb9169dc1c2b24ce0083588d5d5bf6bc5e9a0e4413d6d70ea14da2207af",
-          "bytes": 1748
-        },
-        {
-          "path": "iris-logo.png",
-          "sha256": "3e7ffe75bd96399dcf81c7319ab67e4b9266ac0db5763fe0422b3f3b0924db8c",
-          "bytes": 16963
-        },
-        {
-          "path": "terms.html",
-          "sha256": "f06ab5fd7941f7e859a659c45a45bdb3c52f8a2ed7c074d4ae19523564990efd",
-          "bytes": 1854
-        },
-        {
-          "path": "apple-app-site-association",
-          "sha256": "e1ef574fde27adaac7112b117d761572e9d4c1ae4dff3320625455c8a2f15afb",
-          "bytes": 397
-        },
-        {
-          "path": "registerSW.js",
-          "sha256": "0dda2470c908c594d357bbb21f3495c470963187163f8d371dd6880d95340b0d",
-          "bytes": 148
-        },
-        {
-          "path": "manifest.json",
-          "sha256": "fcf80ca527667c459ddd2e0e8fc9241240ace767754a09b4a697976719c3dc9d",
-          "bytes": 747
-        },
-        {
-          "path": "csae.html",
-          "sha256": "192083da1c016cc690bcdf4f3116ab95cc6b366eddc97802a37dfba00cc4b98a",
-          "bytes": 1724
-        },
-        {
-          "path": "service-worker.js",
-          "sha256": "74082bc7bcf6c44ebf650ca2047fb5f3fe171e660358b8db8156d1716c21f0a5",
-          "bytes": 426484
-        },
-        {
-          "path": "privacy.html",
-          "sha256": "b86d2989c5a410350e268964070c61b47ea68cb4b73dca6cadd86f22ad2afb6b",
-          "bytes": 4413
-        },
-        {
-          "path": "privacy/index.html",
-          "sha256": "b86d2989c5a410350e268964070c61b47ea68cb4b73dca6cadd86f22ad2afb6b",
-          "bytes": 4413
-        },
         {
           "path": ".well-known/apple-app-site-association",
           "sha256": "e1ef574fde27adaac7112b117d761572e9d4c1ae4dff3320625455c8a2f15afb",
@@ -81,54 +31,9 @@
           "bytes": 666
         },
         {
-          "path": "terms/index.html",
-          "sha256": "f06ab5fd7941f7e859a659c45a45bdb3c52f8a2ed7c074d4ae19523564990efd",
-          "bytes": 1854
-        },
-        {
-          "path": "img/maskable_icon_x192.png",
-          "sha256": "3e0317436b4f3dca79197c5332350746a7ab171200955004a808649cfd1f14a6",
-          "bytes": 18063
-        },
-        {
-          "path": "img/maskable_icon.png",
-          "sha256": "5436571afbe36940f2008260b4d8f9f16e25ec8d7f09b50b85a706c3bd048ab2",
-          "bytes": 43539
-        },
-        {
-          "path": "img/android-chrome-192x192.png",
-          "sha256": "3e0317436b4f3dca79197c5332350746a7ab171200955004a808649cfd1f14a6",
-          "bytes": 18063
-        },
-        {
-          "path": "img/apple-touch-icon.png",
-          "sha256": "a0856b5ab5b9f286ef629ce16f3f3b4bd4443cf6bf28f8fe8a7362590535ce21",
-          "bytes": 16058
-        },
-        {
-          "path": "img/android-chrome-512x512.png",
-          "sha256": "8ef711c98312bbf5041baf15cc7f18cbda598bb348431716089bb05c700d3266",
-          "bytes": 39301
-        },
-        {
-          "path": "csae/index.html",
-          "sha256": "192083da1c016cc690bcdf4f3116ab95cc6b366eddc97802a37dfba00cc4b98a",
-          "bytes": 1724
-        },
-        {
-          "path": "assets/privateStateView-p3FsM_uo.js",
-          "sha256": "8f6c6304faf0370038c9b56979fdf23c18ad9d57ec330e619a94f0af17cc0da4",
-          "bytes": 1320
-        },
-        {
-          "path": "assets/nostrWorker-C3AcdQxw.js",
-          "sha256": "47b13e7d3879f036ddc12ce09fe4a83e97674ea13d8cd0444eda84b63e8d31e9",
-          "bytes": 523094
-        },
-        {
-          "path": "assets/index-BpXzEjDb.js",
-          "sha256": "09816c3d7ed05b6a77512d8c79d7a53b10548b2398f8d1ade59f1fa33bf68676",
-          "bytes": 1141112
+          "path": "apple-app-site-association",
+          "sha256": "e1ef574fde27adaac7112b117d761572e9d4c1ae4dff3320625455c8a2f15afb",
+          "bytes": 397
         },
         {
           "path": "assets/directFileWriter.worker-C2cgA_wI.js",
@@ -136,9 +41,14 @@
           "bytes": 695
         },
         {
-          "path": "assets/ownReadState-thtbKpC0.js",
-          "sha256": "2ae72111fb7d1b77bc634975b40e3c262c981a33269660d59d0e13c1dc4afbd5",
-          "bytes": 592
+          "path": "assets/foregroundMessageNotifications-BwLMsxIl.js",
+          "sha256": "66ee6e1280bfeffbc2aeaca941848fbb89c583e3a2a7f3436a420a01de2b4b36",
+          "bytes": 3425
+        },
+        {
+          "path": "assets/index-BdaNz9Nf.js",
+          "sha256": "324974002e3609f451248945053fe17c7d01a83a1ecc345ce5da9c51c859de76",
+          "bytes": 1141112
         },
         {
           "path": "assets/index-Dh3XnsvO.css",
@@ -146,9 +56,9 @@
           "bytes": 83277
         },
         {
-          "path": "assets/socialGraph-B9uPtBHY.bin",
-          "sha256": "df349a23122993183b9b9d2d056b7c655a984bdc86bc72f747202ad772de4d8f",
-          "bytes": 1563994
+          "path": "assets/nostrWorker-C3AcdQxw.js",
+          "sha256": "47b13e7d3879f036ddc12ce09fe4a83e97674ea13d8cd0444eda84b63e8d31e9",
+          "bytes": 523094
         },
         {
           "path": "assets/opus-DaKiHsGi.wasm",
@@ -156,14 +66,24 @@
           "bytes": 340912
         },
         {
-          "path": "assets/vendor-krnTGhra.js",
-          "sha256": "2a97cb25ce80c1acef5c4259c9c273ccf3c6cd918cdbff6618222ae8d2f0c4c1",
-          "bytes": 1283041
+          "path": "assets/ownReadState-CVeYvk2E.js",
+          "sha256": "7379828ccac8bdea19b312f003b0a9aa7632ec196f3c2d6418d98d4afbbd0940",
+          "bytes": 592
         },
         {
-          "path": "assets/foregroundMessageNotifications-eN3TXKjr.js",
-          "sha256": "2d71dd2b451e7088e4cd5799c71004ceda70327a7f76612f257fa9e3a9c326b3",
-          "bytes": 3425
+          "path": "assets/peopleSearchIndex-DD6lGLkC.js",
+          "sha256": "8a30d7c78b1f9887b50511522ff65db9060f0487a061f62952c315023e6bcebc",
+          "bytes": 6201
+        },
+        {
+          "path": "assets/privateStateView-aJK1SlzY.js",
+          "sha256": "f767ff5c8a29f339ec6abaf4d527a61e537ffa94a29f52ca4fa1e42c71303ae6",
+          "bytes": 1320
+        },
+        {
+          "path": "assets/socialGraph-Cc2MnZG2.bin",
+          "sha256": "9af2ad6aaf830ff08aa14f83233e56c49d1379fb5da05efd1ebe9166aceabcb0",
+          "bytes": 1034502
         },
         {
           "path": "assets/vendor-BPDUCCMg.css",
@@ -171,44 +91,101 @@
           "bytes": 1734
         },
         {
-          "path": "assets/peopleSearchIndex-B9qfuY_D.js",
-          "sha256": "55d87e782ef163c09baaea20f62b8e4ea6a325ee92f16374bb4b7d33b3317fb6",
-          "bytes": 6201
+          "path": "assets/vendor-BxMKFQUi.js",
+          "sha256": "bb5e4b7e45ff09d6a573025fcfd74cdc8bed2042f228b9b4f28c4109034c9342",
+          "bytes": 1286477
+        },
+        {
+          "path": "csae/index.html",
+          "sha256": "192083da1c016cc690bcdf4f3116ab95cc6b366eddc97802a37dfba00cc4b98a",
+          "bytes": 1724
+        },
+        {
+          "path": "csae.html",
+          "sha256": "192083da1c016cc690bcdf4f3116ab95cc6b366eddc97802a37dfba00cc4b98a",
+          "bytes": 1724
+        },
+        {
+          "path": "img/android-chrome-192x192.png",
+          "sha256": "3e0317436b4f3dca79197c5332350746a7ab171200955004a808649cfd1f14a6",
+          "bytes": 18063
+        },
+        {
+          "path": "img/android-chrome-512x512.png",
+          "sha256": "8ef711c98312bbf5041baf15cc7f18cbda598bb348431716089bb05c700d3266",
+          "bytes": 39301
+        },
+        {
+          "path": "img/apple-touch-icon.png",
+          "sha256": "a0856b5ab5b9f286ef629ce16f3f3b4bd4443cf6bf28f8fe8a7362590535ce21",
+          "bytes": 16058
+        },
+        {
+          "path": "img/maskable_icon.png",
+          "sha256": "5436571afbe36940f2008260b4d8f9f16e25ec8d7f09b50b85a706c3bd048ab2",
+          "bytes": 43539
+        },
+        {
+          "path": "img/maskable_icon_x192.png",
+          "sha256": "3e0317436b4f3dca79197c5332350746a7ab171200955004a808649cfd1f14a6",
+          "bytes": 18063
+        },
+        {
+          "path": "index.html",
+          "sha256": "d5f4283a3a70f69afee97e9eaebec9357b82ecbf765c2597814ba01440f346c1",
+          "bytes": 1748
+        },
+        {
+          "path": "iris-logo.png",
+          "sha256": "3e7ffe75bd96399dcf81c7319ab67e4b9266ac0db5763fe0422b3f3b0924db8c",
+          "bytes": 16963
+        },
+        {
+          "path": "manifest.json",
+          "sha256": "fcf80ca527667c459ddd2e0e8fc9241240ace767754a09b4a697976719c3dc9d",
+          "bytes": 747
+        },
+        {
+          "path": "privacy/index.html",
+          "sha256": "b86d2989c5a410350e268964070c61b47ea68cb4b73dca6cadd86f22ad2afb6b",
+          "bytes": 4413
+        },
+        {
+          "path": "privacy.html",
+          "sha256": "b86d2989c5a410350e268964070c61b47ea68cb4b73dca6cadd86f22ad2afb6b",
+          "bytes": 4413
+        },
+        {
+          "path": "registerSW.js",
+          "sha256": "0dda2470c908c594d357bbb21f3495c470963187163f8d371dd6880d95340b0d",
+          "bytes": 148
+        },
+        {
+          "path": "service-worker.js",
+          "sha256": "e507c0c06f17862c8e3e659063d2fbd417a1a34fb682fca7ed819d4ee723b910",
+          "bytes": 426516
+        },
+        {
+          "path": "terms/index.html",
+          "sha256": "f06ab5fd7941f7e859a659c45a45bdb3c52f8a2ed7c074d4ae19523564990efd",
+          "bytes": 1854
+        },
+        {
+          "path": "terms.html",
+          "sha256": "f06ab5fd7941f7e859a659c45a45bdb3c52f8a2ed7c074d4ae19523564990efd",
+          "bytes": 1854
         }
       ],
       "specs": [
-        "e2e/private-key-login.spec.ts",
-        "e2e/nip07.spec.ts",
-        "e2e/contact-memory.spec.ts",
-        "e2e/private-contact-sync.spec.ts",
-        "e2e/web-join.spec.ts",
         "e2e/direct-file-first.spec.ts",
-        "e2e/message-mutations.spec.ts",
-        "e2e/link-device.spec.ts",
-        "e2e/invite-roleplay.spec.ts",
-        "e2e/composer-identity.spec.ts",
-        "e2e/composer-completions.spec.ts",
-        "e2e/timed-mute.spec.ts",
-        "e2e/notification-navigation.spec.ts",
         "e2e/sw-push-handler.spec.ts",
-        "e2e/device-removal.spec.ts"
+        "e2e/link-device.spec.ts"
       ],
       "testFiles": {
-        "e2e/private-key-login.spec.ts": "ca3f53ef51bcda1f65f340962466db009406853dfedd3ecb728c7ff8f7f5a78c",
-        "e2e/nip07.spec.ts": "25851697b2cc364fa6912e230ca774ecdd00764407f1ae8efdab8334650eaca7",
-        "e2e/contact-memory.spec.ts": "bf07300af026d998741fa01dfda519b07fccc26be09971441d9a8c668f12b6fc",
-        "e2e/private-contact-sync.spec.ts": "6fc63c7aba9a84029f594c0d1c0dc36284dfc5e15e63c62924a7816e321c875b",
-        "e2e/web-join.spec.ts": "3d2a60e0c39a5f854ef71f37a6ef34fbab7c134f08aa62d2b76a99a14a27aa59",
-        "e2e/direct-file-first.spec.ts": "edde89daa0294e089f0de75c6004df9a3479f0232c1842adfd5474587f7cae4e",
-        "e2e/message-mutations.spec.ts": "99004fa4408da55357f11f676d87a297dbe5428b2c22ed07ef5987f9a10dc533",
-        "e2e/link-device.spec.ts": "af149b7b07b412a87a5ecf2f17bb8050f761b0437e88170d8657e9088f60b957",
-        "e2e/invite-roleplay.spec.ts": "114049e5d8524b90d23056a6a0c386d0e8497ef44262bc84abd887c9a098eee0",
-        "e2e/composer-identity.spec.ts": "f9b4c677521e954dd5c79261bc7903322bd4a69b5311da1edce7fcc92f28c7b8",
-        "e2e/composer-completions.spec.ts": "cc7310e7b1821183142db0bc924e4d518bdb25e739e10145a803b47a1c4f95dd",
-        "e2e/timed-mute.spec.ts": "30a0480a591e7787397a1b16c4a00435aea6296a28255bd6db895515f9d6fb97",
-        "e2e/notification-navigation.spec.ts": "047ec5007e79bca1f267d447995e5cd152445944041dd0f3e3ef9ebfaa0599f1",
+        "e2e/direct-file-first.spec.ts": "416ad602769f6dfa9af9c53c321b2d6d262d962a0f7452579c7f97dd661605e6",
         "e2e/sw-push-handler.spec.ts": "b7278299f36655c5c64e0e669af4901f166956a8e4c01964d2cd443a0efcf312",
-        "e2e/device-removal.spec.ts": "0c8a038a208275c7341469409333e566b7de6fcc06dacc5aa0db62b50983ac97"
+        "e2e/link-device.spec.ts": "af149b7b07b412a87a5ecf2f17bb8050f761b0437e88170d8657e9088f60b957",
+        "e2e/fixtures/directFileDiagnostics.ts": "fe205689f2738af30ea45db9ed6c728b3004ef2f7e8f78724ee6b7e2db40b9b7"
       },
       "fixtureSha256": "7c411f44a1630a461485bb08338d508fe253433f562e7bbecee38af345e47404",
       "configSha256": "dff2d67de101409c41bd52eeb932a600e16d73d7e5ba3f0741b7b1777cffed4d",
@@ -229,15 +206,14 @@
       ],
       "playwright": "1.64.1",
       "packageManager": "pnpm@10.24.0",
-      "builtSource": "b17ed1800ff26606edab42317cadd66fcbf71cec",
-      "buildReceiptSha256": "ecd541a173f891cf74c5ac26cdd0a585e9dd8dc55686848336276e91e28287f8",
+      "builtSource": "7f91f33213a1efdf8a6d47f956f942417446a85a",
+      "buildReceiptSha256": "890233ea4f4cb049005f4a3f472d18cb0b94b5b211cfb24b23884e6641d4ef51",
       "expectedProjects": [
         "chromium",
         "firefox-files",
-        "webkit-files",
-        "webkit-composer",
-        "webkit-notifications"
-      ]
+        "webkit-files"
+      ],
+      "diagnosticResponseScope": "Direct-file test contexts instrument one loopback-served vendor event emitter only; original and diagnostic response hashes attached. On-disk built dist stays exact. No claim instrumented response byte equality."
     }
   ]
 }

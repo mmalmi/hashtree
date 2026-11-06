@@ -1,8 +1,6 @@
-name: Isolated Chat browser compatibility
+name: Isolated Chat graph 4.0.4 compatibility
 on:
   workflow_dispatch:
-  push:
-    branches: [codex/app-fips-isolated]
 permissions:
   contents: read
 jobs:
