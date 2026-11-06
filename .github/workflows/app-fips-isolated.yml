@@ -1,4 +1,4 @@
-name: Isolated Chat browser compatibility
+name: Isolated app FIPS compatibility
 on:
   workflow_dispatch:
   push:
@@ -10,10 +10,10 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
-      FIPS_APPS: chat
+      FIPS_APPS: git
     steps:
       - name: Set task-exclusive stage
-        run: echo "FIPS_STAGE=$RUNNER_TEMP/chat-browser-isolated" >> "$GITHUB_ENV"
+        run: echo "FIPS_STAGE=$RUNNER_TEMP/app-fips-isolated" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
@@ -26,6 +26,6 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: app-fips-isolated-${{ github.sha }}
-          path: ${{ runner.temp }}/chat-browser-isolated/evidence
+          path: ${{ runner.temp }}/app-fips-isolated/evidence
           if-no-files-found: error
           retention-days: 7
