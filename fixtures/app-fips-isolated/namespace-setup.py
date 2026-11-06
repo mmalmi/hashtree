@@ -2,7 +2,7 @@
 import json,os,pathlib,subprocess,sys
 
 container_id,name,image_id,uid=sys.argv[1:]
-assert len(container_id)==64 and name=='iris-fips-diagnostic-docs-dummy'
+assert len(container_id)==64 and name in ('iris-fips-diagnostic-docs-dummy','iris-fips-diagnostic-docs-permission')
 assert uid.isdecimal() and int(uid)!=0
 def inspect():
     value=json.loads(subprocess.check_output(['docker','inspect',container_id],text=True,timeout=5))[0]
@@ -33,7 +33,7 @@ try:
     links=json.loads(ip('-j','link','show'));assert [v['ifname'] for v in links]==['lo']
     ip('link','add','fixture0','type','dummy')
     ip('link','set','dev','fixture0','addrgenmode','none')
-    ip('addr','add','192.0.2.1/32','dev','fixture0')
+    ip('addr','add','192.0.2.1/32','dev','fixture0','noprefixroute')
     ip('link','set','dev','fixture0','up')
     links=json.loads(ip('-j','-d','link','show'))
     assert sorted(v['ifname'] for v in links)==['fixture0','lo']
@@ -42,8 +42,9 @@ try:
     addresses=json.loads(ip('-j','addr','show','dev','fixture0'))[0]['addr_info']
     assert len(addresses)==1 and addresses[0]['local']=='192.0.2.1' and addresses[0]['prefixlen']==32
     routes=json.loads(ip('-j','route','show','table','all'))
-    assert all(v.get('dev')=='lo' or (v.get('dev')=='fixture0' and v.get('type')=='local' and v['dst']=='192.0.2.1') for v in routes)
     routes6=json.loads(ip('-j','-6','route','show','table','all'))
+    print(json.dumps({'phase':'beforeRouteAdmission','identity':before,'interfaces':links,'fixtureAddresses':addresses,'routes4':routes,'routes6':routes6},indent=2),flush=True)
+    assert all(v.get('dev')=='lo' or (v.get('dev')=='fixture0' and v.get('type')=='local' and v['dst']=='192.0.2.1') for v in routes)
     assert all(v.get('dev')=='lo' for v in routes6)
     print(json.dumps({'containerId':container_id,'containerName':name,'identity':before,'hostNetworkNamespace':os.readlink('/proc/self/ns/net'),'interfaces':links,'fixtureAddresses':addresses,'routes4':routes,'routes6':routes6},indent=2))
 finally:os.close(fd)

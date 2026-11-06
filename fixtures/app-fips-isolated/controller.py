@@ -50,10 +50,10 @@ def extract(archive,destination):
     destination.mkdir(parents=True,exist_ok=True)
     with tarfile.open(archive) as tar:tar.extractall(destination,filter='data')
 def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,evidence_suffix='',allow_failure=False):
-    assert not dummy or (network=='none' and name=='iris-fips-diagnostic-docs-dummy')
+    assert not dummy or (network=='none' and name in ('iris-fips-diagnostic-docs-dummy','iris-fips-diagnostic-docs-permission'))
     if dummy:command=['python3','/stage/procedure/await-start.py',name,*command]
     command=['timeout','--signal=TERM','--kill-after=5s',str(seconds-10)+'s',*command]
-    args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,IMAGE,*command]
+    args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,'--env','FIPS_MEDIA_PERMISSION='+str(int(name=='iris-fips-diagnostic-docs-permission')),IMAGE,*command]
     CONTAINERS.add(name)
     run(args,name+'-create.log',30)
     inspect=json.loads(subprocess.check_output(['docker','inspect',name],env=SAFE_ENV,text=True,timeout=5))[0]
@@ -115,8 +115,16 @@ def diagnose():
     assert baseline['candidateAddressesAllowed']
     if code:
         assert baseline['rtc']['error']=='Loopback browser datachannel unavailable','Only diagnosed RTC failure permits dummy proof'
-        docker('iris-fips-diagnostic-docs-dummy',command,cwd='/stage/apps/docs',seconds=90,dummy=True,evidence_suffix='-dummy')
-    (EVIDENCE/'unsigned-diagnostic-passed.json').write_text(json.dumps({'passed':True,'unsignedOnly':True,'apps':SELECTED,'loopbackPassed':code==0,'dummyRequired':code!=0,'containersReaped':not CONTAINERS},indent=2)+'\n')
+        dummy_code=docker('iris-fips-diagnostic-docs-dummy',command,cwd='/stage/apps/docs',seconds=90,dummy=True,evidence_suffix='-dummy',allow_failure=True)
+        if dummy_code:
+            dummy=json.loads((EVIDENCE/'docs-dummy/browser.json').read_text())
+            dummy_network=json.loads((EVIDENCE/'docs-dummy/network.json').read_text())
+            assert dummy_network['interfaces']==['fixture0','lo'] and dummy_network['effectiveAndBoundingCapabilities']==0
+            assert len(dummy['rawWorkerDenial'])==4 and all(v.get('https')=='rejected' or v.get('wss')=='rejected' for v in dummy['rawWorkerDenial'])
+            assert dummy['candidateAddressesAllowed'] and dummy['rtc']['error']=='Loopback browser datachannel unavailable' and dummy['rtc']['candidates']==[]
+            assert not dummy['mediaPermission']['requested']
+            docker('iris-fips-diagnostic-docs-permission',command,cwd='/stage/apps/docs',seconds=90,dummy=True,evidence_suffix='-permission')
+    (EVIDENCE/'unsigned-diagnostic-passed.json').write_text(json.dumps({'passed':True,'unsignedOnly':True,'apps':SELECTED,'loopbackPassed':code==0,'dummyRequired':code!=0,'mediaPermissionRequired':code!=0 and dummy_code!=0,'containersReaped':not CONTAINERS},indent=2)+'\n')
 try:
     {'prepare':prepare,'test':test,'diagnose':diagnose}[sys.argv[1]]()
 finally:cleanup()

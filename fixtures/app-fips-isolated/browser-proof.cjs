@@ -10,7 +10,13 @@ const record={passed:false,node:process.version,playwright:version};
  try {
   browser=await chromium.launch({args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']});
   record.browser=browser.version();assert.equal(record.browser,'148.0.7778.96');
-  const page=await browser.newPage();await page.goto(`http://127.0.0.1:${server.address().port}/`);
+  const origin=`http://127.0.0.1:${server.address().port}`;
+  const page=await browser.newPage();
+  const permission=process.env.FIPS_MEDIA_PERMISSION==='1';
+  if(permission){assert.equal(process.env.FIPS_DUMMY,'1');await page.context().grantPermissions(['microphone'],{origin});}
+  await page.goto(origin+'/');
+  record.mediaPermission={requested:permission,origin:permission?origin:null,captureInvoked:false,state:await page.evaluate(async()=>(await navigator.permissions.query({name:'microphone'})).state)};
+  if(permission)assert.equal(record.mediaPermission.state,'granted');
   record.rawWorkerDenial=await page.evaluate(async()=>{
    const source=String.raw`(async()=>{const outcomes=[];for(const host of ['203.0.113.1','[2001:db8::1]']){try{await fetch('https://'+host+'/raw-worker-proof');outcomes.push({host,https:'escaped'});}catch(e){outcomes.push({host,https:'rejected',error:e.name});}outcomes.push(await new Promise(resolve=>{const s=new WebSocket('wss://'+host+'/raw-worker-proof');let failed=false;s.onerror=()=>{failed=true;};s.onopen=()=>{s.close();resolve({host,wss:'escaped'});};s.onclose=()=>resolve({host,wss:failed?'rejected':'close-without-error'});}));}postMessage(outcomes);})()`;
    return await new Promise((resolve,reject)=>{
