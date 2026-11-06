@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
-      FIPS_APPS: meet
+      FIPS_APPS: git
     steps:
       - name: Set task-exclusive stage
         run: echo "FIPS_STAGE=$RUNNER_TEMP/app-fips-isolated" >> "$GITHUB_ENV"

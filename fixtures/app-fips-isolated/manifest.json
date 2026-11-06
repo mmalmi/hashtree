@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "purpose": "Task branch only: exact app FIPS compatibility, no external network, no native build",
-  "image": "mcr.microsoft.com/playwright@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6",
+  "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
   "imageTagForProvenance": "v1.60.0-noble",
   "pnpm": {
     "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.23.0.tgz",
@@ -549,14 +549,16 @@
     },
     {
       "id": "git",
-      "commit": "8896c005ea98c2b86ea0cb1f1071c97e51b81252",
+      "commit": "ebd818cb9759b9c821eae453638887aab7da705b",
       "archive": "archives/git-source.tar.gz",
-      "archiveSha256": "8e7ba1cf562ff7d189f4b0d61800342fb6508b0d84580648591eab69a780e31c",
+      "archiveSha256": "204595e551613eabbc4e91a77b2689647a26c7a2dd4e236e4babb55cd9354e27",
       "lockSha256": "18124735d12c46577a719234cf58a5a70e61c45b3340d387c51ae2c4b242a097",
       "testFiles": {
         "e2e/git-fips-provider-bridge.spec.ts": "ea8d785539319537a2100898c747eb123d4b20a4a82f0a75468012922cf2074a",
-        "e2e/git-forks.spec.ts": "e2ad5cca2841e6674fd07d2b4e4f59d7dad969811523536bc59f92ebe553fc7d",
-        "e2e/git-push-htree.spec.ts": "21b5b4564fe7d76413503a67abe4a4c123d65dc465161b3d1e6b5aa0bd0c7ccd"
+        "e2e/git-forks.spec.ts": "11f6862f99f836998e6e04350db5a390af7236c87402c0cd056b83be78481d3f",
+        "e2e/git-push-htree.spec.ts": "21b5b4564fe7d76413503a67abe4a4c123d65dc465161b3d1e6b5aa0bd0c7ccd",
+        "e2e/test-utils/gitForkReadiness.ts": "359f1839fd99bcfa8854a1d00c2282b77b3e8733b0f56480714407543b3eb7f7",
+        "e2e/test-utils/gitPeerDiagnostics.ts": "ed4a1c418a6d6eebaa5ec39d9e6c3334bdbb78c07d0d7d65ed55ec69c8d9c6e2"
       },
       "distDir": "iris-git",
       "distArchive": "archives/git-dist.tar.gz",
@@ -849,9 +851,8 @@
         }
       ],
       "specs": [
-        "e2e/git-fips-provider-bridge.spec.ts:122",
-        "e2e/git-push-htree.spec.ts:126",
-        "e2e/git-forks.spec.ts:198"
+        "e2e/git-push-htree.spec.ts:127",
+        "e2e/git-forks.spec.ts:201"
       ]
     },
     {
