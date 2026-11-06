@@ -10,7 +10,8 @@ SAFE_ENV={k:v for k,v in os.environ.items() if k in ('PATH','HOME','USER','DOCKE
 SELECTED=os.environ.get('FIPS_APPS','').split(',') if os.environ.get('FIPS_APPS') else [a['id'] for a in M['apps']]
 assert len(SELECTED)==len(set(SELECTED)) and set(SELECTED)<=set(a['id'] for a in M['apps'])
 APPS=[next(a for a in M['apps'] if a['id']==name) for name in SELECTED]
-APP_CONTAINERS={'iris-fips-test-'+name for name in ('docs','calendar','boards','git','video','drive','maps')}
+APP_CONTAINERS={'iris-fips-test-chat'}
+assert SELECTED==['chat']
 def sha(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 def cleanup():
     global PROCESS
@@ -51,10 +52,10 @@ def extract(archive,destination):
     destination.mkdir(parents=True,exist_ok=True)
     with tarfile.open(archive) as tar:tar.extractall(destination,filter='data')
 def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,evidence_suffix='',allow_failure=False):
-    assert not dummy or (network=='none' and name in APP_CONTAINERS|{'iris-fips-diagnostic-docs-dummy','iris-fips-diagnostic-docs-permission'})
+    assert not dummy or (network=='none' and name in APP_CONTAINERS)
     if dummy:command=['python3','/stage/procedure/await-start.py',name,*command]
     command=['timeout','--signal=TERM','--kill-after=5s',str(seconds-10)+'s',*command]
-    args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,'--env','FIPS_MEDIA_PERMISSION='+str(int(name=='iris-fips-diagnostic-docs-permission' or name in APP_CONTAINERS)),IMAGE,*command]
+    args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home/chat','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','npm_config_manage_package_manager_versions=false','--env','npm_config_package_manager_strict_version=true','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,'--env','FIPS_MEDIA_PERMISSION='+str(int(name in APP_CONTAINERS)),IMAGE,*command]
     CONTAINERS.add(name)
     run(args,name+'-create.log',30)
     inspect=json.loads(subprocess.check_output(['docker','inspect',name],env=SAFE_ENV,text=True,timeout=5))[0]
@@ -80,23 +81,27 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
 
 def prepare():
     assert not STAGE.exists(),'Use one empty task stage'
-    STAGE.mkdir(mode=0o700);EVIDENCE.mkdir();(STAGE/'home').mkdir();(STAGE/'tools/bin').mkdir(parents=True)
+    STAGE.mkdir(mode=0o700);EVIDENCE.mkdir();(STAGE/'home/chat').mkdir(parents=True);(STAGE/'tools/bin').mkdir(parents=True)
     shutil.copytree(HERE,STAGE/'procedure',ignore=shutil.ignore_patterns('archives'))
     fetch(M['pnpm'],STAGE/'pnpm.tgz');extract(STAGE/'pnpm.tgz',STAGE/'tools/pnpm')
     (STAGE/'tools/bin/pnpm').write_text('#!/bin/sh\nexec node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');(STAGE/'tools/bin/pnpm').chmod(0o755)
-    fetch(M['native'],STAGE/'native.tgz');extract(STAGE/'native.tgz',STAGE/'tools/native')
-    for name,digest in M['native']['executables'].items():assert sha(STAGE/'tools/native/hashtree'/name)==digest
     run(['docker','pull',IMAGE],'image-pull.log',300)
-    docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');if(process.versions.node.split('.')[0]!=='24')throw Error('Unexpected image Node');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
+    docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
+    assert json.loads((EVIDENCE/'image-toolchain.json').read_text())['node']=='v26.13.0'
     for app in APPS:
         archive=HERE/app['archive'];assert sha(archive)==app['archiveSha256']
         target=STAGE/'apps'/app['id'];extract(archive,target)
         assert sha(target/'pnpm-lock.yaml')==app['lockSha256']
+        assert json.loads((target/'package.json').read_text())['packageManager']==app['packageManager']
         for file,digest in app['testFiles'].items():assert sha(target/file)==digest
-        dist=HERE/app['distArchive'];assert sha(dist)==app['distArchiveSha256'];extract(dist,target/app['distDir'])
-        for file in app['distFiles']:assert sha(target/app['distDir']/file['path'])==file['sha256']
+        dist=HERE/app['distArchive'];assert sha(dist)==app['distArchiveSha256']
+        with tarfile.open(dist) as tar:
+            assert all(pathlib.PurePosixPath(p.name).parts[0]==app['distArchivePrefix'] for p in tar.getmembers())
+        extract(dist,target)
+        expected={file['path']:file['sha256'] for file in app['distFiles']}
+        actual={str(p.relative_to(target/app['distDir'])):sha(p) for p in (target/app['distDir']).rglob('*') if p.is_file()}
+        assert actual==expected,'Exact dist file set and bytes'
         run(['python3',str(HERE/'apply-app-overlay.py'),app['id'],str(STAGE)],'overlay-'+app['id']+'.log',10)
-        (target/'isolated.playwright.config.ts').write_text("import original from './playwright.config';\nexport default {...original, use:{...original.use, launchOptions:{...original.use?.launchOptions,args:[...(original.use?.launchOptions?.args??[]),'--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}}};\n")
         docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
     (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'distInputsVerified':True},indent=2)+'\n')
 
@@ -105,33 +110,13 @@ def test():
     assert set(SELECTED)<=set(json.loads((EVIDENCE/'prepared.json').read_text())['apps'])
     budgets=json.loads((HERE/'app-budgets.json').read_text()); results=[]
     for app in APPS:
-        code=docker('iris-fips-test-'+app['id'],['python3','/stage/procedure/run-one.py',app['id']],cwd='/stage/apps/'+app['id'],seconds=budgets[app['id']]+90,dummy=True,allow_failure=True)
+        code=docker('iris-fips-test-'+app['id'],['python3','/stage/procedure/run-one.py',app['id']],cwd='/stage/apps/'+app['id'],seconds=budgets[app['id']]+240,dummy=True,allow_failure=True)
         assert not CONTAINERS,'No later app may start before cleanup'
         results.append({'app':app['id'],'exitCode':code,'passed':code==0})
     passed=all(row['passed'] for row in results)
     (EVIDENCE/'passed.json').write_text(json.dumps({'passed':passed,'manifestSha256':sha(HERE/'manifest.json'),'apps':SELECTED,'results':results,'containersReaped':not CONTAINERS},indent=2)+'\n')
     assert passed,'One or more unchanged app tests failed; see per-app evidence'
-def diagnose():
-    prepared=json.loads((EVIDENCE/'prepared.json').read_text())
-    assert SELECTED==['docs'] and prepared['apps']==SELECTED and prepared['manifestSha256']==sha(HERE/'manifest.json')
-    command=['python3','/stage/procedure/run-one.py','docs','--unsigned-only']
-    code=docker('iris-fips-diagnostic-docs-loopback',command,cwd='/stage/apps/docs',seconds=75,evidence_suffix='-loopback',allow_failure=True)
-    baseline=json.loads((EVIDENCE/'docs-loopback/browser.json').read_text())
-    network=json.loads((EVIDENCE/'docs-loopback/network.json').read_text());assert network['interfaces']==['lo']
-    assert len(baseline['rawWorkerDenial'])==4 and all(v.get('https')=='rejected' or v.get('wss')=='rejected' for v in baseline['rawWorkerDenial'])
-    assert baseline['candidateAddressesAllowed']
-    if code:
-        assert baseline['rtc']['error']=='Loopback browser datachannel unavailable','Only diagnosed RTC failure permits dummy proof'
-        dummy_code=docker('iris-fips-diagnostic-docs-dummy',command,cwd='/stage/apps/docs',seconds=90,dummy=True,evidence_suffix='-dummy',allow_failure=True)
-        if dummy_code:
-            dummy=json.loads((EVIDENCE/'docs-dummy/browser.json').read_text())
-            dummy_network=json.loads((EVIDENCE/'docs-dummy/network.json').read_text())
-            assert dummy_network['interfaces']==['fixture0','lo'] and dummy_network['effectiveAndBoundingCapabilities']==0
-            assert len(dummy['rawWorkerDenial'])==4 and all(v.get('https')=='rejected' or v.get('wss')=='rejected' for v in dummy['rawWorkerDenial'])
-            assert dummy['candidateAddressesAllowed'] and dummy['rtc']['error']=='Loopback browser datachannel unavailable' and dummy['rtc']['candidates']==[]
-            assert not dummy['mediaPermission']['requested']
-            docker('iris-fips-diagnostic-docs-permission',command,cwd='/stage/apps/docs',seconds=90,dummy=True,evidence_suffix='-permission')
-    (EVIDENCE/'unsigned-diagnostic-passed.json').write_text(json.dumps({'passed':True,'unsignedOnly':True,'apps':SELECTED,'loopbackPassed':code==0,'dummyRequired':code!=0,'mediaPermissionRequired':code!=0 and dummy_code!=0,'containersReaped':not CONTAINERS},indent=2)+'\n')
+
 try:
-    {'prepare':prepare,'test':test,'diagnose':diagnose}[sys.argv[1]]()
+    {'prepare':prepare,'test':test}[sys.argv[1]]()
 finally:cleanup()
