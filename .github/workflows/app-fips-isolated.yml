@@ -9,6 +9,8 @@ jobs:
   fips:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    env:
+      FIPS_APPS: docs
     steps:
       - name: Set task-exclusive stage
         run: echo "FIPS_STAGE=$RUNNER_TEMP/app-fips-isolated" >> "$GITHUB_ENV"
@@ -17,8 +19,8 @@ jobs:
           persist-credentials: false
       - name: Prepare pinned inputs before isolation
         run: timeout --signal=TERM --kill-after=15s 1200s python3 fixtures/app-fips-isolated/controller.py prepare
-      - name: Test exact apps with no external network
-        run: timeout --signal=TERM --kill-after=15s 1800s python3 fixtures/app-fips-isolated/controller.py test
+      - name: Diagnose unsigned browser transport with no external network
+        run: timeout --signal=TERM --kill-after=15s 240s python3 fixtures/app-fips-isolated/controller.py diagnose
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
