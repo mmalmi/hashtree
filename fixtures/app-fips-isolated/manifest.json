@@ -913,6 +913,149 @@
         "contentAddressVerified": true
       }
     ],
-    "source": "Retained verified public Maps release cache; exact immutable GET/hash bytes only; no headers/cookies/redirects"
+    "source": "Exact retained public Maps cache, all bytes independently hash-verified; no external map fetch during hosted qualification",
+    "archives": [
+      {
+        "archive": "archives/maps-cache-1.tar.gz",
+        "sha256": "e987e00e58b10a868c17a89db5a9a6b82580d63f0ddc1ae613895de337c10ff7",
+        "bytes": 15376514,
+        "files": [
+          "9942db131cd73981a41ee0c6b86744d5ca1af08779746092aa256b7713594d34",
+          "40f3d3027cc59d2ede242fe2a3b853281f703aa5f985920b665a5975e4675ac4",
+          "35b90e86a839f4297fcee28ac20ea2ca8aec7e355d6d6cf073bcc3565ee1c8b0",
+          "0c4d6e59a5cf53d1408f25d039f8012e6977fc9782af9c897a1e2e7eda1215e3",
+          "930286277999bdd9b4fe2879a8f684bf82d08ea3fb983527df4daa11c16d640f",
+          "cbbad604b42a70755cb8b327e86124410fa75116fe2afbd02e6ce92ff2222811",
+          "e2f67d499c8baf2d9409349fe252102a9ecdb09a64fce8b5f0240e95b9755c9e",
+          "b9520cb7e920d2cfebc8e370f36a9e8cb8458ba8ed9108f35733dbadd45fa200",
+          "ff07e80d3459c95477de3bbbaf94f08914a82ed68475b9f8b15c705dd32c2178",
+          "a17bac2185930b552d76219f8483892599fe4cdd86f3e8f890adf02c17a16f58",
+          "7ca1ca2bc55995713ae43957b3966964fd10cf397bf8978ce1502f3c025f91f9",
+          "9b59be5c5799fee6d0abf3599257f549fde68cd766e065588d7e2537050bcc04",
+          "c894241ff796a79b1ed5daa807791f4f1b87b77a7c6acda9847e30e575a247cc",
+          "8c1c9579e9d1d500900fbc5616d1be509ad0da481c50f78fdc496438d1e96fc9",
+          "0c184b3c648a2275f165c9aee0bae945a40d27d0409302b2e4feada1f22922ba",
+          "d1a8d05264bfe15a96c7d7db4d772494d9a3d00fa30ab509ca73262628a163d9",
+          "db3f98972f26b903b5df38821d24ece33b5576255fd665f212b19b4ca199c975",
+          "95528ba40c22e309673d8e53a85e6cfde88718b97c3fd433267e15f96a9b51a2",
+          "c0642bca807eb1caf33e2fb8989c323a1d73a443ddfbcc5f444f26686af88363",
+          "54a14528ef8fe92ec9b3c06c3f47ab3c1252502ea3899d7cb439bc32ce5867fa",
+          "c5577c390316fa3a5a01d74954692c108babce538e4e8b362da3c206229f67a6",
+          "cc32eaef9a691fdf0188a5b186f9f59fe362d3599c30bdacf67db1b41165edd4",
+          "f6817f99e2a27f87fece7b829b9c2deaaacd77bf58d75dd04891e4704cdbf287",
+          "61dcf0fcbe5fcc536e66cae9dad584ffcb4ca489f1ff8ef9c009791b2461c902",
+          "1b6ab1f12d4e7bd62211dc1a37cbbdec295fea67de85f6dd45be608ae409dedc",
+          "ae45ca1d5608e95ec5f5a46c8ff389e17e8b7d63d0a247e6e03553d42cd45909",
+          "a3cfdd92c8c952023e9dff36d8d480be3312c3bed696d90ecba5052310661b8e",
+          "28734d301097c303a93c01638473fde900d57fb45477f9080c0d41b353bfc738",
+          "9f5a477b62bebfb90395d43cb39d72c021eae1a10e99f235e3fd78b42cf1b5a7",
+          "85f639f26c86be3488e775e170afa4dd2d3e981818942f180fefc6ff11f9a5e1"
+        ]
+      },
+      {
+        "archive": "archives/maps-cache-2.tar.gz",
+        "sha256": "dca2815dfd9a8d7a423ac183ac4959a43eb22d5e4d0013d2438bb5e22d4caf2a",
+        "bytes": 14700677,
+        "files": [
+          "6ab8ccc592ba65fa8dd654a5f6d0ad918349374929467e7bfcadd56250deeb1c",
+          "5e6e0cc599bed3f232cab98368647f5548566fc65bdf22c9d1b5b494d3bc1164",
+          "73dec512617cae271ddd1a862ab7160401069f98db9f1c2fa61fc4a94209dfc0",
+          "f96f35191af860b801786e80bb2dab40ef7e6c3737a3dbd15ac4c27728243434",
+          "b023b94d8e4612447335132c16bf4b7d0524ba5bd7c71fe26f63395b95db393c",
+          "8d1f01c2b07c282b875923b2d9f4bb2ed518c3b308c1f07995499281ce9934a4",
+          "21d58d5a0429c0f1887fbbbd3589e247eba4ee3c20b5ca77421545921235238b",
+          "9241e6d94f9d76b0011283ff7bfe2e0c9fb774afc53e6519f921662a67a99bf9"
+        ]
+      },
+      {
+        "archive": "archives/maps-cache-3.tar.gz",
+        "sha256": "8e51a3a7804e896630434f2d5b7e3206dc1051c0f697259b118f558fb856481d",
+        "bytes": 14763186,
+        "files": [
+          "4b2223224ea022c151f86d87278dbcaf402eee15068a25ecd3b74753bacc07e3",
+          "382258a30a74d24da40603db86f32749bc155b2b0e29140f8d10eed9f786a009",
+          "6c9a7cfc9d5fd883bbac285ddaae433ae534afa50dd0a7ec1562bd1cdaeb7ba7",
+          "d1ba9609b556eb4215a35cf2140ef397d6155fbe1396458ab3603c253b4ad9c5",
+          "f1c12b0d28712b921e701467d6baeb824f7dc985a1657e49c81a3f01bf27daea",
+          "de2248309836472d4a0517b2fa3c8a3239963a2ffe34e8f7526e55daea53f8a2",
+          "b81c410fda09e89eda74263ea3898f3aaf9ff783d0240e6eec7768141f35811b",
+          "c4296ef56d31bc63d443fa0ab7f141baa8238a4dd7b91ff69ef24d639d1bc23e",
+          "921630a434cc98862a3ff423c947e3e8bd6d15198c3ebcdea7a0bf1dee388514",
+          "9200b0896e2672eafb02c818c1b906e1ca905e5a417591d0d1ca3c16a740bcd2"
+        ]
+      },
+      {
+        "archive": "archives/maps-cache-4.tar.gz",
+        "sha256": "96347449813cbde19c78fd0c78fb02df407cc583cce82c1cd46b9e96b0badf42",
+        "bytes": 14686064,
+        "files": [
+          "325dd23c7adf950daf34c2b3a44bf3e1df0b9b50c1a8c9c3f9408be463b8395b",
+          "d844f6128e5557ceb11dd7d012961039a72bd6786bbe38766616d4162645d5d4",
+          "d8fb660232f55ee31761152c5bfdbaeda579c094c61dc2b79368f0a9d862f463",
+          "b78d2f0253d07832885a27484764d9290c05be0e5dd9d833a043607c52f4edb2",
+          "6fdf57079afc6ef78f2696481f998e70670d25800f65255a3420e62454b49a0f",
+          "d1a2cffb19d4ba97b9c6453180a231a3da97fbfe07a78b65c1f3ea0748e52138",
+          "a571c771fbf182e53b6c63c5cd3912d10660b71d9b26c63ae9f3ed8c1f0dae52"
+        ]
+      },
+      {
+        "archive": "archives/maps-cache-5.tar.gz",
+        "sha256": "756fc1f21a518fe88d326c67dc11fa8dae309bf2a334d40706bf3d1f62499a34",
+        "bytes": 14686065,
+        "files": [
+          "f4233b7e2648ff73ee5bd55d80538b206bfe46427296047f4d535a7801eaea07",
+          "475296042fe1d7ca9fda85013da19084c7ba6acfcff27759c6daf5991ca67e2a",
+          "70ff00457e29d90a7c83c571f0cf8add7e17084ce6010c38f346a42f68641e0d",
+          "60b52ad451c67e0928eebe2b3a06315c4c1db82517c924db6fecc7c5c7f1e582",
+          "5e4298a1c4507efe6326a3d14e4aed7e7a1d771dfeecfc542a4489446f5fd35b",
+          "f41cc77f11cc3445ab01cf578e7dd1a0b9f3d99ddd16c18e5bcba8619c06ba29",
+          "2a2f03222bc79cbd3ea5bda85690d6bcd5db9ea44362ea9a5974776fa3283efb"
+        ]
+      },
+      {
+        "archive": "archives/maps-cache-6.tar.gz",
+        "sha256": "e65f2d7e12f81c4c7314ce772ed34041148ad057e478f06dd0a6b831271c9f70",
+        "bytes": 14686062,
+        "files": [
+          "e367811e0e2a4406d9caa2fb8dd67aba8593acc2eda9c0e158c7017e0b0a9b2f",
+          "6935eeb8736326a822e22e66aa48707349549b2505c464e7fe80ca99d6cbd2b6",
+          "bf4308c36b23c988959b8fe239f0a8f5e6056a747f012cceaa53905dbbe84ff1",
+          "027abcaecb5ce582c486b50833bd19a70a35eda94f23b1024f66e63d9a776ca7",
+          "6b747040bb1b0669332b429441e71c4439bae7f8feb028021877111c3295fad2",
+          "aac2e421bcd6f90e6da112decd4ad9c313bb864b3106a48d2d1f4046a0762464",
+          "3d76b8592e79956f3d3d030ce6271f51b9e5bb89efc262dfdc26220f7bf813b7"
+        ]
+      },
+      {
+        "archive": "archives/maps-cache-7.tar.gz",
+        "sha256": "8fe595fb9b7729f99329f923183559e5c159e086ec3d2372c09dadf9e877fef5",
+        "bytes": 14738919,
+        "files": [
+          "cc3f772bf6ff5c63e66e8c25f8288e0898500c54f6da17e2dacb4181112afbd4",
+          "4fa5befd6a21f979c399df0d76177d2712566f6f3f30c0f2cc2c0dabc645f6d7",
+          "b807615739b1968208ed8041491029340ced424307ae185bbd383161c6485ba7",
+          "5bedeaf6f64bc2f2eb1359c6ade5c7d95ed786cff898df4ce27dd7c99cce11b4",
+          "4eaeec7b917cc2d3d8bfc46351dccacd55c035d289d15d4171ae9f77dc66e993",
+          "671512e7ffb74a5297600c398546210f759b854c4821543338c0a842f55c9228",
+          "b307b468113fa575164294ab76d685a3c06a20bcc6389bf58b1944e66f1cb061",
+          "6c92199b786e465c2615bb41c475a98f5f5290ea4507abf824b781b5f40b5620",
+          "b23f8bee425c9bdbfd0f0620ccbd11311dfa5367133dd7e33efd5ac908e572c2"
+        ]
+      },
+      {
+        "archive": "archives/maps-cache-8.tar.gz",
+        "sha256": "7fbd4a9f3f409145b99b0dbcb953e95abff959918dd3e40d70e22e5d2b2409b1",
+        "bytes": 14686059,
+        "files": [
+          "8666455d83607499f6309379cb954d1b7b54109bbab5034903b0c752e9751c73",
+          "cfb80d7533dec071c6d5183fac6c04b7753142c68cf56d6ba4562f0e6cbd8522",
+          "84fd127c7d3d342f915d1a43737ebdd1e21185653e976e5c055b7566c6460ec4",
+          "31c255cbabdf36d77041567b79e22175c29231767557c4b643af9c6abe2ec362",
+          "9adfd5b50ee0a7419e31ad3cb92f5db115f6432104ae37e7e1254ccda90afadf",
+          "95092821f45f8c2fcc454689db22df8c76ffc703af89c1ea12efa986e45139c6",
+          "bbb141ca4a47ce442c4fed13fd821f366cf8f7286897c315434f3623cebd0df5"
+        ]
+      }
+    ]
   }
 }

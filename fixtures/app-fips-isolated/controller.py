@@ -60,16 +60,19 @@ def fetch(item,path,*,exact=False):
 def maps_assets():
     cache=STAGE/'map-cache';cache.mkdir();items=M['mapsAssets']['assets']
     assert sum(i['bytes'] for i in items)<=M['mapsAssets']['maximumBytes']<=128*1024**2
-    def one(item):
-        pathname=item['pathname'];url=item['upstream']
-        block=re.fullmatch(r'/blocks/([a-f0-9]{64})',pathname)
-        glyph=re.fullmatch(r'/fonts/(Noto%20Sans%20(?:Regular|Italic|Bold)|Noto%20Sans%20CJK%20JP%20Regular)/(\d{1,7}-\d{1,7})\.pbf',pathname)
-        assert block or glyph
-        assert url==('https://cdn.iris.to/'+block[1]+'.bin' if block else 'https://tiles.openfreemap.org'+pathname)
-        if block:assert item['sha256']==block[1] and item['contentAddressVerified'] is True
-        key=hashlib.sha256(pathname.encode()).hexdigest();fetch({'url':url,**{k:item[k] for k in ('bytes','sha256')}},cache/key,exact=True)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:list(pool.map(one,items))
-    receipt={'assets':items,'methods':['GET'],'forwardedHeaders':[],'redirects':False,'receivedBytes':sum(i['bytes'] for i in items),'allByteHashesVerified':True}
+    expected={hashlib.sha256(i['pathname'].encode()).hexdigest():i for i in items}
+    seen=set()
+    for packed in M['mapsAssets']['archives']:
+        archive=HERE/packed['archive'];assert archive.stat().st_size==packed['bytes'] and sha(archive)==packed['sha256']
+        with tarfile.open(archive) as tar:
+            members=tar.getmembers();assert {m.name for m in members}==set(packed['files'])
+            for member in members:
+                assert member.isfile() and member.name in expected and member.name not in seen
+                item=expected[member.name];assert member.size==item['bytes']
+                body=tar.extractfile(member).read();assert hashlib.sha256(body).hexdigest()==item['sha256']
+                (cache/member.name).write_bytes(body);seen.add(member.name)
+    assert seen==set(expected)
+    receipt={'assets':items,'methods':[],'externalFetches':0,'receivedBytes':sum(i['bytes'] for i in items),'allByteHashesVerified':True}
     (cache/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n');(EVIDENCE/'maps-assets.json').write_text(json.dumps(receipt,indent=2)+'\n')
 def extract(archive,destination):
     destination.mkdir(parents=True,exist_ok=True)
