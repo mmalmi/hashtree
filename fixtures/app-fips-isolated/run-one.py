@@ -50,6 +50,15 @@ def test_selection(report):
         assert any(p=='chromium' and f in (name,name.removeprefix('e2e/')) for p,f,_ in selected),name
     return sorted(selected)
 try:
+    if spec.get('requiredUnitFiles'):
+        unit_command=['node','--no-warnings','--localstorage-file=/stage/home/chat/vitest-localstorage','node_modules/vitest/vitest.mjs','run',*spec['requiredUnitFiles'],'--maxWorkers=1','--reporter=verbose','--reporter=json','--outputFile='+str(evidence/'units.json')]
+        with (evidence/'units.log').open('wb') as unit_log:
+            unit=subprocess.Popen(unit_command,env=env,stdout=unit_log,stderr=subprocess.STDOUT,start_new_session=True);processes.append(unit)
+            unit_code=unit.wait(timeout=300)
+        stop(unit)
+        assert unit_code==0,f'Uncovered exact-tuple release units exited {unit_code}'
+        unit_report=json.loads((evidence/'units.json').read_text())
+        assert unit_report['success'] and unit_report['numFailedTests']==0 and unit_report['numFailedTestSuites']==0
     with socket.socket() as probe:probe.bind(('127.0.0.1',5721))
     output=(evidence/'preview.log').open('wb')
     preview=subprocess.Popen(spec['previewCommand'],env=env,stdout=output,stderr=subprocess.STDOUT,start_new_session=True);processes.append(preview)
