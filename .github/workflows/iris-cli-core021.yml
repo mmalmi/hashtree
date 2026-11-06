@@ -1,0 +1,34 @@
+name: Isolated Iris CLI core 0.2.1
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/iris-cli-core021]
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Prepare exact public source
+        run: |
+          echo "IRIS_CLI_STAGE=$RUNNER_TEMP/iris-cli-core021" >> "$GITHUB_ENV"
+          IRIS_CLI_STAGE="$RUNNER_TEMP/iris-cli-core021" python3 fixtures/iris-cli-core021/prepare.py
+      - name: Prefetch fixed toolchain and locked inputs without executing fixtures
+        run: |
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+          CARGO_HOME="$IRIS_CLI_STAGE/cargo" cargo +1.99.0 fetch --locked --manifest-path "$IRIS_CLI_STAGE/source/Cargo.toml"
+          CARGO_HOME="$IRIS_CLI_STAGE/cargo" cargo +1.99.0 fetch --locked --manifest-path "$IRIS_CLI_STAGE/negative/Cargo.toml"
+      - name: Qualify after unsigned parent and child OS controls
+        run: timeout --signal=TERM --kill-after=15s 2150s python3 fixtures/iris-cli-core021/host.py run
+      - name: Preserve exact evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: iris-cli-core021-${{ github.sha }}
+          path: ${{ runner.temp }}/iris-cli-core021/evidence
+          if-no-files-found: error
+          retention-days: 7

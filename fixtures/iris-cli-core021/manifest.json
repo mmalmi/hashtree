@@ -1,0 +1,25 @@
+{
+  "sourceRepository": "https://github.com/irislib/iris-nostr",
+  "sourceCommit": "3f44bccef921c027b1670290ec18a37604184af1",
+  "sourceParent": "eef0ddca3690dabb261b0a345b416f6abf4c4355",
+  "sourceTree": "96f816cf1ab06b8bde2077eeecc0e6b7a621fc7d",
+  "archiveSha256": "4bda26fa7b5d085d6d267da0fb509ba0cfd9cf26765855a45c8c7ab1d8167927",
+  "archiveBytes": 71672,
+  "sourceFiles": {
+    "Cargo.toml": "8e2b8a19f68a2204267473b5394f8248deade218619b6fad0aa72d110c8ab6a3",
+    "Cargo.lock": "321e92b9ae059d1de8978f2df0843c1ebf4183ee10a9ebe1b662bc77849a2339",
+    "tests/graph_aliases.rs": "84ed9e27c9f2cc16d01ad18bf1587e6f766e05b6e820156fee8831c0e6848ed9"
+  },
+  "negativeControlFiles": {
+    "Cargo.toml": "e6237323a98ecf641ed68b2723af23fb62f1837865f75cca82fab8860f46e0e6",
+    "Cargo.lock": "56716d7700a44b5c318850403801c70fea17923d4226292bcf69b664d9eb5f55"
+  },
+  "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+  "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+  "proofReuse": {
+    "source": "957d2ec73a51166e8acd525ec3946617b3153007",
+    "run": 42217674640,
+    "sha256": "3392b0d3e82515b66fb3ba17d37e70c1e6d0d4d1ad59dae04846f1d56a206fb6"
+  },
+  "scope": "Native CLI source tests and Cargo packaging only; no binary publication, Haps build or live fixture traffic."
+}
