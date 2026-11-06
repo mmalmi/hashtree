@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "purpose": "Task branch only: exact app FIPS compatibility, no external network, no native build",
-  "image": "mcr.microsoft.com/playwright@sha256:ee15712262f017b8157421b212b12099146645f44b1bc5c0514cbbe6a229b1d0",
-  "imageTagForProvenance": "v1.64.1-noble",
+  "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
+  "imageTagForProvenance": "v1.60.0-noble",
   "pnpm": {
     "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.23.0.tgz",
     "sha256": "a1cdd7b468386a9d78a081da05d6049d7e598db62a299db92df21a7062a4b183"
@@ -549,14 +549,14 @@
     },
     {
       "id": "git",
-      "commit": "1b4a0ba62531e71f5498960ff07376ad496d2155",
+      "commit": "8896c005ea98c2b86ea0cb1f1071c97e51b81252",
       "archive": "archives/git-source.tar.gz",
-      "archiveSha256": "a8413150b6a84c13d019640cdbd2190cca02e6631da501b2f96dcd5b9daac483",
+      "archiveSha256": "8e7ba1cf562ff7d189f4b0d61800342fb6508b0d84580648591eab69a780e31c",
       "lockSha256": "18124735d12c46577a719234cf58a5a70e61c45b3340d387c51ae2c4b242a097",
       "testFiles": {
         "e2e/git-fips-provider-bridge.spec.ts": "ea8d785539319537a2100898c747eb123d4b20a4a82f0a75468012922cf2074a",
-        "e2e/git-forks.spec.ts": "578c5af186cbc84721b56dc28f40efa871a83771870b03bc5ce704f33ba33606",
-        "e2e/git-push-htree.spec.ts": "d7e2ffc5ff907f301e083d60c60786e3c97ad232667d9856d0336b5d0355bd35"
+        "e2e/git-forks.spec.ts": "e2ad5cca2841e6674fd07d2b4e4f59d7dad969811523536bc59f92ebe553fc7d",
+        "e2e/git-push-htree.spec.ts": "21b5b4564fe7d76413503a67abe4a4c123d65dc465161b3d1e6b5aa0bd0c7ccd"
       },
       "distDir": "iris-git",
       "distArchive": "archives/git-dist.tar.gz",
