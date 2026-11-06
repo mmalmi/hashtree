@@ -1,21 +1,6 @@
 """Grant exact app-origin permission, including tests using raw Playwright fixtures."""
 import hashlib,json,pathlib,sys
 base=pathlib.Path(sys.argv[2]).resolve();app=sys.argv[1];target=base/'apps'/app
-if app=='meet':
-    manifest=json.loads((base/'procedure/manifest.json').read_text())
-    spec=next(row for row in manifest['apps'] if row['id']==app)
-    changed=[]
-    for name,digest in spec['testFiles'].items():
-        path=target/name;original=path.read_bytes()
-        assert hashlib.sha256(original).hexdigest()==digest
-        text=original.decode();assert text.count("from '@playwright/test'")==1
-        updated=text.replace("from '@playwright/test'","from './isolated-permissions'")
-        path.write_text(updated)
-        changed.append({'path':name,'beforeSha256':digest,'afterSha256':hashlib.sha256(updated.encode()).hexdigest()})
-    for source,dest in [('permission-context-meet.ts','isolated-permission-context.ts'),('isolated-permissions-meet.ts','isolated-permissions.ts')]:
-        path=target/'e2e'/dest;assert not path.exists();path.write_bytes((base/'procedure'/source).read_bytes())
-    (base/'evidence'/'overlay-meet.json').write_text(json.dumps({'assertionsUnchanged':True,'runtimeUnchanged':True,'origin':'http://127.0.0.1:43810','testImports':changed},indent=2)+'\n')
-    sys.exit(0)
 expected=json.loads((base/'procedure/app-fixture-inputs.json').read_text())[app]
 fixture=target/expected['path'];before=fixture.read_bytes()
 sha=lambda b:hashlib.sha256(b).hexdigest()

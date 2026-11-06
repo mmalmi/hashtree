@@ -1,11 +1,11 @@
 {
   "schema": 1,
   "purpose": "Task branch only: exact app FIPS compatibility, no external network, no native build",
-  "image": "mcr.microsoft.com/playwright@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6",
+  "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
   "imageTagForProvenance": "v1.60.0-noble",
   "pnpm": {
-    "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.24.0.tgz",
-    "sha256": "196f4bd174ebcbd99786b33452f144cb2dc32ef4e7138ed44491e9d43d702d75"
+    "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.23.0.tgz",
+    "sha256": "a1cdd7b468386a9d78a081da05d6049d7e598db62a299db92df21a7062a4b183"
   },
   "native": {
     "url": "https://github.com/mmalmi/hashtree/releases/download/v0.2.142/hashtree-x86_64-unknown-linux-musl.tar.gz",
@@ -549,16 +549,18 @@
     },
     {
       "id": "git",
-      "commit": "ebd818cb9759b9c821eae453638887aab7da705b",
+      "commit": "ad54a25dd4a1ad2c919aff69e8c74500221e2340",
       "archive": "archives/git-source.tar.gz",
-      "archiveSha256": "204595e551613eabbc4e91a77b2689647a26c7a2dd4e236e4babb55cd9354e27",
+      "archiveSha256": "1b92043a812fc27c7309369410a147c4dab35bcdef2734f17c32acff709f6178",
       "lockSha256": "18124735d12c46577a719234cf58a5a70e61c45b3340d387c51ae2c4b242a097",
       "testFiles": {
         "e2e/git-fips-provider-bridge.spec.ts": "ea8d785539319537a2100898c747eb123d4b20a4a82f0a75468012922cf2074a",
-        "e2e/git-forks.spec.ts": "11f6862f99f836998e6e04350db5a390af7236c87402c0cd056b83be78481d3f",
-        "e2e/git-push-htree.spec.ts": "21b5b4564fe7d76413503a67abe4a4c123d65dc465161b3d1e6b5aa0bd0c7ccd",
+        "e2e/git-forks.spec.ts": "8fa8b95ddd0761675d1386e423f94ebe32c342b6eb2acc755a778416af60dec8",
+        "e2e/git-push-htree.spec.ts": "2a75f279aa51028de1ea12e5c4ee3e1226687e89153887b339ef2bc0b9436ca7",
         "e2e/test-utils/gitForkReadiness.ts": "359f1839fd99bcfa8854a1d00c2282b77b3e8733b0f56480714407543b3eb7f7",
-        "e2e/test-utils/gitPeerDiagnostics.ts": "ed4a1c418a6d6eebaa5ec39d9e6c3334bdbb78c07d0d7d65ed55ec69c8d9c6e2"
+        "e2e/test-utils/gitPeerDiagnostics.ts": "ed4a1c418a6d6eebaa5ec39d9e6c3334bdbb78c07d0d7d65ed55ec69c8d9c6e2",
+        "e2e/fixtures/gitPeerSeed.ts": "861921c071d5645ea566e4fbc2b5af5518fa7ebab546532f2090d365ddf830ca",
+        "e2e/test-utils/network.ts": "0f40bc515fbb98118273cfecf58d5f20d17cc63ba42801d0e04771d4df26e359"
       },
       "distDir": "iris-git",
       "distArchive": "archives/git-dist.tar.gz",
