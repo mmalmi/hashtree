@@ -101,7 +101,7 @@ def main(output, receipt):
                                 'nostr_relay::snapshot::tests::',
                                 'server::ws_relay::tests::negentropy_',
                                 'config::tests::ditto_'],
-                'htree': ['app::socialgraph::tests::ditto_'], 'hashtree_fips_transport': [],
+                'htree': ['app::socialgraph::tests::ditto_', 'app::nostr_index::tests::'], 'hashtree_fips_transport': [],
                 'provider_route': [], 'hashtree_embedded': [],
                 'git_remote_htree': ['root_observation', 'standalone_lookup']}
     binaries = {}
@@ -142,6 +142,7 @@ def main(output, receipt):
                 assert required in listing, 'Missing graph reconciliation protocol test: ' + required
         if name == 'htree':
             assert 'ditto_publication_uses_configured_relays_without_injecting_defaults: test' in listing
+            assert 'warms_social_graph_and_persists_index_report: test' in listing
         if name == 'hashtree_embedded':
             assert 'host_runtime_serves_initial_keyed_root_from_upstream_blossom: test' in listing
         if name == 'git_remote_htree':

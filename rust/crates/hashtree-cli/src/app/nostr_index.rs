@@ -4101,6 +4101,13 @@ mod tests {
             }
         }
 
+        if let Some(ids) = filter_obj.get("ids").and_then(Value::as_array) {
+            let id = event.get("id").and_then(Value::as_str).unwrap_or_default();
+            if !ids.iter().any(|wanted| wanted.as_str() == Some(id)) {
+                return false;
+            }
+        }
+
         if let Some(kinds) = filter_obj.get("kinds").and_then(Value::as_array) {
             let event_kind = event
                 .get("kind")
@@ -4128,6 +4135,7 @@ mod tests {
         };
 
         let (mut write, mut read) = ws_stream.split();
+        let mut sessions = std::collections::HashMap::new();
 
         while let Some(msg) = read.next().await {
             let msg = match msg {
@@ -4146,6 +4154,51 @@ mod tests {
             };
 
             match parsed.first().and_then(Value::as_str) {
+                Some("NEG-OPEN") => {
+                    let sub_id = parsed[1].as_str().expect("negentropy subscription");
+                    let filter = &parsed[2];
+                    let initial = parsed[3].as_str().expect("negentropy initial message");
+                    let snapshot = events.lock().expect("relay events lock").clone();
+                    let mut storage = negentropy::NegentropyStorageVector::new();
+                    for value in snapshot
+                        .into_iter()
+                        .filter(|event| event_matches_filter(event, filter))
+                    {
+                        let event: nostr::Event =
+                            serde_json::from_value(value).expect("signed fixture event");
+                        storage
+                            .insert(
+                                event.created_at.as_secs(),
+                                negentropy::Id::from_byte_array(event.id.to_bytes()),
+                            )
+                            .expect("insert head");
+                    }
+                    storage.seal().expect("seal heads");
+                    let mut session =
+                        negentropy::Negentropy::owned(storage, 4096).expect("negentropy session");
+                    let reply = session
+                        .reconcile(&hex::decode(initial).expect("initial hex"))
+                        .expect("reconcile initial");
+                    let message = serde_json::json!(["NEG-MSG", sub_id, hex::encode(reply)]);
+                    let _ = write.send(Message::Text(message.to_string())).await;
+                    sessions.insert(sub_id.to_owned(), session);
+                }
+                Some("NEG-MSG") => {
+                    let sub_id = parsed[1].as_str().expect("negentropy subscription");
+                    if let Some(session) = sessions.get_mut(sub_id) {
+                        let message = parsed[2].as_str().expect("negentropy message");
+                        let reply = session
+                            .reconcile(&hex::decode(message).expect("message hex"))
+                            .expect("reconcile message");
+                        let response = serde_json::json!(["NEG-MSG", sub_id, hex::encode(reply)]);
+                        let _ = write.send(Message::Text(response.to_string())).await;
+                    }
+                }
+                Some("NEG-CLOSE") => {
+                    if let Some(sub_id) = parsed.get(1).and_then(Value::as_str) {
+                        sessions.remove(sub_id);
+                    }
+                }
                 Some("EVENT") => {
                     let Some(event) = parsed.get(1).cloned() else {
                         continue;
