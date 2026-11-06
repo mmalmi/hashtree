@@ -9,7 +9,15 @@ const record={passed:false,node:process.version,playwright:version};
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));let browser;
  try {
   browser=await chromium.launch({args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']});
-  record.browser=browser.version();assert.equal(record.browser,'156.0.8078.4');
+  record.browser=browser.version();assert.equal(record.browser,'156.0.8078.80');
+  // The digest-pinned official image carries this patched browser, while the
+  // npm metadata declares 156.0.8078.4. Record the actual image executables.
+  const executablePaths=new Set();
+  for(const pid of fs.readdirSync('/proc').filter(name=>/^\d+$/.test(name))){
+   try{const path=fs.readlinkSync(`/proc/${pid}/exe`);if(path.startsWith('/ms-playwright/'))executablePaths.add(path);}catch{}
+  }
+  assert(executablePaths.size>0);
+  record.executables=[...executablePaths].sort().map(path=>({path,sha256:require('node:crypto').createHash('sha256').update(fs.readFileSync(path)).digest('hex')}));
   const origin=`http://127.0.0.1:${server.address().port}`;
   const page=await browser.newPage();
   const permission=process.env.FIPS_MEDIA_PERMISSION==='1';
