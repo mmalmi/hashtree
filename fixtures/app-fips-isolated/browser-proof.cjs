@@ -62,6 +62,16 @@ const record={passed:false,node:process.version,playwright:version};
   assert(record.candidateAddressesAllowed,'Unexpected ICE candidate address');
   assert.equal(record.rtc.echoed,'loopback-only',JSON.stringify(record.rtc));
   assert(record.rtc.candidates.length);
+  const {grantIsolatedPermission}=require('/stage/procedure/'+(spec.id==='meet'?'permission-context-meet.ts':'permission-context.ts'));
+  const appEvidence=process.env.FIPS_APP_EVIDENCE;
+  process.env.FIPS_APP_EVIDENCE=appEvidence+'/unsigned-permission-controls';fs.mkdirSync(process.env.FIPS_APP_EVIDENCE);
+  record.permissionPreservation=[];
+  try {
+   for(const permissions of [[],['clipboard-read','clipboard-write'],['camera','microphone']]){
+    const context=await browser.newContext({permissions});
+    try{await grantIsolatedPermission(context);record.permissionPreservation.push({originalPermissions:permissions,passed:true});}finally{await context.close();}
+   }
+  } finally {process.env.FIPS_APP_EVIDENCE=appEvidence;}
   record.passed=true;console.log('PASS non-root Chromium raw-worker denial and unsigned local datachannel');
  }catch(error){record.error=String(error);throw error;}
  finally{fs.writeFileSync(process.argv[2],JSON.stringify(record,null,2)+'\n');await browser?.close();await new Promise(resolve=>server.close(resolve));}
