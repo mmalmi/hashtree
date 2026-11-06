@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-nostr-social-graph-heed"
-version = "0.2.0-hashtree.1"
+version = "0.2.1-hashtree.1"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/mmalmi/nostr-social-graph"
@@ -15,7 +15,7 @@ path = "src/lib.rs"
 
 [dependencies]
 heed = { package = "hashtree-heed", version = "=0.20.5-hashtree.2", path = "../heed", features = ["read-txn-no-tls"] }
-nostr-social-graph = "0.2.0"
+nostr-social-graph = "0.2.1"
 thiserror = "2"
 
 [dev-dependencies]

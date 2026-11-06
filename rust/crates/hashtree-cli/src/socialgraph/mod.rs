@@ -1823,6 +1823,8 @@ impl SocialGraphStore {
         *self.distance_cache.lock().unwrap() = None;
     }
 
+    // The writable Heed open migrates legacy rows before SocialGraphStore creates
+    // its empty cache. Do not feed the read-only legacy path export into here.
     fn build_distance_cache(state: nostr_social_graph::SocialGraphState) -> Result<DistanceCache> {
         let unique_ids = state
             .unique_ids
@@ -4320,3 +4322,6 @@ fn page_size_bytes() -> usize {
 mod profile_lock_tests;
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod alias_cache_tests;

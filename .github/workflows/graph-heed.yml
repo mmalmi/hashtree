@@ -1,0 +1,37 @@
+name: Graph Heed migration and CLI cache
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/graph-heed021]
+permissions:
+  contents: read
+jobs:
+  graph:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    env:
+      CARGO_BUILD_JOBS: 1
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      RUSTC_WRAPPER: ''
+      RUSTC_WORKSPACE_WRAPPER: ''
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install Linux test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.99.0
+      - name: Check exact fork and CLI graph consumers in isolated namespaces
+        run: python3 rust/scripts/check_graph_heed.py run "$RUNNER_TEMP/graph-heed-evidence"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: graph-heed-${{ github.sha }}
+          path: ${{ runner.temp }}/graph-heed-evidence
+          if-no-files-found: error
