@@ -22,5 +22,9 @@
   "drive": {
     "path": "e2e/fixtures.ts",
     "beforeSha256": "e4e4bf789023ae5a818a1eda710dc925a6e1eb4687580118e13d7146ad5d8af1"
+  },
+  "maps": {
+    "path": "e2e/fixtures.ts",
+    "beforeSha256": "1806469eba3151164bb05fe4649b9233b1c30b7d62311e849cbf7228d27c73fa"
   }
 }

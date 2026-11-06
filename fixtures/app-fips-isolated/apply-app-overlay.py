@@ -20,7 +20,7 @@ spec=next(row for row in manifest['apps'] if row['id']==app)
 for name,digest in spec['testFiles'].items():
     path=target/name;original=path.read_bytes();assert sha(original)==digest
     raw="import { expect, test } from '@playwright/test';"
-    if app in ('calendar','boards','video'):
+    if app in ('calendar','boards','video','maps'):
         assert original.decode().count(raw)==1
         updated=original.decode().replace(raw,"import { expect, test } from './isolated-permissions';")
         path.write_text(updated)

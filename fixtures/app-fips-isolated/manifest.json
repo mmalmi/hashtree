@@ -1388,6 +1388,214 @@
       "env": {
         "PW_WORKERS": "1"
       }
+    },
+    {
+      "id": "maps",
+      "commit": "929d0373332cca377a64cfa866d0ad9eb398a7a2",
+      "archive": "archives/maps-source.tar.gz",
+      "archiveSha256": "4575041784bfd1124e641ef529018244f03763ffb435d37ebd8f394ed034e538",
+      "lockSha256": "45a33e9508fd4aa9e2678eef8dda4ab7f044b2058964d43273a1b9e3fd4c74fb",
+      "testFiles": {
+        "e2e/fips-discovery.spec.ts": "bdd804a5f37eb7d1e99e53ae4b3e57bd2d1cc17040f8205ff5e45c75d964759f"
+      },
+      "distDir": "dist-maps",
+      "distArchive": "archives/maps-dist.tar.gz",
+      "distArchiveSha256": "25edaa71ba0aa958719cebc615b88a5456395e4a61b5a8e208578e06608a43d0",
+      "distFiles": [
+        {
+          "path": "_headers",
+          "bytes": 210,
+          "sha256": "1afb16ca7e53b6f28e52bda6a23f59f562612496a792385c5ab8a3891cd3b46a"
+        },
+        {
+          "path": "apple-touch-icon.png",
+          "bytes": 25114,
+          "sha256": "49c3e7ebf6cbd27879280b9ebf0c3b13b72e055ef18bc0e85513493b766c4636"
+        },
+        {
+          "path": "assets/__vite-browser-external-BIHI7g3E.js",
+          "bytes": 33,
+          "sha256": "82507b0bb9ac4affaeb17c40968d830cbd6d14a2ffa04d8994faf1a78e58e1b5"
+        },
+        {
+          "path": "assets/dexie-Cu-18gqo.js",
+          "bytes": 177938,
+          "sha256": "303e01363aa702f0ab20c58754fab99a22b89ba4cfc86e7638c3f1fe4ce55ca2"
+        },
+        {
+          "path": "assets/git-vV69POb7.js",
+          "bytes": 15472,
+          "sha256": "390f37b99710bb083473d74023cd977ce48fdd14d08a5e6c7eea8111b286e94f"
+        },
+        {
+          "path": "assets/hashtree.worker-BkzFDJot.js",
+          "bytes": 161,
+          "sha256": "c0b0e038ecf7a20df7cd1378c54ff7e070df2ea9922d7e1cdad0c4873ab09d86"
+        },
+        {
+          "path": "assets/hashtree.worker-CF2mb7bB.js",
+          "bytes": 534862,
+          "sha256": "a7b5cee3d4dc6f4def399962242edbd4b8d990653f67a015c735ec95d4103645"
+        },
+        {
+          "path": "assets/index-DkGjlLDg.js",
+          "bytes": 17864,
+          "sha256": "910c9b9c9903bdd85e12f29df55d6ad07c4ee1cbd4c9f41a24b036920f92d161"
+        },
+        {
+          "path": "assets/lg2_async-DJ2K2_iU.js",
+          "bytes": 79974,
+          "sha256": "2a5b4d73e9088ffd7a2b1cb99e900a4ae94dda3362d0b21b617011d67bef14c5"
+        },
+        {
+          "path": "assets/log-BuLsGomO.js",
+          "bytes": 24209,
+          "sha256": "252e015dd95dd32e60e3832c6905eef9d15043b37e778da8fd14cda1b806e91c"
+        },
+        {
+          "path": "assets/main-B_F2l6k0.css",
+          "bytes": 216307,
+          "sha256": "a6ad4fb57564356dfc5d203664363a156538bc62b3f8c6775b74f3855b5f5ab3"
+        },
+        {
+          "path": "assets/main-i0vevhCo.js",
+          "bytes": 1972562,
+          "sha256": "52ddc7317b9d55a701a3d95168ffc724025a4697151cfcb238edfd4f259a7758"
+        },
+        {
+          "path": "assets/mapLabels-3H6Z6qUE.js",
+          "bytes": 751536,
+          "sha256": "5f3b4fcf5d29a1a8eb2a209c68dda5428c608e86146bdce7fe6a08e8e7def197"
+        },
+        {
+          "path": "assets/maplibre-gl-worker-BrB25tGK.mjs",
+          "bytes": 518806,
+          "sha256": "1c69066368331aae63967ed24a9affcf962cf55fcc6d8f532a8b040f736dbcfa"
+        },
+        {
+          "path": "assets/recents-CPGHlMcf.js",
+          "bytes": 1120,
+          "sha256": "788a2032f2c7c97158da4cb406e3f91ffd0eddfc941052a5560eb3071978fc57"
+        },
+        {
+          "path": "assets/socialGraph-B9uPtBHY.bin",
+          "bytes": 1563994,
+          "sha256": "df349a23122993183b9b9d2d056b7c655a984bdc86bc72f747202ad772de4d8f"
+        },
+        {
+          "path": "assets/trees-CTJ6Xq0E.js",
+          "bytes": 3369,
+          "sha256": "96199727d8f87b2beffa772f91f16da1d4a00550f0e850dd96f661605c986651"
+        },
+        {
+          "path": "assets/vendor-4P2HbrJq.js",
+          "bytes": 357080,
+          "sha256": "8d7bede2804e0b624e3caf89b45329fefd94301eb5d3f2294d1af2117f671909"
+        },
+        {
+          "path": "assets/wallet-4nD3ujMI.js",
+          "bytes": 199215,
+          "sha256": "0aaa15164cb5fa4c6174276cd432334fb3af2c297eed6e48c47774e82524cae0"
+        },
+        {
+          "path": "assets/wasmGit-CGm0hPSd.js",
+          "bytes": 11841,
+          "sha256": "4d44995e04e0113bda774e44359d185e08a9273728cbe9913e7b32797616e5fa"
+        },
+        {
+          "path": "assets/workbox-window.prod.es5-BBnX5xw4.js",
+          "bytes": 5748,
+          "sha256": "cadd21be4a88598a4dec91a26a025df0a5790ff6baec54a884e401c3f5c95557"
+        },
+        {
+          "path": "child-webview-test.html",
+          "bytes": 581,
+          "sha256": "27a11986b4913cd7fb5724d724ac49d8aa3c541c7c9f27c1afe87eafca862481"
+        },
+        {
+          "path": "favicon.ico",
+          "bytes": 9670,
+          "sha256": "20c5c196e7ce1f0baf06d9a0098a3cfc350d3e19d88c5fac6a6bf95e4a52a112"
+        },
+        {
+          "path": "favicon.svg",
+          "bytes": 79002,
+          "sha256": "74de80422a97f756c70ff3bfecc24a203db8770c86210e8409d3fd6a2b73f4e6"
+        },
+        {
+          "path": "index.html",
+          "bytes": 831,
+          "sha256": "d0722afb4c89fc9b16e21c2677684858275b4dd2c860cd2999972c094860242b"
+        },
+        {
+          "path": "iris-favicon.png",
+          "bytes": 2264,
+          "sha256": "f4e7ac4a59e31ef4c3636cf110cff5fc92e46d133c9316a9f920abf381e0ba2d"
+        },
+        {
+          "path": "iris-logo.png",
+          "bytes": 15042,
+          "sha256": "e988831cbd5c54d08995d57f846123dc811cc738b30d9d92189c5815e116c076"
+        },
+        {
+          "path": "iris-maps-icon-180.png",
+          "bytes": 25114,
+          "sha256": "49c3e7ebf6cbd27879280b9ebf0c3b13b72e055ef18bc0e85513493b766c4636"
+        },
+        {
+          "path": "iris-maps-icon-192.png",
+          "bytes": 27857,
+          "sha256": "fad71247dfff4b2bf8fd56736e1097a83b507cd3340f7d4cce97b21ca5c60355"
+        },
+        {
+          "path": "iris-maps-icon-512.png",
+          "bytes": 47944,
+          "sha256": "d5641f4cf6a4c4e8b9125a61adc3da5047b3ce005f17baa5a6c5b2ddf6dd58f2"
+        },
+        {
+          "path": "iris-maps-icon.svg",
+          "bytes": 79002,
+          "sha256": "74de80422a97f756c70ff3bfecc24a203db8770c86210e8409d3fd6a2b73f4e6"
+        },
+        {
+          "path": "lg2_async.js",
+          "bytes": 123652,
+          "sha256": "7a288f234ec43126a5740de0584fd9c8d84554c1873fa9c70fefb3384f8c5eec"
+        },
+        {
+          "path": "lg2_async.wasm",
+          "bytes": 1580955,
+          "sha256": "6e58375e725b5482fcca99c08e1396f1610cdd1ef57359711999fa54c0c67b84"
+        },
+        {
+          "path": "manifest.webmanifest",
+          "bytes": 453,
+          "sha256": "72b636ebae618604c4feee8fe3cc38f4af722cd0964deb01236a63dc9979da99"
+        },
+        {
+          "path": "pwa-192x192.png",
+          "bytes": 27857,
+          "sha256": "fad71247dfff4b2bf8fd56736e1097a83b507cd3340f7d4cce97b21ca5c60355"
+        },
+        {
+          "path": "pwa-512x512.png",
+          "bytes": 47944,
+          "sha256": "d5641f4cf6a4c4e8b9125a61adc3da5047b3ce005f17baa5a6c5b2ddf6dd58f2"
+        },
+        {
+          "path": "secp256k1.wasm",
+          "bytes": 217781,
+          "sha256": "a343e0db7a33da2648820b7705a659b5c84b042c581509cb18d185314f94dc0e"
+        },
+        {
+          "path": "sw.js",
+          "bytes": 29832,
+          "sha256": "9e661a89e378978b3bfad281cca3e6bb9014426ec651ce105807f5ce68538734"
+        }
+      ],
+      "specs": [
+        "e2e/fips-discovery.spec.ts"
+      ]
     }
   ]
 }

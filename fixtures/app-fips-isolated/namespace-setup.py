@@ -4,7 +4,7 @@ import json,os,pathlib,subprocess,sys
 container_id,name,image_id,uid=sys.argv[1:]
 allowed_names=('iris-fips-diagnostic-docs-dummy','iris-fips-diagnostic-docs-permission',
     'iris-fips-test-docs','iris-fips-test-calendar','iris-fips-test-boards',
-    'iris-fips-test-git','iris-fips-test-video','iris-fips-test-drive')
+    'iris-fips-test-git','iris-fips-test-video','iris-fips-test-drive','iris-fips-test-maps')
 assert len(container_id)==64 and name in allowed_names
 assert uid.isdecimal() and int(uid)!=0
 def inspect():
