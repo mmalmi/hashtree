@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Chat graph4.0.4/worker0.4.25 coherent production dist: SW ordering, retained first-file restart and clipboard/linking in original selected projects; no runtime build or public network",
+  "purpose": "Remaining exact Chat release browser specs, excluding three already accepted on same source/dist in42228802659",
   "image": "mcr.microsoft.com/playwright@sha256:ee15712262f017b8157421b212b12099146645f44b1bc5c0514cbbe6a229b1d0",
   "imageTagForProvenance": "v1.64.1-noble",
   "imageIndexSha256": "2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f",
@@ -177,15 +177,32 @@
         }
       ],
       "specs": [
-        "e2e/direct-file-first.spec.ts",
-        "e2e/sw-push-handler.spec.ts",
-        "e2e/link-device.spec.ts"
+        "e2e/private-key-login.spec.ts",
+        "e2e/nip07.spec.ts",
+        "e2e/contact-memory.spec.ts",
+        "e2e/private-contact-sync.spec.ts",
+        "e2e/web-join.spec.ts",
+        "e2e/message-mutations.spec.ts",
+        "e2e/invite-roleplay.spec.ts",
+        "e2e/composer-identity.spec.ts",
+        "e2e/composer-completions.spec.ts",
+        "e2e/timed-mute.spec.ts",
+        "e2e/notification-navigation.spec.ts",
+        "e2e/device-removal.spec.ts"
       ],
       "testFiles": {
-        "e2e/direct-file-first.spec.ts": "416ad602769f6dfa9af9c53c321b2d6d262d962a0f7452579c7f97dd661605e6",
-        "e2e/sw-push-handler.spec.ts": "b7278299f36655c5c64e0e669af4901f166956a8e4c01964d2cd443a0efcf312",
-        "e2e/link-device.spec.ts": "af149b7b07b412a87a5ecf2f17bb8050f761b0437e88170d8657e9088f60b957",
-        "e2e/fixtures/directFileDiagnostics.ts": "fe205689f2738af30ea45db9ed6c728b3004ef2f7e8f78724ee6b7e2db40b9b7"
+        "e2e/private-key-login.spec.ts": "ca3f53ef51bcda1f65f340962466db009406853dfedd3ecb728c7ff8f7f5a78c",
+        "e2e/nip07.spec.ts": "25851697b2cc364fa6912e230ca774ecdd00764407f1ae8efdab8334650eaca7",
+        "e2e/contact-memory.spec.ts": "bf07300af026d998741fa01dfda519b07fccc26be09971441d9a8c668f12b6fc",
+        "e2e/private-contact-sync.spec.ts": "6fc63c7aba9a84029f594c0d1c0dc36284dfc5e15e63c62924a7816e321c875b",
+        "e2e/web-join.spec.ts": "3d2a60e0c39a5f854ef71f37a6ef34fbab7c134f08aa62d2b76a99a14a27aa59",
+        "e2e/message-mutations.spec.ts": "99004fa4408da55357f11f676d87a297dbe5428b2c22ed07ef5987f9a10dc533",
+        "e2e/invite-roleplay.spec.ts": "114049e5d8524b90d23056a6a0c386d0e8497ef44262bc84abd887c9a098eee0",
+        "e2e/composer-identity.spec.ts": "f9b4c677521e954dd5c79261bc7903322bd4a69b5311da1edce7fcc92f28c7b8",
+        "e2e/composer-completions.spec.ts": "cc7310e7b1821183142db0bc924e4d518bdb25e739e10145a803b47a1c4f95dd",
+        "e2e/timed-mute.spec.ts": "30a0480a591e7787397a1b16c4a00435aea6296a28255bd6db895515f9d6fb97",
+        "e2e/notification-navigation.spec.ts": "047ec5007e79bca1f267d447995e5cd152445944041dd0f3e3ef9ebfaa0599f1",
+        "e2e/device-removal.spec.ts": "0c8a038a208275c7341469409333e566b7de6fcc06dacc5aa0db62b50983ac97"
       },
       "fixtureSha256": "7c411f44a1630a461485bb08338d508fe253433f562e7bbecee38af345e47404",
       "configSha256": "dff2d67de101409c41bd52eeb932a600e16d73d7e5ba3f0741b7b1777cffed4d",
@@ -210,10 +227,19 @@
       "buildReceiptSha256": "890233ea4f4cb049005f4a3f472d18cb0b94b5b211cfb24b23884e6641d4ef51",
       "expectedProjects": [
         "chromium",
-        "firefox-files",
-        "webkit-files"
+        "webkit-composer",
+        "webkit-notifications"
       ],
-      "diagnosticResponseScope": "Direct-file test contexts instrument one loopback-served vendor event emitter only; original and diagnostic response hashes attached. On-disk built dist stays exact. No claim instrumented response byte equality."
+      "diagnosticResponseScope": "Direct-file test contexts instrument one loopback-served vendor event emitter only; original and diagnostic response hashes attached. On-disk built dist stays exact. No claim instrumented response byte equality.",
+      "alreadyQualifiedSpecs": {
+        "run": 42228802659,
+        "specs": [
+          "e2e/direct-file-first.spec.ts",
+          "e2e/sw-push-handler.spec.ts",
+          "e2e/link-device.spec.ts"
+        ],
+        "source": "7f91f33213a1efdf8a6d47f956f942417446a85a"
+      }
     }
   ]
 }

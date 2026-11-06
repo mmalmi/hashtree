@@ -91,7 +91,8 @@ finally:
     verify_inputs()
     subprocess.run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after-attempt.json')],env=env,check=True,timeout=15)
 contexts=[json.loads(line) for line in (evidence/'context-permissions.jsonl').read_text().splitlines()]
-assert set(c['engine'] for c in contexts)=={'chromium','firefox','webkit'}
+expected_engines={'chromium' if name=='chromium' else name.split('-')[0] for name in spec['expectedProjects']}
+assert set(c['engine'] for c in contexts)==expected_engines
 assert all(c['origin']=='http://127.0.0.1:5721' and not c['captureInvoked'] for c in contexts)
 assert all(c['state']=='granted' and c['permission']=='microphone' for c in contexts if c['engine']=='chromium')
 assert all(c['permission'] is None for c in contexts if c['engine']!='chromium')
