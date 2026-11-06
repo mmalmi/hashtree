@@ -51,7 +51,7 @@ def test_selection(report):
     return sorted(selected)
 try:
     if spec.get('requiredUnitFiles'):
-        unit_command=['node','--no-warnings','--localstorage-file=/stage/home/chat/vitest-localstorage','node_modules/vitest/vitest.mjs','run',*spec['requiredUnitFiles'],'--maxWorkers=1','--reporter=verbose','--reporter=json','--outputFile='+str(evidence/'units.json')]
+        unit_command=['pnpm','test',*spec['requiredUnitFiles'],'--maxWorkers=1','--reporter=verbose','--reporter=json','--outputFile='+str(evidence/'units.json')]
         with (evidence/'units.log').open('wb') as unit_log:
             unit=subprocess.Popen(unit_command,env=env,stdout=unit_log,stderr=subprocess.STDOUT,start_new_session=True);processes.append(unit)
             unit_code=unit.wait(timeout=300)
