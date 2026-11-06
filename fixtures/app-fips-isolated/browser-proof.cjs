@@ -1,7 +1,7 @@
 const {chromium}=require(process.cwd()+'/node_modules/@playwright/test');
 const fs=require('node:fs'),http=require('node:http'),assert=require('node:assert/strict');
 const version=require(process.cwd()+'/node_modules/@playwright/test/package.json').version;
-assert.equal(version,'1.60.0');
+assert.equal(version,'1.64.1');
 assert.equal(process.version,JSON.parse(fs.readFileSync('/stage/evidence/image-toolchain.json')).node);
 const record={passed:false,node:process.version,playwright:version};
 (async()=>{
@@ -9,7 +9,7 @@ const record={passed:false,node:process.version,playwright:version};
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));let browser;
  try {
   browser=await chromium.launch({args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']});
-  record.browser=browser.version();assert.equal(record.browser,'148.0.7778.96');
+  record.browser=browser.version();assert.equal(record.browser,'156.0.8078.4');
   const origin=`http://127.0.0.1:${server.address().port}`;
   const page=await browser.newPage();
   const permission=process.env.FIPS_MEDIA_PERMISSION==='1';

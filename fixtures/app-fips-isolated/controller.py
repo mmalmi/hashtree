@@ -87,7 +87,7 @@ def prepare():
     fetch(M['native'],STAGE/'native.tgz');extract(STAGE/'native.tgz',STAGE/'tools/native')
     for name,digest in M['native']['executables'].items():assert sha(STAGE/'tools/native/hashtree'/name)==digest
     run(['docker','pull',IMAGE],'image-pull.log',300)
-    docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');if(process.versions.node.split('.')[0]!=='24')throw Error('Unexpected image Node');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
+    docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');if(process.versions.node.split('.')[0]!=='26')throw Error('Unexpected image Node');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
     for app in APPS:
         archive=HERE/app['archive'];assert sha(archive)==app['archiveSha256']
         target=STAGE/'apps'/app['id'];extract(archive,target)

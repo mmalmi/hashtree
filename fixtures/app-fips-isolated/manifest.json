@@ -1,8 +1,8 @@
 {
   "schema": 1,
   "purpose": "Task branch only: exact app FIPS compatibility, no external network, no native build",
-  "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
-  "imageTagForProvenance": "v1.60.0-noble",
+  "image": "mcr.microsoft.com/playwright@sha256:ee15712262f017b8157421b212b12099146645f44b1bc5c0514cbbe6a229b1d0",
+  "imageTagForProvenance": "v1.64.1-noble",
   "pnpm": {
     "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.23.0.tgz",
     "sha256": "a1cdd7b468386a9d78a081da05d6049d7e598db62a299db92df21a7062a4b183"
