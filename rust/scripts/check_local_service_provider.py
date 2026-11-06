@@ -147,15 +147,19 @@ def main(output, receipt):
             assert 'host_runtime_serves_initial_keyed_root_from_upstream_blossom: test' in listing
         if name == 'git_remote_htree':
             assert count == 4, 'Changed Nostr adapter boundary test selection'
+        # sudo changes HOME to /root. Restore a writable task-only home after
+        # dropping privileges so config-reading tests cannot touch host state.
+        home = (output / 'homes' / name).resolve()
+        home.mkdir(parents=True, exist_ok=False)
         command = ['sudo', 'unshare', '--net', 'bash', '-ec',
-                   'ip link set lo up\nexec setpriv --reuid="$1" --regid="$2" --init-groups "$3" "${@:4}"',
+                   'ip link set lo up\nexec setpriv --reuid="$1" --regid="$2" --init-groups env HOME="$3" HTREE_CONFIG_DIR="$3/config" "$4" "${@:5}"',
                    'local-service-provider', str(os.getuid()), str(os.getgid()),
-                   binary, *filters, '--nocapture', '--test-threads=1']
+                   str(home), binary, *filters, '--nocapture', '--test-threads=1']
         try:
             result = run(name, command, output, receipt, 600)
             assert re.search(rf'test result: ok\. {count} passed; 0 failed; 0 ignored;', result)
             receipt['tests'][name] = {'passed': count, 'binarySha256': digest(Path(binary)),
-                                      'loopbackOnly': True}
+                                      'loopbackOnly': True, 'isolatedHome': True}
         except RuntimeError as error:
             failures.append(f'{name}: {error}')
     assert receipt['cargoLockSha256'] == digest(Path('Cargo.lock'))
