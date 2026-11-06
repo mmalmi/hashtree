@@ -81,5 +81,5 @@ clap = { version = "4.5", features = ["derive", "env"] }
 bytes = "1.0"
 toml = "0.8"
 lru = "0.12"
-nostr-social-graph = "0.2.0"
-nostr-social-graph-heed = { package = "hashtree-nostr-social-graph-heed", version = "=0.2.0-hashtree.1", path = "vendor/nostr-social-graph-heed" }
+nostr-social-graph = "0.2.1"
+nostr-social-graph-heed = { package = "hashtree-nostr-social-graph-heed", version = "=0.2.1-hashtree.1", path = "vendor/nostr-social-graph-heed" }

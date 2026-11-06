@@ -4072,7 +4072,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-nostr-social-graph-heed"
-version = "0.2.0-hashtree.1"
+version = "0.2.1-hashtree.1"
 dependencies = [
  "hashtree-heed",
  "nostr-social-graph",
@@ -5563,9 +5563,9 @@ dependencies = [
 
 [[package]]
 name = "nostr-social-graph"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83a7c3e6dedf8c0474c9e09938496abde4a9c77cd38ec4832d9b56ee9602b8f8"
+checksum = "c791a910d0dfe97088bb9ebac2b0551e21102ae4f272ad2a8b20cec27e188402"
 dependencies = [
  "hex",
  "indexmap 2.14.0",
