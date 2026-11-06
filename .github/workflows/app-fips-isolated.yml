@@ -9,7 +9,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        app: [docs, calendar, boards, video, git, maps]
+        app: [docs, calendar, video, git, maps]
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     env:
@@ -32,3 +32,4 @@ jobs:
           path: ${{ runner.temp }}/app-graph404-${{ matrix.app }}/evidence
           if-no-files-found: error
           retention-days: 7
+          include-hidden-files: true

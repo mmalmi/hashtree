@@ -61,6 +61,27 @@ const record={passed:false,node:process.version,playwright:version};
   assert(record.candidateAddressesAllowed,'Unexpected ICE candidate address');
   assert.equal(record.rtc.echoed,'loopback-only',JSON.stringify(record.rtc));
   assert(record.rtc.candidates.length);
+  const {grantIsolatedPermission}=require('/stage/procedure/permission-context.ts');
+  const appEvidence=process.env.FIPS_APP_EVIDENCE;
+  process.env.FIPS_APP_EVIDENCE=appEvidence+'/unsigned-permission-controls';fs.mkdirSync(process.env.FIPS_APP_EVIDENCE);
+  record.permissionPreservation=[];
+  try {
+   for(const permissions of [undefined,[],['clipboard-read','clipboard-write'],['camera','microphone'],['geolocation']]){
+    const context=await browser.newContext({permissions});
+    try{await grantIsolatedPermission(context);record.permissionPreservation.push({originalPermissions:permissions??'unset',passed:true});}finally{await context.close();}
+   }
+   const late=await browser.newContext();
+   try{
+    await grantIsolatedPermission(late);
+    await late.grantPermissions(['geolocation']);
+    const probe=await late.newPage();const owned='http://localhost:43810/__late_permission_control';
+    await probe.route(owned,r=>r.fulfill({contentType:'text/html',body:'<!doctype html>'}));await probe.goto(owned);
+    const states=await probe.evaluate(async()=>Object.fromEntries(await Promise.all(['microphone','geolocation','camera','clipboard-read','clipboard-write'].map(async name=>[name,(await navigator.permissions.query({name})).state]))));
+    assert.equal(states.microphone,'granted');assert.equal(states.geolocation,'granted');
+    for(const name of ['camera','clipboard-read','clipboard-write'])assert.notEqual(states[name],'granted');
+    record.permissionPreservation.push({originalPermissions:'late-global-geolocation',states,passed:true});
+   }finally{await late.close();}
+  } finally {process.env.FIPS_APP_EVIDENCE=appEvidence;}
   record.passed=true;console.log('PASS non-root Chromium raw-worker denial and unsigned local datachannel');
  }catch(error){record.error=String(error);throw error;}
  finally{fs.writeFileSync(process.argv[2],JSON.stringify(record,null,2)+'\n');await browser?.close();await new Promise(resolve=>server.close(resolve));}

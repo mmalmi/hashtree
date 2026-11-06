@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "docs",
-      "commit": "606393bbcc0a9f6d57ecb7e6fb014cc5ba3ef3f4",
+      "commit": "936f5b9067f5ff0e3d5dba9083bc621b782dab6e",
       "archive": "archives/docs-source.tar.gz",
-      "archiveSha256": "74a3a71f4bd28812e73a174be3f73293e1f5395f0c897a0053848829737fa95c",
-      "archiveBytes": 1149962,
+      "archiveSha256": "17194d620f0a2b770bfe9db32789ea7076c2c62d92e4ec91c2bb2e694bfa3668",
+      "archiveBytes": 1150753,
       "lockSha256": "a7990bfc025655856bbcc4f5fbf38561f699df8bd3fafd0ebbc13bd8b81839d3",
       "packageSha256": "35854b877b4f2ca68d2a83d0ab746c045a3685fc92f524355abf83a5bd2c90ad",
       "distDir": "dist-docs",
@@ -34,8 +34,8 @@
       "packageManager": "pnpm@10.23.0",
       "testFiles": {
         "e2e/contact-follow.spec.ts": "e63561d946ba9bce1ae2f32c0f9207ba41bacfd8b38df9c7ba26e1161d97e600",
-        "e2e/docs-app.helpers.ts": "40a39e3260c7528c3718fadef6f94bc53c190fd40ec343cf4081dfad140b7aef",
-        "e2e/docs-app.spec.ts": "1f0470774057ca23582f362f3502389e744546a1cd8a53d2a102abbe01af8d58",
+        "e2e/docs-app.helpers.ts": "450fdbeb9dee709435f55a6d34d654ac7c28e0c479601889dabd7b12da276e1c",
+        "e2e/docs-app.spec.ts": "8cf54c18b1b14b57f8d7c0324cd0585faad6e44b044736396662619bec3c6e58",
         "e2e/docs-test-utils.ts": "591307ce2adb0056e1624ea081cad3f63f8296b6e6b9f30f4c72737dc07fc367",
         "e2e/docs-thumbnail.spec.ts": "bc60716f837ba93d041ae0b1536ce123ad77d60a6d6e5522b09e4e4a084b4462",
         "e2e/fips-discovery.spec.ts": "4ddcbd29e04bec66dc5a3b7a3271a54ad8d1d0f5191ad64896a510cc92ef3ded",
@@ -59,10 +59,10 @@
     },
     {
       "id": "calendar",
-      "commit": "28b9661f3ca2d093418fc4fa05ea8c62992e6fa8",
+      "commit": "fd5c6db8a881a2f049f8c880973deb8e78f63153",
       "archive": "archives/calendar-source.tar.gz",
-      "archiveSha256": "eb16306e804bdbdfc37761e6556da69ebddad28b4c241f6646534af46300d0de",
-      "archiveBytes": 1573111,
+      "archiveSha256": "c3859ac0d125525a3fecd23b9c9af699bb4120ce72e70ba2fadd0710b1d4b8d8",
+      "archiveBytes": 1573107,
       "lockSha256": "62dc8fe6531ef9cf6751aa36c7d1238ae25ca704f48fea824b1656289e71882f",
       "packageSha256": "ba2ff5fb14a3f1fd1891e698e5b5bce605d2c7b9e8d44a5dd5679c827bcd679f",
       "distDir": "dist-calendar",
@@ -73,7 +73,7 @@
       "packageManager": "pnpm@10.23.0",
       "testFiles": {
         "e2e/calendar-booking.spec.ts": "23af15a848d024756accde779a32d2fec22bee6d1dc17b58085e0dacf7872c39",
-        "e2e/calendar-events.spec.ts": "b5b147d8564ea4102fd86909290d5930c77f9f6badfff244aad1a41f5cd5ba32",
+        "e2e/calendar-events.spec.ts": "185e402c81d290247c1e21e9a6e6d952eac0c6aed4e3ec701ff312f1e1e23bf2",
         "e2e/calendar-layout.spec.ts": "0023001a1f5fb7277eba4dc9818eed6ebcde69ba99740cd7d04381211031220e",
         "e2e/fips-discovery.spec.ts": "380b3d75290bfd5987e8dc8d33e8b4b8d88d62f5afadd96745f17835b35fde23",
         "e2e/fips-provider-bridge.spec.ts": "1bf81ac5cd6724f1bf0424c00e1298cff2950f104650d7fda08481f1db688d8c",

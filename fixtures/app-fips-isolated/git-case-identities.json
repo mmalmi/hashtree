@@ -1,0 +1,744 @@
+{
+  "source": "199fd1a15409aef57f51f46f0d298315792ffe43",
+  "priorRun": 42230892162,
+  "cases": [
+    {
+      "id": "aebbfb11e599c5e65dd4-ee29fc462b15b6142d2a",
+      "file": "contact-follow.spec.ts",
+      "line": 10,
+      "column": 1,
+      "title": "public follow and unfollow preserve relay contact metadata through the real worker",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "21b78352b69cf8e74246-534aa55ee71f538c78c8",
+      "file": "git-basic.spec.ts",
+      "line": 70,
+      "column": 3,
+      "title": "navigating to .git directory should show directory view not file download",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "21b78352b69cf8e74246-049150e06ccfa15a68f5",
+      "file": "git-basic.spec.ts",
+      "line": 126,
+      "column": 3,
+      "title": "dotfiles like .git and .claude should be treated as directories",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "21b78352b69cf8e74246-519c402dbec72b8ff4ef",
+      "file": "git-basic.spec.ts",
+      "line": 166,
+      "column": 3,
+      "title": "should detect git repo and show git features when .git directory exists",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "21b78352b69cf8e74246-fc8be602871a11ba2502",
+      "file": "git-basic.spec.ts",
+      "line": 220,
+      "column": 3,
+      "title": ".git directory should be uploaded when adding a folder",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "21b78352b69cf8e74246-63192f73579997250e6a",
+      "file": "git-basic.spec.ts",
+      "line": 244,
+      "column": 3,
+      "title": "git repo structure is preserved when uploading .git directory",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "51bcb041a677ed8b3396-95287981390f240ca5f0",
+      "file": "git-branch-compare.spec.ts",
+      "line": 16,
+      "column": 3,
+      "title": "compare URL with invalid branch shows error",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "51bcb041a677ed8b3396-bc765e4d4e7038836cd9",
+      "file": "git-branch-compare.spec.ts",
+      "line": 53,
+      "column": 3,
+      "title": "compare URL navigates to comparison view",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "51bcb041a677ed8b3396-da6b381421e4719d7444",
+      "file": "git-branch-compare.spec.ts",
+      "line": 89,
+      "column": 3,
+      "title": "merge URL navigates to merge view",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "51bcb041a677ed8b3396-8835f7c86cb5f458a3bc",
+      "file": "git-branch-compare.spec.ts",
+      "line": 125,
+      "column": 3,
+      "title": "compare URL shows diff between branches",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "51bcb041a677ed8b3396-320ee9f9832b2e25d104",
+      "file": "git-branch-compare.spec.ts",
+      "line": 230,
+      "column": 3,
+      "title": "branch dropdown shows compare option",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "51bcb041a677ed8b3396-26f5cf1dfa62fe63c696",
+      "file": "git-branch-compare.spec.ts",
+      "line": 294,
+      "column": 3,
+      "title": "branch creation persists and shows in dropdown",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "51bcb041a677ed8b3396-29fcadd2ddc5c64ea599",
+      "file": "git-branch-compare.spec.ts",
+      "line": 353,
+      "column": 3,
+      "title": "merge branches shows success message",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "aca608e10b2f1b248f12-28a57ba10b6027165dfc",
+      "file": "git-branch.spec.ts",
+      "line": 10,
+      "column": 3,
+      "title": "detached HEAD should show commit id and allow branch checkout",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "aca608e10b2f1b248f12-0f6a7bcfb072397019f6",
+      "file": "git-branch.spec.ts",
+      "line": 111,
+      "column": 3,
+      "title": "new branch can be created from branch dropdown",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "aca608e10b2f1b248f12-efba3b0706b72956c20c",
+      "file": "git-branch.spec.ts",
+      "line": 192,
+      "column": 3,
+      "title": "tags appear in the tags view and commit history",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "132a87a34e2901740ed2-bbac0eee94ca98982eeb",
+      "file": "git-checkout.spec.ts",
+      "line": 10,
+      "column": 3,
+      "title": "checkout commit should return a valid directory CID that can be listed",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "132a87a34e2901740ed2-fa55db2af3fe99c011e3",
+      "file": "git-checkout.spec.ts",
+      "line": 183,
+      "column": 3,
+      "title": "checkout previous revision removes files that were added later",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "15668f0384ef229632c0-de30b2de0c9f58d3ef14",
+      "file": "git-collaboration-privacy.spec.ts",
+      "line": 7,
+      "column": 5,
+      "title": "blocks publishing for private repositories",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "15668f0384ef229632c0-cae3174456ea9dee4230",
+      "file": "git-collaboration-privacy.spec.ts",
+      "line": 7,
+      "column": 5,
+      "title": "blocks publishing for link-visible repositories",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "15668f0384ef229632c0-f186351945b5ec7664c8",
+      "file": "git-collaboration-privacy.spec.ts",
+      "line": 7,
+      "column": 5,
+      "title": "blocks publishing for unknown repositories",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "15668f0384ef229632c0-9405badcd7f46c18c286",
+      "file": "git-collaboration-privacy.spec.ts",
+      "line": 113,
+      "column": 3,
+      "title": "public repositories still publish issues, comments, PRs and status changes",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "d27beb3f1e18a009d30e-ebf6190e766fc1e944d2",
+      "file": "git-commit-status.spec.ts",
+      "line": 11,
+      "column": 3,
+      "title": "shows clean after commit, uncommitted after edit",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "d27beb3f1e18a009d30e-babfde6e6664db3446e1",
+      "file": "git-commit-status.spec.ts",
+      "line": 88,
+      "column": 3,
+      "title": "commit hash in history modal links to commit view",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "d7eefbf036197a47fb4d-933e19a46e6f08b81a28",
+      "file": "git-commit-view.spec.ts",
+      "line": 19,
+      "column": 3,
+      "title": "clicking commit message should navigate to commit view with details",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "d7eefbf036197a47fb4d-28ac62238aa526ef1e49",
+      "file": "git-commit-view.spec.ts",
+      "line": 96,
+      "column": 3,
+      "title": "commit view shows commit details and browse files link",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "d7eefbf036197a47fb4d-fed05600770353af537b",
+      "file": "git-commit-view.spec.ts",
+      "line": 143,
+      "column": 3,
+      "title": "commit view can open the full file at that commit",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "d7eefbf036197a47fb4d-bfc77621a5e9524eda86",
+      "file": "git-commit-view.spec.ts",
+      "line": 209,
+      "column": 3,
+      "title": "commit view handles nested files and back navigation",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "d7eefbf036197a47fb4d-da9d42df9b9813c786cb",
+      "file": "git-commit-view.spec.ts",
+      "line": 292,
+      "column": 3,
+      "title": "tab navigation shows on commit view",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "3a3368e488aa0710a557-9dd6fd52cc4c64d549c1",
+      "file": "git-commit.spec.ts",
+      "line": 10,
+      "column": 3,
+      "title": "should be able to add files and commit them via commit modal",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "3a3368e488aa0710a557-5af98f80547c896569fc",
+      "file": "git-commit.spec.ts",
+      "line": 148,
+      "column": 3,
+      "title": "git status should show correct filename (not truncated)",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "3a3368e488aa0710a557-5ce9082bbc27fb4e3ffc",
+      "file": "git-commit.spec.ts",
+      "line": 223,
+      "column": 3,
+      "title": "git status shows changes count correctly",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "4eb7f24c805a028cc332-daf5cf770ec082f9130e",
+      "file": "git-encrypted-upload.spec.ts",
+      "line": 6,
+      "column": 1,
+      "title": "uploads file and streamed content with versioned keys to Blossom",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "13ed6937654b0c95b259-0bb68122bed99fc2f7dd",
+      "file": "git-favorites.spec.ts",
+      "line": 12,
+      "column": 3,
+      "title": "liked repositories appear on home and profile",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-1f2ba38e902f9f9aa3de",
+      "file": "git-file-bar.spec.ts",
+      "line": 23,
+      "column": 3,
+      "title": "repo pages constrain the main column and keep file-view git path context",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-2e0f99502a6fa2e6db29",
+      "file": "git-file-bar.spec.ts",
+      "line": 74,
+      "column": 3,
+      "title": "repo header shows the current subdirectory path without horizontal overflow on mobile",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-b4e63bdd5bf3d65fd1ac",
+      "file": "git-file-bar.spec.ts",
+      "line": 104,
+      "column": 3,
+      "title": "repo header does not switch to the target subdir before the directory listing catches up",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-a38765afb77a59261c33",
+      "file": "git-file-bar.spec.ts",
+      "line": 138,
+      "column": 3,
+      "title": "shows commit info when viewing a file in git repo",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-4fb349e1720edde26d2d",
+      "file": "git-file-bar.spec.ts",
+      "line": 152,
+      "column": 3,
+      "title": "keeps the file browser sidebar off repo pages but shows it on git file pages",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-1475d837047ed5de52b4",
+      "file": "git-file-bar.spec.ts",
+      "line": 177,
+      "column": 3,
+      "title": "markdown fullscreen hides the git file tree and restores it on exit",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-19c2f9586ed97b753cdd",
+      "file": "git-file-bar.spec.ts",
+      "line": 205,
+      "column": 3,
+      "title": "direct repository links never flash the generic file browser sidebar",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-456c9043e224fb1aabeb",
+      "file": "git-file-bar.spec.ts",
+      "line": 224,
+      "column": 3,
+      "title": "direct repository links never flash empty directory before repo entries load",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-6fabae45f9a13c86d663",
+      "file": "git-file-bar.spec.ts",
+      "line": 243,
+      "column": 3,
+      "title": "git permalinks for subdirectory files do not render the generic file browser sidebar",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-bfc6e37f1dbf1e756123",
+      "file": "git-file-bar.spec.ts",
+      "line": 286,
+      "column": 3,
+      "title": "clicking a git permalink does not flash directory actions before file view resolves",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-805585302167317496f6",
+      "file": "git-file-bar.spec.ts",
+      "line": 329,
+      "column": 3,
+      "title": "clicking history opens git history modal",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-80c91dae6ea4a5628c04",
+      "file": "git-file-bar.spec.ts",
+      "line": 344,
+      "column": 3,
+      "title": "shows git bar when viewing file in subdirectory via navigation",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e51211b2d7c6ccf8d1f-c5c04fb7229dcec46a39",
+      "file": "git-file-bar.spec.ts",
+      "line": 376,
+      "column": 3,
+      "title": "direct deep links into repo subdirectories still use git UI without flashing directory actions",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "24133bcd06231609c25c-30598f069abaeeb9bab7",
+      "file": "git-fips-provider-bridge.spec.ts",
+      "line": 21,
+      "column": 1,
+      "title": "git worker reads a missing block through the FIPS provider bridge",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "24133bcd06231609c25c-175e227f96861a420db6",
+      "file": "git-fips-provider-bridge.spec.ts",
+      "line": 72,
+      "column": 1,
+      "title": "Nostr account switches preserve the independent FIPS device identity",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "24133bcd06231609c25c-75030fe62e09adec2888",
+      "file": "git-fips-provider-bridge.spec.ts",
+      "line": 122,
+      "column": 1,
+      "title": "connected Git browsers exchange events and cached files on the same peer connection",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "14cd8c99aafcec6c968c-64c999b2d1eb4198cc4e",
+      "file": "git-fork-pr.spec.ts",
+      "line": 19,
+      "column": 3,
+      "title": "fork own repo, edit, commit, and create PR using htree:// format",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "18ae65b598e5cef5b635-f2ad3c0ab59177d3a81a",
+      "file": "git-forks.spec.ts",
+      "line": 201,
+      "column": 3,
+      "title": "forking another user repo writes metadata and lists same-EUC repo announcements",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "4fbcd83cde68afba6b11-74bc0dd355c787018a2d",
+      "file": "git-history-cache.spec.ts",
+      "line": 18,
+      "column": 3,
+      "title": "getFileLastCommits should work in subdirectories",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "4fbcd83cde68afba6b11-78f1847c3b9341b6cd0f",
+      "file": "git-history-cache.spec.ts",
+      "line": 163,
+      "column": 3,
+      "title": "getFileLastCommits should use cache for repeated calls",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "b8a03b4c467dd5f7ebe0-31185aff5314ac15a4fa",
+      "file": "git-history-files.spec.ts",
+      "line": 19,
+      "column": 3,
+      "title": "checkout commit should restore files from that commit",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "b8a03b4c467dd5f7ebe0-e489a8ed9b502663087a",
+      "file": "git-history-files.spec.ts",
+      "line": 181,
+      "column": 3,
+      "title": "git directory listing should show last commit info for files",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "c1d2285a0b5f1490b670-e07881cc2195d2d797a3",
+      "file": "git-history-remote.spec.ts",
+      "line": 28,
+      "column": 3,
+      "title": "git-remote-htree packed repos should keep Iris Git history compatible",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "c1d2285a0b5f1490b670-8fc5979c9abef5c9226b",
+      "file": "git-history-remote.spec.ts",
+      "line": 154,
+      "column": 3,
+      "title": "git history modal should handle repos without commits gracefully",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9b644549e3b47a861b3d-d01d45def192d469dd9b",
+      "file": "git-history-scroll.spec.ts",
+      "line": 19,
+      "column": 3,
+      "title": "git history modal should infinite scroll to load more commits",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9b644549e3b47a861b3d-39f887cbfe26a99bc7f1",
+      "file": "git-history-scroll.spec.ts",
+      "line": 190,
+      "column": 3,
+      "title": "wasm-git should not spam console with git output",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "b97d19c795f04f386988-8c9adb9930e4540e39dd",
+      "file": "git-history.spec.ts",
+      "line": 18,
+      "column": 3,
+      "title": "git history should return commits from uploaded git repo",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "b97d19c795f04f386988-c9a994dae672c758ccf8",
+      "file": "git-history.spec.ts",
+      "line": 207,
+      "column": 3,
+      "title": "packed git repos should load history and commit view without wasm fallback",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "6ffe30d92b99dc15820b-ac016f47f45ab4a16657",
+      "file": "git-home-discovery.spec.ts",
+      "line": 130,
+      "column": 3,
+      "title": "shows latest updated repositories from followed users instead of a hardcoded suggestion",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "6ffe30d92b99dc15820b-ad925ab1365b44541bd7",
+      "file": "git-home-discovery.spec.ts",
+      "line": 154,
+      "column": 3,
+      "title": "shows fallback seed followed repositories when the user has no follows",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "6ffe30d92b99dc15820b-61274756d106b40e2897",
+      "file": "git-home-discovery.spec.ts",
+      "line": 175,
+      "column": 3,
+      "title": "opens non-htree discovered repositories externally",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "e16c8b94b7b5baf9028f-82668b20bbda70e3e751",
+      "file": "git-init.spec.ts",
+      "line": 10,
+      "column": 3,
+      "title": "new repository should be initialized as a git repo by default",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "34a93e3c35f5ac233697-b644a2f7bdbbe1c4d261",
+      "file": "git-perf.spec.ts",
+      "line": 19,
+      "column": 3,
+      "title": "measure git operations on hashtree repo",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "cd0d95a7684daee6879c-88671d77235bebb7536c",
+      "file": "git-pr-interop.spec.ts",
+      "line": 391,
+      "column": 3,
+      "title": "PRs created in iris-git are listed by htree and become applied after htree-side merge",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "cd0d95a7684daee6879c-0f86f5045220c1bd117f",
+      "file": "git-pr-interop.spec.ts",
+      "line": 443,
+      "column": 3,
+      "title": "PRs created with htree are listed and merged in iris-git for the repo owner",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "62a9fd0e089cdeb5dc68-f9d8619635467f93d1b2",
+      "file": "git-profile-activity.spec.ts",
+      "line": 41,
+      "column": 3,
+      "title": "profile shows issues, pull requests, and comments",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "62a9fd0e089cdeb5dc68-34253fc957523f9560b5",
+      "file": "git-profile-activity.spec.ts",
+      "line": 119,
+      "column": 3,
+      "title": "issue comments remain visible after refresh",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "4e2e8362fbb998f74089-8f78440b547142e8e149",
+      "file": "git-push-htree.spec.ts",
+      "line": 144,
+      "column": 3,
+      "title": "push repo to htree:// and view in browser",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "38358b5596ecfaeac42c-85a1dacbdb27f99e959b",
+      "file": "git-shell.spec.ts",
+      "line": 34,
+      "column": 3,
+      "title": "git code dropdown shows clone, install command, and install help",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e1bd622ba47475c2b08-ef6c451883fca16a419c",
+      "file": "git-startup-ui.spec.ts",
+      "line": 5,
+      "column": 3,
+      "title": "waits before showing an offline warning",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "9e1bd622ba47475c2b08-433f4571bb0cb2dc054b",
+      "file": "git-startup-ui.spec.ts",
+      "line": 22,
+      "column": 3,
+      "title": "does not flash signed-out prompts while restoring a saved account",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "36d43e86f8f7917aee4b-482a1bab2889555cf400",
+      "file": "git-status-edit.spec.ts",
+      "line": 14,
+      "column": 3,
+      "title": "should show uncommitted after adding a new file in subdirectory",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "36d43e86f8f7917aee4b-6c21227664a869f10594",
+      "file": "git-status-edit.spec.ts",
+      "line": 98,
+      "column": 3,
+      "title": "should show uncommitted when editing file inside subdirectory",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "36d43e86f8f7917aee4b-9c736b2c14e1cf7ab585",
+      "file": "git-status-edit.spec.ts",
+      "line": 188,
+      "column": 3,
+      "title": "should show uncommitted after using FileEditor to edit a file",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "36d43e86f8f7917aee4b-7f8340d93dd46458fd4b",
+      "file": "git-status-edit.spec.ts",
+      "line": 320,
+      "column": 3,
+      "title": "should show uncommitted after forking and editing a git repo",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "6c553cac115d5f879106-056e5c3c3aee07c0abe0",
+      "file": "git-status-remote-edit.spec.ts",
+      "line": 19,
+      "column": 3,
+      "title": "should show uncommitted in git-remote-htree pushed repo after edit",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "801261937a6f522a83b2-cdb57ec9ecd4862f31d8",
+      "file": "tree-loading.spec.ts",
+      "line": 69,
+      "column": 1,
+      "title": "measure tree loading time",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    },
+    {
+      "id": "801261937a6f522a83b2-583dc07031e8fdcf70b5",
+      "file": "tree-loading.spec.ts",
+      "line": 106,
+      "column": 1,
+      "title": "direct nav loads repo on first page load",
+      "projectName": "chromium",
+      "expectedStatus": "passed"
+    }
+  ]
+}
