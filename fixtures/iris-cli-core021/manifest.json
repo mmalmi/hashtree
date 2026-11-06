@@ -1,15 +1,15 @@
 {
   "sourceRepository": "https://github.com/irislib/iris-nostr",
-  "sourceCommit": "ed13f4691571f978cca343604b119a078157731d",
+  "sourceCommit": "a3113ed13fc7df343f9c4294713121004bd2ac8d",
   "sourceParent": "3ba59aeffc47ffc354cbcecef47315b1c092f4cb",
-  "sourceTree": "f7ad175a6337085cbc9aef83e73baeea02efb889",
-  "archiveSha256": "01c4599eaa6c8818b738034f14c6d3a78abc0c7055054eefceaa3539cca5bb1d",
-  "archiveBytes": 1060832,
+  "sourceTree": "5572154a23eb64e850751323069a6554402968d4",
+  "archiveSha256": "2463ae3daabcdb899caf1745bbefc9a8894e0d86938d1b6ece68cc248d770066",
+  "archiveBytes": 1060846,
   "sourceFiles": {
     "Cargo.toml": "525a88d29d14701342990578c46fa0fd62b2331b1cece9f92168eb821bb0a356",
     "Cargo.lock": "2f105d1dab8098fa731dca2809a2591a7b2b57049a23d4435d59658bae124106",
     "src/snapshot.rs": "aa297b0ba3949ce222bd9504ff2aa3e349c0979cdab32d5d1aa89fbb75161961",
-    "tests/default_bootstrap.rs": "b641483b427f513e469c431b0f669769041457eaf3b7933ba6cfc2da46bb22fd",
+    "tests/default_bootstrap.rs": "bc8020b9ed53f5d744a6cf5d3c53bb3457f43fc2ceca592e70d331f617260428",
     "tests/data/default-bootstrap-v4.bin": "9af2ad6aaf830ff08aa14f83233e56c49d1379fb5da05efd1ebe9166aceabcb0"
   },
   "negativeControlFiles": {
