@@ -473,16 +473,30 @@ mod tests {
 
     #[tokio::test]
     async fn negentropy_corrupt_checkpoint_is_an_error_not_an_empty_set() {
+        let _guard = crate::socialgraph::test_lock().await;
         let directory = tempfile::tempdir().unwrap();
+        let graph = crate::socialgraph::open_test_social_graph_store_with_mapsize(
+            &directory.path().join("graph"),
+            Some(128 * 1024 * 1024),
+        )
+        .unwrap();
+        let backend: std::sync::Arc<dyn crate::socialgraph::SocialGraphBackend> = graph;
         let store =
             crate::storage::HashtreeStore::with_options(directory.path(), None, 128 * 1024 * 1024)
                 .unwrap();
         let index = directory.path().join("nostr-index");
         std::fs::create_dir_all(&index).unwrap();
-        let relay = NostrRelay::new_read_only(
+        let relay = NostrRelay::new(
+            backend,
             directory.path().to_path_buf(),
-            super::super::NostrRelayConfig::default(),
+            Default::default(),
+            None,
+            super::super::NostrRelayConfig {
+                spambox_db_max_bytes: 0,
+                ..Default::default()
+            },
         )
+        .unwrap()
         .with_historical_nostr_index(store.store_arc(), directory.path().to_path_buf());
         let (tx, mut rx) = mpsc::unbounded_channel();
         relay.register_client(7, tx, None).await;

@@ -109,8 +109,10 @@ pub struct ServerConfig {
     #[serde(default = "default_enable_fips_lan_discovery")]
     pub enable_fips_lan_discovery: bool,
     /// FIPS Nostr relays used for discovery adverts and encrypted signaling.
-    /// Unset uses active [nostr].relays plus FIPS defaults; an explicit empty
-    /// list disables relay discovery.
+    /// Unset inherits custom active [nostr].relays plus FIPS defaults. The exact
+    /// public default catalog uses a separate FIPS catalog, even when saved
+    /// explicitly, so public default changes do not expand private signaling.
+    /// An explicit empty list disables relay discovery.
     #[serde(default)]
     pub fips_relays: Option<Vec<String>>,
     /// First-adjacency FIPS WebSocket seeds. Unset uses the public Iris FIPS
@@ -188,6 +190,9 @@ impl ServerConfig {
             // relay deployments and deterministic local test networks; adding
             // public bootstrap relays here leaks signaling outside that scope.
             Some(relays) => normalize_fips_signal_relays(relays),
+            None if active_nostr_relays == default_relays() => {
+                merge_fips_signal_relays(&DEFAULT_FIPS_BASE_RELAYS.map(str::to_string))
+            }
             None => merge_fips_signal_relays(active_nostr_relays),
         }
     }
@@ -205,6 +210,12 @@ impl ServerConfig {
 }
 
 const DEFAULT_FIPS_SIGNAL_RELAYS: [&str; 2] = ["wss://temp.iris.to", "wss://relay.primal.net"];
+// Keep the pre-Ditto effective private catalog independent of public defaults.
+const DEFAULT_FIPS_BASE_RELAYS: [&str; 3] = [
+    "wss://nos.lol",
+    "wss://relay.snort.social",
+    "wss://temp.iris.to",
+];
 const DEFAULT_FIPS_WEBSOCKET_SEED_URLS: [&str; 2] =
     ["wss://fips1.iris.to/fips", "wss://fips2.iris.to/fips"];
 
@@ -1111,6 +1122,33 @@ mod tests {
             DEFAULT_FIPS_SIGNAL_RELAYS,
             ["wss://temp.iris.to", "wss://relay.primal.net"]
         );
+    }
+
+    #[test]
+    fn ditto_public_defaults_preserve_effective_private_fips_relays() {
+        let expected = vec![
+            "wss://nos.lol",
+            "wss://relay.snort.social",
+            "wss://temp.iris.to",
+            "wss://relay.primal.net",
+        ];
+        let saved_defaults = format!(
+            "[nostr]\nrelays = {}\n",
+            serde_json::to_string(&default_relays()).unwrap()
+        );
+        for config in [
+            Config::default(),
+            toml::from_str::<Config>("").unwrap(),
+            toml::from_str::<Config>(&saved_defaults).unwrap(),
+        ] {
+            assert_eq!(config.nostr.relays, default_relays());
+            assert_eq!(
+                config
+                    .server
+                    .resolved_fips_relays(&config.nostr.active_relays()),
+                expected
+            );
+        }
     }
 
     #[test]

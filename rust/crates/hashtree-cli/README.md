@@ -130,6 +130,16 @@ New identities also seed a local bootstrap follow to `npub1xdhnr9mrv47kkrn95k6cw
 
 Config file: `~/.hashtree/config.toml`
 
+Fresh public relay settings include `wss://relay.ditto.pub` for reading, graph
+sync and public posting. Existing relay lists, including empty lists, are kept.
+Private FIPS discovery and encrypted signaling keep their previous default
+relays: `nos.lol`, `relay.snort.social`, `temp.iris.to` and `relay.primal.net`.
+When `server.fips_relays` is omitted, the exact ordered built-in public relay
+catalog uses that separate FIPS default, including when the catalog was saved
+explicitly. Other custom public lists retain their existing FIPS inheritance.
+Set `server.fips_relays` explicitly to choose private signaling destinations
+(including Ditto if desired); an explicit empty list disables relay signaling.
+
 ```toml
 [blossom]
 read_servers = ["https://cdn.iris.to"]

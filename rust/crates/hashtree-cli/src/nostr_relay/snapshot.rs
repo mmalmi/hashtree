@@ -131,9 +131,15 @@ pub(crate) async fn query<S: Store>(
             sources.push((root, String::new()));
         }
         for (root, prefix) in sources {
-            let next = index
-                .prefix_links_limited(root, &prefix, budget.remaining_candidates + 1)
-                .await?;
+            let next = if prefix.is_empty() {
+                index
+                    .links_entries_limited(Some(root), budget.remaining_candidates + 1)
+                    .await?
+            } else {
+                index
+                    .prefix_links_limited(root, &prefix, budget.remaining_candidates + 1)
+                    .await?
+            };
             ensure!(
                 next.len() <= budget.remaining_candidates,
                 "reconciliation candidate limit"
@@ -196,6 +202,7 @@ mod tests {
         }
         let (store, root) = fixture(&events).await;
         for filter in [
+            Filter::new(),
             Filter::new()
                 .authors(events.iter().map(|e| e.pubkey))
                 .kinds([Kind::ContactList, Kind::MuteList]),

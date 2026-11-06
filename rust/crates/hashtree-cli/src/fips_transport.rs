@@ -96,6 +96,12 @@ impl DaemonNostrPubsubHandle {
     }
 }
 
+fn configure_daemon_fips_relay_scope(config: &Config, options: &mut FipsEndpointOptions) {
+    options.relays = config
+        .server
+        .resolved_fips_relays(&config.nostr.active_relays());
+}
+
 pub async fn start_daemon_fips_transport(
     config: &Config,
     keys: &nostr::Keys,
@@ -106,8 +112,6 @@ pub async fn start_daemon_fips_transport(
         return Ok(None);
     }
 
-    let active_relays = config.nostr.active_relays();
-    let relays = config.server.resolved_fips_relays(&active_relays);
     let discovery_scope = normalized_discovery_scope(&config.server.fips_discovery_scope);
     let peer_configs = daemon_fips_peer_configs(config, peer_ids);
     let identity_nsec = keys
@@ -116,7 +120,7 @@ pub async fn start_daemon_fips_transport(
         .context("Failed to encode daemon identity for FIPS endpoint")?;
     let mut options = FipsEndpointOptions::new(identity_nsec);
     options.discovery_scope = discovery_scope.clone();
-    options.relays = relays;
+    configure_daemon_fips_relay_scope(config, &mut options);
     options.enable_udp = config.server.enable_fips_udp;
     options.enable_webrtc = config.server.enable_fips_webrtc;
     let websocket_seed_urls = config.server.resolved_fips_websocket_seed_urls();
@@ -628,6 +632,107 @@ mod tests {
     use nostr_pubsub::{PubsubProviderMode, QueryOptions};
     use sha2::{Digest, Sha256};
     use tokio::time::timeout;
+
+    #[test]
+    fn ditto_public_defaults_preserve_daemon_fips_endpoint_relay_scope() {
+        let legacy = vec![
+            "wss://nos.lol",
+            "wss://relay.snort.social",
+            "wss://temp.iris.to",
+            "wss://relay.primal.net",
+        ];
+        let fallback = vec!["wss://temp.iris.to", "wss://relay.primal.net"];
+        let mut cases = vec![
+            ("fresh", Config::default(), legacy.clone()),
+            (
+                "omitted TOML",
+                toml::from_str::<Config>("").unwrap(),
+                legacy.clone(),
+            ),
+        ];
+        let public_defaults = Config::default().nostr.relays;
+        let saved_defaults: Config = toml::from_str(&format!(
+            "[nostr]\nrelays = {}\n",
+            serde_json::to_string(&public_defaults).unwrap()
+        ))
+        .unwrap();
+        cases.push(("saved exact public catalog", saved_defaults, legacy.clone()));
+
+        let mut explicit_empty = Config::default();
+        explicit_empty.server.fips_relays = Some(Vec::new());
+        cases.push(("explicit empty FIPS", explicit_empty, vec![]));
+
+        let mut explicit_custom = Config::default();
+        explicit_custom.server.fips_relays = Some(vec![
+            " wss://private.example/ ".to_string(),
+            "wss://relay.ditto.pub".to_string(),
+            "wss://private.example".to_string(),
+        ]);
+        cases.push((
+            "explicit custom FIPS",
+            explicit_custom,
+            vec!["wss://private.example", "wss://relay.ditto.pub"],
+        ));
+
+        let mut old_public_defaults = Config::default();
+        old_public_defaults.nostr.relays = legacy[..3].iter().map(|s| s.to_string()).collect();
+        cases.push(("saved old public catalog", old_public_defaults, legacy));
+
+        let mut custom_public = Config::default();
+        custom_public.nostr.relays = vec![
+            "wss://custom.example".to_string(),
+            "wss://relay.ditto.pub".to_string(),
+        ];
+        cases.push((
+            "custom public inheritance",
+            custom_public,
+            vec![
+                "wss://custom.example",
+                "wss://relay.ditto.pub",
+                "wss://temp.iris.to",
+                "wss://relay.primal.net",
+            ],
+        ));
+
+        let mut empty_public = Config::default();
+        empty_public.nostr.relays.clear();
+        cases.push(("empty public inheritance", empty_public, fallback.clone()));
+
+        let mut disabled_public = Config::default();
+        disabled_public.nostr.enabled = false;
+        cases.push((
+            "disabled public transport",
+            disabled_public,
+            fallback.clone(),
+        ));
+
+        let mut local_only = Config::default();
+        local_only.nostr.event_transport = NostrEventTransport::FipsLocalOnly;
+        cases.push(("local-only event transport", local_only, fallback));
+
+        let mut reordered_public = Config::default();
+        reordered_public.nostr.relays.swap(0, 1);
+        cases.push((
+            "reordered custom public catalog",
+            reordered_public,
+            vec![
+                "wss://nos.lol",
+                "wss://relay.ditto.pub",
+                "wss://relay.snort.social",
+                "wss://temp.iris.to",
+                "wss://relay.primal.net",
+            ],
+        ));
+
+        let nsec = nostr::Keys::generate().secret_key().to_bech32().unwrap();
+        for (name, config, expected) in cases {
+            let original_public_relays = config.nostr.relays.clone();
+            let mut options = FipsEndpointOptions::new(nsec.clone());
+            configure_daemon_fips_relay_scope(&config, &mut options);
+            assert_eq!(options.relays, expected, "{name}");
+            assert_eq!(config.nostr.relays, original_public_relays, "{name}");
+        }
+    }
 
     struct RecordingStoreRoute {
         store: Arc<hashtree_core::MemoryStore>,

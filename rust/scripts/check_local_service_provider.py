@@ -136,7 +136,9 @@ def main(output, receipt):
                              'negentropy_bounded_reader_rejects_candidate_and_record_exhaustion',
                              'negentropy_bounded_reader_applies_body_size_limit_before_decoding',
                              'negentropy_websocket_roundtrip_and_exact_id_fetch',
-                             'ditto_defaults_do_not_replace_saved_relay_choices'):
+                             'ditto_defaults_do_not_replace_saved_relay_choices',
+                             'ditto_public_defaults_preserve_effective_private_fips_relays',
+                             'ditto_public_defaults_preserve_daemon_fips_endpoint_relay_scope'):
                 assert required in listing, 'Missing graph reconciliation protocol test: ' + required
         if name == 'htree':
             assert 'ditto_publication_uses_configured_relays_without_injecting_defaults: test' in listing
