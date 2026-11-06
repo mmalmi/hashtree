@@ -129,11 +129,40 @@ The daemon maintains a local social graph store. On startup it crawls follow lis
 
 The social graph API is available at `/api/socialgraph/distance/:pubkey`.
 
+The embedded WebSocket relay supports NIP-77 reconciliation over its locally
+readable events. Clients exchange event IDs, then download wanted bodies with
+ordinary exact-ID requests. A reconciliation snapshot is limited to 1,024 events
+and 16 MiB of serialized event data; larger or unreadable sets return `NEG-ERR`
+instead of a partial result. Use bounded author or time filters for larger stores.
+Stored-event reads are limited to 512 KiB per body, 4,096 candidate index links
+and 16 MiB of body reads per backing source (the graph's public/ambient indexes
+share a budget; the optional historical index has another). Recent events are
+size-checked before cloning. These limits bound reconciliation payload work,
+not total process memory: decoded objects, index/storage buffers and the existing
+cache use additional memory. A selective filter can be rejected if its candidate
+scan exceeds the limit, even when its final matching set would be small.
+Only one snapshot query runs at a time, with a five-second response deadline.
+Sessions expire after 30 idle seconds and are limited to four per connection and
+64 overall, with 32 protocol rounds and 1 MiB of incoming hexadecimal messages
+per session. Legacy protocol envelopes, search filters and filters with `limit`
+are rejected. Reconciliation does not fetch from upstream relays or store remote
+events, and `NEG-CLOSE` leaves ordinary subscriptions open.
+
 New identities also seed a local bootstrap follow to `npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm` so the graph starts with a usable entrypoint. This writes `contacts.json` locally and is not auto-published.
 
 ## Configuration
 
 Config file: `~/.hashtree/config.toml`
+
+Fresh public relay settings include `wss://relay.ditto.pub` for reading, graph
+sync and public posting. Existing relay lists, including empty lists, are kept.
+Private FIPS discovery and encrypted signaling keep their previous default
+relays: `nos.lol`, `relay.snort.social`, `temp.iris.to` and `relay.primal.net`.
+When `server.fips_relays` is omitted, the exact ordered built-in public relay
+catalog uses that separate FIPS default, including when the catalog was saved
+explicitly. Other custom public lists retain their existing FIPS inheritance.
+Set `server.fips_relays` explicitly to choose private signaling destinations
+(including Ditto if desired); an explicit empty list disables relay signaling.
 
 ```toml
 [blossom]

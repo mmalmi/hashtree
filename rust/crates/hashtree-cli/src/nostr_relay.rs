@@ -16,6 +16,11 @@ use nostr::{Event, EventId, Filter as NostrFilter, SubscriptionId};
 
 use crate::socialgraph;
 
+#[path = "nostr_relay/negentropy.rs"]
+mod negentropy;
+#[path = "nostr_relay/snapshot.rs"]
+pub(crate) mod snapshot;
+
 const BLUETOOTH_EVENT_LOG_CAPACITY: usize = 100;
 const MAX_CONCURRENT_NOSTR_STORE_BLOCKING_TASKS: usize = 4;
 
@@ -194,6 +199,7 @@ mod imp {
         }
     }
 
+    #[derive(Clone)]
     struct HistoricalNostrIndex {
         store: Arc<StorageRouter>,
         latest_root_path: PathBuf,
@@ -318,10 +324,17 @@ mod imp {
         }
 
         async fn load_existing_root(&self) -> Result<Option<Cid>> {
-            if let Some(root) = load_nostr_index_root_file(&self.latest_root_path).await? {
+            if let Some(root) = load_nostr_index_root_file(&self.latest_root_path, false).await? {
                 return Ok(Some(root));
             }
-            load_nostr_index_root_file(&self.checkpoint_root_path).await
+            load_nostr_index_root_file(&self.checkpoint_root_path, false).await
+        }
+
+        async fn load_reconciliation_root(&self) -> Result<Option<Cid>> {
+            if let Some(root) = load_nostr_index_root_file(&self.latest_root_path, true).await? {
+                return Ok(Some(root));
+            }
+            load_nostr_index_root_file(&self.checkpoint_root_path, true).await
         }
 
         async fn persist_latest_root(&self, root: &Cid) -> Result<()> {
@@ -333,7 +346,7 @@ mod imp {
         }
     }
 
-    async fn load_nostr_index_root_file(path: &Path) -> Result<Option<Cid>> {
+    async fn load_nostr_index_root_file(path: &Path, reject_empty: bool) -> Result<Option<Cid>> {
         let root = match tokio::fs::read_to_string(path).await {
             Ok(root) => root,
             Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
@@ -341,6 +354,7 @@ mod imp {
         };
         let trimmed = root.trim();
         if trimmed.is_empty() {
+            anyhow::ensure!(!reject_empty, "empty reconciliation index root");
             return Ok(None);
         }
         parse_nostr_index_root(trimmed).map(Some)
@@ -625,6 +639,8 @@ mod imp {
         social_graph: Option<Arc<SocialGraphAccessControl>>,
         clients: Mutex<HashMap<u64, ClientState>>,
         subscriptions: Mutex<HashMap<u64, HashMap<SubscriptionId, Vec<NostrFilter>>>>,
+        pub(super) negentropy: Mutex<super::negentropy::Sessions>,
+        negentropy_queries: Arc<Semaphore>,
         recent_events: Mutex<RecentEvents>,
         next_client_id: AtomicU64,
         bluetooth_event_log: Arc<BluetoothEventLog>,
@@ -784,6 +800,8 @@ mod imp {
                 social_graph,
                 clients: Mutex::new(HashMap::new()),
                 subscriptions: Mutex::new(HashMap::new()),
+                negentropy: Mutex::new(Default::default()),
+                negentropy_queries: Arc::new(Semaphore::new(1)),
                 recent_events: Mutex::new(RecentEvents::new(recent_size)),
                 next_client_id: AtomicU64::new(1),
                 bluetooth_event_log,
@@ -811,6 +829,8 @@ mod imp {
                 social_graph: None,
                 clients: Mutex::new(HashMap::new()),
                 subscriptions: Mutex::new(HashMap::new()),
+                negentropy: Mutex::new(Default::default()),
+                negentropy_queries: Arc::new(Semaphore::new(1)),
                 recent_events: Mutex::new(RecentEvents::new(recent_size)),
                 next_client_id: AtomicU64::new(1),
                 bluetooth_event_log,
@@ -938,6 +958,100 @@ mod imp {
             Ok(())
         }
 
+        /// Build a complete bounded local set, without remote queries or the
+        /// ordinary REQ path's error-to-empty and result-limit behavior.
+        pub(super) async fn negentropy_snapshot(&self, filter: NostrFilter) -> Result<Vec<Event>> {
+            use super::negentropy::{MAX_RECORDS, MAX_SNAPSHOT_BYTES};
+            let permit = self
+                .negentropy_queries
+                .clone()
+                .try_acquire_owned()
+                .map_err(|_| anyhow::anyhow!("reconciliation snapshot busy"))?;
+            let recent = if self.trusted.is_none() || !prefers_trusted_only(&filter) {
+                let cache = self.recent_events.lock().await;
+                let mut result = Vec::new();
+                let mut remaining = MAX_SNAPSHOT_BYTES;
+                for event in cache
+                    .events
+                    .values()
+                    .filter(|event| filter.match_event(event, Default::default()))
+                {
+                    anyhow::ensure!(result.len() < MAX_RECORDS, "reconciliation set too large");
+                    remaining -= super::snapshot::event_size(event, remaining)?;
+                    result.push(event.clone());
+                }
+                result
+            } else {
+                Vec::new()
+            };
+            let trusted = self.trusted.as_ref().map(|store| Arc::clone(&store.store));
+            let historical = self.historical_index.clone();
+            let task = tokio::task::spawn_blocking(move || -> Result<Vec<Event>> {
+                // Keep this permit in the blocking task even if the requester
+                // times out: a stalled store must not create unlimited workers.
+                let _permit = permit;
+                let mut events = Vec::new();
+                let mut seen = HashSet::new();
+                let mut bytes = 0usize;
+                let mut append = |batch: Vec<Event>| -> Result<()> {
+                    anyhow::ensure!(batch.len() <= MAX_RECORDS, "reconciliation set too large");
+                    for event in batch {
+                        if !filter.match_event(&event, Default::default()) || !seen.insert(event.id)
+                        {
+                            continue;
+                        }
+                        bytes = bytes.saturating_add(super::snapshot::event_size(
+                            &event,
+                            MAX_SNAPSHOT_BYTES.saturating_sub(bytes),
+                        )?);
+                        anyhow::ensure!(
+                            bytes <= MAX_SNAPSHOT_BYTES,
+                            "reconciliation snapshot byte limit"
+                        );
+                        events.push(event);
+                        anyhow::ensure!(
+                            events.len() <= MAX_RECORDS,
+                            "reconciliation set too large"
+                        );
+                    }
+                    Ok(())
+                };
+                append(recent)?;
+                if let Some(store) = trusted {
+                    // Propagate backend errors; an empty successful NEG set
+                    // must never stand in for unreadable local data.
+                    append(store.query_events_bounded(
+                        &filter,
+                        MAX_RECORDS,
+                        MAX_SNAPSHOT_BYTES,
+                    )?)?;
+                }
+                if let Some(index) = historical {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()?;
+                    let stored = runtime.block_on(async {
+                        let Some(root) = index.load_reconciliation_root().await? else {
+                            return Ok::<_, anyhow::Error>(Vec::new());
+                        };
+                        super::snapshot::query(
+                            Arc::clone(&index.store),
+                            Some(&root),
+                            &filter,
+                            &mut super::snapshot::ReadBudget::new(MAX_RECORDS, MAX_SNAPSHOT_BYTES),
+                        )
+                        .await
+                    })?;
+                    append(stored)?;
+                }
+                Ok(events)
+            });
+            tokio::time::timeout(Duration::from_secs(5), task)
+                .await
+                .map_err(|_| anyhow::anyhow!("reconciliation snapshot timeout"))?
+                .map_err(|err| anyhow::anyhow!("reconciliation snapshot task failed: {err}"))?
+        }
+
         pub async fn query_events(&self, filter: &NostrFilter, limit: usize) -> Vec<Event> {
             let limit = limit.min(self.config.max_query_limit);
             if limit == 0 {
@@ -1009,6 +1123,7 @@ mod imp {
             let mut clients = self.clients.lock().await;
             clients.remove(&client_id);
             drop(clients);
+            self.negentropy.lock().await.disconnect(client_id);
             let mut subs = self.subscriptions.lock().await;
             subs.remove(&client_id);
         }
@@ -1050,14 +1165,37 @@ mod imp {
                 NostrClientMessage::Auth(event) => {
                     self.handle_auth(client_id, event.into_owned()).await;
                 }
-                NostrClientMessage::NegOpen { .. }
-                | NostrClientMessage::NegMsg { .. }
-                | NostrClientMessage::NegClose { .. } => {
-                    self.send_to_client(
+                NostrClientMessage::NegOpen {
+                    subscription_id,
+                    filter,
+                    id_size,
+                    initial_message,
+                } => {
+                    self.handle_neg_open(
                         client_id,
-                        NostrRelayMessage::notice("negentropy not supported"),
+                        subscription_id.into_owned(),
+                        filter.into_owned(),
+                        id_size,
+                        initial_message.into_owned(),
                     )
                     .await;
+                }
+                NostrClientMessage::NegMsg {
+                    subscription_id,
+                    message,
+                } => {
+                    self.handle_neg_message(
+                        client_id,
+                        subscription_id.into_owned(),
+                        message.into_owned(),
+                    )
+                    .await;
+                }
+                NostrClientMessage::NegClose { subscription_id } => {
+                    self.negentropy
+                        .lock()
+                        .await
+                        .close(client_id, &subscription_id);
                 }
             }
         }
@@ -1330,7 +1468,7 @@ mod imp {
                 .allow_spambox_event(self.config.spambox_max_events_per_min)
         }
 
-        async fn allow_req(&self, client_id: u64) -> bool {
+        pub(super) async fn allow_req(&self, client_id: u64) -> bool {
             let mut clients = self.clients.lock().await;
             let Some(state) = clients.get_mut(&client_id) else {
                 return false;
@@ -1359,7 +1497,7 @@ mod imp {
             }
         }
 
-        async fn send_to_client(&self, client_id: u64, msg: NostrRelayMessage<'_>) {
+        pub(super) async fn send_to_client(&self, client_id: u64, msg: NostrRelayMessage<'_>) {
             let sender = {
                 let clients = self.clients.lock().await;
                 clients.get(&client_id).map(|state| state.sender.clone())

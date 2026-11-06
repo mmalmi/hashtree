@@ -1301,6 +1301,16 @@ pub trait SocialGraphBackend: Send + Sync {
         self.ingest_events(events)
     }
     fn query_events(&self, filter: &Filter, limit: usize) -> Result<Vec<Event>>;
+    /// Complete local reconciliation query with bounded payload reads.
+    /// Unsupported backends must reject, never fall back to an unbounded query.
+    fn query_events_bounded(
+        &self,
+        _filter: &Filter,
+        _limit: usize,
+        _max_bytes: usize,
+    ) -> Result<Vec<Event>> {
+        anyhow::bail!("bounded reconciliation queries are unavailable for this backend")
+    }
 }
 
 #[cfg(test)]
@@ -1662,10 +1672,12 @@ fn open_social_graph_store_at_path_with_storage_split_and_env_flags(
         ambient_store: Arc::clone(&ambient_store),
         distance_cache: StdMutex::new(None),
         public_events: EventIndexBucket {
+            store: Arc::clone(&public_store),
             event_store: NostrEventStore::new(Arc::clone(&public_store)),
             root_path: db_dir.join(EVENTS_ROOT_FILE),
         },
         ambient_events: EventIndexBucket {
+            store: Arc::clone(&ambient_store),
             event_store: NostrEventStore::new(ambient_store),
             root_path: db_dir.join(AMBIENT_EVENTS_ROOT_FILE),
         },
@@ -3361,6 +3373,26 @@ impl SocialGraphBackend for SocialGraphStore {
     fn query_events(&self, filter: &Filter, limit: usize) -> Result<Vec<Event>> {
         SocialGraphStore::query_events(self, filter, limit)
     }
+
+    fn query_events_bounded(
+        &self,
+        filter: &Filter,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Event>> {
+        let mut budget = crate::nostr_relay::snapshot::ReadBudget::new(limit, max_bytes);
+        let mut events = Vec::new();
+        for bucket in [&self.public_events, &self.ambient_events] {
+            let root = bucket.events_root()?;
+            events.extend(block_on(crate::nostr_relay::snapshot::query(
+                Arc::clone(&bucket.store),
+                root.as_ref(),
+                filter,
+                &mut budget,
+            ))?);
+        }
+        Ok(dedupe_events(events))
+    }
 }
 
 impl NostrSocialGraphBackend for SocialGraphStore {
@@ -3577,6 +3609,15 @@ where
 
     fn query_events(&self, filter: &Filter, limit: usize) -> Result<Vec<Event>> {
         self.as_ref().query_events(filter, limit)
+    }
+
+    fn query_events_bounded(
+        &self,
+        filter: &Filter,
+        limit: usize,
+        max_bytes: usize,
+    ) -> Result<Vec<Event>> {
+        self.as_ref().query_events_bounded(filter, limit, max_bytes)
     }
 }
 

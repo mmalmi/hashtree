@@ -21,6 +21,7 @@ const PUBLISHED_EVENT_TREE_NAME: &str = "nostr-event-index";
 const PUBLISHED_PROFILE_SEARCH_TREE_NAME: &str = "profile-search";
 const PUBLISHED_PROFILES_BY_PUBKEY_TREE_NAME: &str = "profiles-by-pubkey";
 const MIRROR_PUBLISH_RELAY_PRIORITY: &[&str] = &[
+    "wss://relay.ditto.pub",
     "wss://temp.iris.to",
     "wss://vault.iris.to",
     "wss://relay.damus.io",
@@ -671,6 +672,24 @@ mod tests {
     use nostr::nips::nip19::ToBech32;
     use nostr::PublicKey;
     use tempfile::TempDir;
+
+    #[test]
+    fn ditto_publication_uses_configured_relays_without_injecting_defaults() {
+        assert_eq!(super::mirror_publish_relays(&[]), Vec::<String>::new());
+        let custom = vec!["wss://custom.example".to_string()];
+        assert_eq!(super::mirror_publish_relays(&custom), custom);
+        let configured = vec![
+            "wss://temp.iris.to".to_string(),
+            "wss://relay.ditto.pub".to_string(),
+        ];
+        assert_eq!(
+            super::mirror_publish_relays(&configured),
+            vec![
+                "wss://relay.ditto.pub".to_string(),
+                "wss://temp.iris.to".to_string()
+            ]
+        );
+    }
 
     #[test]
     fn formats_hex_socialgraph_root_as_npub() {
