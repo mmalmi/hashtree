@@ -14,6 +14,7 @@ def inner(config):
             binary=pathlib.Path(subprocess.check_output(['rustup','which',tool],text=True).strip());runtime[tool+'Sha256']=sha(binary)
         commands=[
             ('negative',['cargo','test','--locked','--offline','--test','default_bootstrap','pinned_default_preserves_follow_and_mute_revisions','--','--nocapture'],'negative'),
+            ('clear-negative-package',['cargo','clean','--locked','--offline','--package','iris-nostr'],'source'),
             ('fmt',['cargo','fmt','--all','--','--check'],'source'),
             ('clippy',['cargo','clippy','--locked','--offline','--all-targets','--','-D','warnings'],'source'),
             ('tests',['cargo','test','--locked','--offline'],'source'),
@@ -21,6 +22,12 @@ def inner(config):
             ('package-list',['cargo','package','--locked','--offline','--list'],'source'),
         ]
         for name,command,directory in commands:
+            # The controls have identical package IDs but different source roots.
+            # Clear only this package after RED so Cargo cannot reuse its old-default objects.
+            if name=='clear-negative-package':
+                restored={file:sha(stage/'source'/file) for file in manifest['sourceFiles']}
+                assert restored==manifest['sourceFiles'],'Positive source changed'
+                runtime['positiveSourceFiles']=restored
             log=evidence/(name+'.log');start=time.monotonic()
             with log.open('xb') as output:result=subprocess.run(command,cwd=stage/directory,stdout=output,stderr=subprocess.STDOUT,timeout=1500)
             text=log.read_text(errors='replace');runtime['commands'].append({'name':name,'argv':command,'cwd':directory,'exitCode':result.returncode,'seconds':time.monotonic()-start,'logSha256':sha(log)})
@@ -29,6 +36,11 @@ def inner(config):
                 assert result.returncode!=0 and 'test result: FAILED. 0 passed; 1 failed;' in text,'Negative control must fail assertions, not compilation'
                 assert 'pinned_default_preserves_follow_and_mute_revisions' in text and 'snapshot SHA-256 mismatch' in text
             else:assert result.returncode==0,name+' failed'
+            if name=='tests':
+                executables=[p for p in (stage/'target/debug/deps').glob('default_bootstrap-*') if p.is_file() and os.access(p,os.X_OK)]
+                assert len(executables)==1,'Unexpected positive test executable set'
+                runtime['positiveBootstrapTest']={'sha256':sha(executables[0]),'bytes':executables[0].stat().st_size,'sourceSha256':sha(stage/'source/tests/default_bootstrap.rs'),'snapshotSourceSha256':sha(stage/'source/src/snapshot.rs'),'bootstrapSha256':sha(stage/'source/tests/data/default-bootstrap-v4.bin')}
+                assert 'pinned_default_preserves_follow_and_mute_revisions ... ok' in text
         packages=list((stage/'target/package').glob('iris-nostr-*.crate'));assert len(packages)==1
         runtime['cargoPackage']={'name':packages[0].name,'bytes':packages[0].stat().st_size,'sha256':sha(packages[0])}
         with tarfile.open(packages[0]) as tar:
