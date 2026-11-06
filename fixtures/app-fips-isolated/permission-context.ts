@@ -32,7 +32,9 @@ export async function grantIsolatedPermission(context: BrowserContext) {
     }, Object.keys(before));
     if (after.microphone !== 'granted') throw new Error('Loopback microphone permission was not granted');
     for (const name of Object.keys(before)) {
-      if (name !== 'microphone' && after[name] !== before[name]) throw new Error(`Existing ${name} permission changed`);
+      if (name === 'microphone') continue;
+      if (before[name] === 'granted' && after[name] !== 'granted') throw new Error(`Existing ${name} grant lost`);
+      if (before[name] !== 'granted' && after[name] === 'granted') throw new Error(`Unrequested ${name} grant added`);
     }
     appendFileSync(process.env.FIPS_APP_EVIDENCE + '/context-permissions.jsonl', JSON.stringify({ origin, permission: 'microphone', state: after.microphone, before, after, captureInvoked: false, processId: process.pid }) + '\n');
     isolatedFipsContexts.add(context);

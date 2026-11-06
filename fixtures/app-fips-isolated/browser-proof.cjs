@@ -67,9 +67,9 @@ const record={passed:false,node:process.version,playwright:version};
   process.env.FIPS_APP_EVIDENCE=appEvidence+'/unsigned-permission-controls';fs.mkdirSync(process.env.FIPS_APP_EVIDENCE);
   record.permissionPreservation=[];
   try {
-   for(const permissions of [[],['clipboard-read','clipboard-write'],['camera','microphone']]){
+   for(const permissions of [undefined,[],['clipboard-read','clipboard-write'],['camera','microphone']]){
     const context=await browser.newContext({permissions});
-    try{await grantIsolatedPermission(context);record.permissionPreservation.push({originalPermissions:permissions,passed:true});}finally{await context.close();}
+    try{await grantIsolatedPermission(context);record.permissionPreservation.push({originalPermissions:permissions??'unset',passed:true});}finally{await context.close();}
    }
   } finally {process.env.FIPS_APP_EVIDENCE=appEvidence;}
   record.passed=true;console.log('PASS non-root Chromium raw-worker denial and unsigned local datachannel');
