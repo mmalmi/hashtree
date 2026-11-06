@@ -324,10 +324,17 @@ mod imp {
         }
 
         async fn load_existing_root(&self) -> Result<Option<Cid>> {
-            if let Some(root) = load_nostr_index_root_file(&self.latest_root_path).await? {
+            if let Some(root) = load_nostr_index_root_file(&self.latest_root_path, false).await? {
                 return Ok(Some(root));
             }
-            load_nostr_index_root_file(&self.checkpoint_root_path).await
+            load_nostr_index_root_file(&self.checkpoint_root_path, false).await
+        }
+
+        async fn load_reconciliation_root(&self) -> Result<Option<Cid>> {
+            if let Some(root) = load_nostr_index_root_file(&self.latest_root_path, true).await? {
+                return Ok(Some(root));
+            }
+            load_nostr_index_root_file(&self.checkpoint_root_path, true).await
         }
 
         async fn persist_latest_root(&self, root: &Cid) -> Result<()> {
@@ -339,7 +346,7 @@ mod imp {
         }
     }
 
-    async fn load_nostr_index_root_file(path: &Path) -> Result<Option<Cid>> {
+    async fn load_nostr_index_root_file(path: &Path, reject_empty: bool) -> Result<Option<Cid>> {
         let root = match tokio::fs::read_to_string(path).await {
             Ok(root) => root,
             Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
@@ -347,6 +354,7 @@ mod imp {
         };
         let trimmed = root.trim();
         if trimmed.is_empty() {
+            anyhow::ensure!(!reject_empty, "empty reconciliation index root");
             return Ok(None);
         }
         parse_nostr_index_root(trimmed).map(Some)
@@ -1023,7 +1031,7 @@ mod imp {
                         .enable_all()
                         .build()?;
                     let stored = runtime.block_on(async {
-                        let Some(root) = index.load_existing_root().await? else {
+                        let Some(root) = index.load_reconciliation_root().await? else {
                             return Ok::<_, anyhow::Error>(Vec::new());
                         };
                         super::snapshot::query(

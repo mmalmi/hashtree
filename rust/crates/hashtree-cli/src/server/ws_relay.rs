@@ -10,6 +10,7 @@ use nostr::{
     ClientMessage as NostrClientMessage, Filter as NostrFilter, JsonUtil as NostrJsonUtil,
     RelayMessage as NostrRelayMessage, SubscriptionId,
 };
+use std::borrow::Cow;
 use std::collections::HashSet;
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
@@ -567,7 +568,7 @@ fn nostr_responses_for(msg: &NostrClientMessage<'_>) -> Vec<NostrRelayMessage<'s
             subscription_id, ..
         } => {
             vec![NostrRelayMessage::NegErr {
-                subscription_id: subscription_id.clone().into_owned().into(),
+                subscription_id: Cow::Owned(subscription_id.clone().into_owned()),
                 message: "blocked: local reconciliation store unavailable".into(),
             }]
         }
@@ -813,8 +814,8 @@ mod tests {
             socket
                 .send(TungsteniteMessage::Text(
                     NostrClientMessage::NegOpen {
-                        subscription_id: id.clone().into(),
-                        filter: Filter::new().kind(Kind::ContactList).into(),
+                        subscription_id: Cow::Owned(id.clone()),
+                        filter: Cow::Owned(Filter::new().kind(Kind::ContactList)),
                         id_size: None,
                         initial_message: hex::encode(client.initiate()?).into(),
                     }
@@ -847,7 +848,7 @@ mod tests {
                         socket
                             .send(TungsteniteMessage::Text(
                                 NostrClientMessage::NegMsg {
-                                    subscription_id: id.clone().into(),
+                                    subscription_id: Cow::Owned(id.clone()),
                                     message: hex::encode(message).into(),
                                 }
                                 .as_json(),
@@ -872,7 +873,7 @@ mod tests {
             socket
                 .send(TungsteniteMessage::Text(
                     NostrClientMessage::NegClose {
-                        subscription_id: id.clone().into(),
+                        subscription_id: Cow::Owned(id.clone()),
                     }
                     .as_json(),
                 ))
@@ -911,14 +912,14 @@ mod tests {
     fn negentropy_without_store_returns_error_and_close_is_silent() {
         let id = SubscriptionId::new("no-store");
         let replies = nostr_responses_for(&NostrClientMessage::NegOpen {
-            subscription_id: id.clone().into(),
-            filter: Filter::new().into(),
+            subscription_id: Cow::Owned(id.clone()),
+            filter: Cow::Owned(Filter::new()),
             id_size: None,
             initial_message: "61".into(),
         });
         assert!(matches!(&replies[..], [NostrRelayMessage::NegErr { .. }]));
         assert!(nostr_responses_for(&NostrClientMessage::NegClose {
-            subscription_id: id.into(),
+            subscription_id: Cow::Owned(id),
         })
         .is_empty());
     }

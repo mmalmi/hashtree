@@ -2,6 +2,7 @@
 use super::imp::NostrRelay;
 use ::negentropy::{Id, Negentropy, NegentropyStorageVector};
 use nostr::{Event, Filter, JsonUtil, RelayMessage, SubscriptionId};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -232,7 +233,7 @@ impl NostrRelay {
                 self.send_to_client(
                     client,
                     RelayMessage::NegMsg {
-                        subscription_id: id.into(),
+                        subscription_id: Cow::Owned(id),
                         message: message.into(),
                     },
                 )
@@ -246,7 +247,7 @@ impl NostrRelay {
         self.send_to_client(
             client,
             RelayMessage::NegErr {
-                subscription_id: id.into(),
+                subscription_id: Cow::Owned(id),
                 message: error.into(),
             },
         )
@@ -281,8 +282,8 @@ mod tests {
             .handle_client_message(
                 7,
                 ClientMessage::NegOpen {
-                    subscription_id: id.clone().into(),
-                    filter: filter.into(),
+                    subscription_id: Cow::Owned(id.clone()),
+                    filter: Cow::Owned(filter),
                     id_size: None,
                     initial_message: hex::encode(client.initiate().unwrap()).into(),
                 },
@@ -311,7 +312,7 @@ mod tests {
                         .handle_client_message(
                             7,
                             ClientMessage::NegMsg {
-                                subscription_id: id.clone().into(),
+                                subscription_id: Cow::Owned(id.clone()),
                                 message: hex::encode(message).into(),
                             },
                         )
@@ -398,7 +399,7 @@ mod tests {
             .handle_client_message(
                 7,
                 ClientMessage::NegClose {
-                    subscription_id: id.clone().into(),
+                    subscription_id: Cow::Owned(id.clone()),
                 },
             )
             .await;
@@ -468,7 +469,6 @@ mod tests {
                 .unwrap();
         let index = directory.path().join("nostr-index");
         std::fs::create_dir_all(&index).unwrap();
-        std::fs::write(index.join("latest-root.txt"), "corrupt-root\n").unwrap();
         let relay = NostrRelay::new_read_only(
             directory.path().to_path_buf(),
             super::super::NostrRelayConfig::default(),
@@ -476,22 +476,25 @@ mod tests {
         .with_historical_nostr_index(store.store_arc(), directory.path().to_path_buf());
         let (tx, mut rx) = mpsc::unbounded_channel();
         relay.register_client(7, tx, None).await;
-        relay
-            .handle_client_message(
-                7,
-                ClientMessage::NegOpen {
-                    subscription_id: SubscriptionId::new("corrupt").into(),
-                    filter: Filter::new().into(),
-                    id_size: None,
-                    initial_message: hex::encode(peer(&[]).initiate().unwrap()).into(),
-                },
-            )
-            .await;
-        assert!(matches!(
-            response(&mut rx).await,
-            RelayMessage::NegErr { .. }
-        ));
-        assert!(relay.negentropy.lock().await.entries.is_empty());
+        for contents in ["corrupt-root\n", "", " \n"] {
+            std::fs::write(index.join("latest-root.txt"), contents).unwrap();
+            relay
+                .handle_client_message(
+                    7,
+                    ClientMessage::NegOpen {
+                        subscription_id: Cow::Owned(SubscriptionId::new("corrupt")),
+                        filter: Cow::Owned(Filter::new()),
+                        id_size: None,
+                        initial_message: hex::encode(peer(&[]).initiate().unwrap()).into(),
+                    },
+                )
+                .await;
+            assert!(matches!(
+                response(&mut rx).await,
+                RelayMessage::NegErr { .. }
+            ));
+            assert!(relay.negentropy.lock().await.entries.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -563,8 +566,8 @@ mod tests {
             .handle_client_message(
                 7,
                 ClientMessage::NegOpen {
-                    subscription_id: SubscriptionId::new("over-budget").into(),
-                    filter: Filter::new().into(),
+                    subscription_id: Cow::Owned(SubscriptionId::new("over-budget")),
+                    filter: Cow::Owned(Filter::new()),
                     id_size: None,
                     initial_message: hex::encode(peer(&[]).initiate().unwrap()).into(),
                 },
