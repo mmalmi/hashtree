@@ -10,6 +10,7 @@ SAFE_ENV={k:v for k,v in os.environ.items() if k in ('PATH','HOME','USER','DOCKE
 SELECTED=os.environ.get('FIPS_APPS','').split(',') if os.environ.get('FIPS_APPS') else [a['id'] for a in M['apps']]
 assert len(SELECTED)==len(set(SELECTED)) and set(SELECTED)<=set(a['id'] for a in M['apps'])
 APPS=[next(a for a in M['apps'] if a['id']==name) for name in SELECTED]
+APP_CONTAINERS={'iris-fips-test-'+name for name in ('docs','calendar','boards','git','video','drive')}
 def sha(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 def cleanup():
     global PROCESS
@@ -29,7 +30,7 @@ def interrupted(signum,frame):
 for signum in (signal.SIGTERM,signal.SIGINT):signal.signal(signum,interrupted)
 def run(args,log,timeout=300,allow_failure=False):
     global PROCESS
-    assert time.monotonic()-START<2400,'Overall deadline'
+    assert time.monotonic()-START<4200,'Overall deadline'
     assert shutil.disk_usage(STAGE).free>8*1024**3,'Hosted disk reserve'
     p=EVIDENCE/log;assert not p.exists(),'Preserve prior evidence'
     with p.open('wb') as output:
@@ -50,10 +51,10 @@ def extract(archive,destination):
     destination.mkdir(parents=True,exist_ok=True)
     with tarfile.open(archive) as tar:tar.extractall(destination,filter='data')
 def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,evidence_suffix='',allow_failure=False):
-    assert not dummy or (network=='none' and name in ('iris-fips-diagnostic-docs-dummy','iris-fips-diagnostic-docs-permission'))
+    assert not dummy or (network=='none' and name in APP_CONTAINERS|{'iris-fips-diagnostic-docs-dummy','iris-fips-diagnostic-docs-permission'})
     if dummy:command=['python3','/stage/procedure/await-start.py',name,*command]
     command=['timeout','--signal=TERM','--kill-after=5s',str(seconds-10)+'s',*command]
-    args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,'--env','FIPS_MEDIA_PERMISSION='+str(int(name=='iris-fips-diagnostic-docs-permission')),IMAGE,*command]
+    args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,'--env','FIPS_MEDIA_PERMISSION='+str(int(name=='iris-fips-diagnostic-docs-permission' or name in APP_CONTAINERS)),IMAGE,*command]
     CONTAINERS.add(name)
     run(args,name+'-create.log',30)
     inspect=json.loads(subprocess.check_output(['docker','inspect',name],env=SAFE_ENV,text=True,timeout=5))[0]
@@ -94,6 +95,7 @@ def prepare():
         for file,digest in app['testFiles'].items():assert sha(target/file)==digest
         dist=HERE/app['distArchive'];assert sha(dist)==app['distArchiveSha256'];extract(dist,target/app['distDir'])
         for file in app['distFiles']:assert sha(target/app['distDir']/file['path'])==file['sha256']
+        run(['python3',str(HERE/'apply-app-overlay.py'),app['id'],str(STAGE)],'overlay-'+app['id']+'.log',10)
         (target/'isolated.playwright.config.ts').write_text("import original from './playwright.config';\nexport default {...original, use:{...original.use, launchOptions:{...original.use?.launchOptions,args:[...(original.use?.launchOptions?.args??[]),'--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}}};\n")
         docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
     (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'distInputsVerified':True},indent=2)+'\n')
@@ -101,9 +103,14 @@ def prepare():
 def test():
     assert json.loads((EVIDENCE/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json')
     assert set(SELECTED)<=set(json.loads((EVIDENCE/'prepared.json').read_text())['apps'])
+    budgets=json.loads((HERE/'app-budgets.json').read_text()); results=[]
     for app in APPS:
-        docker('iris-fips-test-'+app['id'],['python3','/stage/procedure/run-one.py',app['id']],cwd='/stage/apps/'+app['id'],seconds=300)
-    (EVIDENCE/'passed.json').write_text(json.dumps({'passed':True,'manifestSha256':sha(HERE/'manifest.json'),'apps':SELECTED,'containersReaped':not CONTAINERS},indent=2)+'\n')
+        code=docker('iris-fips-test-'+app['id'],['python3','/stage/procedure/run-one.py',app['id']],cwd='/stage/apps/'+app['id'],seconds=budgets[app['id']]+90,dummy=True,allow_failure=True)
+        assert not CONTAINERS,'No later app may start before cleanup'
+        results.append({'app':app['id'],'exitCode':code,'passed':code==0})
+    passed=all(row['passed'] for row in results)
+    (EVIDENCE/'passed.json').write_text(json.dumps({'passed':passed,'manifestSha256':sha(HERE/'manifest.json'),'apps':SELECTED,'results':results,'containersReaped':not CONTAINERS},indent=2)+'\n')
+    assert passed,'One or more unchanged app tests failed; see per-app evidence'
 def diagnose():
     prepared=json.loads((EVIDENCE/'prepared.json').read_text())
     assert SELECTED==['docs'] and prepared['apps']==SELECTED and prepared['manifestSha256']==sha(HERE/'manifest.json')

@@ -1,16 +1,16 @@
 name: Isolated app FIPS compatibility
 on:
+  workflow_dispatch:
   push:
     branches: [codex/app-fips-isolated]
-  workflow_dispatch:
 permissions:
   contents: read
 jobs:
   fips:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 75
     env:
-      FIPS_APPS: docs
+      FIPS_APPS: docs,calendar,boards,git,video,drive
     steps:
       - name: Set task-exclusive stage
         run: echo "FIPS_STAGE=$RUNNER_TEMP/app-fips-isolated" >> "$GITHUB_ENV"
@@ -19,8 +19,8 @@ jobs:
           persist-credentials: false
       - name: Prepare pinned inputs before isolation
         run: timeout --signal=TERM --kill-after=15s 1200s python3 fixtures/app-fips-isolated/controller.py prepare
-      - name: Diagnose unsigned browser transport with no external network
-        run: timeout --signal=TERM --kill-after=15s 240s python3 fixtures/app-fips-isolated/controller.py diagnose
+      - name: Test exact apps after unsigned transport and denial controls
+        run: timeout --signal=TERM --kill-after=15s 3000s python3 fixtures/app-fips-isolated/controller.py test
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
