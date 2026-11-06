@@ -9,9 +9,9 @@ jobs:
   fips:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
-    env:
-      FIPS_STAGE: ${{ runner.temp }}/app-fips-isolated
     steps:
+      - name: Set task-exclusive stage
+        run: echo "FIPS_STAGE=$RUNNER_TEMP/app-fips-isolated" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
