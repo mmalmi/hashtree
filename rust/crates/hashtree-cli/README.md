@@ -118,7 +118,7 @@ not total process memory: decoded objects, index/storage buffers and the existin
 cache use additional memory. A selective filter can be rejected if its candidate
 scan exceeds the limit, even when its final matching set would be small.
 Only one snapshot query runs at a time, with a five-second response deadline.
-Sessions expire after 30 idle seconds and are limited to two per connection and
+Sessions expire after 30 idle seconds and are limited to four per connection and
 64 overall, with 32 protocol rounds and 1 MiB of incoming hexadecimal messages
 per session. Legacy protocol envelopes, search filters and filters with `limit`
 are rejected. Reconciliation does not fetch from upstream relays or store remote

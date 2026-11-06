@@ -10,7 +10,8 @@ pub(super) const MAX_RECORDS: usize = 1024;
 pub(super) const MAX_SNAPSHOT_BYTES: usize = 16 * 1024 * 1024;
 const MAX_HEX_BYTES: usize = 65536;
 const MAX_SESSIONS: usize = 64;
-const MAX_CLIENT_SESSIONS: usize = 2;
+// The native graph crawler runs four author batches over one relay connection.
+const MAX_CLIENT_SESSIONS: usize = 4;
 const SESSION_TTL: Duration = Duration::from_secs(30);
 
 struct Session {
@@ -333,7 +334,7 @@ mod tests {
         );
         let records = (0..300)
             .map(|i| {
-                let keys = Keys::parse(format!("{:064x}", i / 2 + 1)).unwrap();
+                let keys = Keys::parse(&format!("{:064x}", i / 2 + 1)).unwrap();
                 EventBuilder::new(
                     if i % 2 == 0 {
                         Kind::ContactList
@@ -384,7 +385,13 @@ mod tests {
                     other => panic!("unexpected exact-ID response: {other:?}"),
                 }
             }
-            assert_eq!(fetched, chunk.iter().map(|e| e.id).collect());
+            assert_eq!(
+                fetched,
+                chunk
+                    .iter()
+                    .map(|e| e.id)
+                    .collect::<std::collections::HashSet<_>>()
+            );
         }
         assert!(
             reconcile_relay(&relay, &mut rx, &id, filter.clone(), &records)
@@ -457,7 +464,10 @@ mod tests {
                 .iter()
                 .map(|e| e.id)
                 .collect::<std::collections::HashSet<_>>(),
-            records.iter().map(|e| e.id).collect()
+            records
+                .iter()
+                .map(|e| e.id)
+                .collect::<std::collections::HashSet<_>>()
         );
     }
 
@@ -635,7 +645,7 @@ mod tests {
         let got = roundtrip(&mut book, 1, &id, &known)
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
-        let expected = records
+        let expected: std::collections::HashSet<_> = records
             .iter()
             .skip(1)
             .step_by(2)
@@ -696,12 +706,16 @@ mod tests {
         let id = SubscriptionId::new("a");
         book.reserve(1, &id).unwrap();
         book.reserve(1, &SubscriptionId::new("b")).unwrap();
-        assert!(book.reserve(1, &SubscriptionId::new("c")).is_err());
-        for owner in 2..=32 {
+        book.reserve(1, &SubscriptionId::new("c")).unwrap();
+        book.reserve(1, &SubscriptionId::new("d")).unwrap();
+        assert!(book.reserve(1, &SubscriptionId::new("e")).is_err());
+        for owner in 2..=16 {
             book.reserve(owner, &id).unwrap();
             book.reserve(owner, &SubscriptionId::new("b")).unwrap();
+            book.reserve(owner, &SubscriptionId::new("c")).unwrap();
+            book.reserve(owner, &SubscriptionId::new("d")).unwrap();
         }
-        assert!(book.reserve(33, &id).is_err());
+        assert!(book.reserve(17, &id).is_err());
         book.disconnect(1);
         let generation = book.reserve(1, &id).unwrap();
         let one = events(1);

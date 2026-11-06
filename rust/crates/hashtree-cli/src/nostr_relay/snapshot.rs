@@ -216,7 +216,7 @@ mod tests {
                     .iter()
                     .filter(|e| filter.match_event(e, Default::default()))
                     .map(|e| e.id)
-                    .collect()
+                    .collect::<HashSet<_>>()
             );
         }
     }

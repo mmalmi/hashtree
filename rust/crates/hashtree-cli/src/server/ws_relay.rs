@@ -800,6 +800,53 @@ mod tests {
             .with_state(state);
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let (mut socket, _) = connect_async(format!("ws://{addr}/ws")).await?;
+        // Match the native crawler's four concurrent author batches. Hold all
+        // four sessions open before replying so admission cannot depend on timing.
+        let parallel =
+            ["parallel-1", "parallel-2", "parallel-3", "parallel-4"].map(SubscriptionId::new);
+        let mut empty = NegentropyStorageVector::new();
+        empty.seal()?;
+        let initial = hex::encode(Negentropy::owned(empty, 4096)?.initiate()?);
+        for id in &parallel {
+            socket
+                .send(TungsteniteMessage::Text(
+                    NostrClientMessage::NegOpen {
+                        subscription_id: Cow::Owned(id.clone()),
+                        filter: Cow::Owned(Filter::new().kind(Kind::ContactList)),
+                        id_size: None,
+                        initial_message: initial.clone().into(),
+                    }
+                    .as_json(),
+                ))
+                .await?;
+        }
+        let mut opened = HashSet::new();
+        for _ in &parallel {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(2), socket.next())
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("socket closed during parallel reconciliation"))??;
+            let TungsteniteMessage::Text(text) = frame else {
+                anyhow::bail!("expected parallel NEG-MSG");
+            };
+            let NostrRelayMessage::NegMsg {
+                subscription_id, ..
+            } = NostrRelayMessage::from_json(text)?
+            else {
+                anyhow::bail!("default four-way crawl was rejected");
+            };
+            opened.insert(subscription_id.into_owned());
+        }
+        assert_eq!(opened, parallel.iter().cloned().collect::<HashSet<_>>());
+        for id in parallel {
+            socket
+                .send(TungsteniteMessage::Text(
+                    NostrClientMessage::NegClose {
+                        subscription_id: Cow::Owned(id),
+                    }
+                    .as_json(),
+                ))
+                .await?;
+        }
         let id = SubscriptionId::new("wire-sync");
         for warm in [false, true] {
             let mut storage = NegentropyStorageVector::new();

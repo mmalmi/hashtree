@@ -1095,7 +1095,7 @@ mod tests {
             .await;
         assert_eq!(
             fetched.iter().map(|e| e.id).collect::<HashSet<_>>(),
-            events.iter().map(|e| e.id).collect()
+            events.iter().map(|e| e.id).collect::<HashSet<_>>()
         );
         {
             let state = preferred.state.lock().unwrap();
@@ -1114,7 +1114,10 @@ mod tests {
                     f.ids.as_ref().unwrap().iter().copied()
                 })
                 .collect::<HashSet<_>>();
-            assert_eq!(requested, events.iter().map(|e| e.id).collect());
+            assert_eq!(
+                requested,
+                events.iter().map(|e| e.id).collect::<HashSet<_>>()
+            );
             assert_eq!(state.published_events, 0);
         }
         assert_eq!(second.state.lock().unwrap().neg_opens, 1);
