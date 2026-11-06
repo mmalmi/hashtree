@@ -5,7 +5,9 @@
  * @hashtree/fips-transport; Nostr event distribution is independent of blob routing.
  */
 
+// Fresh public root/event discovery defaults; saved relay choices remain authoritative.
 export const DEFAULT_RELAYS: string[] = [
+  'wss://relay.ditto.pub',
   'wss://relay.damus.io',
   'wss://relay.primal.net',
   'wss://relay.nostr.band',
