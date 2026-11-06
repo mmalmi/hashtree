@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
-      FIPS_APPS: docs,calendar,boards,git,video,drive
+      FIPS_APPS: docs,calendar,boards,git,video
     steps:
       - name: Set task-exclusive stage
         run: echo "FIPS_STAGE=$RUNNER_TEMP/app-fips-isolated" >> "$GITHUB_ENV"

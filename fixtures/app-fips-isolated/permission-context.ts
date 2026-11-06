@@ -1,6 +1,11 @@
+import { appendFileSync } from 'node:fs';
+import type { BrowserContext } from '@playwright/test';
+const isolatedFipsContexts = new WeakSet<object>();
+
+export async function grantIsolatedPermission(context: BrowserContext) {
   if (!isolatedFipsContexts.has(context)) {
-    const origin = `http://127.0.0.1:${process.env.PW_APP_PORT}`;
-    if (origin !== 'http://127.0.0.1:43810' || !process.env.FIPS_APP_EVIDENCE) {
+    const origin = `http://localhost:${process.env.PW_APP_PORT}`;
+    if (origin !== 'http://localhost:43810' || !process.env.FIPS_APP_EVIDENCE) {
       throw new Error('Unexpected isolated app origin/evidence directory');
     }
     await context.grantPermissions(['microphone'], { origin });
@@ -19,3 +24,4 @@
     appendFileSync(process.env.FIPS_APP_EVIDENCE + '/context-permissions.jsonl', JSON.stringify({ origin, permission: 'microphone', state, captureInvoked: false, processId: process.pid }) + '\n');
     isolatedFipsContexts.add(context);
   }
+}

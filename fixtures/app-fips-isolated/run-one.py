@@ -17,6 +17,6 @@ budget=json.loads((base/'procedure/app-budgets.json').read_text())[app]
 subprocess.run(command,env=env,check=True,timeout=budget)
 contexts=[json.loads(line) for line in (evidence/'context-permissions.jsonl').read_text().splitlines()]
 assert len(contexts)>=2
-assert all(c['origin']=='http://127.0.0.1:43810' and c['permission']=='microphone' and c['state']=='granted' and not c['captureInvoked'] for c in contexts)
+assert all(c['origin']=='http://localhost:43810' and c['permission']=='microphone' and c['state']=='granted' and not c['captureInvoked'] for c in contexts)
 subprocess.run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after.json')],env=env,check=True,timeout=15)
 (evidence/'passed.json').write_text(json.dumps({'passed':True,'sourceCommit':spec['commit'],'unchangedAssertions':True,'driveInputPolicySha256':'a5ca26fea52d3cb55288992c793db53f93228a7f42bc973564d7ff14c0a46b22' if app=='drive' else None})+'\n')
