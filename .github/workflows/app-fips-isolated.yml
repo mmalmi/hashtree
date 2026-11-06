@@ -1,0 +1,29 @@
+name: Isolated app FIPS compatibility
+on:
+  push:
+    branches: [codex/app-fips-isolated]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  fips:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      FIPS_STAGE: ${{ runner.temp }}/app-fips-isolated
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Prepare pinned inputs before isolation
+        run: timeout --signal=TERM --kill-after=15s 1200s python3 fixtures/app-fips-isolated/controller.py prepare
+      - name: Test exact apps with no external network
+        run: timeout --signal=TERM --kill-after=15s 1800s python3 fixtures/app-fips-isolated/controller.py test
+      - name: Preserve evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: app-fips-isolated-${{ github.sha }}
+          path: ${{ runner.temp }}/app-fips-isolated/evidence
+          if-no-files-found: error
+          retention-days: 7
