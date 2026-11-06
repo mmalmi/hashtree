@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "purpose": "Task branch only: exact app FIPS compatibility, no external network, no native build",
-  "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
+  "image": "mcr.microsoft.com/playwright@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6",
   "imageTagForProvenance": "v1.60.0-noble",
   "pnpm": {
     "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.23.0.tgz",
@@ -1596,6 +1596,160 @@
       "specs": [
         "e2e/fips-discovery.spec.ts"
       ]
+    },
+    {
+      "id": "meet",
+      "commit": "e060c349b378624d5993284851ba8b6c7eaa4efb",
+      "archive": "archives/meet-source.tar.gz",
+      "archiveSha256": "0bad5a24d3049145d6d6765f2066491f26ab5008e1a3e30d4788b017c79a3568",
+      "lockSha256": "822c5c0a8e85af2e3052730f67d6ed9feb00e8c479f91893f87ed14a3f061fb0",
+      "distArchive": "archives/meet-dist.tar.gz",
+      "distArchiveSha256": "99568f9bf57bb93e5fc4563edbd99c05f87f191dd6c904c2a42f8c3879a0fa0c",
+      "distDir": "dist",
+      "distFiles": [
+        {
+          "path": "iris-meet-icon-maskable.png",
+          "sha256": "2d0724fe159aa3434a5f89f382de095db87cebf74011888b81215d449da885c7",
+          "bytes": 14181
+        },
+        {
+          "path": "iris-meet-icon-180.png",
+          "sha256": "1771ec758d7b98402979c376b61473efe6631615166f119f8447183428172ace",
+          "bytes": 4521
+        },
+        {
+          "path": "index.html",
+          "sha256": "f6fc97b8641d3d1b129c6add8a6f8c3ed30126c9dfff8f273b1d6c1bcdd8ebbc",
+          "bytes": 1142
+        },
+        {
+          "path": "iris-meet-icon-192.png",
+          "sha256": "af29b7ec1ffcc13c8aa53e0ee4f387ab343e66246a2d6ed50f95c19c58c1a7cc",
+          "bytes": 4886
+        },
+        {
+          "path": "iris-logo.png",
+          "sha256": "e988831cbd5c54d08995d57f846123dc811cc738b30d9d92189c5815e116c076",
+          "bytes": 15042
+        },
+        {
+          "path": "apple-touch-icon.png",
+          "sha256": "969f89356f131f150aaeed7e5054bb9e4df79bd0a53ff5c540e9b4a3a2046b1d",
+          "bytes": 5589
+        },
+        {
+          "path": "pwa-512x512.png",
+          "sha256": "5457b339d6ed801fe1c50f2cd47c3d5e2a5d41524fbea31f9bd0ae70e3c067b3",
+          "bytes": 49988
+        },
+        {
+          "path": "workbox-9c191d2f.js",
+          "sha256": "04b086f1b2f4215ee4b659a7bc9c76162894abdb43fa876247bc7c0bd6fd1c37",
+          "bytes": 15112
+        },
+        {
+          "path": "maskable-icon.png",
+          "sha256": "fbef13ebab717439cc73578c39924909e3cc58da841234fd4e2aaaa7e6fe76d2",
+          "bytes": 22115
+        },
+        {
+          "path": "favicon.png",
+          "sha256": "d3e33620e24dffdd9415feff00fa5b6def8aa815cb53d97676237df1c3aa25d1",
+          "bytes": 1008
+        },
+        {
+          "path": "registerSW.js",
+          "sha256": "e12c8db54e3cc247034427f2b661b305a78fea7e7cdec1eac179fecec3da0fc7",
+          "bytes": 136
+        },
+        {
+          "path": "iris-meet-icon-512.png",
+          "sha256": "2d0724fe159aa3434a5f89f382de095db87cebf74011888b81215d449da885c7",
+          "bytes": 14181
+        },
+        {
+          "path": "iris-meet-icon.svg",
+          "sha256": "1770ff6351cb13cbf186051e7036dd2e582e16912910ee4f506568c0c79751b1",
+          "bytes": 355
+        },
+        {
+          "path": "iris-meet-icon.png",
+          "sha256": "08d1cee802440f917702ad2ad69b6a74d0d164d901fc54e6e0c02cfcce8aa469",
+          "bytes": 1624
+        },
+        {
+          "path": "manifest.webmanifest",
+          "sha256": "5981417ffc31764358544e391f135eb203f30be80d9a78b553a2cf5040f92a73",
+          "bytes": 457
+        },
+        {
+          "path": "pwa-192x192.png",
+          "sha256": "f67a838cb6e64f159a9987a65a75ab8b0dfc04d7acd533f2657e326126b6d5bf",
+          "bytes": 23510
+        },
+        {
+          "path": "sw.js",
+          "sha256": "ba814953ff8b6856409f26f7b87cb890d77900ab1d8fe3b6a3873df515ad384f",
+          "bytes": 2494
+        },
+        {
+          "path": "assets/index-DS7PNEFT.css",
+          "sha256": "9b2f769754d5d79a2b4804537c6ab7378b85656f1e74f197f69e1547bee6b424",
+          "bytes": 30848
+        },
+        {
+          "path": "assets/vendor-6iEEDHVX.css",
+          "sha256": "c6468f7cf60cab90dec83ce8f6f806abc211a5822d8b31f778ea120871a4d145",
+          "bytes": 584
+        },
+        {
+          "path": "assets/vendor-BGhDpHv5.js",
+          "sha256": "88b9d8f62f5c61a33f0888fb5f9504e1f50226f8e4a3de95c146b759155497e3",
+          "bytes": 682730
+        },
+        {
+          "path": "assets/index-DooWT12K.js",
+          "sha256": "4667f3ebec792ad3b6b25a1fd3aa4fc579c96c368a912cd7c4d2d925d2f445a9",
+          "bytes": 530703
+        },
+        {
+          "path": "assets/opus-DaKiHsGi.wasm",
+          "sha256": "36e1116e6e4604917eca9b72de018f897c9cc429e0f69f404e2c0cc65cf94c0f",
+          "bytes": 340912
+        }
+      ],
+      "specs": [
+        "e2e/meeting.spec.ts",
+        "e2e/video-playback.spec.ts",
+        "e2e/hashtree.spec.ts",
+        "e2e/login.spec.ts",
+        "e2e/pubsub.spec.ts",
+        "e2e/multi-user.spec.ts",
+        "e2e/fips.spec.ts",
+        "e2e/updates.spec.ts",
+        "e2e/chat.spec.ts",
+        "e2e/audio-output.spec.ts",
+        "e2e/offline.spec.ts"
+      ],
+      "testFiles": {
+        "e2e/meeting.spec.ts": "5f7445f25b52daaca2c79c939b87627e16ae02474dd4df37240525a00b256503",
+        "e2e/video-playback.spec.ts": "1da28e5f731cfc9c9f17b0bb554272c6924428da6c2739c1e2ed81b5dbc70d4b",
+        "e2e/hashtree.spec.ts": "c6be6d1328f936e03a53bd6a869b3ad6bbc01fd395f1161c3b2cb9986ddc06d1",
+        "e2e/login.spec.ts": "8111a4b630cb4d40a5b58f786374bc4fb88faabc9ba3626fed52361436de7b45",
+        "e2e/pubsub.spec.ts": "469b0a0532f7a7607c6022d2343982cd0524ff9eded13a15c38f3ac83ef3886e",
+        "e2e/multi-user.spec.ts": "ee3c63661c6d66ddd9aea87957b97217a191595d2f4bc9a2a18985fca75645aa",
+        "e2e/fips.spec.ts": "c3e3bae09bd5c3e59dd41a610a566cdb3d2fde207c71692afbfed29468e3664d",
+        "e2e/updates.spec.ts": "dda192db14a0261bf2506a39f947aad109cbcd1905e76237ab00a32e80c528b9",
+        "e2e/chat.spec.ts": "e7d2c2d306d083020f6c81559a32c710fd51b1b4c2ea34d653d1d5e9639848a5",
+        "e2e/audio-output.spec.ts": "df2dbb93eb6c745b8bcf7f747e5725c97c19d08441ea0c1b70e5722684482256",
+        "e2e/offline.spec.ts": "e5b7b19aa399364ff3815092feb2a2ea9a704d54f5caec0146aeb25e468075dc"
+      },
+      "env": {
+        "PW_PORT": "43810",
+        "PW_RELAY_PORT": "43811",
+        "PW_FIPS_PORT": "43813"
+      },
+      "playwright": "1.61.1"
     }
   ]
 }
