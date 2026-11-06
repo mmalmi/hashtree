@@ -4,13 +4,14 @@ HERE=pathlib.Path(__file__).resolve().parent
 M=json.loads((HERE/'manifest.json').read_text())
 STAGE=pathlib.Path(os.environ['FIPS_STAGE']).resolve()
 EVIDENCE=STAGE/'evidence'
-IMAGE=M['image']
 CONTAINERS=set();PROCESS=None;START=time.monotonic()
 SAFE_ENV={k:v for k,v in os.environ.items() if k in ('PATH','HOME','USER','DOCKER_HOST','DOCKER_CONFIG','XDG_RUNTIME_DIR')}
 SELECTED=os.environ.get('FIPS_APPS','').split(',') if os.environ.get('FIPS_APPS') else [a['id'] for a in M['apps']]
 assert len(SELECTED)==len(set(SELECTED)) and set(SELECTED)<=set(a['id'] for a in M['apps'])
 APPS=[next(a for a in M['apps'] if a['id']==name) for name in SELECTED]
-APP_CONTAINERS={'iris-fips-test-'+name for name in ('docs','calendar','boards','git','video','drive','maps')}
+assert len(APPS)==1, 'One app/image/toolchain per hosted job'
+APP=APPS[0];IMAGE=APP['image']
+APP_CONTAINERS={'iris-fips-test-drive','iris-fips-test-meet'}
 def sha(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 def cleanup():
     global PROCESS
@@ -57,23 +58,6 @@ def fetch(item,path,*,exact=False):
             size+=len(chunk);assert size<=limit,'Download byte ceiling';output.write(chunk)
     assert sha(path)==item['sha256'],str(path)
     if 'bytes' in item:assert size==item['bytes']
-def maps_assets():
-    cache=STAGE/'map-cache';cache.mkdir();items=M['mapsAssets']['assets']
-    assert sum(i['bytes'] for i in items)<=M['mapsAssets']['maximumBytes']<=128*1024**2
-    expected={hashlib.sha256(i['pathname'].encode()).hexdigest():i for i in items}
-    seen=set()
-    for packed in M['mapsAssets']['archives']:
-        archive=HERE/packed['archive'];assert archive.stat().st_size==packed['bytes'] and sha(archive)==packed['sha256']
-        with tarfile.open(archive) as tar:
-            members=tar.getmembers();assert {m.name for m in members}==set(packed['files'])
-            for member in members:
-                assert member.isfile() and member.name in expected and member.name not in seen
-                item=expected[member.name];assert member.size==item['bytes']
-                body=tar.extractfile(member).read();assert hashlib.sha256(body).hexdigest()==item['sha256']
-                (cache/member.name).write_bytes(body);seen.add(member.name)
-    assert seen==set(expected)
-    receipt={'assets':items,'methods':[],'externalFetches':0,'receivedBytes':sum(i['bytes'] for i in items),'allByteHashesVerified':True}
-    (cache/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n');(EVIDENCE/'maps-assets.json').write_text(json.dumps(receipt,indent=2)+'\n')
 def extract(archive,destination):
     destination.mkdir(parents=True,exist_ok=True)
     with tarfile.open(archive) as tar:tar.extractall(destination,filter='data')
@@ -109,29 +93,29 @@ def prepare():
     assert not STAGE.exists(),'Use one empty task stage'
     STAGE.mkdir(mode=0o700);EVIDENCE.mkdir();(STAGE/'home').mkdir();(STAGE/'tools/bin').mkdir(parents=True)
     shutil.copytree(HERE,STAGE/'procedure',ignore=shutil.ignore_patterns('archives'))
-    fetch(M['pnpm'],STAGE/'pnpm.tgz');extract(STAGE/'pnpm.tgz',STAGE/'tools/pnpm')
+    fetch(APP['pnpm'],STAGE/'pnpm.tgz');extract(STAGE/'pnpm.tgz',STAGE/'tools/pnpm')
     (STAGE/'tools/bin/pnpm').write_text('#!/bin/sh\nexec node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');(STAGE/'tools/bin/pnpm').chmod(0o755)
     fetch(M['native'],STAGE/'native.tgz');extract(STAGE/'native.tgz',STAGE/'tools/native')
     for name,digest in M['native']['executables'].items():assert sha(STAGE/'tools/native/hashtree'/name)==digest
     run(['docker','pull',IMAGE],'image-pull.log',300)
-    docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');if(process.versions.node.split('.')[0]!=='24')throw Error('Unexpected image Node');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
+    docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
+    assert json.loads((EVIDENCE/'image-toolchain.json').read_text())['node']==APP['node']
     for app in APPS:
         archive=HERE/app['archive'];assert sha(archive)==app['archiveSha256']
         target=STAGE/'apps'/app['id'];extract(archive,target)
         assert sha(target/'pnpm-lock.yaml')==app['lockSha256']
         assert sha(target/'package.json')==app['packageSha256']
-        package=json.loads((target/'package.json').read_text());assert package['packageManager']==app['packageManager']=='pnpm@10.23.0'
+        package=json.loads((target/'package.json').read_text());assert package['packageManager']==app['packageManager']
         assert sha(target/app['releaseProfilePath'])==app['releaseProfileSha256']
         for file,digest in app['testFiles'].items():assert sha(target/file)==digest
         assert app['buildFromSource'] is True
         run(['python3',str(HERE/'apply-app-overlay.py'),app['id'],str(STAGE)],'overlay-'+app['id']+'.log',10)
         original=target/'playwright.config.ts';raw=original.read_text()
         assert raw.count('export default ')==1
-        wrapped=raw.replace('export default ','const taskOriginalConfig = ',1)+"\nexport default {...taskOriginalConfig, workers:1, retries:0, reporter:[...(Array.isArray(taskOriginalConfig.reporter) ? taskOriginalConfig.reporter : [[taskOriginalConfig.reporter ?? 'list']]),['json']], use:{...taskOriginalConfig.use, trace:'retain-on-failure',screenshot:'only-on-failure', launchOptions:{...taskOriginalConfig.use?.launchOptions,args:[...(taskOriginalConfig.use?.launchOptions?.args??[]),'--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}}};\n"
+        wrapped=raw.replace('export default ','const taskOriginalConfig = ',1)+"\nconst taskLaunch = (use) => ({...use,launchOptions:{...use?.launchOptions,args:[...(use?.launchOptions?.args??[]),'--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}});\nexport default {...taskOriginalConfig, workers:1, retries:0, reporter:[['list'],['json']], use:taskLaunch({...taskOriginalConfig.use,trace:'retain-on-failure',screenshot:'only-on-failure'}),projects:taskOriginalConfig.projects?.map(p=>({...p,use:taskLaunch(p.use)}))};\n"
         original.write_text(wrapped)
         (EVIDENCE/('config-overlay-'+app['id']+'.json')).write_text(json.dumps({'beforeSha256':hashlib.sha256(raw.encode()).hexdigest(),'afterSha256':sha(original),'scope':'Task fixture only; unchanged selectors/assertions; bounded1worker0retry and accepted loopback RTC flags'})+'\n')
         docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
-    if 'maps' in SELECTED:maps_assets()
     (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'buildFromExactSource':True},indent=2)+'\n')
 
 def test():

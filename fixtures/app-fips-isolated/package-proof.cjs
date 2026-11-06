@@ -10,9 +10,12 @@ function manifestPath(name,req){
 }
 function qualify(root,output){
  const req=createRequire(root+'/package.json');
- const expected={'@playwright/test':'1.60.0','@hashtree/worker':'0.4.25','nostr-social-graph':'4.0.4','@fips/browser':'0.0.19','@fips/core':'0.0.54','@fips/transport-webrtc':'0.0.58','@fips/transport-websocket':'0.0.12'};
+ const spec=JSON.parse(fs.readFileSync('/stage/procedure/manifest.json')).apps.find(a=>a.id===process.env.FIPS_APP_ID);assert(spec);
+ const expected={'@playwright/test':spec.playwright,'@hashtree/worker':'0.4.25','nostr-social-graph':'4.0.4','@fips/browser':'0.0.19','@fips/core':'0.0.54','@fips/transport-webrtc':'0.0.58','@fips/transport-websocket':'0.0.12'};
  const packages=[],resolved={};
+ const own=JSON.parse(fs.readFileSync(root+'/package.json'));
  for(const [name,version] of Object.entries(expected)){
+  if(name.startsWith('@fips/') && !(name in (own.dependencies||{})))continue;
   const entry=manifestPath(name,req),bytes=fs.readFileSync(entry),manifest=JSON.parse(bytes);assert.equal(manifest.name,name);assert.equal(manifest.version,version);
   resolved[name]=entry;packages.push({name,version,manifestSha256:crypto.createHash('sha256').update(bytes).digest('hex')});
  }

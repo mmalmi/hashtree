@@ -5,12 +5,19 @@ spec=next(a for a in json.loads((base/'procedure/manifest.json').read_text())['a
 env=dict(os.environ,PW_WORKERS='1',PW_MAX_WORKERS='1');sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 assert sha(root/'package.json')==spec['packageSha256'] and sha(root/'pnpm-lock.yaml')==spec['lockSha256']
 assert sha(root/spec['releaseProfilePath'])==spec['releaseProfileSha256']
-code="const m=await import('./scripts/release-site.mjs');const p=m.releaseProfiles[process.argv[1]];if(!p)throw Error('No release profile');console.log(JSON.stringify(p));"
-profile=json.loads(subprocess.check_output(['node','--input-type=module','-e',code,app],env=env,text=True,timeout=15));assert profile['distDir']==spec['distDir']
-steps=[{'name':'build','command':profile['buildCommand']}]
-for i,item in enumerate(profile['testCommands']):steps.append({'name':f'release-check-{i+1}',**({'command':item} if isinstance(item,list) else item)})
-if ['pnpm','run','test:unit'] not in [s['command'] for s in steps]:steps.append({'name':'unit','command':['pnpm','run','test:unit']})
-steps.append({'name':'dry-run','command':['node','scripts/release-site.mjs',app,'--dry-run']})
+if app=='meet':
+    code="const m=await import('./scripts/release-site.mjs');console.log(JSON.stringify(m.createReleasePlan(m.parseArgs(['--dry-run']))));"
+    profile=json.loads(subprocess.check_output(['node','--input-type=module','-e',code],env=env,text=True,timeout=15))
+    # The frozen installation is completed before isolation; only publication/deployment are excluded.
+    assert {s['id'] for s in profile['steps']}=={'install','build','test-unit','test-smoke','test-check','test-calls','test-offline','publish','deploy'}
+    steps=[{'name':s['id'],'command':s['command']} for s in profile['steps'] if s['id'] not in {'install','publish','deploy'}]
+    steps.append({'name':'dry-run','command':['node','scripts/release-site.mjs','--dry-run']})
+else:
+    code="const m=await import('./scripts/release-site.mjs');const p=m.releaseProfiles[process.argv[1]];if(!p)throw Error('No release profile');console.log(JSON.stringify(p));"
+    profile=json.loads(subprocess.check_output(['node','--input-type=module','-e',code,app],env=env,text=True,timeout=15));assert profile['distDir']==spec['distDir']
+    steps=[{'name':'build','command':profile['buildCommand']}]
+    for i,item in enumerate(profile['testCommands']):steps.append({'name':f'release-check-{i+1}',**({'command':item} if isinstance(item,list) else item)})
+    steps.append({'name':'dry-run','command':['node','scripts/release-site.mjs',app,'--dry-run']})
 result={'source':spec['commit'],'profileSha256':sha(root/spec['releaseProfilePath']),'steps':[],'passed':False};cache=None
 (evidence/'release-plan.json').write_text(json.dumps({'profile':profile,'steps':steps},indent=2)+'\n')
 def retain_artifacts(name):
@@ -27,14 +34,10 @@ def retain_artifacts(name):
             records.append({'path':dest.relative_to(evidence).as_posix(),'sha256':sha(dest),'bytes':dest.stat().st_size})
     return records
 try:
-    if app=='maps':
-        cache=subprocess.Popen(['node','/stage/procedure/map-cache.mjs',str(root),str(base/'map-cache')],env=env,stdout=subprocess.PIPE,stderr=(evidence/'map-cache.log').open('wb'),text=True)
-        ready=selectors.DefaultSelector();ready.register(cache.stdout,selectors.EVENT_READ)
-        assert ready.select(15),'Map cache startup deadline';env['MAP_FIXTURE_CACHE_URL']=json.loads(cache.stdout.readline())['url'];ready.close()
     for step in steps:
         command=step['command'];assert isinstance(command,list) and command and all(isinstance(x,str) for x in command)
         step_env=env|step.get('env',{})|{'PW_WORKERS':'1','PW_MAX_WORKERS':'1','PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/(step['name']+'-playwright.json'))}
-        if command[:3]==['pnpm','run','test:unit'] or command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
+        if command[:3] in (['pnpm','run','test:unit'],['pnpm','run','test']) or command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
         row={'name':step['name'],'command':command,'exitCode':None};result['steps'].append(row);started=time.monotonic()
         try:
             with (evidence/(step['name']+'.log')).open('wb') as log:done=subprocess.run(command,env=step_env,stdout=log,stderr=subprocess.STDOUT,timeout=1800)

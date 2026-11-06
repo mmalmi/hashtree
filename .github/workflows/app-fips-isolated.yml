@@ -1,4 +1,4 @@
-name: Isolated graph consumer release gates
+name: Isolated Drive and Meet release gates
 on:
   workflow_dispatch:
 permissions:
@@ -9,7 +9,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        app: [docs, calendar, boards, video, git, maps]
+        app: [drive, meet]
     runs-on: ubuntu-24.04
     timeout-minutes: 65
     env:
@@ -28,7 +28,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: app-graph404-${{ matrix.app }}-${{ github.sha }}
+          name: drive-meet-graph404-${{ matrix.app }}-${{ github.sha }}
           path: ${{ runner.temp }}/app-graph404-${{ matrix.app }}/evidence
           if-no-files-found: error
           retention-days: 7
