@@ -18,9 +18,12 @@ changed_tests=[]
 manifest=json.loads((base/'procedure/manifest.json').read_text())
 spec=next(row for row in manifest['apps'] if row['id']==app)
 for name,digest in spec['testFiles'].items():
+    if name==expected['path']:
+        assert sha(before)==digest
+        continue
     path=target/name;original=path.read_bytes();assert sha(original)==digest
     raw="import { expect, test } from '@playwright/test';"
-    if app in ('calendar','boards','video','maps'):
+    if name in spec['permissionTestFiles']:
         assert original.decode().count(raw)==1
         updated=original.decode().replace(raw,"import { expect, test } from './isolated-permissions';")
         path.write_text(updated)

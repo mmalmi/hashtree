@@ -11,17 +11,13 @@
     "path": "e2e/fixtures.ts",
     "beforeSha256": "1806469eba3151164bb05fe4649b9233b1c30b7d62311e849cbf7228d27c73fa"
   },
-  "git": {
-    "path": "e2e/fixtures.ts",
-    "beforeSha256": "8d252c9acfbf3c3c2dfbf22ca43618c44756a1cbfaeb491487b09a119fad7900"
-  },
   "video": {
     "path": "e2e/fixtures.ts",
     "beforeSha256": "0e014bf47d4daffc80cce0f79df339a7273e40dadc8c0e5438ca3d58a67d1ebb"
   },
-  "drive": {
+  "git": {
     "path": "e2e/fixtures.ts",
-    "beforeSha256": "e4e4bf789023ae5a818a1eda710dc925a6e1eb4687580118e13d7146ad5d8af1"
+    "beforeSha256": "8d252c9acfbf3c3c2dfbf22ca43618c44756a1cbfaeb491487b09a119fad7900"
   },
   "maps": {
     "path": "e2e/fixtures.ts",

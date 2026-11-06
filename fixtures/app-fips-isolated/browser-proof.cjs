@@ -3,6 +3,7 @@ const fs=require('node:fs'),http=require('node:http'),assert=require('node:asser
 const version=require(process.cwd()+'/node_modules/@playwright/test/package.json').version;
 assert.equal(version,'1.60.0');
 assert.equal(process.version,JSON.parse(fs.readFileSync('/stage/evidence/image-toolchain.json')).node);
+const crypto=require('node:crypto');
 const record={passed:false,node:process.version,playwright:version};
 (async()=>{
  const server=http.createServer((_req,res)=>res.end('<!doctype html><title>Unsigned namespace proof</title>'));
@@ -10,6 +11,11 @@ const record={passed:false,node:process.version,playwright:version};
  try {
   browser=await chromium.launch({args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']});
   record.browser=browser.version();assert.equal(record.browser,'148.0.7778.96');
+  record.actualBrowserExecutables=[];
+  for(const pid of fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p))){
+   try{const status=fs.readFileSync('/proc/'+pid+'/status','utf8');if(Number(status.match(/^PPid:\s+(\d+)/m)?.[1])!==process.pid)continue;const exe=fs.readlinkSync('/proc/'+pid+'/exe');if(!exe.startsWith('/ms-playwright/'))continue;record.actualBrowserExecutables.push({pid:Number(pid),path:exe,sha256:crypto.createHash('sha256').update(fs.readFileSync(exe)).digest('hex')});}catch(error){if(error.code!=='ENOENT')throw error;}
+  }
+  assert.equal(record.actualBrowserExecutables.length,1,'Identify actual launched browser executable');
   const origin=`http://127.0.0.1:${server.address().port}`;
   const page=await browser.newPage();
   const permission=process.env.FIPS_MEDIA_PERMISSION==='1';

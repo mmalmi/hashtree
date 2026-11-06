@@ -1,5 +1,5 @@
 """Task-only, hash-pinned browser qualification. Never builds native code."""
-import hashlib,json,os,pathlib,shutil,signal,subprocess,sys,tarfile,time,urllib.request
+import concurrent.futures,hashlib,json,os,pathlib,re,shutil,signal,subprocess,sys,tarfile,time,urllib.request
 HERE=pathlib.Path(__file__).resolve().parent
 M=json.loads((HERE/'manifest.json').read_text())
 STAGE=pathlib.Path(os.environ['FIPS_STAGE']).resolve()
@@ -44,9 +44,33 @@ def run(args,log,timeout=300,allow_failure=False):
         finally:PROCESS=None
     if not allow_failure:assert code==0,f'{log} exited {code}'
     return code
-def fetch(item,path):
-    with urllib.request.urlopen(item['url'],timeout=60) as response,path.open('wb') as output:shutil.copyfileobj(response,output)
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self,*args,**kwargs):raise RuntimeError('Unexpected redirect')
+def fetch(item,path,*,exact=False):
+    deadline=time.monotonic()+180;limit=item.get('bytes',256*1024**2);size=0
+    opener=urllib.request.build_opener(NoRedirect()) if exact else urllib.request.build_opener()
+    with opener.open(item['url'],timeout=30) as response,path.open('xb') as output:
+        while True:
+            assert time.monotonic()<deadline,'Fetch deadline'
+            chunk=response.read(1024**2)
+            if not chunk:break
+            size+=len(chunk);assert size<=limit,'Download byte ceiling';output.write(chunk)
     assert sha(path)==item['sha256'],str(path)
+    if 'bytes' in item:assert size==item['bytes']
+def maps_assets():
+    cache=STAGE/'map-cache';cache.mkdir();items=M['mapsAssets']['assets']
+    assert sum(i['bytes'] for i in items)<=M['mapsAssets']['maximumBytes']<=128*1024**2
+    def one(item):
+        pathname=item['pathname'];url=item['upstream']
+        block=re.fullmatch(r'/blocks/([a-f0-9]{64})',pathname)
+        glyph=re.fullmatch(r'/fonts/(Noto%20Sans%20(?:Regular|Italic|Bold)|Noto%20Sans%20CJK%20JP%20Regular)/(\d{1,7}-\d{1,7})\.pbf',pathname)
+        assert block or glyph
+        assert url==('https://cdn.iris.to/'+block[1]+'.bin' if block else 'https://tiles.openfreemap.org'+pathname)
+        if block:assert item['sha256']==block[1] and item['contentAddressVerified'] is True
+        key=hashlib.sha256(pathname.encode()).hexdigest();fetch({'url':url,**{k:item[k] for k in ('bytes','sha256')}},cache/key,exact=True)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:list(pool.map(one,items))
+    receipt={'assets':items,'methods':['GET'],'forwardedHeaders':[],'redirects':False,'receivedBytes':sum(i['bytes'] for i in items),'allByteHashesVerified':True}
+    (cache/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n');(EVIDENCE/'maps-assets.json').write_text(json.dumps(receipt,indent=2)+'\n')
 def extract(archive,destination):
     destination.mkdir(parents=True,exist_ok=True)
     with tarfile.open(archive) as tar:tar.extractall(destination,filter='data')
@@ -92,13 +116,20 @@ def prepare():
         archive=HERE/app['archive'];assert sha(archive)==app['archiveSha256']
         target=STAGE/'apps'/app['id'];extract(archive,target)
         assert sha(target/'pnpm-lock.yaml')==app['lockSha256']
+        assert sha(target/'package.json')==app['packageSha256']
+        package=json.loads((target/'package.json').read_text());assert package['packageManager']==app['packageManager']=='pnpm@10.23.0'
+        assert sha(target/app['releaseProfilePath'])==app['releaseProfileSha256']
         for file,digest in app['testFiles'].items():assert sha(target/file)==digest
-        dist=HERE/app['distArchive'];assert sha(dist)==app['distArchiveSha256'];extract(dist,target/app['distDir'])
-        for file in app['distFiles']:assert sha(target/app['distDir']/file['path'])==file['sha256']
+        assert app['buildFromSource'] is True
         run(['python3',str(HERE/'apply-app-overlay.py'),app['id'],str(STAGE)],'overlay-'+app['id']+'.log',10)
-        (target/'isolated.playwright.config.ts').write_text("import original from './playwright.config';\nexport default {...original, use:{...original.use, launchOptions:{...original.use?.launchOptions,args:[...(original.use?.launchOptions?.args??[]),'--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}}};\n")
+        original=target/'playwright.config.ts';raw=original.read_text()
+        assert raw.count('export default ')==1
+        wrapped=raw.replace('export default ','const taskOriginalConfig = ',1)+"\nexport default {...taskOriginalConfig, workers:1, retries:0, reporter:[...(Array.isArray(taskOriginalConfig.reporter) ? taskOriginalConfig.reporter : [[taskOriginalConfig.reporter ?? 'list']]),['json']], use:{...taskOriginalConfig.use, trace:'retain-on-failure',screenshot:'only-on-failure', launchOptions:{...taskOriginalConfig.use?.launchOptions,args:[...(taskOriginalConfig.use?.launchOptions?.args??[]),'--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}}};\n"
+        original.write_text(wrapped)
+        (EVIDENCE/('config-overlay-'+app['id']+'.json')).write_text(json.dumps({'beforeSha256':hashlib.sha256(raw.encode()).hexdigest(),'afterSha256':sha(original),'scope':'Task fixture only; unchanged selectors/assertions; bounded1worker0retry and accepted loopback RTC flags'})+'\n')
         docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
-    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'distInputsVerified':True},indent=2)+'\n')
+    if 'maps' in SELECTED:maps_assets()
+    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'buildFromExactSource':True},indent=2)+'\n')
 
 def test():
     assert json.loads((EVIDENCE/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json')
@@ -111,27 +142,6 @@ def test():
     passed=all(row['passed'] for row in results)
     (EVIDENCE/'passed.json').write_text(json.dumps({'passed':passed,'manifestSha256':sha(HERE/'manifest.json'),'apps':SELECTED,'results':results,'containersReaped':not CONTAINERS},indent=2)+'\n')
     assert passed,'One or more unchanged app tests failed; see per-app evidence'
-def diagnose():
-    prepared=json.loads((EVIDENCE/'prepared.json').read_text())
-    assert SELECTED==['docs'] and prepared['apps']==SELECTED and prepared['manifestSha256']==sha(HERE/'manifest.json')
-    command=['python3','/stage/procedure/run-one.py','docs','--unsigned-only']
-    code=docker('iris-fips-diagnostic-docs-loopback',command,cwd='/stage/apps/docs',seconds=75,evidence_suffix='-loopback',allow_failure=True)
-    baseline=json.loads((EVIDENCE/'docs-loopback/browser.json').read_text())
-    network=json.loads((EVIDENCE/'docs-loopback/network.json').read_text());assert network['interfaces']==['lo']
-    assert len(baseline['rawWorkerDenial'])==4 and all(v.get('https')=='rejected' or v.get('wss')=='rejected' for v in baseline['rawWorkerDenial'])
-    assert baseline['candidateAddressesAllowed']
-    if code:
-        assert baseline['rtc']['error']=='Loopback browser datachannel unavailable','Only diagnosed RTC failure permits dummy proof'
-        dummy_code=docker('iris-fips-diagnostic-docs-dummy',command,cwd='/stage/apps/docs',seconds=90,dummy=True,evidence_suffix='-dummy',allow_failure=True)
-        if dummy_code:
-            dummy=json.loads((EVIDENCE/'docs-dummy/browser.json').read_text())
-            dummy_network=json.loads((EVIDENCE/'docs-dummy/network.json').read_text())
-            assert dummy_network['interfaces']==['fixture0','lo'] and dummy_network['effectiveAndBoundingCapabilities']==0
-            assert len(dummy['rawWorkerDenial'])==4 and all(v.get('https')=='rejected' or v.get('wss')=='rejected' for v in dummy['rawWorkerDenial'])
-            assert dummy['candidateAddressesAllowed'] and dummy['rtc']['error']=='Loopback browser datachannel unavailable' and dummy['rtc']['candidates']==[]
-            assert not dummy['mediaPermission']['requested']
-            docker('iris-fips-diagnostic-docs-permission',command,cwd='/stage/apps/docs',seconds=90,dummy=True,evidence_suffix='-permission')
-    (EVIDENCE/'unsigned-diagnostic-passed.json').write_text(json.dumps({'passed':True,'unsignedOnly':True,'apps':SELECTED,'loopbackPassed':code==0,'dummyRequired':code!=0,'mediaPermissionRequired':code!=0 and dummy_code!=0,'containersReaped':not CONTAINERS},indent=2)+'\n')
 try:
-    {'prepare':prepare,'test':test,'diagnose':diagnose}[sys.argv[1]]()
+    {'prepare':prepare,'test':test}[sys.argv[1]]()
 finally:cleanup()
