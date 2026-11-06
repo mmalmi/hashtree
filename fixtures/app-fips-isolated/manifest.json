@@ -1,11 +1,11 @@
 {
   "schema": 1,
   "purpose": "Task branch only: exact app FIPS compatibility, no external network, no native build",
-  "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
+  "image": "mcr.microsoft.com/playwright@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6",
   "imageTagForProvenance": "v1.60.0-noble",
   "pnpm": {
-    "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.23.0.tgz",
-    "sha256": "a1cdd7b468386a9d78a081da05d6049d7e598db62a299db92df21a7062a4b183"
+    "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.24.0.tgz",
+    "sha256": "196f4bd174ebcbd99786b33452f144cb2dc32ef4e7138ed44491e9d43d702d75"
   },
   "native": {
     "url": "https://github.com/mmalmi/hashtree/releases/download/v0.2.142/hashtree-x86_64-unknown-linux-musl.tar.gz",

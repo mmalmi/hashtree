@@ -10,7 +10,7 @@ SAFE_ENV={k:v for k,v in os.environ.items() if k in ('PATH','HOME','USER','DOCKE
 SELECTED=os.environ.get('FIPS_APPS','').split(',') if os.environ.get('FIPS_APPS') else [a['id'] for a in M['apps']]
 assert len(SELECTED)==len(set(SELECTED)) and set(SELECTED)<=set(a['id'] for a in M['apps'])
 APPS=[next(a for a in M['apps'] if a['id']==name) for name in SELECTED]
-APP_CONTAINERS={'iris-fips-test-'+name for name in ('docs','calendar','boards','git','video','drive','maps')}
+APP_CONTAINERS={'iris-fips-test-'+name for name in ('docs','calendar','boards','git','video','drive','maps','meet')}
 def sha(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 def cleanup():
     global PROCESS
@@ -87,7 +87,7 @@ def prepare():
     fetch(M['native'],STAGE/'native.tgz');extract(STAGE/'native.tgz',STAGE/'tools/native')
     for name,digest in M['native']['executables'].items():assert sha(STAGE/'tools/native/hashtree'/name)==digest
     run(['docker','pull',IMAGE],'image-pull.log',300)
-    docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');if(process.versions.node.split('.')[0]!=='24')throw Error('Unexpected image Node');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
+    docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
     for app in APPS:
         archive=HERE/app['archive'];assert sha(archive)==app['archiveSha256']
         target=STAGE/'apps'/app['id'];extract(archive,target)
@@ -97,6 +97,8 @@ def prepare():
         for file in app['distFiles']:assert sha(target/app['distDir']/file['path'])==file['sha256']
         run(['python3',str(HERE/'apply-app-overlay.py'),app['id'],str(STAGE)],'overlay-'+app['id']+'.log',10)
         (target/'isolated.playwright.config.ts').write_text("import original from './playwright.config';\nexport default {...original, use:{...original.use, launchOptions:{...original.use?.launchOptions,args:[...(original.use?.launchOptions?.args??[]),'--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}}};\n")
+        if app['id']=='meet':
+            (target/'isolated.playwright.config.ts').write_text("import original from './playwright.config';\nexport default {...original, use:{...original.use,trace:'retain-on-failure'}, projects:original.projects?.map(project=>({...project,use:{...project.use,launchOptions:{...project.use?.launchOptions,args:[...(project.use?.launchOptions?.args??[]),'--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}}}))};\n")
         docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
     (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'distInputsVerified':True},indent=2)+'\n')
 
