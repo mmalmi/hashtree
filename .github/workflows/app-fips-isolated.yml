@@ -1,34 +1,30 @@
-name: Isolated graph consumer release gates
+name: Isolated Client graph release qualification
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  qualify:
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        app: [docs, calendar, boards, video, git, maps]
+  qualify-client:
     runs-on: ubuntu-24.04
-    timeout-minutes: 65
+    timeout-minutes: 80
     env:
-      FIPS_APPS: ${{ matrix.app }}
+      FIPS_APPS: client
     steps:
       - name: Set task-exclusive stage
-        run: echo "FIPS_STAGE=$RUNNER_TEMP/app-graph404-${{ matrix.app }}" >> "$GITHUB_ENV"
+        run: echo "FIPS_STAGE=$RUNNER_TEMP/client-graph404" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Prepare pinned inputs before isolation
-        run: timeout --signal=TERM --kill-after=15s 900s python3 fixtures/app-fips-isolated/controller.py prepare
-      - name: Build and qualify after independent unsigned denial controls
-        run: timeout --signal=TERM --kill-after=15s 3000s python3 fixtures/app-fips-isolated/controller.py test
-      - name: Preserve logs and exact qualified distribution
+      - name: Verify exact Git history and frozen dependencies
+        run: timeout --signal=TERM --kill-after=15s 900s python3 fixtures/client-graph404/controller.py prepare
+      - name: Qualify complete original release plan after independent OS denial
+        run: timeout --signal=TERM --kill-after=15s 3750s python3 fixtures/client-graph404/controller.py test
+      - name: Preserve evidence and qualified distribution
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: app-graph404-${{ matrix.app }}-${{ github.sha }}
-          path: ${{ runner.temp }}/app-graph404-${{ matrix.app }}/evidence
+          name: client-graph404-${{ github.sha }}
+          path: ${{ runner.temp }}/client-graph404/evidence
           if-no-files-found: error
+          include-hidden-files: true
           retention-days: 7

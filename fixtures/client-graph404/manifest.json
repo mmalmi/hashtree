@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "purpose": "Client complete checked-in qualification only; no publication; independent network namespace before signing",
+  "image": "mcr.microsoft.com/playwright@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6",
+  "imageTagForProvenance": "v1.61.1-noble",
+  "node": "v24.17.0",
+  "nodeSha256": "62d66443847de1f527f74afe715900b12884ace52136dc9cd8e91e61acc2f527",
+  "pnpm": {
+    "url": "https://registry.npmjs.org/pnpm/-/pnpm-9.15.0.tgz",
+    "bytes": 4314910,
+    "sha256": "09a8fe31a34fda706354680619f4002f4ccef6dadff93240d24ef6c831f0fd28",
+    "version": "9.15.0"
+  },
+  "apps": [
+    {
+      "id": "client",
+      "commit": "77fa93af76d3bcfd3e6236b04610caaa8c47f5bc",
+      "archive": "archives/client-source.bundle",
+      "archiveSha256": "b6494d75bed5bfd286c281d00fe6cb8053d2f81a96833bc74873a7c5263d0885",
+      "requiredMaster": "12bcd8a190e8eb9d92d48d723ff582eff0ce6787",
+      "observedPublicMaster": "2163baf6f2c22dc6cfd46ce3126f50c2d6b15b94",
+      "publicRemote": "https://github.com/irislib/iris-client.git",
+      "bundleRef": "refs/task-evidence/cohort404-client-source",
+      "lockSha256": "21554dcdef70d62145b339c992a221a56b8ce942e67451a7a334b0ce91547823",
+      "packageSha256": "8ccef439e55701e629e79e928d9155a7899c7e666e505e67598c51d0a2461c19",
+      "releaseProfileSha256": "cb3294c56495522aaf0fbbe8dd8fb08a3077e6c7790fcbb870317225b3d2080d",
+      "sourceCheckerSha256": "a0a93988ff4d3d513bf6da36c29ddf1aa46a2322a1846237d6c8bc351f187004",
+      "distDir": "dist",
+      "packageManager": "pnpm@9.15.0",
+      "playwright": "1.61.1"
+    }
+  ]
+}
