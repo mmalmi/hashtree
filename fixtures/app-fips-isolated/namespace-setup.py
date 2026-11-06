@@ -25,13 +25,16 @@ assert before['pidNamespace']!=os.readlink('/proc/self/ns/pid')
 fd=os.open(f'/proc/{pid}/ns/net',os.O_RDONLY)
 try:
     assert os.fstat(fd).st_ino==os.stat(f'/proc/{pid}/ns/net').st_ino
-    def ip(*args):
+    def namespace_command(*args):
         assert identity()==before,'Container identity changed before namespace command'
-        result=subprocess.check_output(['nsenter',f'--net=/proc/self/fd/{fd}','--','ip',*args],pass_fds=(fd,),text=True,timeout=5)
+        result=subprocess.check_output(['nsenter',f'--net=/proc/self/fd/{fd}','--',*args],pass_fds=(fd,),text=True,timeout=5)
         assert identity()==before,'Container identity changed during namespace command'
         return result
+    def ip(*args):return namespace_command('ip',*args)
     links=json.loads(ip('-j','link','show'));assert [v['ifname'] for v in links]==['lo']
     ip('link','add','fixture0','type','dummy')
+    namespace_command('sysctl','-q','-w','net.ipv6.conf.fixture0.disable_ipv6=1')
+    assert namespace_command('sysctl','-n','net.ipv6.conf.fixture0.disable_ipv6').strip()=='1'
     ip('link','set','dev','fixture0','addrgenmode','none')
     ip('addr','add','192.0.2.1/32','dev','fixture0','noprefixroute')
     ip('link','set','dev','fixture0','up')
@@ -43,7 +46,7 @@ try:
     assert len(addresses)==1 and addresses[0]['local']=='192.0.2.1' and addresses[0]['prefixlen']==32
     routes=json.loads(ip('-j','route','show','table','all'))
     routes6=json.loads(ip('-j','-6','route','show','table','all'))
-    print(json.dumps({'phase':'beforeRouteAdmission','identity':before,'interfaces':links,'fixtureAddresses':addresses,'routes4':routes,'routes6':routes6},indent=2),flush=True)
+    print(json.dumps({'phase':'beforeRouteAdmission','identity':before,'dummyIpv6Disabled':True,'interfaces':links,'fixtureAddresses':addresses,'routes4':routes,'routes6':routes6},indent=2),flush=True)
     assert all(v.get('dev')=='lo' or (v.get('dev')=='fixture0' and v.get('type')=='local' and v['dst']=='192.0.2.1') for v in routes)
     assert all(v.get('dev')=='lo' for v in routes6)
     print(json.dumps({'containerId':container_id,'containerName':name,'identity':before,'hostNetworkNamespace':os.readlink('/proc/self/ns/net'),'interfaces':links,'fixtureAddresses':addresses,'routes4':routes,'routes6':routes6},indent=2))
