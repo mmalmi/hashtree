@@ -1,0 +1,1228 @@
+{
+  "name": "@hashtree/worker",
+  "version": "0.4.25",
+  "source": "3b5ec0e2ea9f1da2036bf4c894a770bd211add30",
+  "tag": "hashtree-ts-runtime-v0.5.41",
+  "tsTree": "151614d7d6b8de5591988802d73eba98037c5446",
+  "rustTree": "bf45ba3a2074c1b18a5abddbb5a28094d51a6c86",
+  "mirror": "dd35758d27208cdc9a97bb304b5a1d86e8ffcc6b",
+  "archive": {
+    "filename": "hashtree-worker-0.4.25.tgz",
+    "bytes": 255911,
+    "sha256": "b9ea6d34c73f7005e862bbbec0a4a6164649cc24306ea53684413cf57a54de4e",
+    "integrity": "sha512-viUPl2JUtrfJENEWZPvaTtT5x73Pvj5EmHn7qjsTP5T01uOg0tDm7xJww3cf6x23LILi6drOh97ss0WWYq/KVA=="
+  },
+  "sourceExpected": {
+    "previous_master": "3d273dc63fc69143dfdb84ab6ed5a1961b033137",
+    "master": "dd35758d27208cdc9a97bb304b5a1d86e8ffcc6b",
+    "head": "refs/heads/master",
+    "refs": {
+      "refs/heads/codex/haps-query-cancellation": "435400fab747e7314b3c870c4ac578258d16f2a5",
+      "refs/heads/codex/ios-lmdb-locking": "b1f0e059576536543a99cef645db73ace8caf26e",
+      "refs/heads/codex/release-prebuilt-031": "f19cb5d0cf78e61533cd086f29ba83d7f0193b27",
+      "refs/heads/master": "dd35758d27208cdc9a97bb304b5a1d86e8ffcc6b",
+      "refs/tags/haps-source/5b1f6c036a9b2756a25df9420fe79880707e6a3b": "5b1f6c036a9b2756a25df9420fe79880707e6a3b",
+      "refs/tags/haps-source/876abcd67dc613efd43945ce82cac2d701317162": "876abcd67dc613efd43945ce82cac2d701317162",
+      "refs/tags/hashtree-client-v0.1.0": "46ed89864d90728e9368732f7bcebfd5e6fa50d0",
+      "refs/tags/hashtree-client-v0.1.1": "a72e5eaf9b90cf106c6727032d2d5da6be70be9c",
+      "refs/tags/hashtree-client-v0.1.2": "0909e0a49742ebff73936b3648526bf547c0dd54",
+      "refs/tags/hashtree-core-v0.2.91": "7c6604a163850f93cbffaadfaca9a6915863cbcc",
+      "refs/tags/hashtree-fips-transport-v0.4.27": "717eee3c755fe123aa8c24bfa8efee8d16f9edc2",
+      "refs/tags/hashtree-fips-transport-v0.4.28": "91157df02a01bfbc1d3892b301a98802412e085e",
+      "refs/tags/hashtree-fs-v0.2.83": "790c7e46a1077ae0e35aa5aac9c99fae8d95c727",
+      "refs/tags/hashtree-nostr-v0.2.90": "3cb2a06b4461dc8248fca267373504ef8e10c427",
+      "refs/tags/hashtree-ts-runtime-v0.5.21": "62b9794288552eb2ad7d75b31f60c53764ed2604",
+      "refs/tags/hashtree-ts-runtime-v0.5.27": "9eb201a26dd6a0a914f9a480b6a33621ca9e635e",
+      "refs/tags/hashtree-ts-runtime-v0.5.28": "65f9a8145100c152f716edcba7c5bd05e1c0e9a5",
+      "refs/tags/hashtree-ts-runtime-v0.5.29": "cc45bb74ef12c9cc5b4325a3c67522c6700e415b",
+      "refs/tags/library-prep-v0.2.154": "d91ae6227ddd5e981f9e753ea3d47075f82f0cfb",
+      "refs/tags/v0.2.152": "8c0205a62f221cb6f74bb1e0cd6923798e7fc3ee",
+      "refs/tags/v0.2.153": "6c706eae6d1e944901eaa179731c20b93b27308e",
+      "refs/tags/v0.3.1": "a020090724e3ec5cf929350ea1bffef3bb4fcb11",
+      "refs/tags/hashtree-ts-runtime-v0.5.32": "f5e71f852f995273ee8c54e33f615aad7aa9531c",
+      "refs/tags/hashtree-ts-runtime-v0.5.33": "56e0ed368d7d41e45ada36c2a8bfb231fe77f7b0",
+      "refs/tags/hashtree-ts-runtime-v0.5.34": "a136e56f2b10ab91cc6cf87cca7acacb2506f1dd",
+      "refs/tags/hashtree-ts-runtime-v0.5.35": "8bf1de1272a39fb0616c22133d429ac21d12094f",
+      "refs/tags/git-remote-htree-v0.4.0": "b96680ccb0c09ac01a405bf07d550741f25a6180",
+      "refs/tags/hashtree-cli-v0.4.0": "76a3927ecbfab84c68b722ccccb9d83abfb111c3",
+      "refs/tags/hashtree-embedded-v0.4.0": "a4844d3950a4dad5d4dda722d5a3c9eba9d7eeb6",
+      "refs/tags/hashtree-ts-runtime-v0.5.36": "7e086c2e5d5611564f99c49ce3f4ed7a3cda0771",
+      "refs/tags/hashtree-ts-runtime-v0.5.37": "f89303978e1a30c86efec0d63ab453460fa17215",
+      "refs/tags/hashtree-ts-runtime-v0.5.38": "5b8e784357db6da44e89b4b6b7d780f9d50d4d8f",
+      "refs/tags/hashtree-cli-v0.4.1": "c2112f3513b0509de693233009ea022f6fdee871",
+      "refs/tags/hashtree-embedded-v0.4.1": "055b23e53f35235797dea7344eac5c4937c419cf",
+      "refs/tags/hashtree-ts-runtime-v0.5.39": "340a203a7e4aea1ae400a4df0241c015f0770462",
+      "refs/tags/hashtree-ts-runtime-v0.5.40": "1d67d07b3f2fd38038f3c9340ab5e1462b5961d0",
+      "refs/tags/hashtree-ts-runtime-v0.5.41": "3b5ec0e2ea9f1da2036bf4c894a770bd211add30"
+    },
+    "objects": 33692,
+    "object_ids_sha256": "156f51388ed7600a3eb013343aa70eb145b208656de390a1e3ab7a8783d6fc5d",
+    "payloads_sha256": "09c4768b92ea10b0f50bade53ff8e5f3531d690beac035a9a1e3aa2f473ee7b5",
+    "payload_bytes": 517413751
+  },
+  "coldAudit": {
+    "run": 42225168192,
+    "opsCommit": "7245a923117cc82445f4d3df413fcf449395bde9",
+    "receiptSha256": "b2562b3dba2145ba7b0f1d8ad80edc62ffd7980f78f42c587ff6626853f8e2f7"
+  },
+  "qualification": {
+    "workerTests": 268,
+    "workerFiles": 45,
+    "actualIifeModes": 15,
+    "networkIsolationControlsPassed": true,
+    "workerReceiptSha256": "acd9e210a2f0f4c20811af2185471d97604c6aa4fa6aa564d057730898c38c9b",
+    "nativePassed": 126,
+    "nativeIgnoredBenchmarks": 2,
+    "nativeWorkflowConclusion": "failure",
+    "nativeFailureWasReporterOnly": true,
+    "nativePostRunDiffCheckOmitted": true,
+    "nativeReceiptSha256": "5a5008b2f105c8b924fcd33daade854842868a014eaba6c2af9546d8333bffcc"
+  },
+  "files": {
+    "package/LICENSE": {
+      "sha256": "d43b5e99d9d0e73f69edac17b4167b5f973bb4920edc77f344c1091c4ec1b86c",
+      "mode": 420,
+      "bytes": 1077
+    },
+    "package/dist/app-runtime.js": {
+      "sha256": "443b3a6bb894a5381bd9d66ca92835b5a13fa4e15b0912269f652b4006074357",
+      "mode": 420,
+      "bytes": 10782
+    },
+    "package/dist/capabilities/blossomBandwidthTracker.js": {
+      "sha256": "99ee9897a8f286c41116d146230550d14eb75415a0e47eb5a7577d1338b711d5",
+      "mode": 420,
+      "bytes": 1669
+    },
+    "package/dist/capabilities/blossomTransport.js": {
+      "sha256": "04a286c4d40e4ede36dcb5767c00d25b512f1cc8af1d5fbcbb7260b5e7768848",
+      "mode": 420,
+      "bytes": 7576
+    },
+    "package/dist/client-id.js": {
+      "sha256": "50bf94a324ee46027f327a004bf8c1e29082f796a3f8b7d87de2be1ef35318b1",
+      "mode": 420,
+      "bytes": 3281
+    },
+    "package/dist/client.js": {
+      "sha256": "977a4372a2a3b33b14d53da55ce5019ec712054b0005105e10068352312132e8",
+      "mode": 420,
+      "bytes": 22043
+    },
+    "package/dist/capabilities/connectivity.js": {
+      "sha256": "2502f401a8b7d162c9da7b85ddb33a0071b24696af71c43a94618de930416e39",
+      "mode": 420,
+      "bytes": 1871
+    },
+    "package/dist/relay/utils/constants.js": {
+      "sha256": "89441efea57d635737a95cdda6ef47f04f79f8af502c69cc1c77fc5c1c038d57",
+      "mode": 420,
+      "bytes": 3804
+    },
+    "package/dist/encryptedFileSize.js": {
+      "sha256": "3f983ef9762fb0fc27fd638f63f01f3ec5328589632c8b2d7f49bb39f4fb7cc1",
+      "mode": 420,
+      "bytes": 724
+    },
+    "package/dist/entry.js": {
+      "sha256": "095f5c7a3dc709339300f8b991be6b61cbbad67f73eab9b5e26b48070655d238",
+      "mode": 420,
+      "bytes": 109
+    },
+    "package/dist/relay/utils/errorMessage.js": {
+      "sha256": "d00972d7dc4ab13f27804d6ac5c9453ee50603af97905bbf0622adc2a2090b3d",
+      "mode": 420,
+      "bytes": 214
+    },
+    "package/dist/relay/eventIndex.js": {
+      "sha256": "0d0583e9df6485920566bab5af2f775cf99efd54cccea40d70747bd3a2f18d29",
+      "mode": 420,
+      "bytes": 2842
+    },
+    "package/dist/htree-path.js": {
+      "sha256": "45931cd74e09837e27cee3b941f1a73e6e3be8ebde0658ccdd7a7f30fd4650af",
+      "mode": 420,
+      "bytes": 1167
+    },
+    "package/dist/htree-url.js": {
+      "sha256": "686df31b3bebab0fbbb78d4d97b6678c8b9196e4a2a3d76da924ec97650567a8",
+      "mode": 420,
+      "bytes": 4659
+    },
+    "package/dist/httpRange.js": {
+      "sha256": "6669369d3c071df835cc93963941ea2d2a0590812c6cfa343435d834376b89a0",
+      "mode": 420,
+      "bytes": 1565
+    },
+    "package/dist/capabilities/idbStorage.js": {
+      "sha256": "2797f6f3ca6c2e0389f151c19b6c1bd3a9b54fc9a7dd3fbf7d3253c38bb49390",
+      "mode": 420,
+      "bytes": 4532
+    },
+    "package/dist/relay/identity.js": {
+      "sha256": "0984c7ddbabdba8e48d6e8e4020e5be7f7a649f2c70e9f4bb4b6fa64252df322",
+      "mode": 420,
+      "bytes": 1982
+    },
+    "package/dist/index.js": {
+      "sha256": "fbaf69c1d35a29d358f24161e31e020403134d077298814ce3a0875910e6fdac",
+      "mode": 420,
+      "bytes": 614
+    },
+    "package/dist/relay/utils/lruCache.js": {
+      "sha256": "8359ea005d06d6c8a67c066a487e57ddb21b59c0ddf7278beae2a820a4769579",
+      "mode": 420,
+      "bytes": 1535
+    },
+    "package/dist/relay/mediaHandler.js": {
+      "sha256": "f4524b205c3bbbac822fe49f22f6cae5205d03bf927474080927949ea146680d",
+      "mode": 420,
+      "bytes": 44363
+    },
+    "package/dist/mediaReadRetry.js": {
+      "sha256": "e5fab916b9c2eedda7ae4804e4cb56ed59c257d950dbd71881f5b730ee138782",
+      "mode": 420,
+      "bytes": 1595
+    },
+    "package/dist/mediaStreaming.js": {
+      "sha256": "9b3f864181db0c7366dcb5168f3dee10dcbde327e795a6558dd263ccf2847705",
+      "mode": 420,
+      "bytes": 2053
+    },
+    "package/dist/relay/nostr-wasm.js": {
+      "sha256": "e1df493a6e4714ab7ece3fffe2af4fbd0abfd71286018d564407cca07fc13ca4",
+      "mode": 420,
+      "bytes": 10098
+    },
+    "package/dist/relay/nostr.js": {
+      "sha256": "22998d0a975f402237d1d8ad5d3284bb498e66858538f32381cc8666bf80cee3",
+      "mode": 420,
+      "bytes": 6570
+    },
+    "package/dist/relay/nostrRuntime.js": {
+      "sha256": "53ab48ae09e22f23eba29e75e8b02f49e07e5b31e0a7800a33ede4aa3bb15426",
+      "mode": 420,
+      "bytes": 4152
+    },
+    "package/dist/nostrSourcePort.js": {
+      "sha256": "3bb9de0346bb842599771ffa49a46eeb051d831b18548158dbacb4ad6335bd7b",
+      "mode": 420,
+      "bytes": 6319
+    },
+    "package/dist/p2pBridge.js": {
+      "sha256": "c1ee212f87194be70629b33dbd864bbf642dba02c2582b83c5cce29303081673",
+      "mode": 420,
+      "bytes": 4515
+    },
+    "package/dist/p2pPeerRoutes.js": {
+      "sha256": "5ad7a4761c07744ae0c49385d6b3919c83366c148c420d2279db7a08811e0b1b",
+      "mode": 420,
+      "bytes": 3247
+    },
+    "package/dist/privacyGuards.js": {
+      "sha256": "188cd9072d7f624c2f5f1705e511a1f054fa4e891a6260cd7eee8b252e99afef",
+      "mode": 420,
+      "bytes": 851
+    },
+    "package/dist/protocol.js": {
+      "sha256": "b5ab69287989be4a830cf388cb3030d92eb9659a48f3e37ce718ba7282bd6417",
+      "mode": 420,
+      "bytes": 47
+    },
+    "package/dist/relay/protocol.js": {
+      "sha256": "86e540d0780dee2a2123fa3cc8f48f7d754d1012dd8969890d44bf72df556888",
+      "mode": 420,
+      "bytes": 336
+    },
+    "package/dist/relay/publicAssetUrl.js": {
+      "sha256": "d764ac1903796355bca45cf683982d9ca4fb97824232ad3db0df5397fa6bb22e",
+      "mode": 420,
+      "bytes": 853
+    },
+    "package/dist/relay-client.js": {
+      "sha256": "5fec8783080a3b5b02337f00f2641a2d10e6b9e80ecaaeca6d20f523f07995b3",
+      "mode": 420,
+      "bytes": 20712
+    },
+    "package/dist/relay-entry.js": {
+      "sha256": "a62fecb1513b1e871ff0a1ca1152589f3dbff8db70720cb5bba87ade39947b39",
+      "mode": 420,
+      "bytes": 67
+    },
+    "package/dist/relay/rootPathResolver.js": {
+      "sha256": "d936a8decd1c8aabe2bdbee1f3f678db685cd4631f6e1d38a430f0cc8fc98f98",
+      "mode": 420,
+      "bytes": 1028
+    },
+    "package/dist/capabilities/rootResolver.js": {
+      "sha256": "483a0182e54caae3605a27f23e21ee15edf1526018c2379315afd3fd9db55d34",
+      "mode": 420,
+      "bytes": 14304
+    },
+    "package/dist/runtime-network.js": {
+      "sha256": "45cb719d465691824acccf87fa546d1a1b0eacfb514932111cf755f6300ee9c8",
+      "mode": 420,
+      "bytes": 3524
+    },
+    "package/dist/runtime.js": {
+      "sha256": "0bc41a57825f39feff14ba06f3b3f3f56a5d3775a7d08e42c72d9c59482fc7bc",
+      "mode": 420,
+      "bytes": 6043
+    },
+    "package/dist/relay/signing.js": {
+      "sha256": "1d06c514ff358593bbd76c23a47908626624a069577aed2efccef1da8f1a3e4c",
+      "mode": 420,
+      "bytes": 8218
+    },
+    "package/dist/transferableBytes.js": {
+      "sha256": "7d3a06d56dda7e9a4de79afbee5584169a4a548a3e04bea0d798be602d8936eb",
+      "mode": 420,
+      "bytes": 273
+    },
+    "package/dist/tree-root.js": {
+      "sha256": "a64646fc78236d5d29e1ace03b96f58b8365fc64d57cd991dfc00c965e7db57e",
+      "mode": 420,
+      "bytes": 23108
+    },
+    "package/dist/relay/treeRootCache.js": {
+      "sha256": "f62ebe8a2990eea5fb1f424f7c2448b38fda2c1c678fcf8e80f33a64c748863a",
+      "mode": 420,
+      "bytes": 9045
+    },
+    "package/dist/relay/treeRootSubscription.js": {
+      "sha256": "0337d1b3a6cfdea1ed1f0f9880deb7e2b2cad452b50c4d46f5de3b0b535aa0da",
+      "mode": 420,
+      "bytes": 13446
+    },
+    "package/dist/types.js": {
+      "sha256": "01ae2a5b120382f9a648ced7ee8507493a134f216d100fc61600c6c9738235d2",
+      "mode": 420,
+      "bytes": 44
+    },
+    "package/dist/relay/worker.js": {
+      "sha256": "57d31834c8daae58c8d1abcb0b808058ceacc345f0302c62cf5f6a7f9c217f58",
+      "mode": 420,
+      "bytes": 67293
+    },
+    "package/dist/worker.js": {
+      "sha256": "a90abf50f2167b7e4f144e9f0fe666797780c020a5239226905a575b05d1dc13",
+      "mode": 420,
+      "bytes": 54878
+    },
+    "package/package.json": {
+      "sha256": "19df1a71625708d37bf3f7523bd859a828f5fe1ab809cf720b84209cfb62889e",
+      "mode": 420,
+      "bytes": 3343
+    },
+    "package/dist/app-runtime.d.ts.map": {
+      "sha256": "d631465b97f0a9046684a9ad4b4f6c68bb7bea24782460df63fbd6268219b76d",
+      "mode": 420,
+      "bytes": 2488
+    },
+    "package/dist/app-runtime.js.map": {
+      "sha256": "f1f2e255259de13fa657da9face444e8cd588ba7bb9265b229c5faa377d91551",
+      "mode": 420,
+      "bytes": 9464
+    },
+    "package/dist/capabilities/blossomBandwidthTracker.d.ts.map": {
+      "sha256": "18f3b5bd1f4ee73a62989cbb5e4a4a5c24dcd15950a39ab0b1c0c50eb8666230",
+      "mode": 420,
+      "bytes": 870
+    },
+    "package/dist/capabilities/blossomBandwidthTracker.js.map": {
+      "sha256": "1f4f5dc103c2cc39d7694c91bc3d745453b28ce09b21e36d8ec0db43c93ef2f8",
+      "mode": 420,
+      "bytes": 1808
+    },
+    "package/dist/capabilities/blossomTransport.d.ts.map": {
+      "sha256": "2c0459d6872ef471ccb4ec01e63e6af0e485d954f71032a562955c66fd862bb9",
+      "mode": 420,
+      "bytes": 1385
+    },
+    "package/dist/capabilities/blossomTransport.js.map": {
+      "sha256": "7032f009951685dab77fa1d42ffc7df67d281c8e97ca1371f90f8684c781ffe0",
+      "mode": 420,
+      "bytes": 7409
+    },
+    "package/dist/client-id.d.ts.map": {
+      "sha256": "45064ed6b1b2da7644bca99e190842ac45b7fe51cc369c8a1f79daa5e3fa18f6",
+      "mode": 420,
+      "bytes": 911
+    },
+    "package/dist/client-id.js.map": {
+      "sha256": "1a0b808136a0fa89e3c8adbe16cb58d4dc3e6f09512c0e6d469e70d8526ccee1",
+      "mode": 420,
+      "bytes": 3436
+    },
+    "package/dist/client.d.ts.map": {
+      "sha256": "1985564ea3a23dad61d226d5f887ee7423745cea0ba08a6f6ca61405e4f86fb7",
+      "mode": 420,
+      "bytes": 4431
+    },
+    "package/dist/client.js.map": {
+      "sha256": "30a53f287a914b810201a28f9a32b10ce41f36988b048adeacaee1a11c4e0bee",
+      "mode": 420,
+      "bytes": 21112
+    },
+    "package/dist/capabilities/connectivity.d.ts.map": {
+      "sha256": "ecfe451cf12300104a12e747b3fa3f1d0aeee0e854bbfcbb5634263d8a900fd2",
+      "mode": 420,
+      "bytes": 276
+    },
+    "package/dist/capabilities/connectivity.js.map": {
+      "sha256": "43ddd42b3b8e163118323be03205b4536a7a0ed977f3ae85c72b1cc18cca20ad",
+      "mode": 420,
+      "bytes": 1854
+    },
+    "package/dist/relay/utils/constants.d.ts.map": {
+      "sha256": "9eebd54892f78d1dc5f63ef5b93b21bc2ffcc1bc8a6b8f1c42a1646387be27ca",
+      "mode": 420,
+      "bytes": 1339
+    },
+    "package/dist/relay/utils/constants.js.map": {
+      "sha256": "a803752cd1aeaa53e0d6ecb27e857a86b4dabb21788f3f3f2bd9770ab2e60bdb",
+      "mode": 420,
+      "bytes": 2867
+    },
+    "package/dist/encryptedFileSize.d.ts.map": {
+      "sha256": "34f1e30b264de60b60e3ecf3d8e4a2c7cb1ad767f077395bd213466abb944280",
+      "mode": 420,
+      "bytes": 309
+    },
+    "package/dist/encryptedFileSize.js.map": {
+      "sha256": "1cee29af6d3e49ca6fe703d7303b5fe15c65d5c2fecdee25ac2dc8134d4a5aa8",
+      "mode": 420,
+      "bytes": 868
+    },
+    "package/dist/entry.d.ts.map": {
+      "sha256": "6455824f7e57e992236964a48399c82c21daf1df8f69108c9f5564c97f8d66f4",
+      "mode": 420,
+      "bytes": 104
+    },
+    "package/dist/entry.js.map": {
+      "sha256": "c408c1ff4e5fcc0a67313e96e216b68eec607f6d8e7359c145685050ca053ede",
+      "mode": 420,
+      "bytes": 166
+    },
+    "package/dist/relay/utils/errorMessage.d.ts.map": {
+      "sha256": "826625b108768d6523604e74455f319202f25a220b6510c413ced7cfa05769c0",
+      "mode": 420,
+      "bytes": 199
+    },
+    "package/dist/relay/utils/errorMessage.js.map": {
+      "sha256": "8245a400d81991f1eec31dc6c0e365395df8713b82f25e9f04da5b710e21afa4",
+      "mode": 420,
+      "bytes": 291
+    },
+    "package/dist/relay/eventIndex.d.ts.map": {
+      "sha256": "aba84a55b23dbbdd253d098aac4e6f9c3f24382e29d69649b49c985ff83921b7",
+      "mode": 420,
+      "bytes": 510
+    },
+    "package/dist/relay/eventIndex.js.map": {
+      "sha256": "c1422be9c7631a6bb4b47d0e2bcdf3891260343b8762591dfddb94c460206590",
+      "mode": 420,
+      "bytes": 3068
+    },
+    "package/dist/htree-path.d.ts.map": {
+      "sha256": "10de60862f2565aed4bd5caf4dd28c746417fa638e317588ef90202ddf425ebe",
+      "mode": 420,
+      "bytes": 485
+    },
+    "package/dist/htree-path.js.map": {
+      "sha256": "72fe18bd4a0036d063ff64bd73d0a454347bcde8d0f340a77206155e73e83bce",
+      "mode": 420,
+      "bytes": 1562
+    },
+    "package/dist/htree-url.d.ts.map": {
+      "sha256": "d0807d5f6b03d09de1a807959ecf5d7ff01e5271c7df63b400ce5f844c3d3d0a",
+      "mode": 420,
+      "bytes": 862
+    },
+    "package/dist/htree-url.js.map": {
+      "sha256": "28c4d344316c014ee569fd7d7df0dc8f29c65f46c35b8ef60f7078bae9e7d53e",
+      "mode": 420,
+      "bytes": 4895
+    },
+    "package/dist/httpRange.d.ts.map": {
+      "sha256": "b3e4659a84de5ae95742497fa4cacb1c451372be0dff1d70642a401617ce0740",
+      "mode": 420,
+      "bytes": 450
+    },
+    "package/dist/httpRange.js.map": {
+      "sha256": "82d76b1060917843d5fa9c959858a76ab3a26bb8efae87a742b6cdecf445ae02",
+      "mode": 420,
+      "bytes": 1729
+    },
+    "package/dist/capabilities/idbStorage.d.ts.map": {
+      "sha256": "69c8e564868ce4b0e62dd33a3047d2dc299257dc636a6d6321d05aadd9d46d66",
+      "mode": 420,
+      "bytes": 1289
+    },
+    "package/dist/capabilities/idbStorage.js.map": {
+      "sha256": "d235293d2e9b4f4535780d7726df5ac0ea4efcffb22aa403889a441299a6e5ca",
+      "mode": 420,
+      "bytes": 4962
+    },
+    "package/dist/relay/identity.d.ts.map": {
+      "sha256": "11ad7b3272d46f1c7ed4f3925ff232f7fca757859b7e310fc49e2c02273acbe1",
+      "mode": 420,
+      "bytes": 563
+    },
+    "package/dist/relay/identity.js.map": {
+      "sha256": "cce4ac63e05074e6472d8f8e786c4b18aa0719b0248eb08b3ffa8650e34404a6",
+      "mode": 420,
+      "bytes": 1530
+    },
+    "package/dist/index.d.ts.map": {
+      "sha256": "058592aaad5cc202684b6e0b87d0dbfa2a9cd147a367672750bfbbb67c6182c0",
+      "mode": 420,
+      "bytes": 1347
+    },
+    "package/dist/index.js.map": {
+      "sha256": "7dad0c869028bd31ea78cebff663e6551df9ae81a81607e325cac972788ed359",
+      "mode": 420,
+      "bytes": 470
+    },
+    "package/dist/relay/utils/lruCache.d.ts.map": {
+      "sha256": "dc93f01cb8352fb6fc06e307a390718d85033adf436eb4c98133a12895c819fe",
+      "mode": 420,
+      "bytes": 819
+    },
+    "package/dist/relay/utils/lruCache.js.map": {
+      "sha256": "813ad1840452d4970620bc0975d684da3f9ad2f3ba0d27104e867d563f9ced79",
+      "mode": 420,
+      "bytes": 1705
+    },
+    "package/dist/relay/mediaHandler.d.ts.map": {
+      "sha256": "309a7abc8532f945c295552cf2157be8492b580206b3ee4c99cc122ce4053b9c",
+      "mode": 420,
+      "bytes": 1675
+    },
+    "package/dist/relay/mediaHandler.js.map": {
+      "sha256": "0bba0993c4dea17eff8985ddb4c1c8d1ea38156daaa188bbb44b0910bb36d421",
+      "mode": 420,
+      "bytes": 41316
+    },
+    "package/dist/mediaReadRetry.d.ts.map": {
+      "sha256": "45ce0eca1d1dfac15878a779fdf4480ef5b670a0955ba0f1eb43ee36ef61c289",
+      "mode": 420,
+      "bytes": 611
+    },
+    "package/dist/mediaReadRetry.js.map": {
+      "sha256": "01098b45cb08b47626505fb1a3852d87293ad3de22d3d9ef69f1180d937d01aa",
+      "mode": 420,
+      "bytes": 1544
+    },
+    "package/dist/mediaStreaming.d.ts.map": {
+      "sha256": "575a0c7f3fac2dbba7f82828270bb1d3ed94c0f3b8e650a101addbfcc15ef82a",
+      "mode": 420,
+      "bytes": 506
+    },
+    "package/dist/mediaStreaming.js.map": {
+      "sha256": "5b02660bd47bd3073061505da8884401d9dfbd79d3642843e1382a2fab9878d7",
+      "mode": 420,
+      "bytes": 1876
+    },
+    "package/dist/relay/nostr-wasm.d.ts.map": {
+      "sha256": "4923b1f9fdfb98bac9d15f1ad33b7d7fe56b8632500138decbc5681a29b306b3",
+      "mode": 420,
+      "bytes": 213
+    },
+    "package/dist/relay/nostr-wasm.js.map": {
+      "sha256": "5d1466e07e4262d39993992c18bd0065b4fc7acf85a6b889f8149b5663cf5eb5",
+      "mode": 420,
+      "bytes": 8646
+    },
+    "package/dist/relay/nostr.d.ts.map": {
+      "sha256": "9ee6dc37b5322fafff10575888eeaee00690eab3caa36ff34955ef2a949f1d4a",
+      "mode": 420,
+      "bytes": 1021
+    },
+    "package/dist/relay/nostr.js.map": {
+      "sha256": "db149bdf6dbfbad45aa8b695b776dfd08fd40ee70ccdeb976e44ededc78ac4e0",
+      "mode": 420,
+      "bytes": 5369
+    },
+    "package/dist/relay/nostrRuntime.d.ts.map": {
+      "sha256": "b2f674098fb1a1d0219189f167d81d36aa46cd21897767db9dae6226cbbef439",
+      "mode": 420,
+      "bytes": 2295
+    },
+    "package/dist/relay/nostrRuntime.js.map": {
+      "sha256": "ee69b1f57f9c49ce709743a2155e9bea419e668d3d4bbb491c9b119112629dde",
+      "mode": 420,
+      "bytes": 4960
+    },
+    "package/dist/nostrSourcePort.d.ts.map": {
+      "sha256": "a4e686844c902e1923ad6a5daad9fb226a75c3ad0944338ddca8f56cdd05c949",
+      "mode": 420,
+      "bytes": 435
+    },
+    "package/dist/nostrSourcePort.js.map": {
+      "sha256": "af456efb868dfaeb10b5069332bc15246bb16880e5290cf028aaf5dfea1137f6",
+      "mode": 420,
+      "bytes": 6582
+    },
+    "package/dist/p2pBridge.d.ts.map": {
+      "sha256": "cfec5b980f1c733923b61046e87c2c3e82a1c6460b9e99b4b92e9032cc6e796d",
+      "mode": 420,
+      "bytes": 1320
+    },
+    "package/dist/p2pBridge.js.map": {
+      "sha256": "7b832d76035c0f92b856bd90f49e6a0405a208d364108054a719dae506824c7c",
+      "mode": 420,
+      "bytes": 4742
+    },
+    "package/dist/p2pPeerRoutes.d.ts.map": {
+      "sha256": "35da5f223edbeb5fb1ca6ba83042869585ad71b8139f4949573607251ee870b0",
+      "mode": 420,
+      "bytes": 824
+    },
+    "package/dist/p2pPeerRoutes.js.map": {
+      "sha256": "eb236b7d502976313a32b345226da234f5e0a841a1eedb6f9fe6d6316dfdd5e7",
+      "mode": 420,
+      "bytes": 3379
+    },
+    "package/dist/privacyGuards.d.ts.map": {
+      "sha256": "4a65f06332595dcdfacbb7cc6803642868b1843ac20d8bac065bfb3599efc1a9",
+      "mode": 420,
+      "bytes": 451
+    },
+    "package/dist/privacyGuards.js.map": {
+      "sha256": "94e5f49537cb1dded432368d94c7cf57d868eb39d111cc6178c76fa935eb03d5",
+      "mode": 420,
+      "bytes": 740
+    },
+    "package/dist/protocol.d.ts.map": {
+      "sha256": "fa1611a0ccce9fa9340e31ece38cb51efd402a78800d5182e927c181b78d73a0",
+      "mode": 420,
+      "bytes": 7293
+    },
+    "package/dist/relay/protocol.d.ts.map": {
+      "sha256": "1cc3f138aa043eaf153b0c230ef11c2f835b81a9fedf658bff8c6893ad76fe81",
+      "mode": 420,
+      "bytes": 13394
+    },
+    "package/dist/protocol.js.map": {
+      "sha256": "a03d75593f3b3d0db9aa914c94c8dbcb269278c1b9012fa7524c43e02ce82d4d",
+      "mode": 420,
+      "bytes": 108
+    },
+    "package/dist/relay/protocol.js.map": {
+      "sha256": "4c01f97dd4351fa1343052a88657c6064a1ab3ab63f7ef3b2a8bf57e9b3e2c8e",
+      "mode": 420,
+      "bytes": 285
+    },
+    "package/dist/relay/publicAssetUrl.d.ts.map": {
+      "sha256": "7ef849b173f8153f6fbc2ff932d3fa08d80fc33c9b6398634f82d3233dc3f99e",
+      "mode": 420,
+      "bytes": 320
+    },
+    "package/dist/relay/publicAssetUrl.js.map": {
+      "sha256": "8f65365789975b8b19526af78d1899594138a0d45837874bde8ed911f2b9d326",
+      "mode": 420,
+      "bytes": 1000
+    },
+    "package/dist/relay-client.d.ts.map": {
+      "sha256": "e9339ea0eb70f18520befd642bdb9d47232fa265d11380d9ec27c083402e0636",
+      "mode": 420,
+      "bytes": 2798
+    },
+    "package/dist/relay-client.js.map": {
+      "sha256": "472f5b2f6f11f568b70ea9fa480dd942a0b71770058955d14696970abaafd938",
+      "mode": 420,
+      "bytes": 20209
+    },
+    "package/dist/relay-entry.d.ts.map": {
+      "sha256": "64d3c36db6f41d3ed28f8f270c44500ac717175b603ebbfd9b584384a2325238",
+      "mode": 420,
+      "bytes": 137
+    },
+    "package/dist/relay-entry.js.map": {
+      "sha256": "9f1e700b4a2723ce07565ab54db739cb7bd1d7e30fe896642fa01da455895c20",
+      "mode": 420,
+      "bytes": 135
+    },
+    "package/dist/relay/rootPathResolver.d.ts.map": {
+      "sha256": "1d53a6b7ed5f71e0d84857e2b7582753eccfc35462547ec1fd94bfd27d1eda12",
+      "mode": 420,
+      "bytes": 549
+    },
+    "package/dist/relay/rootPathResolver.js.map": {
+      "sha256": "8bc584628a933770e15aa699916f65e7dff98130a296b495575e6001d55c4639",
+      "mode": 420,
+      "bytes": 1180
+    },
+    "package/dist/capabilities/rootResolver.d.ts.map": {
+      "sha256": "3f660dfb460839e83386c8a5f915f2298bb6be19c06dd6f442f3ceb41ebf9b3b",
+      "mode": 420,
+      "bytes": 1080
+    },
+    "package/dist/capabilities/rootResolver.js.map": {
+      "sha256": "178030300e336ffc41a06f142fba757e7a76c9050044a262a079e159c9b7a237",
+      "mode": 420,
+      "bytes": 13746
+    },
+    "package/dist/runtime-network.d.ts.map": {
+      "sha256": "349b975243fd9cb4a639dd089fb000a9a224826a529761f8b03fb5f668c33dd9",
+      "mode": 420,
+      "bytes": 1118
+    },
+    "package/dist/runtime-network.js.map": {
+      "sha256": "cd1f70ad9826521217d4806df396d277ac437a5145c395950c2abf73fe525931",
+      "mode": 420,
+      "bytes": 3620
+    },
+    "package/dist/runtime.d.ts.map": {
+      "sha256": "7943225644115050cc7be80a4c55986782a85fc49b2aeed61fa00c40b272b753",
+      "mode": 420,
+      "bytes": 970
+    },
+    "package/dist/runtime.js.map": {
+      "sha256": "435edd5b8787a98ba69e336488321ebbb82337e93642ce8b233c631af105eb28",
+      "mode": 420,
+      "bytes": 5510
+    },
+    "package/dist/relay/signing.d.ts.map": {
+      "sha256": "22cf4d84ec46a40b3bfd10a136b4ec6e890b2f6d41b24a3b5ef604f506999184",
+      "mode": 420,
+      "bytes": 925
+    },
+    "package/dist/relay/signing.js.map": {
+      "sha256": "a88a59b2ee14d055b546a98ea53adc5d053b8dc3c5214173059b39e867f9c6e7",
+      "mode": 420,
+      "bytes": 7572
+    },
+    "package/dist/transferableBytes.d.ts.map": {
+      "sha256": "ea9830300f8ec53e52bd0c5a02c2c994581abb299ebd03115846d23f0442037f",
+      "mode": 420,
+      "bytes": 182
+    },
+    "package/dist/transferableBytes.js.map": {
+      "sha256": "c9455906a01217ed60d760dd03317401300c63890466d62610edb52f646cb8bc",
+      "mode": 420,
+      "bytes": 231
+    },
+    "package/dist/tree-root.d.ts.map": {
+      "sha256": "89a23f9b0a18ee9a651d9479ea5003fef0d799503394fe8c5c8ccdc929c318a9",
+      "mode": 420,
+      "bytes": 4363
+    },
+    "package/dist/tree-root.js.map": {
+      "sha256": "735e95b6eae6c997770427550863712a8cbc7a478d0d5b81d2f230a025eb9242",
+      "mode": 420,
+      "bytes": 20837
+    },
+    "package/dist/relay/treeRootCache.d.ts.map": {
+      "sha256": "90768609deb57a20a39ce3501cf010444bd935445c2f2d583218dc3a0ad97057",
+      "mode": 420,
+      "bytes": 2123
+    },
+    "package/dist/relay/treeRootCache.js.map": {
+      "sha256": "b186fc41393d8f9a6d7efa7977e31edc31ddacc441443211056277a8d73e122d",
+      "mode": 420,
+      "bytes": 8837
+    },
+    "package/dist/relay/treeRootSubscription.d.ts.map": {
+      "sha256": "a00aba4b98bf3ae29246749aaa808533ef7cbcae82d8e2212e7d3684557812b6",
+      "mode": 420,
+      "bytes": 1630
+    },
+    "package/dist/relay/treeRootSubscription.js.map": {
+      "sha256": "d036b57abf129e861d3936292ee8201b6fba06489b5ec33b546440c9b280e421",
+      "mode": 420,
+      "bytes": 13896
+    },
+    "package/dist/types.d.ts.map": {
+      "sha256": "ae5b5826c2e212a0a003073043c78ef4158994660b64b3ff6ddbaf6d1c3b4430",
+      "mode": 420,
+      "bytes": 195
+    },
+    "package/dist/types.js.map": {
+      "sha256": "a7de897b48fe57bf54d6f84169135ff2e89e2fc95ea0a0a815761cc29a41efee",
+      "mode": 420,
+      "bytes": 102
+    },
+    "package/dist/relay/worker.d.ts.map": {
+      "sha256": "f34ee1b262625c8b75d4c1ad66c64515610ee118bed379d37daf3101398795c2",
+      "mode": 420,
+      "bytes": 132
+    },
+    "package/dist/worker.d.ts.map": {
+      "sha256": "5845d147ee7d8639a7de5ff6f0a621d6694b89d2b9196758bd94cdeee92eca72",
+      "mode": 420,
+      "bytes": 937
+    },
+    "package/dist/relay/worker.js.map": {
+      "sha256": "0c531fbb4a39bee012e8bcd742db5f8b203f86c01b2f788943f94bd9252c71b9",
+      "mode": 420,
+      "bytes": 59014
+    },
+    "package/dist/worker.js.map": {
+      "sha256": "bdda619fdc94292e76b52d428ff2ffb444e276f011b3e9818ebd3d788602ee82",
+      "mode": 420,
+      "bytes": 50640
+    },
+    "package/README.md": {
+      "sha256": "b3aa0f04b6431399f98f8e863ffd8b301b47c46c35ee7fff810354af6e491da6",
+      "mode": 420,
+      "bytes": 13679
+    },
+    "package/dist/app-runtime.d.ts": {
+      "sha256": "eaf280153a026e18a3efe44367032dc2b60cca7ea304201a8ace11b5e507c075",
+      "mode": 420,
+      "bytes": 2683
+    },
+    "package/src/app-runtime.ts": {
+      "sha256": "faaa774d0251c350c39627e5143bbf57d427706b2cdd5d6a1df142fdcacd1b67",
+      "mode": 420,
+      "bytes": 13235
+    },
+    "package/dist/capabilities/blossomBandwidthTracker.d.ts": {
+      "sha256": "6a099c81e256e7c69cf4c6e881061b1e3f0b5f58f46734fd5f7924ed27a1a3cb",
+      "mode": 420,
+      "bytes": 900
+    },
+    "package/src/capabilities/blossomBandwidthTracker.ts": {
+      "sha256": "92a154061ea34a6ba95d06a2786eb548fb5101b0e8ba37886058dceb21861a5a",
+      "mode": 420,
+      "bytes": 2139
+    },
+    "package/dist/capabilities/blossomTransport.d.ts": {
+      "sha256": "efda0f6af75f3d7a7026ace00306f58cc70b151b3507f685bf5887ef8ea5e819",
+      "mode": 420,
+      "bytes": 1558
+    },
+    "package/src/capabilities/blossomTransport.ts": {
+      "sha256": "70056d937a004ab39417097f0eabb2e8d0dccd5f07e0e1e53f5b3a24799a9d90",
+      "mode": 420,
+      "bytes": 8197
+    },
+    "package/dist/client-id.d.ts": {
+      "sha256": "7158cb727e45941673859debe1284285897097cd139d4362ebd68a78db61e56c",
+      "mode": 420,
+      "bytes": 929
+    },
+    "package/src/client-id.ts": {
+      "sha256": "7ae4075a6057b72ddef426b2743d772423a49f33144071e47a6f377322256b6a",
+      "mode": 420,
+      "bytes": 3754
+    },
+    "package/dist/client.d.ts": {
+      "sha256": "2c420acc8f7a93662f6562d8a5743a34e48a808cc92de0aa8ecdbdaedcb46db3",
+      "mode": 420,
+      "bytes": 4822
+    },
+    "package/src/client.ts": {
+      "sha256": "8f4aa845be7f1e1a8a8ea3c1776635ee6939e71cb129df5e4d64b8a13854afa1",
+      "mode": 420,
+      "bytes": 22952
+    },
+    "package/dist/capabilities/connectivity.d.ts": {
+      "sha256": "b0495cd7dcc9607e181a4f1aca340903aac432c745c7d8ae90effd30006bc512",
+      "mode": 420,
+      "bytes": 223
+    },
+    "package/src/capabilities/connectivity.ts": {
+      "sha256": "185c1f5b2ee4e7e186d5bfde49c96db7417ae30eea0e466661ebe782f54c1edc",
+      "mode": 420,
+      "bytes": 1863
+    },
+    "package/dist/relay/utils/constants.d.ts": {
+      "sha256": "6c560aa11685b4e78b6750c15f61d269cb4aa3d47b414f78358511fa7e846d2e",
+      "mode": 420,
+      "bytes": 2520
+    },
+    "package/src/relay/utils/constants.ts": {
+      "sha256": "73cb7efdc7cc6f449c8d501588a29d698d2c0b912da800db3f5a45e2c718986f",
+      "mode": 420,
+      "bytes": 3752
+    },
+    "package/dist/encryptedFileSize.d.ts": {
+      "sha256": "934c9e3ad95f9f7dcbd19a8d77beee1632ebe91b4e2999cdd60923d3dd9d0a30",
+      "mode": 420,
+      "bytes": 309
+    },
+    "package/src/encryptedFileSize.ts": {
+      "sha256": "0f2c9bda899bbadc59643ac214c27b5f2dcbc8c8051344a8ce75d775d348141c",
+      "mode": 420,
+      "bytes": 714
+    },
+    "package/dist/entry.d.ts": {
+      "sha256": "8daaf84e30e4324c2fe5ca09685cb8998bb3e3cc02e485668db8e9fc8c096ac6",
+      "mode": 420,
+      "bytes": 46
+    },
+    "package/src/entry.ts": {
+      "sha256": "540cb25f570044dc78c9867127c9f78e4f4cc30b1606d407a841d392c005dfef",
+      "mode": 420,
+      "bytes": 77
+    },
+    "package/dist/relay/utils/errorMessage.d.ts": {
+      "sha256": "3d732226f66ce41d74b0f4d90497cd4e298d9d2d3c9ea57679254cc0402df95c",
+      "mode": 420,
+      "bytes": 162
+    },
+    "package/src/relay/utils/errorMessage.ts": {
+      "sha256": "51330cc7eb2dd63119918fcb2743f067aaab87745c0678d5499106c7f901c5db",
+      "mode": 420,
+      "bytes": 189
+    },
+    "package/dist/relay/eventIndex.d.ts": {
+      "sha256": "e2ba6809630383eefc86f712effee6b9765d95b139468985c846bbeb169deae2",
+      "mode": 420,
+      "bytes": 613
+    },
+    "package/src/relay/eventIndex.ts": {
+      "sha256": "6629b58c271336f7039ad0f3f074239ee8a61481cd90f9f6020dd123b9c00656",
+      "mode": 420,
+      "bytes": 2852
+    },
+    "package/dist/htree-path.d.ts": {
+      "sha256": "1790a0a0312f139bb145a1a3dd5e93d8f2eee625da5a61fd693ddf6fb6e70e53",
+      "mode": 420,
+      "bytes": 486
+    },
+    "package/src/htree-path.ts": {
+      "sha256": "0b16ba91a270ede39aff1266833d4d187150907529eb7a873fdd3bff5bccba78",
+      "mode": 420,
+      "bytes": 1349
+    },
+    "package/dist/htree-url.d.ts": {
+      "sha256": "3d6206dffbbeacdf32b1042aa400efc08efba92e2145af31cc369c27abcbfa16",
+      "mode": 420,
+      "bytes": 882
+    },
+    "package/src/htree-url.ts": {
+      "sha256": "dbb77a5fe84f6802b60f584ad1f5926d313ba2afb447a1da3d66235a062e0620",
+      "mode": 420,
+      "bytes": 5006
+    },
+    "package/dist/httpRange.d.ts": {
+      "sha256": "da71a41009e31af97aaf7f0f29ea7ce6bdb24f34ceecae45bc045693b8b08553",
+      "mode": 420,
+      "bytes": 391
+    },
+    "package/src/httpRange.ts": {
+      "sha256": "d58db4ca80508cf5112fee9c90d053c25a1f1d44a1a23b76a95713bbe964f4a6",
+      "mode": 420,
+      "bytes": 1641
+    },
+    "package/dist/capabilities/idbStorage.d.ts": {
+      "sha256": "f47f9dce7454659456f004cc3700b99db333223b1803e5035c1c2966c950d9b5",
+      "mode": 420,
+      "bytes": 1234
+    },
+    "package/src/capabilities/idbStorage.ts": {
+      "sha256": "f329cc312197a1d0d054019fa678a2e32e58e54221fe051e8923f2140a6c7cf4",
+      "mode": 420,
+      "bytes": 5074
+    },
+    "package/dist/relay/identity.d.ts": {
+      "sha256": "a49daea91ae94a19f3a0d885066e8044140ee61a13be6f2c4ebfe0d4fe457d28",
+      "mode": 420,
+      "bytes": 1035
+    },
+    "package/src/relay/identity.ts": {
+      "sha256": "d858ffb0acfaebc8761838812ec4ebfd45ad4a0e8a7042314ccf2d673a5968c5",
+      "mode": 420,
+      "bytes": 2071
+    },
+    "package/dist/index.d.ts": {
+      "sha256": "b16e7802630968a65489e7008c9874403e761bfbfa78a9138f911a6adccf71f6",
+      "mode": 420,
+      "bytes": 2041
+    },
+    "package/src/index.ts": {
+      "sha256": "b152df8bb02fb838ef967481aa72c9790180090f4eef21e08ed12ae6ae67ce90",
+      "mode": 420,
+      "bytes": 2116
+    },
+    "package/dist/relay/utils/lruCache.d.ts": {
+      "sha256": "335536a14180d5e63a3978aefdf610f060ae3c5bab5dbbfbfbeb3ce43488834b",
+      "mode": 420,
+      "bytes": 705
+    },
+    "package/src/relay/utils/lruCache.ts": {
+      "sha256": "fcb196a7a19544452c4ec40eafe4d9b20453e440e51730659464f9d8592a31e6",
+      "mode": 420,
+      "bytes": 1565
+    },
+    "package/dist/relay/mediaHandler.d.ts": {
+      "sha256": "9e5798a07da853265916f6777e015af00a2428169bbf0a383739f31c8615a18e",
+      "mode": 420,
+      "bytes": 2286
+    },
+    "package/src/relay/mediaHandler.ts": {
+      "sha256": "268affc6bc30504b97078ff1bcd1e56601d270640cda9e496996eca86380b64d",
+      "mode": 420,
+      "bytes": 44968
+    },
+    "package/dist/mediaReadRetry.d.ts": {
+      "sha256": "34398708da7e5a21bb6ab7a6a5f1264f2ae91ff6d17de3e9193c398d59def2af",
+      "mode": 420,
+      "bytes": 575
+    },
+    "package/src/mediaReadRetry.ts": {
+      "sha256": "19a2aa4f80a0631eb28847ce3de4f8a8ddd3a7ae26981aee1e00194f68a58624",
+      "mode": 420,
+      "bytes": 1661
+    },
+    "package/dist/mediaStreaming.d.ts": {
+      "sha256": "b3a700bba672202901cfed7c5ab7ef159bd5ff06bf6691764da201deab51c6fb",
+      "mode": 420,
+      "bytes": 532
+    },
+    "package/src/mediaStreaming.ts": {
+      "sha256": "7cb8475f57ac69db072da6714212674d1dd3cea17a6b1645c6d84c43a7eb5552",
+      "mode": 420,
+      "bytes": 2074
+    },
+    "package/dist/relay/nostr-wasm.d.ts": {
+      "sha256": "dc123799747a0b1f9c29e7c0ea93e8603cfa6ce971738dbbd64886b0ae479cd1",
+      "mode": 420,
+      "bytes": 567
+    },
+    "package/src/relay/nostr-wasm.ts": {
+      "sha256": "79638bb460522c0f6a9c79138d47442a57a62554d85e4a49596ec3aabb3c752c",
+      "mode": 420,
+      "bytes": 10069
+    },
+    "package/dist/relay/nostr.d.ts": {
+      "sha256": "130fce70d715bdeffa0ab94b77c8af5a1cce6699b18cbf0308019efa8797dfd5",
+      "mode": 420,
+      "bytes": 1599
+    },
+    "package/src/relay/nostr.ts": {
+      "sha256": "40beee272dea9ee44773f5966dd3d6766f6fc186bcb9d8c3d19577cac2c864e6",
+      "mode": 420,
+      "bytes": 6560
+    },
+    "package/dist/relay/nostrRuntime.d.ts": {
+      "sha256": "ebe10b13d0d87b2523c0eabe9efcbe08534c5a01c279d99ddaf8c549c2db4154",
+      "mode": 420,
+      "bytes": 2380
+    },
+    "package/src/relay/nostrRuntime.ts": {
+      "sha256": "197590c0848e5cf0bb732b89952a9a90407f89de1c6253850bd33b041782713d",
+      "mode": 420,
+      "bytes": 5379
+    },
+    "package/dist/nostrSourcePort.d.ts": {
+      "sha256": "14efc8fd3737eb5d4ea1c63113ecb16df90251ccc13c7fc85ac756c4a7b58932",
+      "mode": 420,
+      "bytes": 462
+    },
+    "package/src/nostrSourcePort.ts": {
+      "sha256": "ede6c3c5adc889359fa07aa663d4b1db0858c62181a06f9fd1515ec0ff06648f",
+      "mode": 420,
+      "bytes": 6118
+    },
+    "package/dist/p2pBridge.d.ts": {
+      "sha256": "30e7823fb8b974ab8d6a363fc5f46af3c0440a918088511793555bfe02044945",
+      "mode": 420,
+      "bytes": 1198
+    },
+    "package/src/p2pBridge.ts": {
+      "sha256": "a92e982926ae02c66b3ca99a8a9e902c18746b78ab8dba5fba27a1d8f3f5ce1b",
+      "mode": 420,
+      "bytes": 5026
+    },
+    "package/dist/p2pPeerRoutes.d.ts": {
+      "sha256": "8a8020f43f599bd2f83e70b85e8349f6eb53f6a56a8e4611b57066433c584228",
+      "mode": 420,
+      "bytes": 912
+    },
+    "package/src/p2pPeerRoutes.ts": {
+      "sha256": "9fa16c770e21cfce907d39561b5981e4b2bd4d48872e1588b13a40d1da1d51c2",
+      "mode": 420,
+      "bytes": 3240
+    },
+    "package/dist/privacyGuards.d.ts": {
+      "sha256": "fc3cee95e5a4f8a5ed86f5ecf80f64f0732648295d087dc653ea5114e45ee8bd",
+      "mode": 420,
+      "bytes": 576
+    },
+    "package/src/privacyGuards.ts": {
+      "sha256": "76ad5bca7b65158eadb679e057779a260b2f4c584109243dbba9d8b1948c0cc6",
+      "mode": 420,
+      "bytes": 873
+    },
+    "package/dist/protocol.d.ts": {
+      "sha256": "1d0ec47de1e7f583c2377a2fd4060576a63200fbae048f55f51148bc55ca29ec",
+      "mode": 420,
+      "bytes": 6304
+    },
+    "package/dist/relay/protocol.d.ts": {
+      "sha256": "d1d1afe1c52ba8bf54bcbfa71b29eab57b09c36b27d8c9de71dd48f63bfbe296",
+      "mode": 420,
+      "bytes": 11993
+    },
+    "package/src/protocol.ts": {
+      "sha256": "689bef183cf8a936b699914f4cc0e35bb607b61a76663b7f26822a56229d9018",
+      "mode": 420,
+      "bytes": 5637
+    },
+    "package/src/relay/protocol.ts": {
+      "sha256": "6826d5dd73403236d04ff7445c366ad2d44cdb59f2fce965587f887d6911bbca",
+      "mode": 420,
+      "bytes": 13473
+    },
+    "package/dist/relay/publicAssetUrl.d.ts": {
+      "sha256": "e35ad002124b9b2e3806b240ff1ab053a6d234e8957fa0a448fc9fe97f0084d8",
+      "mode": 420,
+      "bytes": 301
+    },
+    "package/src/relay/publicAssetUrl.ts": {
+      "sha256": "04fa6b4bf905eefbab8ac01d9d63a7e70a47636acb4f91afe0a618913ec7ead4",
+      "mode": 420,
+      "bytes": 969
+    },
+    "package/dist/relay-client.d.ts": {
+      "sha256": "9a55898901d6da4c3fb164089a9e12cb32cea97de8956a28d432b1cfd92d29d9",
+      "mode": 420,
+      "bytes": 3448
+    },
+    "package/src/relay-client.ts": {
+      "sha256": "ea61117db393858a917c0d23e7c3ae5f1306dc42b280621ce64e05c2f13b8948",
+      "mode": 420,
+      "bytes": 21951
+    },
+    "package/dist/relay-entry.d.ts": {
+      "sha256": "dc5afbe573af326d5316814917dd93cf7339314eaf4f559adb908a7101ca8099",
+      "mode": 420,
+      "bytes": 69
+    },
+    "package/src/relay-entry.ts": {
+      "sha256": "681540abcc4654d348f8b096f75bdd0692409b87d6231b3d5abc0e3f11b2b868",
+      "mode": 420,
+      "bytes": 28
+    },
+    "package/dist/relay/rootPathResolver.d.ts": {
+      "sha256": "94f53dbd4dd34be0e483b08736a3e11978f9f48a687fd2c46c7a174da57f7582",
+      "mode": 420,
+      "bytes": 472
+    },
+    "package/src/relay/rootPathResolver.ts": {
+      "sha256": "bf0e898b172db9ab364531c2ed978418446f9701e17cc55b32e2fc17ceffe9ef",
+      "mode": 420,
+      "bytes": 1196
+    },
+    "package/dist/capabilities/rootResolver.d.ts": {
+      "sha256": "8879f52313a9f084f60f84f7786bbe79a8a28932530430de97d9ece1736d7ab6",
+      "mode": 420,
+      "bytes": 988
+    },
+    "package/src/capabilities/rootResolver.ts": {
+      "sha256": "1bf81c091c235cfab4ddd02d6896b0889fe7dd6b059ff58c57560afa3c7de8ef",
+      "mode": 420,
+      "bytes": 14727
+    },
+    "package/dist/runtime-network.d.ts": {
+      "sha256": "d3ed32afc4d6ea4cc384a24308aa59b9c7ef61c03e917049c22d620087d8f5ab",
+      "mode": 420,
+      "bytes": 1390
+    },
+    "package/src/runtime-network.ts": {
+      "sha256": "f9863c06065ecb3184dd63e539742e673b3e0c896368c308e756752fc17c4e03",
+      "mode": 420,
+      "bytes": 4113
+    },
+    "package/dist/runtime.d.ts": {
+      "sha256": "4619877f5b14c6360e56e56549f68e13eea36dcd84ca75778f6c4877d10c8d47",
+      "mode": 420,
+      "bytes": 1229
+    },
+    "package/src/runtime.ts": {
+      "sha256": "b868f40f1083452ae259efb2a5f6229867fcfc5efd4b9821b3ff39d0e68905cb",
+      "mode": 420,
+      "bytes": 6839
+    },
+    "package/src/relay/shims.d.ts": {
+      "sha256": "c327625dfcc2fefec1f67cc8b4c037686293d54b30441aee006a9f06b64a804b",
+      "mode": 420,
+      "bytes": 105
+    },
+    "package/dist/relay/signing.d.ts": {
+      "sha256": "402f0164116ff740c650c1779c83fabbc0682d2ec4f43d7e0a3b5418d5a7096a",
+      "mode": 420,
+      "bytes": 1395
+    },
+    "package/src/relay/signing.ts": {
+      "sha256": "a4149528b2b620534c40e421d8480f36e47b8553c941477878193f71a5a7cf0f",
+      "mode": 420,
+      "bytes": 8150
+    },
+    "package/dist/transferableBytes.d.ts": {
+      "sha256": "a71b34f7ce05d6b8a07e46e31188de37609a0f1293243219a7fe093e1fb023e9",
+      "mode": 420,
+      "bytes": 126
+    },
+    "package/src/transferableBytes.ts": {
+      "sha256": "05ca8cf35f5ca99b3dcbe04478a7d1aae5093bca262e4ad125ae69436f7747db",
+      "mode": 420,
+      "bytes": 250
+    },
+    "package/dist/tree-root.d.ts": {
+      "sha256": "2381544fa8021101f5a72d1fd99c9adfba3901075e0f2124f449fdc17eb52e42",
+      "mode": 420,
+      "bytes": 6447
+    },
+    "package/src/tree-root.ts": {
+      "sha256": "b598185841860902cba2d1bd9849dd171b7552fb5361b88f8cad1fd84b4c43d4",
+      "mode": 420,
+      "bytes": 25401
+    },
+    "package/dist/relay/treeRootCache.d.ts": {
+      "sha256": "b71763f17ac92308c5e3c951a951a9c03e691748fdc765780475717fe66757d3",
+      "mode": 420,
+      "bytes": 2709
+    },
+    "package/src/relay/treeRootCache.ts": {
+      "sha256": "dc5a9625896157f06aabbabd6af0305c20146e8ebe2e79a588b641152300cc44",
+      "mode": 420,
+      "bytes": 10431
+    },
+    "package/dist/relay/treeRootSubscription.d.ts": {
+      "sha256": "fe1be42e2e284db11ef8a36b3147488943b90c7525607d00d8422c5b5cb7f03e",
+      "mode": 420,
+      "bytes": 1989
+    },
+    "package/src/relay/treeRootSubscription.ts": {
+      "sha256": "3bdbf89bebb737a6d07c725f25e914a7c3295817954f2e7df5982a3dd9b0b399",
+      "mode": 420,
+      "bytes": 14243
+    },
+    "package/dist/types.d.ts": {
+      "sha256": "67efa714727f1e47f68f180e046eefbdc691ead5adc621d522cc5bad55029307",
+      "mode": 420,
+      "bytes": 121
+    },
+    "package/src/types.ts": {
+      "sha256": "70ba68f3d37605fc85a7b7e91df2ffd75d323abae81e0b15507625c96a7f9794",
+      "mode": 420,
+      "bytes": 98
+    },
+    "package/dist/relay/worker.d.ts": {
+      "sha256": "7fa1af72074e1f5f90faca709c862067b3f4930233f21a21b81a3a1c451df3d8",
+      "mode": 420,
+      "bytes": 323
+    },
+    "package/dist/worker.d.ts": {
+      "sha256": "2d5e38d1ab3904ca1cd973a59802dcaac605b9a38fd773f638cad94cf74f56a5",
+      "mode": 420,
+      "bytes": 1079
+    },
+    "package/src/relay/worker.ts": {
+      "sha256": "bd3da47af651ba2f20cadba804eb005e42aacfc6bed1013cfdb89251d821ec5d",
+      "mode": 420,
+      "bytes": 63316
+    },
+    "package/src/worker.ts": {
+      "sha256": "c44df7efc01226761468f8dc087e6aa81b550b2c5bb4dc1e46f2149bcc589ae6",
+      "mode": 420,
+      "bytes": 54318
+    }
+  }
+}
