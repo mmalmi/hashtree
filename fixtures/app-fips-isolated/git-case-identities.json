@@ -563,7 +563,7 @@
     {
       "id": "6ffe30d92b99dc15820b-ac016f47f45ab4a16657",
       "file": "git-home-discovery.spec.ts",
-      "line": 130,
+      "line": 132,
       "column": 3,
       "title": "shows latest updated repositories from followed users instead of a hardcoded suggestion",
       "projectName": "chromium",
@@ -572,7 +572,7 @@
     {
       "id": "6ffe30d92b99dc15820b-ad925ab1365b44541bd7",
       "file": "git-home-discovery.spec.ts",
-      "line": 154,
+      "line": 156,
       "column": 3,
       "title": "shows fallback seed followed repositories when the user has no follows",
       "projectName": "chromium",
@@ -581,7 +581,7 @@
     {
       "id": "6ffe30d92b99dc15820b-61274756d106b40e2897",
       "file": "git-home-discovery.spec.ts",
-      "line": 175,
+      "line": 177,
       "column": 3,
       "title": "opens non-htree discovered repositories externally",
       "projectName": "chromium",

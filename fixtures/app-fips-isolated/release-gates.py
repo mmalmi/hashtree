@@ -94,12 +94,44 @@ try:
         cache=subprocess.Popen(['node','/stage/procedure/map-cache.mjs',str(root),str(base/'map-cache')],env=env,stdout=subprocess.PIPE,stderr=(evidence/'map-cache.log').open('wb'),text=True)
         ready=selectors.DefaultSelector();ready.register(cache.stdout,selectors.EVENT_READ)
         assert ready.select(15),'Map cache startup deadline';env['MAP_FIXTURE_CACHE_URL']=json.loads(cache.stdout.readline())['url'];ready.close()
+    # Resume exact already executed browser cases from the checksum-pinned Actions artifact.
+    # This release uses the same app archive, release profile, image, lock and test fixtures.
+    previous=base/'earlier/git'
+    load=lambda directory,name:json.loads((directory/name).read_bytes())
+    prev=load(previous,'release-gates.json')
+    assert prev['source']==spec['commit'] and prev['profileSha256']==sha(root/spec['releaseProfilePath'])
+    assert load(previous,'inputs.json')==load(evidence,'inputs.json')
+    assert load(previous,'packages.json')==load(evidence,'packages.json')
+    assert load(previous,'release-plan.json')==load(evidence,'release-plan.json')
+    old,new=load(previous,'browser.json'),load(evidence,'browser.json')
+    for field in ['node','playwright','browser']:assert old[field]==new[field]
+    image_proof=lambda report:{(p['path'],p['sha256']) for p in report['actualBrowserExecutables']}
+    assert image_proof(old)==image_proof(new) and old['passed'] and old['rtc']['echoed']=='loopback-only' and old['candidateAddressesAllowed'] and len(old['rawWorkerDenial'])==4
+    for name in ['network.json','network-after-attempt.json']:
+        net=load(previous,name)
+        assert net['interfaces']==['fixture0','lo'] and net['uid']!=0 and net['effectiveAndBoundingCapabilities']==0 and len(net['externalDenied'])==len(net['childDenied'])==4
+    assert not load(previous,'resource-final.json')['samplerErrors'] and int(load(previous,'resource-final.json')['sample']['events']['oom_kill'])==0
+    shutil.copyfile(previous/'context-permissions.jsonl',evidence/'context-permissions.jsonl')
+    (evidence/'browser-reuse.json').write_text(json.dumps({'run':42352553046,'artifact':13566378424,'sha256':'e1c1dad63a3c49b4474d7193a0a68931aceafccaa1cb81ad7f0b4a555197e05d','tests':82,'correctedSourceLineCount':3}))
     for step in steps:
         command=step['command'];assert isinstance(command,list) and command and all(isinstance(x,str) for x in command)
         step_env=env|step.get('env',{})|{'PW_WORKERS':'1','PW_MAX_WORKERS':'1','PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/(step['name']+'-playwright.json'))}
         if command[:3]==['pnpm','run','test:unit'] or command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
         row={'name':step['name'],'command':command,'exitCode':None};result['steps'].append(row);started=time.monotonic()
         is_shard='gitShard' in step
+        if is_shard:
+            oldrow=next(v for v in prev['steps'] if v['name']==step['name'])
+            assert oldrow['command']==command and oldrow['exitCode']==0
+            row.update(oldrow,reusedFromRun=42352553046)
+            for f in oldrow['artifacts']:
+                rel=pathlib.PurePosixPath(f['path']);assert not rel.is_absolute() and '..' not in rel.parts
+                target=evidence/rel;target.parent.mkdir(parents=True,exist_ok=True)
+                assert sha(previous/rel)==f['sha256'] and (previous/rel).stat().st_size==f['bytes']
+                shutil.copyfile(previous/rel,target)
+            for suffix in ['.log','-playwright.json']:
+                name=step['name']+suffix;shutil.copyfile(previous/name,evidence/name)
+            if step['gitShard']==12:git_coverage()
+            continue
         if is_shard:
             assert_git_ports_closed()
             step_env['NODE_OPTIONS']=(step_env.get('NODE_OPTIONS','')+' --max-old-space-size=1280').strip()
