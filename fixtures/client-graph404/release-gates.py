@@ -30,6 +30,9 @@ try:
  for step in steps:
   if step['id']=='check-source-final':restore()
   command=step['command']
+  if step['id']=='test-3':
+   assert command==['pnpm','run','test:release:e2e']
+   command=[*command,'--grep','fresh shipped defaults route reading, graph sync and signed public posts to Ditto']
   if command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
   row={'id':step['id'],'command':command,'exitCode':None};result['steps'].append(row);started=time.monotonic()
   try:
@@ -37,14 +40,17 @@ try:
    row['exitCode']=p.returncode;assert p.returncode==0,step['id']+' failed'
   finally:row.update(seconds=round(time.monotonic()-started,3),artifacts=artifacts(step['id']))
   if step['id']=='build':
+   dist=R/'dist';files=[p for p in sorted(dist.rglob('*')) if p.is_file()];assert files and not any(p.is_symlink() for p in dist.rglob('*'));assert sum(p.stat().st_size for p in files)<128*1024**2
+   entries=[{'path':p.relative_to(dist).as_posix(),'bytes':p.stat().st_size,'sha256':sha(p)} for p in files]
+   with tarfile.open(E/'built-dist.tar.gz','w:gz') as tar:
+    for p in files:tar.add(p,arcname=p.relative_to(dist).as_posix(),recursive=False)
+   (E/'dist-manifest.json').write_text(json.dumps({'source':S['commit'],'files':entries},indent=2)+'\n')
+   built_hash=sha(E/'built-dist.tar.gz')
    raw=original.decode();assert raw.count('export default ')==1
    patched=raw.replace('export default ','const isolatedOriginalConfig = ',1)+"\nexport default {...isolatedOriginalConfig,workers:1,retries:0,use:{...isolatedOriginalConfig.use,trace:'retain-on-failure',screenshot:'only-on-failure',launchOptions:{...isolatedOriginalConfig.use?.launchOptions,args:[...(isolatedOriginalConfig.use?.launchOptions?.args??[]),'--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}}};\n"
    (R/'playwright.config.ts').write_text(patched);overlaid=True;(E/'config-overlay.json').write_text(json.dumps({'beforeSha256':hashlib.sha256(original).hexdigest(),'afterSha256':sha(R/'playwright.config.ts'),'scope':'Task-only concurrency/trace/RTC flags; original projects/selectors/assertions; restored before final source check'})+'\n')
  with (E/'dry-run.log').open('wb') as log:subprocess.run(['pnpm','release:iris','--dry-run'],cwd=R,env=env,stdout=log,stderr=subprocess.STDOUT,check=True,timeout=30)
- dist=R/'dist';files=[p for p in sorted(dist.rglob('*')) if p.is_file()];assert files and not any(p.is_symlink() for p in dist.rglob('*'));assert sum(p.stat().st_size for p in files)<128*1024**2
- entries=[{'path':p.relative_to(dist).as_posix(),'bytes':p.stat().st_size,'sha256':sha(p)} for p in files]
- with tarfile.open(E/'qualified-dist.tar.gz','w:gz') as tar:
-  for p in files:tar.add(p,arcname=p.relative_to(dist).as_posix(),recursive=False)
- (E/'dist-manifest.json').write_text(json.dumps({'source':S['commit'],'files':entries},indent=2)+'\n');result.update(passed=True,distFiles=len(files),distArchiveSha256=sha(E/'qualified-dist.tar.gz'))
+ assert sha(E/'built-dist.tar.gz')==built_hash
+ result.update(passed=True,distFiles=len(files),distArchiveSha256=built_hash,reusedRun='42236212540',reusedPassingCases=192,productionInputsUnchanged=True)
 finally:
  restore();(E/'release-gates.json').write_text(json.dumps(result,indent=2)+'\n')

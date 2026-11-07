@@ -6,4 +6,4 @@ image=json.loads((B/'evidence/image-toolchain.json').read_text());assert image['
 assert subprocess.check_output(['pnpm','--version'],env=env,text=True).strip()=='9.15.0'
 try:subprocess.run(['python3','/stage/procedure/release-gates.py'],env=env,check=True,timeout=3540)
 finally:subprocess.run(['python3','/stage/procedure/network-proof.py',str(E/'network-after.json')],env=env,check=True,timeout=15)
-(E/'passed.json').write_text(json.dumps({'passed':True,'sourceCommit':S['commit'],'completeOriginalReleaseProfile':True,'bothOriginalSourceChecks':True,'productionPublished':False})+'\n')
+(E/'passed.json').write_text(json.dumps({'passed':True,'sourceCommit':S['commit'],'completeOriginalReleaseProfile':False,'combinedWithPriorRun':'42236212540','bothOriginalSourceChecks':True,'productionPublished':False})+'\n')

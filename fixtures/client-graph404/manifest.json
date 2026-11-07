@@ -14,13 +14,13 @@
   "apps": [
     {
       "id": "client",
-      "commit": "77fa93af76d3bcfd3e6236b04610caaa8c47f5bc",
+      "commit": "995499dd29b569b39db4917c6690d4885ec60e89",
       "archive": "archives/client-source.bundle",
-      "archiveSha256": "b6494d75bed5bfd286c281d00fe6cb8053d2f81a96833bc74873a7c5263d0885",
+      "archiveSha256": "ff5ea5f9ff94d34c663c975d9ad8dece107566c45ffc9ff554655d70236a7010",
       "requiredMaster": "12bcd8a190e8eb9d92d48d723ff582eff0ce6787",
       "observedPublicMaster": "2163baf6f2c22dc6cfd46ce3126f50c2d6b15b94",
       "publicRemote": "https://github.com/irislib/iris-client.git",
-      "bundleRef": "refs/task-evidence/cohort404-client-source",
+      "bundleRef": "refs/task-evidence/cohort404-client-auth-policy",
       "lockSha256": "21554dcdef70d62145b339c992a221a56b8ce942e67451a7a334b0ce91547823",
       "packageSha256": "8ccef439e55701e629e79e928d9155a7899c7e666e505e67598c51d0a2461c19",
       "releaseProfileSha256": "cb3294c56495522aaf0fbbe8dd8fb08a3077e6c7790fcbb870317225b3d2080d",
