@@ -20,6 +20,19 @@ try:
     run(['python3','/stage/procedure/network-proof.py',str(evidence/'network.json')],'network',15)
     run(['node','/stage/procedure/browser-proof.cjs',str(evidence/'browser.json')],'browser',50)
     assert proxy.rejected>0,'Unsigned rejecting-proxy probe received no requests'
+    # Rebuild the new source under the verified network boundary. The original
+    # dist was verified before entry and is retained solely as a byte comparator.
+    import hashlib,tarfile
+    dist=root/spec['distDir'];old={r['path']:r['sha256'] for r in spec['distFiles']}
+    run(['node','scripts/verify-dependency-lock.mjs'],'check-lock',30)
+    run(['node','--import','tsx','scripts/verify-social-graph-snapshot.ts'],'check-seed',45)
+    run(['pnpm','run','build'],'build-candidate',300)
+    new={str(f.relative_to(dist)):hashlib.sha256(f.read_bytes()).hexdigest() for f in sorted(dist.rglob('*')) if f.is_file()}
+    changed=sorted(k for k in set(new)|set(old) if new.get(k)!=old.get(k))
+    assert new and 'index.html' in changed
+    (evidence/'candidate-dist.json').write_text(json.dumps(dict(source=spec['commit'],files=new,changed=changed),indent=2))
+    with tarfile.open(evidence/'new-dist.tar.gz','w:gz') as archive:
+        for name in new:archive.add(dist/name,arcname=name,recursive=False)
     config=root/'playwright.graph-qual.config.ts'
     assert not config.exists()
     config.write_text("""import { defineConfig } from '@playwright/test';
