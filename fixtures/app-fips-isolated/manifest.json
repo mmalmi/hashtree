@@ -208,10 +208,10 @@
     },
     {
       "id": "git",
-      "commit": "4a788af91d4e41a5bb09626cfe9740a144a5d3b6",
+      "commit": "33fec1802ba913f4d474cf3b56e90bb9ece692d0",
       "archive": "archives/git-source.tar.gz",
-      "archiveSha256": "5759f4a9f1c8738a251d4d3c9c6961bf268cd8d1b4c597116d779773b58db7b4",
-      "archiveBytes": 6480196,
+      "archiveSha256": "165b024e6ac44764467acefd9d98d733560e93622c5ea2c95dda1dff2ab76def",
+      "archiveBytes": 6480154,
       "lockSha256": "4a46847411e5587cb94289568a5cea7b7e92df7cb2eec7be138f55706bb9ef4d",
       "packageSha256": "516bfb8d8108ff1072d62c704a8484ca50bb649e5605ab5cae2ee05981ef881e",
       "distDir": "iris-git",

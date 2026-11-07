@@ -117,6 +117,16 @@ def prepare():
     docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');if(process.versions.node.split('.')[0]!=='24')throw Error('Unexpected image Node');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
     for app in APPS:
         archive=HERE/app['archive'];assert sha(archive)==app['archiveSha256']
+        if app['id']=='git':
+            old=HERE/'archives/git-before-unit-contract.tar.gz'
+            assert sha(old)=='5759f4a9f1c8738a251d4d3c9c6961bf268cd8d1b4c597116d779773b58db7b4'
+            def source_rows(archive):
+                with tarfile.open(archive) as tar:
+                    return {m.name:(m.mode,m.type,m.linkname,hashlib.sha256(tar.extractfile(m).read()).hexdigest() if m.isfile() else '') for m in tar.getmembers()}
+            before,after=source_rows(old),source_rows(archive)
+            assert before.keys()==after.keys()
+            assert [f for f in before if before[f]!=after[f]]==['tests/releaseSite.test.ts']
+            (EVIDENCE/'git-source-equivalence.json').write_text(json.dumps({'earlierSource':'4a788af91d4e41a5bb09626cfe9740a144a5d3b6','currentSource':app['commit'],'changed':['tests/releaseSite.test.ts'],'otherwiseIdentical':len(before)-1}))
         target=STAGE/'apps'/app['id'];extract(archive,target)
         assert sha(target/'pnpm-lock.yaml')==app['lockSha256']
         assert sha(target/'package.json')==app['packageSha256']

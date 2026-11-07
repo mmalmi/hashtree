@@ -99,8 +99,10 @@ try:
     previous=base/'earlier/git'
     load=lambda directory,name:json.loads((directory/name).read_bytes())
     prev=load(previous,'release-gates.json')
-    assert prev['source']==spec['commit'] and prev['profileSha256']==sha(root/spec['releaseProfilePath'])
-    assert load(previous,'inputs.json')==load(evidence,'inputs.json')
+    eq=load(evidence.parent,'git-source-equivalence.json')
+    assert prev['source']==eq['earlierSource'] and spec['commit']==eq['currentSource'] and eq['changed']==['tests/releaseSite.test.ts'] and eq['otherwiseIdentical']>500
+    assert prev['profileSha256']==sha(root/spec['releaseProfilePath'])
+    assert load(previous,'inputs.json')|{'sourceCommit':spec['commit']}==load(evidence,'inputs.json')
     assert load(previous,'packages.json')==load(evidence,'packages.json')
     assert load(previous,'release-plan.json')==load(evidence,'release-plan.json')
     old,new=load(previous,'browser.json'),load(evidence,'browser.json')
@@ -116,6 +118,14 @@ try:
     for step in steps:
         command=step['command'];assert isinstance(command,list) and command and all(isinstance(x,str) for x in command)
         step_env=env|step.get('env',{})|{'PW_WORKERS':'1','PW_MAX_WORKERS':'1','PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/(step['name']+'-playwright.json'))}
+        if command==['pnpm','run','test:unit']:
+            # The package unit suite checks executable discovery and the default
+            # command name with its own tiny shell fixtures. Product/native gates
+            # continue using the digest-pinned absolute executable.
+            tmp=base/'git-unit-temp';tmp.mkdir(mode=0o700)
+            step_env['TMPDIR']=str(tmp)
+            step_env.pop('HTREE_BIN',None)
+            step_env.pop('GIT_REMOTE_HTREE_BIN',None)
         if command[:3]==['pnpm','run','test:unit'] or command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
         row={'name':step['name'],'command':command,'exitCode':None};result['steps'].append(row);started=time.monotonic()
         is_shard='gitShard' in step
