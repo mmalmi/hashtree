@@ -8,7 +8,7 @@ env['PATH']='/stage/tools/native/hashtree:'+env['PATH'];env.update(spec.get('env
 subprocess.run(['python3','/stage/procedure/network-proof.py',str(evidence/'network.json')],env=env,check=True,timeout=15)
 subprocess.run(['node','/stage/procedure/package-proof.cjs',str(evidence/'packages.json')],env=env,check=True,timeout=15)
 subprocess.run(['node','/stage/procedure/browser-proof.cjs',str(evidence/'browser.json')],env=env,check=True,timeout=35)
-versions={'node':subprocess.check_output(['node','--version'],env=env,text=True).strip(),'pnpm':subprocess.check_output(['pnpm','--version'],env=env,text=True).strip(),'htree':subprocess.check_output([env['HTREE_BIN'],'--version'],env=env,text=True).strip(),'command':['python3','/stage/procedure/release-gates.py',app],'sourceCommit':spec['commit'],'runtimeMode':'Exact frozen source built inside OS boundary; complete checked-in release profile and qualified dist'}
+versions={'node':subprocess.check_output(['node','--version'],env=env,text=True).strip(),'pnpm':subprocess.check_output(['pnpm','--version'],env=env,text=True).strip(),'htree':subprocess.check_output([env['HTREE_BIN'],'--version'],env=env,text=True).strip(),'command':['python3','/stage/procedure/release-gates.py',app],'sourceCommit':spec['commit'],'runtimeMode':'Exact frozen source built inside OS boundary; one autosave diagnostic against exact source'}
 assert versions['node']==json.loads((base/'evidence/image-toolchain.json').read_text())['node']
 assert versions['pnpm']=='10.23.0' and versions['htree']=='htree 0.2.142'
 (evidence/'inputs.json').write_text(json.dumps(versions,indent=2)+'\n')
@@ -18,4 +18,4 @@ finally:subprocess.run(['python3','/stage/procedure/network-proof.py',str(eviden
 contexts=[json.loads(line) for line in (evidence/'context-permissions.jsonl').read_text().splitlines()]
 assert len(contexts)>=spec['requiredPermissionContexts']
 assert all(c['origin']=='http://localhost:43810' and c['permission']=='microphone' and c['state']=='granted' and not c['captureInvoked'] for c in contexts)
-(evidence/'passed.json').write_text(json.dumps({'passed':True,'sourceCommit':spec['commit'],'completeCheckedInProfile':True,'assertionsPreserved':True,'permissionContexts':len(contexts)})+'\n')
+(evidence/'passed.json').write_text(json.dumps({'passed':True,'sourceCommit':spec['commit'],'completeCheckedInProfile':False,'assertionsPreserved':True,'permissionContexts':len(contexts)})+'\n')

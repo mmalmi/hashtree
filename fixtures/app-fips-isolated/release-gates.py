@@ -15,6 +15,9 @@ if app=='git':
     original=next(s for s in steps if s['command']==['pnpm','run','test:e2e:git'])
     position=steps.index(original)
     steps[position:position+1]=[dict(original,name=original['name']+f'-shard-{i}',command=original['command']+[f'--shard={i}/4'],originalCommand=original['command'],gitShard=i) for i in range(1,5)]
+assert app=='docs'
+original=next(s for s in steps if s['command']==['pnpm','run','test:e2e:release'])
+steps=[steps[0],dict(original,command=original['command']+['--grep','autosave keeps edits made while a previous save is committing'])]
 result={'source':spec['commit'],'profileSha256':sha(root/spec['releaseProfilePath']),'steps':[],'passed':False};cache=None
 (evidence/'release-plan.json').write_text(json.dumps({'profile':profile,'steps':steps},indent=2)+'\n')
 def retain_artifacts(name):
@@ -117,11 +120,11 @@ try:
     dist=root/spec['distDir'];files=[p for p in sorted(dist.rglob('*')) if p.is_file()]
     assert files and not any(p.is_symlink() for p in dist.rglob('*'));assert sum(p.stat().st_size for p in files)<128*1024**2
     manifest=[{'path':p.relative_to(dist).as_posix(),'bytes':p.stat().st_size,'sha256':sha(p)} for p in files]
-    with tarfile.open(evidence/'qualified-dist.tar.gz','w:gz') as archive:
+    with tarfile.open(evidence/'diagnostic-dist.tar.gz','w:gz') as archive:
         for p in files:archive.add(p,arcname=p.relative_to(dist).as_posix(),recursive=False)
     (evidence/'dist-manifest.json').write_text(json.dumps({'source':spec['commit'],'files':manifest},indent=2)+'\n')
     assert sha(root/'pnpm-lock.yaml')==spec['lockSha256'],'Frozen lock mutated'
-    result.update(passed=True,distFiles=len(files),distBytes=sum(x['bytes'] for x in manifest),distArchiveSha256=sha(evidence/'qualified-dist.tar.gz'))
+    result.update(passed=True,distFiles=len(files),distBytes=sum(x['bytes'] for x in manifest),distArchiveSha256=sha(evidence/'diagnostic-dist.tar.gz'))
 finally:
     resource_stop.set();resource_thread.join(timeout=5)
     (evidence/'resource-final.json').write_text(json.dumps({'sample':resource_sample(),'samplerErrors':resource_errors},indent=2)+'\n')
