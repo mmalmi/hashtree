@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "cabd85a24c499be659079413aab70cba11deae96",
+      "commit": "db3ce56f0a5b336581e3a33398a06ff1f8bc3394",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "ab57452584473ddec8212903621b32fee674685ac1df61975867328da74e439a",
+      "archiveSha256": "96a8213ac155935430d24b73a6cb877b627cabb6767ccb1334550a80129f83c3",
       "lockSha256": "393b4b78857ed83e47794fc0b94bcecf2024c74d28e51104ca409e3ebe6865cc",
       "packageManager": "pnpm@10.28.2",
       "distDir": "dist",
@@ -284,7 +284,7 @@
       "testFiles": {
         "tests/initial-paint.spec.ts": "5d55dcfea8f841b195945b6bf496f912abdf6cbe5ffaaf9e0c484ffb2a3f818b",
         "tests/favorites-feed-ui.spec.ts": "d1eba8bd2534e4f6765025bf5ab56ccf308bfc9f8aee930d0665c53c49319a23",
-        "tests/private-contact-sync-ui.spec.ts": "e1da272bdd502e59392958f9315f222707521df4462ef36df880ecdf8e2a586a",
+        "tests/private-contact-sync-ui.spec.ts": "73ab0e917da2558334110116daa72328f7f655f239dfa93f2c58e9c5d20ebc7d",
         "tests/recent-searches.spec.ts": "5a1f0ad5e96b48aafa96465dabc749d5c80135b6047567fc02d65e8837e4a68f",
         "tests/fips-p2p.spec.ts": "467015b3b000369525a5f8caa69267f785f8608730db6d9bfb542e37a41b5ea7",
         "tests/personal-event-index-publication.spec.ts": "935c4ffadb55d54054066e57029cc428396897628aca4f52c7b86a5e13bdc5d4"
@@ -299,7 +299,7 @@
         "PLAYWRIGHT_RUNTIME_PORT": "4181",
         "PLAYWRIGHT_USE_PREVIEW": "1"
       },
-      "archiveBytes": 2873438
+      "archiveBytes": 2873698
     }
   ]
 }
