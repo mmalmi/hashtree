@@ -60,17 +60,15 @@ export default defineConfig({...original,workers:1,retries:0,
  args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection',
  '--proxy-server='+process.env.REJECT_PROXY,'--proxy-bypass-list=localhost;127.0.0.1;[::1]']}}});
 """)
+    t=root/'src/lib/appFeedPreferences.ts';raw=t.read_text();assert raw.count('  async function handleRefreshHome(): Promise<void> {')==1;t.write_text(raw.replace('  async function handleRefreshHome(): Promise<void> {',"  async function handleRefreshHome(): Promise<void> {\n    console.log('BUFFER_OBS refresh', deps.route.kind, deps.homeRefreshPending);"))
+    t=root/'src/lib/appLiveHomeController.ts';raw=t.read_text();assert raw.count('  function resetLiveHomeFeedBuffer(): void {')==1;t.write_text(raw.replace('  function resetLiveHomeFeedBuffer(): void {',"  function resetLiveHomeFeedBuffer(): void {\n    console.log('BUFFER_OBS reset', state.liveHomeFeedBuffer.events.length);"))
+    t=root/'src/lib/appHistoryNavigation.ts';raw=t.read_text();assert raw.count('  function navigateHomeTab(tab: HomeTab): void {')==1;t.write_text(raw.replace('  function navigateHomeTab(tab: HomeTab): void {',"  function navigateHomeTab(tab: HomeTab): void {\n    console.log('BUFFER_OBS navigate', tab, deps.route.kind, deps.route.tab);"))
+    t=root/'src/lib/appLiveHomeController.ts';raw=t.read_text();assert raw.count('    state.liveHomeFeedBuffer = bufferLiveHomeFeedEvent(')==1;t.write_text(raw.replace('    state.liveHomeFeedBuffer = bufferLiveHomeFeedEvent(',"    console.log('BUFFER_OBS insert', /^(buffered|route-reset|tab-refresh-reset|live)-fips-/.exec(event.content)?.[1] ?? 'other', state.homeRefreshPending, state.liveHomeFeedBuffer.events.some(e => e.id === event.id));\n    state.liveHomeFeedBuffer = bufferLiveHomeFeedEvent("))
+    t=root/'tests/fips-p2p.spec.ts';raw=t.read_text();assert raw.count('  const secondPage = await secondContext.newPage();')==1;t.write_text(raw.replace('  const secondPage = await secondContext.newPage();',"  const secondPage = await secondContext.newPage();\n    secondPage.on('console', msg => { if (msg.text().startsWith('BUFFER_OBS')) console.log(msg.text()); });"))
+    t=root/'src/lib/components/app-projection/AppLiveProjection.svelte';raw=t.read_text();assert raw.count('        homeState.bufferedLiveHomePostCount = nextBufferedEvents.length;')==1;t.write_text(raw.replace('        homeState.bufferedLiveHomePostCount = nextBufferedEvents.length;',"        homeState.bufferedLiveHomePostCount = nextBufferedEvents.length;\n    console.log('BUFFER_OBS count', nextBufferedEvents.length, nextBufferedEvents.map(e => /^(buffered|route-reset|tab-refresh-reset|live)-fips-/.exec(e.content)?.[1] ?? 'other'));"))
     command=['pnpm','exec','playwright','test','--config',config.name]
-    cases=spec['specs'];env['GRAPH_REPORT']=str(evidence/'selected.json')
-    selected=subprocess.run(command+cases,env=env,stdout=(evidence/'selected.log').open('wb'),stderr=subprocess.STDOUT,timeout=940)
-    env['GRAPH_REPORT']=str(evidence/'idle.json')
-    idle=subprocess.run(command+['tests/idle-cpu.spec.ts'],env=env,stdout=(evidence/'idle.log').open('wb'),stderr=subprocess.STDOUT,timeout=150)
-    counts={}
-    for name,code,expected in [('selected',selected.returncode,spec['expectedCases']),('idle',idle.returncode,1)]:
-        report=json.loads((evidence/(name+'.json')).read_text());counts[name]=dict(exit=code,stats=report['stats'])
-    (evidence/'results.json').write_text(json.dumps(dict(source=spec['commit'],counts=counts,rejected=proxy.rejected),indent=2)+'\n')
-    assert all(row['exit']==0 for row in counts.values())
-    assert counts['selected']['stats']['expected']==spec['expectedCases'] and counts['idle']['stats']['expected']==1
+    env['GRAPH_REPORT']=str(evidence/'buffer-observation.json')
+    run(command+['tests/fips-p2p.spec.ts','--grep','automatically exchanges live events'],'buffer-observation',230)
 finally:
     run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after.json')],'network-after',15)
     proxy.shutdown();proxy.server_close()
