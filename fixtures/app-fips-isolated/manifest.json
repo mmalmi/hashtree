@@ -278,10 +278,10 @@
     },
     {
       "id": "maps",
-      "commit": "acabbfb15745f48c9b60729c22b4a987f3dcd7d9",
+      "commit": "6f47382d2005a804f49805c07d9bb2a69bc04b55",
       "archive": "archives/maps-source.tar.gz",
-      "archiveSha256": "bc990f0fc6d58d49b261cd2ab8f99836878aa7d3322f17f39e3ff647a65698ec",
-      "archiveBytes": 2764850,
+      "archiveSha256": "ad665f6704d1d7045094b2b37691bd88c884ab43840c0466e3e1a29ee68a21e6",
+      "archiveBytes": 2764879,
       "lockSha256": "ce1e7e9bf6ec0cdcc8bd652d135adb0016c6efc850d4b347beced7f2df97023b",
       "packageSha256": "21ccfa15195a18f8ee61ea5fef81cf50a1af925d34cc545733b40ae6ac69686a",
       "distDir": "dist-maps",
@@ -291,7 +291,7 @@
       "playwright": "1.60.0",
       "packageManager": "pnpm@10.23.0",
       "testFiles": {
-        "e2e/fips-discovery.spec.ts": "bdd804a5f37eb7d1e99e53ae4b3e57bd2d1cc17040f8205ff5e45c75d964759f",
+        "e2e/fips-discovery.spec.ts": "94c0d99e9add212a7a898bcb9ddd40f6dad1815420842e10d2c131bcc1cfb723",
         "e2e/fips-provider-bridge.spec.ts": "e7c7e35ea855abd519ce94dcd9529fc0244524e2b2ed8409f50021fe08b7e956",
         "e2e/fixtures.ts": "1806469eba3151164bb05fe4649b9233b1c30b7d62311e849cbf7228d27c73fa",
         "e2e/fixtures/localFipsWebSocketSeed.ts": "9ab30a2f14107808705b45fc3bc3bcecd4470c2c56c113ee516cc6daabbcf07d",
