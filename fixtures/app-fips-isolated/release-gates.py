@@ -14,7 +14,7 @@ steps.append({'name':'dry-run','command':['node','scripts/release-site.mjs',app,
 if app=='git':
     original=next(s for s in steps if s['command']==['pnpm','run','test:e2e:git'])
     position=steps.index(original)
-    steps[position:position+1]=[dict(original,name=original['name']+f'-shard-{i}',command=original['command']+[f'--shard={i}/4'],originalCommand=original['command'],gitShard=i) for i in range(1,5)]
+    steps[position:position+1]=[dict(original,name=original['name']+f'-shard-{i}',command=original['command']+[f'--shard={i}/12'],originalCommand=original['command'],gitShard=i) for i in range(1,13)]
 result={'source':spec['commit'],'profileSha256':sha(root/spec['releaseProfilePath']),'steps':[],'passed':False};cache=None
 (evidence/'release-plan.json').write_text(json.dumps({'profile':profile,'steps':steps},indent=2)+'\n')
 def retain_artifacts(name):
@@ -64,7 +64,7 @@ def git_coverage():
                 assert test['results'][0]['status']==test['expectedStatus']=='passed'
                 actual.append({k:case[k] for k in ('id','file','line','column','title')}|{'projectName':test['projectName'],'expectedStatus':test['expectedStatus']})
         for child in suite.get('suites',[]):visit(child)
-    for i in range(1,5):visit(json.loads((evidence/f'release-check-2-shard-{i}-playwright.json').read_text()))
+    for i in range(1,13):visit(json.loads((evidence/f'release-check-2-shard-{i}-playwright.json').read_text()))
     assert len(actual)==len(expected)==82 and sorted(actual,key=lambda x:x['id'])==sorted(expected,key=lambda x:x['id']),'Original Git case coverage differs'
     (evidence/'git-shard-coverage.json').write_text(json.dumps({'passed':True,'cases':actual,'count':len(actual),'retries':0,'skips':0,'originalCommand':['pnpm','run','test:e2e:git']},indent=2)+'\n')
 # Capture the whole container's memory pressure, including child-only OOMs.
@@ -100,7 +100,9 @@ try:
         if command[:3]==['pnpm','run','test:unit'] or command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
         row={'name':step['name'],'command':command,'exitCode':None};result['steps'].append(row);started=time.monotonic()
         is_shard='gitShard' in step
-        if is_shard:assert_git_ports_closed()
+        if is_shard:
+            assert_git_ports_closed()
+            step_env['NODE_OPTIONS']=(step_env.get('NODE_OPTIONS','')+' --max-old-space-size=1280').strip()
         before_processes=process_snapshot();row['resourcesBefore']=resource_sample()
         try:
             with (evidence/(step['name']+'.log')).open('wb') as log:done=subprocess.run(command,env=step_env,stdout=log,stderr=subprocess.STDOUT,timeout=1800,start_new_session=True)
@@ -110,7 +112,7 @@ try:
             if is_shard:
                 row['reapedTaskDescendants']=clean_shard_children(before_processes);assert_git_ports_closed()
             row.update(seconds=round(time.monotonic()-started,3),resourcesAfter=resource_sample(),artifacts=retain_artifacts(step['name']))
-        if is_shard and step['gitShard']==4:
+        if is_shard and step['gitShard']==12:
             assert all(r['exitCode']==0 for r in result['steps'] if '-shard-' in r['name']),'Original Git shard failed'
             git_coverage()
     assert not resource_errors,'Resource sampler failed'
