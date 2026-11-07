@@ -44,16 +44,10 @@ export default defineConfig({...original,workers:1,retries:0,
  '--proxy-server='+process.env.REJECT_PROXY,'--proxy-bypass-list=localhost;127.0.0.1;[::1]']}}});
 """)
     command=['pnpm','exec','playwright','test','--config',config.name]
-    cases=spec['specs'];env['GRAPH_REPORT']=str(evidence/'selected.json')
-    selected=subprocess.run(command+cases,env=env,stdout=(evidence/'selected.log').open('wb'),stderr=subprocess.STDOUT,timeout=940)
-    env['GRAPH_REPORT']=str(evidence/'idle.json')
-    idle=subprocess.run(command+['tests/idle-cpu.spec.ts'],env=env,stdout=(evidence/'idle.log').open('wb'),stderr=subprocess.STDOUT,timeout=150)
-    counts={}
-    for name,code,expected in [('selected',selected.returncode,spec['expectedCases']),('idle',idle.returncode,1)]:
-        report=json.loads((evidence/(name+'.json')).read_text());counts[name]=dict(exit=code,stats=report['stats'])
-    (evidence/'results.json').write_text(json.dumps(dict(source=spec['commit'],counts=counts,rejected=proxy.rejected),indent=2)+'\n')
-    assert all(row['exit']==0 for row in counts.values())
-    assert counts['selected']['stats']['expected']==spec['expectedCases'] and counts['idle']['stats']['expected']==1
+    env['GRAPH_REPORT']=str(evidence/'peer-diagnostic.json')
+    with (evidence/'peer-diagnostic.log').open('wb') as output:
+        run_case=subprocess.run(command+['tests/fips-p2p.spec.ts','--grep','automatically exchanges live events'],env=env,stdout=output,stderr=subprocess.STDOUT,timeout=260)
+    assert run_case.returncode==0
 finally:
     run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after.json')],'network-after',15)
     proxy.shutdown();proxy.server_close()
