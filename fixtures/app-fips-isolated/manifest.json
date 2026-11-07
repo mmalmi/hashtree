@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "docs",
-      "commit": "936f5b9067f5ff0e3d5dba9083bc621b782dab6e",
+      "commit": "1614398d8b2b3074bf50bdb73164d82025a293b3",
       "archive": "archives/docs-source.tar.gz",
-      "archiveSha256": "17194d620f0a2b770bfe9db32789ea7076c2c62d92e4ec91c2bb2e694bfa3668",
-      "archiveBytes": 1150753,
+      "archiveSha256": "077a835bada575626d00ed81d2bcfc72bdac512c63ee73cf18b34702623395fa",
+      "archiveBytes": 1151907,
       "lockSha256": "a7990bfc025655856bbcc4f5fbf38561f699df8bd3fafd0ebbc13bd8b81839d3",
       "packageSha256": "35854b877b4f2ca68d2a83d0ab746c045a3685fc92f524355abf83a5bd2c90ad",
       "distDir": "dist-docs",
@@ -33,10 +33,10 @@
       "playwright": "1.60.0",
       "packageManager": "pnpm@10.23.0",
       "testFiles": {
-        "e2e/contact-follow.spec.ts": "e63561d946ba9bce1ae2f32c0f9207ba41bacfd8b38df9c7ba26e1161d97e600",
-        "e2e/docs-app.helpers.ts": "450fdbeb9dee709435f55a6d34d654ac7c28e0c479601889dabd7b12da276e1c",
-        "e2e/docs-app.spec.ts": "8cf54c18b1b14b57f8d7c0324cd0585faad6e44b044736396662619bec3c6e58",
-        "e2e/docs-test-utils.ts": "591307ce2adb0056e1624ea081cad3f63f8296b6e6b9f30f4c72737dc07fc367",
+        "e2e/contact-follow.spec.ts": "42ff94697821ff5530454457e06604c4410f051f41124f3fb41470fd1ef3769a",
+        "e2e/docs-app.helpers.ts": "b1ce80f42d6a1ddef7555f7811697e395cbf4693a77a38e6b51aacb6b5d8c199",
+        "e2e/docs-app.spec.ts": "08b5438a4e2ece71a68b49b4cf81dc8204e44dc28a53cd534111412cce23b260",
+        "e2e/docs-test-utils.ts": "5611a666c610390ef19ae3860fca201165c27de4123c5ca96e6e9e28ec874f2c",
         "e2e/docs-thumbnail.spec.ts": "bc60716f837ba93d041ae0b1536ce123ad77d60a6d6e5522b09e4e4a084b4462",
         "e2e/fips-discovery.spec.ts": "4ddcbd29e04bec66dc5a3b7a3271a54ad8d1d0f5191ad64896a510cc92ef3ded",
         "e2e/fips-provider-bridge.spec.ts": "e13694dcbb2e0e31fe3a584e9ab871347adfcbcf5225f417f993faed1d89a7d8",
@@ -50,7 +50,7 @@
         "e2e/test-utils/core.ts": "ef5d56f2fa635f3874750303a7a11b6ab1bbdeab42914698fc0706ca756ae5e7",
         "e2e/test-utils/git.ts": "7ff5c0c81359488c116482132009a8411c7251b88bc64374fe31879ad24a502d",
         "e2e/test-utils/navigation.ts": "ad159eaf9687591931a50de07cce40e06fae9f66509486b4537100615810cb50",
-        "e2e/test-utils/network.ts": "e08ed13d64329a6ff1d5cb685ff224d3dbfdee29524c91dc5002321c053589c0",
+        "e2e/test-utils/network.ts": "9fc490fd6d006f7fea76e04554f3a6ee7335d79ba5fe7d867698ca9b68044008",
         "e2e/yjs-comments.spec.ts": "2e198713108041442094ea9ad71ea84ef3ebb82e9fa1155f80fae6999b529af5",
         "e2e/yjs-document.spec.ts": "8da1cf0da36c7e477a3d333acb253a631bdb613119da656132794bbd8c0384a6"
       },
