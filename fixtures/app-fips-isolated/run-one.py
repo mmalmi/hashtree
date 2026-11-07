@@ -1,21 +1,46 @@
-"""One unchanged app profile; all signing follows independent OS/browser proofs."""
-import hashlib,json,os,pathlib,subprocess,sys
-base=pathlib.Path('/stage');app=sys.argv[1]
-spec=next(a for a in json.loads((base/'procedure/manifest.json').read_text())['apps'] if a['id']==app)
-evidence=base/'evidence'/app;evidence.mkdir();home=base/'home'/app;home.mkdir(exist_ok=True)
-env=dict(os.environ,CI='1',PW_WORKERS='1',PW_MAX_WORKERS='1',PW_APP_PORT='43810',PW_RELAY_PORT='43811',PW_TEST_BLOSSOM_URL='http://127.0.0.1:43812',HTREE_ADDR='127.0.0.1:43812',HTREE_BIN='/stage/tools/native/hashtree/htree',GIT_REMOTE_HTREE_BIN='/stage/tools/native/hashtree/git-remote-htree',HTREE_CONFIG_DIR=str(home/'config'),HTREE_DATA_DIR=str(home/'data'),HTREE_PREFER_LOCAL_DAEMON='false',FIPS_APP_EVIDENCE=str(evidence))
-env['PATH']='/stage/tools/native/hashtree:'+env['PATH'];env.update(spec.get('env',{}))
-subprocess.run(['python3','/stage/procedure/network-proof.py',str(evidence/'network.json')],env=env,check=True,timeout=15)
-subprocess.run(['node','/stage/procedure/package-proof.cjs',str(evidence/'packages.json')],env=env,check=True,timeout=15)
-subprocess.run(['node','/stage/procedure/browser-proof.cjs',str(evidence/'browser.json')],env=env,check=True,timeout=35)
-versions={'node':subprocess.check_output(['node','--version'],env=env,text=True).strip(),'pnpm':subprocess.check_output(['pnpm','--version'],env=env,text=True).strip(),'htree':subprocess.check_output([env['HTREE_BIN'],'--version'],env=env,text=True).strip(),'command':['python3','/stage/procedure/release-gates.py',app],'sourceCommit':spec['commit'],'runtimeMode':'Exact frozen source built inside OS boundary; complete checked-in release profile and qualified dist'}
-assert versions['node']==json.loads((base/'evidence/image-toolchain.json').read_text())['node']
-assert versions['pnpm']=='10.23.0' and versions['htree']=='htree 0.2.142'
-(evidence/'inputs.json').write_text(json.dumps(versions,indent=2)+'\n')
-budget=json.loads((base/'procedure/app-budgets.json').read_text())[app]
-try:subprocess.run(versions['command'],env=env,check=True,timeout=budget)
-finally:subprocess.run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after-attempt.json')],env=env,check=True,timeout=15)
-contexts=[json.loads(line) for line in (evidence/'context-permissions.jsonl').read_text().splitlines()]
-assert len(contexts)>=spec['requiredPermissionContexts']
-assert all(c['origin']=='http://localhost:43810' and c['permission']=='microphone' and c['state']=='granted' and not c['captureInvoked'] for c in contexts)
-(evidence/'passed.json').write_text(json.dumps({'passed':True,'sourceCommit':spec['commit'],'completeCheckedInProfile':True,'assertionsPreserved':True,'permissionContexts':len(contexts)})+'\n')
+"""Exercise the selected Social release checks under the proven namespace."""
+import http.server,json,os,pathlib,subprocess,sys,threading
+base=pathlib.Path('/stage');root=pathlib.Path.cwd()
+spec=json.loads((base/'procedure/manifest.json').read_text())['apps'][0]
+evidence=base/'evidence/social';evidence.mkdir()
+class Reject(http.server.BaseHTTPRequestHandler):
+    def reject(self):
+        self.server.rejected+=1
+        self.send_error(403)
+    do_CONNECT=do_GET=do_POST=reject
+    def log_message(self,*args):pass
+proxy=http.server.ThreadingHTTPServer(('127.0.0.1',0),Reject)
+proxy.rejected=0
+threading.Thread(target=proxy.serve_forever,daemon=True).start()
+env=dict(os.environ,CI='1',**spec['env'],REJECT_PROXY='http://127.0.0.1:'+str(proxy.server_port))
+def run(command,log,timeout):
+    with (evidence/(log+'.log')).open('wb') as out:
+        subprocess.run(command,stdout=out,stderr=subprocess.STDOUT,env=env,check=True,timeout=timeout)
+try:
+    run(['python3','/stage/procedure/network-proof.py',str(evidence/'network.json')],'network',15)
+    run(['node','/stage/procedure/browser-proof.cjs',str(evidence/'browser.json')],'browser',50)
+    assert proxy.rejected>0,'Unsigned rejecting-proxy probe received no requests'
+    config=root/'playwright.graph-qual.config.ts'
+    assert not config.exists()
+    config.write_text("""import { defineConfig } from '@playwright/test';
+import original from './playwright.config';
+export default defineConfig({...original,workers:1,retries:0,
+ reporter:[['list'],['json',{outputFile:process.env.GRAPH_REPORT}]],
+ use:{...original.use,trace:'retain-on-failure',launchOptions:{channel:'chromium',
+ args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection',
+ '--proxy-server='+process.env.REJECT_PROXY,'--proxy-bypass-list=localhost;127.0.0.1;[::1]']}}});
+""")
+    command=['pnpm','exec','playwright','test','--config',config.name]
+    cases=spec['specs'];env['GRAPH_REPORT']=str(evidence/'selected.json')
+    selected=subprocess.run(command+cases,env=env,stdout=(evidence/'selected.log').open('wb'),stderr=subprocess.STDOUT,timeout=940)
+    env['GRAPH_REPORT']=str(evidence/'idle.json')
+    idle=subprocess.run(command+['tests/idle-cpu.spec.ts'],env=env,stdout=(evidence/'idle.log').open('wb'),stderr=subprocess.STDOUT,timeout=150)
+    counts={}
+    for name,code,expected in [('selected',selected.returncode,spec['expectedCases']),('idle',idle.returncode,1)]:
+        report=json.loads((evidence/(name+'.json')).read_text());counts[name]=dict(exit=code,stats=report['stats'])
+    (evidence/'results.json').write_text(json.dumps(dict(source=spec['commit'],counts=counts,rejected=proxy.rejected),indent=2)+'\n')
+    assert all(row['exit']==0 for row in counts.values())
+    assert counts['selected']['stats']['expected']==spec['expectedCases'] and counts['idle']['stats']['expected']==1
+finally:
+    run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after.json')],'network-after',15)
+    proxy.shutdown();proxy.server_close()
