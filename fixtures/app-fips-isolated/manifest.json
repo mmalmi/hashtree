@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "docs",
-      "commit": "1614398d8b2b3074bf50bdb73164d82025a293b3",
+      "commit": "2a713eca05463107f0f14a566cabd0be44540e7a",
       "archive": "archives/docs-source.tar.gz",
-      "archiveSha256": "077a835bada575626d00ed81d2bcfc72bdac512c63ee73cf18b34702623395fa",
-      "archiveBytes": 1151907,
+      "archiveSha256": "de450fdf248ff26cca571c9031b338c9af984969e96aa34403f42036da6b525a",
+      "archiveBytes": 1152561,
       "lockSha256": "a7990bfc025655856bbcc4f5fbf38561f699df8bd3fafd0ebbc13bd8b81839d3",
       "packageSha256": "35854b877b4f2ca68d2a83d0ab746c045a3685fc92f524355abf83a5bd2c90ad",
       "distDir": "dist-docs",
@@ -35,7 +35,7 @@
       "testFiles": {
         "e2e/contact-follow.spec.ts": "42ff94697821ff5530454457e06604c4410f051f41124f3fb41470fd1ef3769a",
         "e2e/docs-app.helpers.ts": "b1ce80f42d6a1ddef7555f7811697e395cbf4693a77a38e6b51aacb6b5d8c199",
-        "e2e/docs-app.spec.ts": "08b5438a4e2ece71a68b49b4cf81dc8204e44dc28a53cd534111412cce23b260",
+        "e2e/docs-app.spec.ts": "0d5c1bbfccb6cc9ccef17f0eb10113ea1a4a5fea301152e68d91bf2e45f3b22b",
         "e2e/docs-test-utils.ts": "5611a666c610390ef19ae3860fca201165c27de4123c5ca96e6e9e28ec874f2c",
         "e2e/docs-thumbnail.spec.ts": "bc60716f837ba93d041ae0b1536ce123ad77d60a6d6e5522b09e4e4a084b4462",
         "e2e/fips-discovery.spec.ts": "4ddcbd29e04bec66dc5a3b7a3271a54ad8d1d0f5191ad64896a510cc92ef3ded",
