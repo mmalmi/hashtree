@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "6ccb8ddbcff6b7ee54dae56263646f5d180db477",
+      "commit": "ae912320f192a6efbb579334ae18ea8ebfd9822e",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "a9c875241a36ed71b1a9a1233d9255218fce369f72a0fa488f112923726d2040",
+      "archiveSha256": "0fba491b3b26b0d2852489f6bff791bce431bb7d19fb672bd532609e105bad2e",
       "lockSha256": "393b4b78857ed83e47794fc0b94bcecf2024c74d28e51104ca409e3ebe6865cc",
       "packageManager": "pnpm@10.28.2",
       "distDir": "dist",
@@ -286,7 +286,7 @@
         "tests/favorites-feed-ui.spec.ts": "d1eba8bd2534e4f6765025bf5ab56ccf308bfc9f8aee930d0665c53c49319a23",
         "tests/private-contact-sync-ui.spec.ts": "0aa5ea9172dd1d2fef5b01b7c82ef1fca7db97f0667ab9531fd49e4fa67c6fc8",
         "tests/recent-searches.spec.ts": "5a1f0ad5e96b48aafa96465dabc749d5c80135b6047567fc02d65e8837e4a68f",
-        "tests/fips-p2p.spec.ts": "dca2b5b4cf4165a7f9062e2b8703fdafa213692036beef14494a914676e718dc",
+        "tests/fips-p2p.spec.ts": "2fa157dd37152cdbfc8334ffd0a9c265cb8cc15ef102a9f75af2cfeb85ec5416",
         "tests/personal-event-index-publication.spec.ts": "935c4ffadb55d54054066e57029cc428396897628aca4f52c7b86a5e13bdc5d4"
       },
       "expectedProjects": [
@@ -299,7 +299,7 @@
         "PLAYWRIGHT_RUNTIME_PORT": "4181",
         "PLAYWRIGHT_USE_PREVIEW": "1"
       },
-      "archiveBytes": 2877317
+      "archiveBytes": 2879587
     }
   ]
 }
