@@ -1,0 +1,34 @@
+{
+  "run": "42537526250",
+  "source": "ae912320f192a6efbb579334ae18ea8ebfd9822e",
+  "evidence": {
+    "reader-red.log": {
+      "bytes": 10569,
+      "sha256": "0cd8e1bcf8c1434e163ed7b588c988167f54f806815aff3400f980268315e8d5"
+    },
+    "reader-green.log": {
+      "bytes": 13258,
+      "sha256": "8e8feb533070a86b447727af1928eab49fe9e6df1997cabc5cc22dfb0a5d9c1a"
+    },
+    "check.log": {
+      "bytes": 254,
+      "sha256": "1689a91ea62e60827317935e1a009ef02fb0a279c4d862c9d156c0497739c26f"
+    }
+  },
+  "reader-red": {
+    "startTime": "2026-11-08T23:57:14.127Z",
+    "duration": 3260.9750000000004,
+    "expected": 0,
+    "skipped": 0,
+    "unexpected": 1,
+    "flaky": 0
+  },
+  "reader-green": {
+    "startTime": "2026-11-08T23:57:18.481Z",
+    "duration": 2847.722,
+    "expected": 8,
+    "skipped": 0,
+    "unexpected": 0,
+    "flaky": 0
+  }
+}
