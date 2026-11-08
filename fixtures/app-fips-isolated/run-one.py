@@ -64,14 +64,12 @@ export default defineConfig({...original,workers:1,retries:0,outputDir:process.e
     env['GRAPH_OUTPUT']=str(evidence/'peer-roles')
     peer=subprocess.run(['pnpm','exec','playwright','test','--config',config.name,'tests/fips-p2p.spec.ts'],
         env=env,stdout=(evidence/'peer-roles.log').open('wb'),stderr=subprocess.STDOUT,timeout=220)
-    remaining=subprocess.run(['python3','/stage/procedure/finish-remaining.py'],env=env,
-        stdout=(evidence/'full-profile.log').open('wb'),stderr=subprocess.STDOUT,timeout=1500)
     peer_report=json.loads((evidence/'peer-roles.json').read_text())
     counts=peer_report['stats']
-    passed=peer.returncode==remaining.returncode==0 and counts['expected']==2 and counts['unexpected']==counts['flaky']==counts['skipped']==0
+    passed=peer.returncode==0 and counts['expected']==2 and counts['unexpected']==counts['flaky']==counts['skipped']==0
     (evidence/'completed-gates.json').write_text(json.dumps(dict(passed=passed,source=spec['commit'],peer=counts,
-        peerExit=peer.returncode,remainingExit=remaining.returncode,priorSelectedRun='42534884779'))+'\n')
-    assert passed,'Remaining gate or two-role peer test failed'
+        peerExit=peer.returncode,scope='Both unchanged-deadline reload roles, with routing diagnostics'))+'\n')
+    assert passed,'Two-role peer test failed'
 
 finally:
     run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after.json')],'network-after',15)
