@@ -1,0 +1,24 @@
+{
+  "source": "6ccb8ddbcff6b7ee54dae56263646f5d180db477",
+  "testedSource": "0e1e8ffc184ed030d75ef282327332b99f86567f",
+  "sourceOnlyChanges": [
+    "tests/fips-p2p.spec.ts"
+  ],
+  "run": "42535238793",
+  "stats": {
+    "startTime": "2026-11-08T23:28:42.038Z",
+    "duration": 133421.94199999998,
+    "expected": 1340,
+    "skipped": 1,
+    "unexpected": 3,
+    "flaky": 0
+  },
+  "unitReportSha256": "ec79a98d4682d7a6604eb6f078d967ace18b7c7335dda4832a3b147b972795e1",
+  "checkLogSha256": "1689a91ea62e60827317935e1a009ef02fb0a279c4d862c9d156c0497739c26f",
+  "nativeInteropSkip": {
+    "file": "private-ratchet-controls.spec.ts",
+    "title": "dispatches actual native-produced current and legacy sibling controls",
+    "reason": "Native core fixture is required for the dedicated interoperability gate."
+  },
+  "failedTitleRegex": "(?:runs\\ exactly\\ one\\ native\\ index\\ process\\ and\\ accepts\\ its\\ normal\\ final\\ root|recycles\\ bounded\\ profile\\ processes\\ until\\ the\\ durable\\ author\\ cursor\\ completes|fails\\ closed\\ when\\ the\\ native\\ crawl\\ exits\\ before\\ completing)$"
+}
