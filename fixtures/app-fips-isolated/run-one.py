@@ -60,18 +60,11 @@ export default defineConfig({...original,workers:1,retries:0,
  args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection',
  '--proxy-server='+process.env.REJECT_PROXY,'--proxy-bypass-list=localhost;127.0.0.1;[::1]']}}});
 """)
-    command=['pnpm','exec','playwright','test','--config',config.name]
-    cases=spec['specs'];env['GRAPH_REPORT']=str(evidence/'selected.json')
-    selected=subprocess.run(command+cases,env=env,stdout=(evidence/'selected.log').open('wb'),stderr=subprocess.STDOUT,timeout=940)
-    env['GRAPH_REPORT']=str(evidence/'idle.json')
-    idle=subprocess.run(command+['tests/idle-cpu.spec.ts'],env=env,stdout=(evidence/'idle.log').open('wb'),stderr=subprocess.STDOUT,timeout=150)
-    counts={}
-    for name,code,expected in [('selected',selected.returncode,spec['expectedCases']),('idle',idle.returncode,1)]:
-        report=json.loads((evidence/(name+'.json')).read_text());counts[name]=dict(exit=code,stats=report['stats'])
-    (evidence/'results.json').write_text(json.dumps(dict(source=spec['commit'],counts=counts,rejected=proxy.rejected),indent=2)+'\n')
     run(['python3','/stage/procedure/finish-profile.py'],'full-profile',1500)
-    assert all(row['exit']==0 for row in counts.values())
-    assert counts['selected']['stats']['expected']==spec['expectedCases'] and counts['idle']['stats']['expected']==1
+    (evidence/'scope.json').write_text(json.dumps(dict(source=spec['commit'],
+        scope='Supplemental original release gates and six mobile cases; selected and idle are separately qualified',
+        pairedRun='42534884779'))+'\n')
+
 finally:
     run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after.json')],'network-after',15)
     proxy.shutdown();proxy.server_close()

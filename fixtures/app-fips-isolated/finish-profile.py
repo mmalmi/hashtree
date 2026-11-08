@@ -1,6 +1,6 @@
 """Finish the declared Social release checks inside the existing isolated runner."""
 import hashlib,json,os,pathlib,signal,subprocess,tarfile,time
-root=pathlib.Path.cwd();procedure=pathlib.Path('/stage/procedure');evidence=pathlib.Path(os.environ['FIPS_APP_EVIDENCE'])
+root=pathlib.Path.cwd();procedure=pathlib.Path('/stage/procedure');evidence=pathlib.Path('/stage/evidence/social')
 env=dict(os.environ);sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 def run(args,name,seconds):
  with (evidence/(name+'.log')).open('wb') as log:
@@ -14,6 +14,11 @@ env['GRAPH_REPORT']=str(evidence/'full-graph.json')
 run(['pnpm','exec','playwright','test','--config',config.name,'tests/public-graph-bootstrap.spec.ts','tests/social-worker-profile-snapshot-browser.spec.ts'],'full-graph',300)
 graph=json.loads((evidence/'full-graph.json').read_text())
 assert graph['stats']['unexpected']==graph['stats']['flaky']==graph['stats']['skipped']==0
+env['GRAPH_REPORT']=str(evidence/'full-mobile.json')
+run(['pnpm','exec','playwright','test','--config',config.name,'tests/mobile-navigation.spec.ts'],'full-mobile',240)
+mobile=json.loads((evidence/'full-mobile.json').read_text())
+assert mobile['stats']['expected']==6
+assert mobile['stats']['unexpected']==mobile['stats']['flaky']==mobile['stats']['skipped']==0
 manifest=json.loads((procedure/'public-read-manifest.json').read_text())
 fixture=procedure/'public-read'
 expected=manifest['files'];archive=procedure/'public-read-fixture.tar.gz'
@@ -61,4 +66,4 @@ finally:
   except subprocess.TimeoutExpired:bridge.kill();bridge.wait()
   for p in fixture.glob('receipt-*.json'):
    (evidence/('public-read-'+p.name)).write_bytes(p.read_bytes())
-(evidence/'full-profile.json').write_text(json.dumps({'passed':True,'unit':unit['stats'],'graph':graph['stats'],'smoke':smoke_report['stats'],'fixtureSha256':manifest['sha256']},indent=2)+'\n')
+(evidence/'full-profile.json').write_text(json.dumps({'passed':True,'unit':unit['stats'],'graph':graph['stats'],'mobile':mobile['stats'],'smoke':smoke_report['stats'],'fixtureSha256':manifest['sha256']},indent=2)+'\n')
