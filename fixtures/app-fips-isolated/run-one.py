@@ -69,6 +69,7 @@ export default defineConfig({...original,workers:1,retries:0,
     for name,code,expected in [('selected',selected.returncode,spec['expectedCases']),('idle',idle.returncode,1)]:
         report=json.loads((evidence/(name+'.json')).read_text());counts[name]=dict(exit=code,stats=report['stats'])
     (evidence/'results.json').write_text(json.dumps(dict(source=spec['commit'],counts=counts,rejected=proxy.rejected),indent=2)+'\n')
+    run(['python3','/stage/procedure/finish-profile.py'],'full-profile',1500)
     assert all(row['exit']==0 for row in counts.values())
     assert counts['selected']['stats']['expected']==spec['expectedCases'] and counts['idle']['stats']['expected']==1
 finally:
