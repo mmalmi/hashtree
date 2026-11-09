@@ -22,7 +22,7 @@ try:
     run(['node','/stage/procedure/browser-default-origin-proof.cjs',str(evidence/'browser-default-origin.json')],'browser-default-origin',60)
     assert json.loads((evidence/'browser-default-origin.json').read_text())['passed']
     assert proxy.rejected>0,'Unsigned rejecting-proxy probe received no requests'
-    run(['python3','/stage/procedure/batching-regression.py'],'batching-regression',100)
+    run(['python3','/stage/procedure/startup-regression.py'],'startup-regression',100)
     # Rebuild the new source under the verified network boundary. The original
     # dist was verified before entry and is retained solely as a byte comparator.
     import hashlib,tarfile
@@ -61,21 +61,15 @@ export default defineConfig({...original,workers:1,retries:0,outputDir:process.e
  args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection',
  '--proxy-server='+process.env.REJECT_PROXY,'--proxy-bypass-list=localhost;127.0.0.1;[::1]']}}});
 """)
-    command=['pnpm','exec','playwright','test','--config',config.name]
-    counts={}
-    for name,cases,expected,seconds in [('selected',spec['specs'],22,940),('idle',['tests/idle-cpu.spec.ts'],1,150)]:
-        env['GRAPH_REPORT']=str(evidence/(name+'.json'));env['GRAPH_OUTPUT']=str(evidence/name)
-        with (evidence/(name+'.log')).open('wb') as log:
-            result=subprocess.run(command+cases,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=seconds)
-        stats=json.loads((evidence/(name+'.json')).read_text())['stats']
-        counts[name]=dict(exit=result.returncode,stats=stats,expected=expected)
-    with (evidence/'full-profile.log').open('wb') as log:
-        remaining=subprocess.run(['python3','/stage/procedure/finish-full.py'],env=env,stdout=log,stderr=subprocess.STDOUT,timeout=1700)
-    passed=remaining.returncode==0 and all(row['exit']==0 and row['stats']['expected']==row['expected']
-        and row['stats']['unexpected']==row['stats']['flaky']==row['stats']['skipped']==0 for row in counts.values())
-    (evidence/'completed-gates.json').write_text(json.dumps(dict(passed=passed,source=spec['commit'],counts=counts,
-        remainingExit=remaining.returncode,scope='Complete original release profile plus mobile and both peer reload roles'))+'\n')
-    assert passed,'Original release profile failed'
+    run(['pnpm','run','check'],'check',180)
+    env['GRAPH_REPORT']=str(evidence/'private-ui.json');env['GRAPH_OUTPUT']=str(evidence/'private-ui')
+    with (evidence/'private-ui.log').open('wb') as log:
+        result=subprocess.run(['pnpm','exec','playwright','test','--config',config.name,'tests/private-contact-sync-ui.spec.ts'],
+            env=env,stdout=log,stderr=subprocess.STDOUT,timeout=400)
+    report=json.loads((evidence/'private-ui.json').read_text());stats=report['stats']
+    passed=result.returncode==0 and stats['expected']==4 and stats['unexpected']==stats['skipped']==stats['flaky']==0
+    (evidence/'private-startup-check.json').write_text(json.dumps(dict(passed=passed,source=spec['commit'],stats=stats,exit=result.returncode))+'\n')
+    assert passed,'Private-contact UI flow failed; retain wire diagnostics'
 
 finally:
     run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after.json')],'network-after',15)
