@@ -16,7 +16,7 @@ def specs(node):
  yield from node.get('specs',[])
  for child in node.get('suites',[]):yield from specs(child)
 records=[(s,t) for s in specs(unit) for t in s['tests']]
-assert len(records)==1345 and unit['stats']['expected']==1344 and unit['stats']['skipped']==1
+assert len(records)==1347 and unit['stats']['expected']==1346 and unit['stats']['skipped']==1
 skipped=[(s,t) for s,t in records if t['expectedStatus']=='skipped']
 assert len(skipped)==1 and skipped[0][0]['file']=='private-ratchet-controls.spec.ts'
 assert skipped[0][0]['title']=='dispatches actual native-produced current and legacy sibling controls'
