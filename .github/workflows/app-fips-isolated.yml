@@ -1,4 +1,4 @@
-name: Isolated Drive and Meet release gates
+name: Fresh meet runtime61 complete release qualification
 on:
   workflow_dispatch:
 permissions:
@@ -11,7 +11,7 @@ jobs:
       matrix:
         app: [meet]
     runs-on: ubuntu-24.04
-    timeout-minutes: 65
+    timeout-minutes: 70
     env:
       FIPS_APPS: ${{ matrix.app }}
     steps:
@@ -32,3 +32,4 @@ jobs:
           path: ${{ runner.temp }}/app-graph404-${{ matrix.app }}/evidence
           if-no-files-found: error
           retention-days: 7
+          include-hidden-files: true

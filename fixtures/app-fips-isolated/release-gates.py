@@ -1,5 +1,5 @@
 """Run the complete checked-in release profile inside the proven OS boundary."""
-import hashlib,json,os,pathlib,selectors,shutil,subprocess,sys,tarfile,time
+import hashlib,json,os,pathlib,runpy,selectors,shutil,subprocess,sys,tarfile,time
 app=sys.argv[1];base=pathlib.Path('/stage');evidence=pathlib.Path(os.environ['FIPS_APP_EVIDENCE']);root=pathlib.Path.cwd()
 spec=next(a for a in json.loads((base/'procedure/manifest.json').read_text())['apps'] if a['id']==app)
 env=dict(os.environ,PW_WORKERS='1',PW_MAX_WORKERS='1');sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
@@ -18,7 +18,8 @@ else:
     steps=[{'name':'build','command':profile['buildCommand']}]
     for i,item in enumerate(profile['testCommands']):steps.append({'name':f'release-check-{i+1}',**({'command':item} if isinstance(item,list) else item)})
     steps.append({'name':'dry-run','command':['node','scripts/release-site.mjs',app,'--dry-run']})
-result={'source':spec['commit'],'profileSha256':sha(root/spec['releaseProfilePath']),'steps':[],'passed':False};cache=None
+checks=runpy.run_path('/stage/procedure/browser-results.py')
+result={'allAppGatesFromCurrentRun':True,'reusedAppScopes':[],'source':spec['commit'],'profileSha256':sha(root/spec['releaseProfilePath']),'steps':[],'passed':False};cache=None
 (evidence/'release-plan.json').write_text(json.dumps({'profile':profile,'steps':steps},indent=2)+'\n')
 def retain_artifacts(name):
     records=[];total=0
@@ -38,10 +39,14 @@ try:
         command=step['command'];assert isinstance(command,list) and command and all(isinstance(x,str) for x in command)
         step_env=env|step.get('env',{})|{'PW_WORKERS':'1','PW_MAX_WORKERS':'1','PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/(step['name']+'-playwright.json'))}
         if command[:3] in (['pnpm','run','test:unit'],['pnpm','run','test']) or command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
+        if step['name'] in ('test-calls','test-offline'):command=[*command,'--retries=0']
         row={'name':step['name'],'command':command,'exitCode':None};result['steps'].append(row);started=time.monotonic()
         try:
             with (evidence/(step['name']+'.log')).open('wb') as log:done=subprocess.run(command,env=step_env,stdout=log,stderr=subprocess.STDOUT,timeout=1800)
             row['exitCode']=done.returncode;assert done.returncode==0,f"{step['name']} failed; retained complete log"
+            if step['name'] in ('test-calls','test-offline'):
+                rows=checks['verify'](evidence/(step['name']+'-playwright.json'),43 if step['name']=='test-calls' else 3,0)
+                if step['name']=='test-calls':(evidence/'peer-recovery.json').write_text(json.dumps(checks['recovery'](rows,'meet'),indent=2)+'\n')
         finally:row.update(seconds=round(time.monotonic()-started,3),artifacts=retain_artifacts(step['name']))
     dist=root/spec['distDir'];files=[p for p in sorted(dist.rglob('*')) if p.is_file()]
     assert files and not any(p.is_symlink() for p in dist.rglob('*'));assert sum(p.stat().st_size for p in files)<128*1024**2
