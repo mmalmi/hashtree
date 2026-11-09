@@ -1,8 +1,5 @@
 {
   "schema": 1,
-  "purpose": "Exact frozen source builds and complete checked-in six-app release profiles inside independently proven network isolation; no production publish",
-  "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
-  "imageTagForProvenance": "v1.60.0-noble",
   "pnpm": {
     "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.23.0.tgz",
     "sha256": "a1cdd7b468386a9d78a081da05d6049d7e598db62a299db92df21a7062a4b183"
@@ -17,1045 +14,183 @@
     },
     "provenance": "Accepted release binding plus exact public GitHub asset digest; old release has no SLSA attestation"
   },
+  "purpose": "Fresh original profile plus both browser peer reload checks; no production publication",
+  "image": "mcr.microsoft.com/playwright@sha256:5b8f294aff9041b7191c34a4bab3ac270157a28774d4b0660e9743297b697e48",
+  "imageTagForProvenance": "v1.61.1-noble",
   "apps": [
     {
-      "id": "docs",
-      "commit": "2a713eca05463107f0f14a566cabd0be44540e7a",
-      "archive": "archives/docs-source.tar.gz",
-      "archiveSha256": "de450fdf248ff26cca571c9031b338c9af984969e96aa34403f42036da6b525a",
-      "archiveBytes": 1152561,
-      "lockSha256": "a7990bfc025655856bbcc4f5fbf38561f699df8bd3fafd0ebbc13bd8b81839d3",
-      "packageSha256": "35854b877b4f2ca68d2a83d0ab746c045a3685fc92f524355abf83a5bd2c90ad",
-      "distDir": "dist-docs",
-      "buildFromSource": true,
-      "releaseProfilePath": "scripts/release-profiles.mjs",
-      "releaseProfileSha256": "446c3268f88233122faac770d56a00e1dfb9bad4911d83cec5c99e4539fe511b",
-      "playwright": "1.60.0",
+      "id": "sites",
+      "commit": "575f3308e181e6fa9fdca0386beb1edd35856fa5",
+      "archive": "archives/source.tar.gz",
+      "archiveSha256": "1e8895eba99b1bfd79098a5403a2301b799d38b57a0a438a95b4f7214e5a1a31",
+      "archiveBytes": 854706,
+      "lockSha256": "0931b5b0a23b5f15f4272db14f92102ac97d627c227eb30534390fb0f39cc137",
+      "rootPackageSha256": "e68005c35593fcd56ba41da6b075307ad99ee7aa16d077afcf3979123d194433",
+      "packageSha256": "e68005c35593fcd56ba41da6b075307ad99ee7aa16d077afcf3979123d194433",
       "packageManager": "pnpm@10.23.0",
-      "testFiles": {
-        "e2e/contact-follow.spec.ts": "42ff94697821ff5530454457e06604c4410f051f41124f3fb41470fd1ef3769a",
-        "e2e/docs-app.helpers.ts": "b1ce80f42d6a1ddef7555f7811697e395cbf4693a77a38e6b51aacb6b5d8c199",
-        "e2e/docs-app.spec.ts": "0d5c1bbfccb6cc9ccef17f0eb10113ea1a4a5fea301152e68d91bf2e45f3b22b",
-        "e2e/docs-test-utils.ts": "5611a666c610390ef19ae3860fca201165c27de4123c5ca96e6e9e28ec874f2c",
-        "e2e/docs-thumbnail.spec.ts": "bc60716f837ba93d041ae0b1536ce123ad77d60a6d6e5522b09e4e4a084b4462",
-        "e2e/fips-discovery.spec.ts": "4ddcbd29e04bec66dc5a3b7a3271a54ad8d1d0f5191ad64896a510cc92ef3ded",
-        "e2e/fips-provider-bridge.spec.ts": "e13694dcbb2e0e31fe3a584e9ab871347adfcbcf5225f417f993faed1d89a7d8",
-        "e2e/fixtures.ts": "1806469eba3151164bb05fe4649b9233b1c30b7d62311e849cbf7228d27c73fa",
-        "e2e/fixtures/localFipsWebSocketSeed.ts": "9ab30a2f14107808705b45fc3bc3bcecd4470c2c56c113ee516cc6daabbcf07d",
-        "e2e/htree-blossom.sh": "46f97c8169592d16471342c3330bf739c78395f7c2e40cacc51df9c4a6c92087",
-        "e2e/nostr-test-keys.ts": "37d4f7a1ddf1d0ab9395895973123265ac36a562c713f1c9aed34b04813a6288",
-        "e2e/relay/index.js": "6a521d8f52da23442ba67f7bc5479a4db4ac366d90d96bc5b2975e9db6d3bd7e",
-        "e2e/renderLoopGuard.ts": "23ed428dce812fbfe4d0a3dcc1bbbbc08a61627980a1e57054cfebcd76331d02",
-        "e2e/test-utils.ts": "81f1689db92f37b863595006405af6749e881dfc3488300b3495e32ab807bf91",
-        "e2e/test-utils/core.ts": "ef5d56f2fa635f3874750303a7a11b6ab1bbdeab42914698fc0706ca756ae5e7",
-        "e2e/test-utils/git.ts": "7ff5c0c81359488c116482132009a8411c7251b88bc64374fe31879ad24a502d",
-        "e2e/test-utils/navigation.ts": "ad159eaf9687591931a50de07cce40e06fae9f66509486b4537100615810cb50",
-        "e2e/test-utils/network.ts": "9fc490fd6d006f7fea76e04554f3a6ee7335d79ba5fe7d867698ca9b68044008",
-        "e2e/yjs-comments.spec.ts": "2e198713108041442094ea9ad71ea84ef3ebb82e9fa1155f80fae6999b529af5",
-        "e2e/yjs-document.spec.ts": "8da1cf0da36c7e477a3d333acb253a631bdb613119da656132794bbd8c0384a6"
-      },
-      "permissionTestFiles": [],
-      "requiredPermissionContexts": 1
-    },
-    {
-      "id": "calendar",
-      "commit": "fd5c6db8a881a2f049f8c880973deb8e78f63153",
-      "archive": "archives/calendar-source.tar.gz",
-      "archiveSha256": "c3859ac0d125525a3fecd23b9c9af699bb4120ce72e70ba2fadd0710b1d4b8d8",
-      "archiveBytes": 1573107,
-      "lockSha256": "62dc8fe6531ef9cf6751aa36c7d1238ae25ca704f48fea824b1656289e71882f",
-      "packageSha256": "ba2ff5fb14a3f1fd1891e698e5b5bce605d2c7b9e8d44a5dd5679c827bcd679f",
-      "distDir": "dist-calendar",
-      "buildFromSource": true,
-      "releaseProfilePath": "scripts/release-profiles.mjs",
-      "releaseProfileSha256": "5877dc1622e23bc8c17552c7b987b05b91449f7bb6aba4db3fe513b1ca6b9a5b",
-      "playwright": "1.60.0",
-      "packageManager": "pnpm@10.23.0",
-      "testFiles": {
-        "e2e/calendar-booking.spec.ts": "23af15a848d024756accde779a32d2fec22bee6d1dc17b58085e0dacf7872c39",
-        "e2e/calendar-events.spec.ts": "185e402c81d290247c1e21e9a6e6d952eac0c6aed4e3ec701ff312f1e1e23bf2",
-        "e2e/calendar-layout.spec.ts": "0023001a1f5fb7277eba4dc9818eed6ebcde69ba99740cd7d04381211031220e",
-        "e2e/fips-discovery.spec.ts": "380b3d75290bfd5987e8dc8d33e8b4b8d88d62f5afadd96745f17835b35fde23",
-        "e2e/fips-provider-bridge.spec.ts": "1bf81ac5cd6724f1bf0424c00e1298cff2950f104650d7fda08481f1db688d8c",
-        "e2e/fixtures.ts": "1806469eba3151164bb05fe4649b9233b1c30b7d62311e849cbf7228d27c73fa",
-        "e2e/fixtures/localFipsWebSocketSeed.ts": "9ab30a2f14107808705b45fc3bc3bcecd4470c2c56c113ee516cc6daabbcf07d",
-        "e2e/htree-blossom.sh": "46f97c8169592d16471342c3330bf739c78395f7c2e40cacc51df9c4a6c92087",
-        "e2e/nostr-test-keys.ts": "37d4f7a1ddf1d0ab9395895973123265ac36a562c713f1c9aed34b04813a6288",
-        "e2e/public-follow.spec.ts": "947069b2b9610718bc60da882b30a1959d5bbb09cb65aed9a9ee1151acba0273",
-        "e2e/relay/index.js": "6a521d8f52da23442ba67f7bc5479a4db4ac366d90d96bc5b2975e9db6d3bd7e",
-        "e2e/renderLoopGuard.ts": "23ed428dce812fbfe4d0a3dcc1bbbbc08a61627980a1e57054cfebcd76331d02",
-        "e2e/test-utils.ts": "17dc8a61626f92d2bb55a25adb37cc10c1d7602c76c4225a4a2f51f09b657b6f",
-        "e2e/test-utils/calendar.ts": "73b1c592a5bfb81a135b5823b3c09889e41bc82ff90834730c52573286461362",
-        "e2e/test-utils/core.ts": "173b2a3b4ab944f9ad595ae254684255e673241f027c76f314c4027ae8cdee79",
-        "e2e/test-utils/navigation.ts": "ad159eaf9687591931a50de07cce40e06fae9f66509486b4537100615810cb50",
-        "e2e/test-utils/network.ts": "54167ab8a0f94592883372343e85f7caacd1f5c1ee35790552572aa1b7e2bcf4"
-      },
-      "permissionTestFiles": [
-        "e2e/fips-discovery.spec.ts"
-      ],
-      "requiredPermissionContexts": 1
-    },
-    {
-      "id": "boards",
-      "commit": "ed38e36e10f64c28ac8d10ccf305f5db0777eea6",
-      "archive": "archives/boards-source.tar.gz",
-      "archiveSha256": "614dc9522b2da0eb74d81c9cb8ff3fc463b5316c959535aad08530472511b9f7",
-      "archiveBytes": 1356013,
-      "lockSha256": "c212f3b3b1989f055c666ed46e716a2fdf2b04d1b8e73bce4d509fbbaea0ef9e",
-      "packageSha256": "fb969e99d0c48895c10c9bbb8eed0b66e264902874c3458559e01093aaab3717",
-      "distDir": "dist-boards",
-      "buildFromSource": true,
-      "releaseProfilePath": "scripts/release-profiles.mjs",
-      "releaseProfileSha256": "ec432aa668e191e8d397754dd72a448de16aea7ebf6e144bebb912d2cbed6834",
-      "playwright": "1.60.0",
-      "packageManager": "pnpm@10.23.0",
-      "testFiles": {
-        "e2e/boards-access.spec.ts": "5bce77d80b9a9298f213c9a4fdc1f29ac3635e53ae8b758746be14cdec1d6f27",
-        "e2e/boards-app.helpers.ts": "768c2569ede19ba3ae8658a0c0408d841df2772821547101acd91c468c7c8ef6",
-        "e2e/boards-app.spec.ts": "5178440832f6dfaa9605dfcc6e777b08fa7c0733447b3eeb474d92621dd1700a",
-        "e2e/fips-discovery.spec.ts": "7c1c458e7392088cc37714ebe60000e3e6018347a394e533350dd308d6372e31",
-        "e2e/fips-provider-bridge.spec.ts": "7a3d604b38fd8a5705ae6d9512d497e14e0af29eb07d832f21a2d771adcc9886",
-        "e2e/fixtures.ts": "1806469eba3151164bb05fe4649b9233b1c30b7d62311e849cbf7228d27c73fa",
-        "e2e/fixtures/localFipsWebSocketSeed.ts": "9ab30a2f14107808705b45fc3bc3bcecd4470c2c56c113ee516cc6daabbcf07d",
-        "e2e/htree-blossom.sh": "46f97c8169592d16471342c3330bf739c78395f7c2e40cacc51df9c4a6c92087",
-        "e2e/nostr-test-keys.ts": "37d4f7a1ddf1d0ab9395895973123265ac36a562c713f1c9aed34b04813a6288",
-        "e2e/public-follow.spec.ts": "e6cb255b98036c2f88e2118b9538cea65ed4c7d291b67672cb6f3eb51583295b",
-        "e2e/relay/index.js": "6a521d8f52da23442ba67f7bc5479a4db4ac366d90d96bc5b2975e9db6d3bd7e",
-        "e2e/renderLoopGuard.ts": "23ed428dce812fbfe4d0a3dcc1bbbbc08a61627980a1e57054cfebcd76331d02",
-        "e2e/test-utils.ts": "578019d57df596ce06ffd7e45ef591e3a3c3dd6d25b41c022030c68e82e50b77",
-        "e2e/test-utils/core.ts": "031986d17871c997b3e4b716c19a8d4bc9625abe9cb971db64870c66a74f343a",
-        "e2e/test-utils/navigation.ts": "ad159eaf9687591931a50de07cce40e06fae9f66509486b4537100615810cb50",
-        "e2e/test-utils/network.ts": "54167ab8a0f94592883372343e85f7caacd1f5c1ee35790552572aa1b7e2bcf4"
-      },
-      "permissionTestFiles": [
-        "e2e/fips-discovery.spec.ts"
-      ],
-      "requiredPermissionContexts": 1
-    },
-    {
-      "id": "video",
-      "commit": "7cfa0fc6de043da6d689ca31aea5ba66ccb9f913",
-      "archive": "archives/video-source.tar.gz",
-      "archiveSha256": "566bed776a6ef55221c342c6acc94a624874de76fbdf7bb3b7af9baf99ae8ae9",
-      "archiveBytes": 48302993,
-      "lockSha256": "4c8d65280b3b36c42c825fdbea77bebc2f2d9757eae9d44ef8147d6b49d4f35b",
-      "packageSha256": "a40b745c762f151878bc75774de4a896f86afef76b26ca2dc0233986658a138b",
-      "distDir": "dist-video",
+      "playwright": "1.61.1",
+      "browser": "149.0.7827.55",
+      "workDir": "",
+      "distDir": "dist",
       "buildFromSource": true,
       "releaseProfilePath": "scripts/release-site.mjs",
-      "releaseProfileSha256": "7f2d282b41a49528d0dfd3cf201ad8382baadd42ce2e3de561984b80ec232a25",
-      "playwright": "1.60.0",
-      "packageManager": "pnpm@10.23.0",
-      "testFiles": {
-        "e2e/blossom-disabled.spec.ts": "5a4ccc7e213b74702032eac12d6d45fe060c0333b4883100cf5e85976d650f28",
-        "e2e/blossom-fallback.spec.ts": "7d514e84781c070293d2f5c1cf7b08d191fa8e4ad2c1792d6162f935decf733c",
-        "e2e/blossom-push.spec.ts": "258b65496ffd3075646abbc4a1317a5ddf37dfab95c31776bdd392d26259106a",
-        "e2e/chunk-boundary-video.spec.ts": "d09370661b83526ffd9eefdc8d8894a5e89f7217889cfae80e9b862922506441",
-        "e2e/fips-discovery.spec.ts": "ec1d915e5c495b5d9713ecbcc21ef543d759988935f27e4e9a204327445e917a",
-        "e2e/fips-provider-bridge.spec.ts": "759d449bc1a47501e996d6b88cfa1e7870aa86cc208a483028be2fee9a975988",
-        "e2e/fixtures.ts": "0e014bf47d4daffc80cce0f79df339a7273e40dadc8c0e5438ca3d58a67d1ebb",
-        "e2e/fixtures/localFipsWebSocketSeed.ts": "9ab30a2f14107808705b45fc3bc3bcecd4470c2c56c113ee516cc6daabbcf07d",
-        "e2e/fixtures/test-pwa/app.js": "f0aafdd703849155af96fa0f8a91ebfc78d9f0c76c2a262b96d9430ae870abd7",
-        "e2e/htree-blossom.sh": "46f97c8169592d16471342c3330bf739c78395f7c2e40cacc51df9c4a6c92087",
-        "e2e/live-indicator.spec.ts": "a95ec5b50dc91c99aca67d63ffc5152a6782063427dd176dc8abf9ade110db09",
-        "e2e/live-video.spec.ts": "a30e06bbf8d72a26405ee9d649213832e458fe1f1d08cfd24be79217d3083e9c",
-        "e2e/livestream-viewer.spec.ts": "6daf7b7471b264a47f32884c90247ce046f3c39ced835f4cd44199136f3dc6a7",
-        "e2e/livestream.test.ts": "201f20279219a7ae778ff9ee64cb6541913866cba5e48a710096d3125160b342",
-        "e2e/mobile-search.spec.ts": "f6156fee32c209cebdca36c443fc26ab2ab7e3d983f4dc4925bf8fa9c762d8ee",
-        "e2e/nostr-test-keys.ts": "37d4f7a1ddf1d0ab9395895973123265ac36a562c713f1c9aed34b04813a6288",
-        "e2e/playlist-management.spec.ts": "d8728dd213b2aaa4bc4da96d3f9fcc87b126347a9daefdcc5300846ecdf5e15c",
-        "e2e/playlist-perf.spec.ts": "2a90c16535ce278e13ba41ac80d79ef5ba3d6b38c57ef9f86ebf0f72319731e4",
-        "e2e/public-follow.spec.ts": "a12743efb1f597863ce6adb7518ef2acb87ca66f357d4ef1f78284d770f312de",
-        "e2e/relay/index.js": "6a521d8f52da23442ba67f7bc5479a4db4ac366d90d96bc5b2975e9db6d3bd7e",
-        "e2e/renderLoopGuard.ts": "23ed428dce812fbfe4d0a3dcc1bbbbc08a61627980a1e57054cfebcd76331d02",
-        "e2e/rust-lock.ts": "45b1a1ea7c61e77c55e6632b766cf9ca47363d00951e613dadcd011b742df7ab",
-        "e2e/rust-target.ts": "0257600531dd5532afd59f0578eeaea16224dcd260c2dfc3e1cef5c83da22393",
-        "e2e/search-feed-videos.spec.ts": "6978fd168bf254f60576d963891d76acd4ab3a7265d1b4b7af7bcbf5456823f0",
-        "e2e/settings-rate-limits.spec.ts": "528bc2c8f1e6fff4d4045354ea5725155463eca76595f5d236fa0c41fdb542ce",
-        "e2e/settings-stats.spec.ts": "0da6834ff214e6d5cec56654eabb26006199c01686081853429527b6bf6c94f8",
-        "e2e/settings.spec.ts": "98e7cf766fb0b16ab4671bf9375bf83b7cf9df4a5c3b4bfeb988750cd82324ab",
-        "e2e/test-utils.ts": "3e4157067dbfcd82c16bf724a615b68979ad52dc167f9ae758f35f6412278dd7",
-        "e2e/users-page-extension.spec.ts": "348e56f501c194db919a361221536f44506b59cea2ab4bb389acce4d1a433283",
-        "e2e/users-page.spec.ts": "957c45e52869d8bb977674d66fc03a205676e0cc1d9eb40eaa7f6b0ad8a6543c",
-        "e2e/video-app.spec.ts": "11d3b4de53efff7409da3f321aa546f2a66fad41210956317716b1d1d4ebfc36",
-        "e2e/video-catalog-index.spec.ts": "414823ce5923059857ccca7ecd96d4a56b9cc4da8b4dd1c9e6696786e2a80c64",
-        "e2e/video-direct-nav.spec.ts": "a301592b76126e3b80bee7f25253a0cfa11f5df3d2d4ce7f219e9accf5dc0484",
-        "e2e/video-feed-follows.spec.ts": "01193810a07f42101138101f9666dde42b963425756fb57f3110f53e70d97eca",
-        "e2e/video-search.spec.ts": "cb4462c5a6800e04eb88bc1722d6e0501e79ffde474c5113e6a10b14432c6c6b",
-        "e2e/video-source-loading.spec.ts": "0d6af92190bc17758a1d924b19c0bd8d0d2274a56ff8d1f1d5a05b31682dfaeb",
-        "e2e/video-stream-create.spec.ts": "09f077d741db7e35de5df38155dd7acd1c09c1bc1db908c37b95c0d8047a28d4",
-        "e2e/video-streaming.spec.ts": "eca0594c33ae436a03d671d29a21efff4b8bca1f1d401c93fa4ffe36c5ecd4f9",
-        "e2e/video-tree-subscription.spec.ts": "1b670893ffd611508ee76de0e20908d510108859fa5863f21e94afec2c8526e4",
-        "e2e/video-upload.spec.ts": "c8708aeb9bdda1948bdd20c7194ebf96643781541cc7427c277e7c2ba8e6efa5",
-        "e2e/video-viewing.spec.ts": "2c6bf9e407ce01e30f5a85548507d30b858b971a388f1f9d29fb618764bd6daf",
-        "e2e/video-zaps.spec.ts": "d9d4c66d20011e882966f869cfe223ca96ec40e24963169752c0acb8929ec23f",
-        "e2e/virtual-camera-stream.spec.ts": "ae4bb45fabc215fdefa0deaab84cbd7d363740890cd6034f2ebbe9bd459c8991",
-        "e2e/wallet.spec.ts": "f40f742ba8b64a8f97f222f56ef405b552a688a04fb1f807ebf5b122314440e6",
-        "e2e/webrtc-compat.test.ts": "858a0f226106760a7505bacedb57d512d22a02eacb83a4947bb1d315b17d14ad",
-        "e2e/webrtc-connection.spec.ts": "01813d3571e8deff0e1be005f675dcc8103f9a1f48830baece69e89f0caa86be",
-        "e2e/webrtc-connectivity.spec.ts": "2abe615cb4ef3c261430c5c5d31f4fe082618b1f8e046db660045ab4fa8880f2",
-        "e2e/webrtc-forwarding.spec.ts": "f7496058ff5eae60b6f2af497d3b069d86cf468df55a342842ecc4be07482634",
-        "e2e/webrtc-live-fetch.spec.ts": "dfe0787e2fee1bb1eaf6bfe141c963eecc717e8597c6964bc414d878e57fc364",
-        "e2e/webrtc-p2p.spec.ts": "34db34078dd17978873b0ca65e5fc152624218dd2cd8038006589ceb49d04013",
-        "e2e/webrtc-stats.spec.ts": "05fa120a787bce7baf0d90f105a2360e94b069c209737ef9e0435a5199ab848c",
-        "e2e/webrtc.test.ts": "9a3cc3d0927e838e744ddf6f7f800848c1f133a91f44b21d84d2892f3ed5dc06",
-        "e2e/ytdlp-batch-upload.spec.ts": "b1d90ea12c6bec8a94c1c48642364a425e60cf1c59026841a7f747eedee132b6"
-      },
-      "permissionTestFiles": [
-        "e2e/fips-discovery.spec.ts"
+      "releaseProfileSha256": "6c60c30ec8f69950a2c8129c3a937d36cee480315392bdf4edc5d9d14a24f343",
+      "runtimeOrigin": "http://127.0.0.1:49316",
+      "configs": [
+        "playwright.config.ts",
+        "playwright.runtime.config.ts"
       ],
-      "requiredPermissionContexts": 1
-    },
-    {
-      "id": "git",
-      "commit": "199fd1a15409aef57f51f46f0d298315792ffe43",
-      "archive": "archives/git-source.tar.gz",
-      "archiveSha256": "89cb05dee1e59ae65509764486d4229c523ed3bb61f359b7363f94500f6b4d7d",
-      "archiveBytes": 6479654,
-      "lockSha256": "4a46847411e5587cb94289568a5cea7b7e92df7cb2eec7be138f55706bb9ef4d",
-      "packageSha256": "516bfb8d8108ff1072d62c704a8484ca50bb649e5605ab5cae2ee05981ef881e",
-      "distDir": "iris-git",
-      "buildFromSource": true,
-      "releaseProfilePath": "scripts/release-profiles.mjs",
-      "releaseProfileSha256": "e3e9d46f7eab5239fb7f77b747357ef4c3a58aa3cb9c8081f5e5a5e2acee3f31",
-      "playwright": "1.60.0",
-      "packageManager": "pnpm@10.23.0",
       "testFiles": {
-        "e2e/contact-follow.spec.ts": "115b1a42cd49ab21b1c44ff2cf6989450860eada42a36454483464925f735999",
-        "e2e/fixtures.ts": "8d252c9acfbf3c3c2dfbf22ca43618c44756a1cbfaeb491487b09a119fad7900",
-        "e2e/fixtures/gitPeerSeed.ts": "1fc041d973973395b9b6b92391175a1940b77bc7668fee0968958bd5b31f7d16",
-        "e2e/fixtures/localFipsWebSocketSeed.ts": "9ab30a2f14107808705b45fc3bc3bcecd4470c2c56c113ee516cc6daabbcf07d",
-        "e2e/git-basic.spec.ts": "b3a9ae18599f51fcf7402c165d5338c8bbbc9abf5d96669cc238154a00afd3d3",
-        "e2e/git-branch-compare.spec.ts": "d4c504deebf00a756697098c530276bc16e6cafd6548713b13c518ee325554f6",
-        "e2e/git-branch.spec.ts": "046c172325f0345a3abcb35378540d4d30fe8e735b935c54317800ca13b98686",
-        "e2e/git-checkout.spec.ts": "16f47463d6158ea37c4e86a93c03ac46aa09b10ab3fb186ed59ab9bceb8a92e7",
-        "e2e/git-collaboration-privacy.spec.ts": "ace0a4d39217ad6cc1be7bac4bcbbe6d6e8a423acbaf3af13599d0eddc55e8f0",
-        "e2e/git-commit-status.spec.ts": "28078196e2e5a41326a897d7c8c0c4f8665a82b68186fb6182ecce3b0340a089",
-        "e2e/git-commit-view.spec.ts": "b7f175d3373882d5d8d01e82525c16626308eb684ee6cdffc78f33f120a09955",
-        "e2e/git-commit.spec.ts": "6bf516a304a02d4f6051569e6dffa98ae804f622b962fe22f43e7c0978b18cab",
-        "e2e/git-encrypted-upload.spec.ts": "74961947cac624243d267b98c07984e949a47e8b6f012305fea8a3ffe4cb8703",
-        "e2e/git-favorites.spec.ts": "706f412a8562bed52981c50b35d508e5bba80eee65079eae4c28dcd9406cd0d5",
-        "e2e/git-file-bar.helpers.ts": "76a3ee585fe228e29f790e4c3d40ad1065e459b3a02c20c91a1207eb9fef408c",
-        "e2e/git-file-bar.spec.ts": "d97d54c674e2651ec6a049a43042539aebac900e6f8c6d78b3e3f5c4f97f6d5c",
-        "e2e/git-fips-provider-bridge.spec.ts": "ea8d785539319537a2100898c747eb123d4b20a4a82f0a75468012922cf2074a",
-        "e2e/git-fork-pr.spec.ts": "fb0f3b05ae4c983e83e89187cdddf92a6cab589676aaf56147fb89ca5b211909",
-        "e2e/git-forks.spec.ts": "8fa8b95ddd0761675d1386e423f94ebe32c342b6eb2acc755a778416af60dec8",
-        "e2e/git-history-cache.spec.ts": "aa36ada8f39cb1e46260539bb4b68b7afdcfcfa080354677675fc879c74439ac",
-        "e2e/git-history-files.spec.ts": "91ea2d241d9da8a8084dde45f76b1527ec804c943c97dd5b939bccc395d6ff06",
-        "e2e/git-history-remote.spec.ts": "3b26501577cbbbc94aa3713d8774443aa1fe709f5774b949aa07320757a64403",
-        "e2e/git-history-scroll.spec.ts": "05f0bc8323a3abb20d96e3d5f8984b407e5c14aa7a7dff7cc1d8cde259e29b35",
-        "e2e/git-history.helpers.ts": "ac00c4dc41448e13fd32ab101f6c6a1b1a98a495d3ff1b071f6127c1bc5bef36",
-        "e2e/git-history.spec.ts": "b760906b40e92fe004cb0beeaaeb72e36c4c315a19ad95e9307c13455112e9b8",
-        "e2e/git-home-discovery.spec.ts": "c9d9a79196382a2b604bbed0365ae7311e7b9d9483849f41dee90166500bf927",
-        "e2e/git-init.spec.ts": "a0792622ec9febf3c3cafd88c6fa44ed6f785e6ee04c4d29850e9bd7ac744007",
-        "e2e/git-perf.spec.ts": "b9ef8e01fda65bb24e61480f8361b8bbf95c86202e5587a0dac67cc240ba9488",
-        "e2e/git-pr-interop.spec.ts": "9feb78edaead92cb16bdca6473b187821b76d919fbf7a1dce7c4840971903e66",
-        "e2e/git-profile-activity.spec.ts": "139fcfa3c1bb72eee8bfa697166ef36ef2f48bcc1931f0685ed5e5d7729af67d",
-        "e2e/git-push-htree.spec.ts": "a5d55fce8eb6ce23f18a336898564ed353cbac7376f3e16da48fa51cbaddb94e",
-        "e2e/git-shell.spec.ts": "574ce1e49574c198ad482e46d8e8e2caf71a0310aa2948c9967d2b31e19cf0a4",
-        "e2e/git-startup-ui.spec.ts": "f7befe9f1bd80b7136f3e6dd605187a8edc66cff5b4c02af8ddf0f414819144e",
-        "e2e/git-status-edit.helpers.ts": "7778263ffb1748546cf4c8971843280a86e263668d6d11fe2ba1478ca2687bfc",
-        "e2e/git-status-edit.spec.ts": "caa5fa44077096537819dcd92cb35a5c3a3dc342edf7f5c392a119067a138416",
-        "e2e/git-status-remote-edit.spec.ts": "73527c88a80ba93a58688a7039aeed9381dc88838dae93fe308608f8513909fe",
-        "e2e/global-setup.ts": "89b47f3b3b181993e34717d32f5d1c79ffc799a18e266232a23da4f41e4c504d",
-        "e2e/htree-blossom.sh": "72a5c4f32e7f9f1f2380f733fd863bf37b57dfc49d13a0b3f413091efb594a67",
-        "e2e/native-binaries.ts": "6070fb5dda26b2f7e952fb5c059a2c7af85e2b07e1e271791d2a57294a381b8b",
-        "e2e/nostr-test-keys.ts": "37d4f7a1ddf1d0ab9395895973123265ac36a562c713f1c9aed34b04813a6288",
-        "e2e/relay/index.js": "6a521d8f52da23442ba67f7bc5479a4db4ac366d90d96bc5b2975e9db6d3bd7e",
-        "e2e/renderLoopGuard.ts": "23ed428dce812fbfe4d0a3dcc1bbbbc08a61627980a1e57054cfebcd76331d02",
-        "e2e/test-utils.ts": "81f1689db92f37b863595006405af6749e881dfc3488300b3495e32ab807bf91",
-        "e2e/test-utils/core.ts": "d4614561407baf536bc3dfa102ddf0fcf662050fb4b44884cc823ccb1ec77470",
-        "e2e/test-utils/git.ts": "0d1742bbf4cfe513e66000c39fe759875a72d5ee593dd72bb718349adcc3a9a3",
-        "e2e/test-utils/gitForkReadiness.ts": "359f1839fd99bcfa8854a1d00c2282b77b3e8733b0f56480714407543b3eb7f7",
-        "e2e/test-utils/gitNativePeerReadiness.ts": "1a7e3bcc64a1448c7bb9fb1ae2c57be62109e35c530669fd28c5a50ae9b73412",
-        "e2e/test-utils/gitPeerDiagnostics.ts": "ed4a1c418a6d6eebaa5ec39d9e6c3334bdbb78c07d0d7d65ed55ec69c8d9c6e2",
-        "e2e/test-utils/navigation.ts": "35cfcbb9f2dc3e0605026efd605f038425dbed74a2a002249f3ef474e912ad29",
-        "e2e/test-utils/network.ts": "0f40bc515fbb98118273cfecf58d5f20d17cc63ba42801d0e04771d4df26e359",
-        "e2e/tree-loading.spec.ts": "1b1d938badb6efd12dd4e6ffde55d625687ed016367db6ef996806a83ff8d5e4"
+        "e2e/add-site-folder.spec.ts": "96377c40799a129fea533ed73425b1c7ed387de86f286be54b46674d61e79d18",
+        "e2e/launcher-groups.spec.ts": "399ed06697fd71788ec9e078bc83249020dcc8bd343acbd2d182420473a58050",
+        "e2e/launcher-touch-drag.spec.ts": "9acf397d3910f1a2dbbe338fa323196d184610669d10b615819d04fbd3e8a5ca",
+        "playwright.config.ts": "78bc25b11f4761d0733fc6bc7e1047959dc66d4d8f7aff2ebd50c90c5728a832",
+        "playwright.runtime.config.ts": "7c007c5a0f878ea7be36bdd3da792d6781052cf6bc1c6f4c5229e6daaec38e59",
+        "tests/bootShellMarkup.test.ts": "32c10438a82e9f48258575f795bccaf634b4818ba0db10a59be828837d598da5",
+        "tests/defaultRelays.test.ts": "d59bf4ce0555921f362cd327e76e567544a6f530fc0dcb091052badbff74304a",
+        "tests/directFileViewer.test.ts": "c420676d23cdb1adab906cf6bf87ffd33735f726c49b6c7e62e9139882c5f36d",
+        "tests/faviconSync.test.ts": "3b60a28d167f879638c7068f790ff2ebacc8d04f08fc9d9c62db73e2e050875f",
+        "tests/fixtures/localFipsWebSocketSeed.ts": "56365ebc9769a5c84bdc9f8f702e8fe3f747caf1cc1bae0d1acc4fd1b0cf2d8c",
+        "tests/gridKeyboardNavigation.test.ts": "3edf4209a8d35fd803f05990a35be511293debeed81640d69f428763d46d0f13",
+        "tests/httpsStaticAssetsWorker.test.ts": "7c3d390d3bcbd69b59cc5b8ed88f1fbd04651d80707276ce4605d59bad451f70",
+        "tests/launchInput.test.ts": "93d3ac2f74b3c2bc15c0b3959f5f918ce75d07478ad553360bfbf03864f60ed6",
+        "tests/launcherHome.test.ts": "a4eaf86bb4e90ab1f93ee501a940202c6d816624344cbcf91556834729a29144",
+        "tests/launcherIconAssets.test.ts": "6ec34aaa0e34bb87c9cf79d6b078e4cd100d8ea00d13c64643b0bf63d5567f68",
+        "tests/portableBuildConfig.test.ts": "1dd91e2a84eee18ac3319f21f2039d5daec26cfecd321009e05b866aecd100f8",
+        "tests/releaseSite.test.ts": "3b6f935119e1f853ef2568b529529eb9e50312c58f4031c6805637e6b8ab248e",
+        "tests/runtime/site-peers.spec.ts": "c907868fbf511610140be488c397edd64c0076bb6108604fef0a84472e84d9f6",
+        "tests/runtimeMenuMarkup.test.ts": "bf74117e7baf1c3833209238065c695eda8c2ec9e6e2acf1acd5cb566eb591fc",
+        "tests/runtimeUi.test.ts": "44d719f4d9b0314ab35a028bbe881d928180d5943104578103eb0cf4039121bf",
+        "tests/runtimeUpdatePolicy.test.ts": "2f2028796c970dd221900275f3a00f96241a4b2e0a3ac98af658cda6fb65e412",
+        "tests/siteConfig.test.ts": "ffcf8d61b7d96f9b7a6c450abd2b58afd49fe401b231c476ad361cdddc1fb04b",
+        "tests/siteFrame.test.ts": "38df8b15800bbc701a9414b73dfb98e30ad9f2c74dc38cdc72518cc0e66afb49",
+        "tests/siteHost.test.ts": "b3ff057e03623b0b3e44cd71093ac4c02ce5d29bf2d296721aa5c21f16e2c47c",
+        "tests/siteUploader.test.ts": "7b8cd892f7bc0184be6f36ce2f90d38e6ba50a9c304e41716ef0eef23d23be1e",
+        "tests/swUpdatePolicy.test.ts": "718ff8cb6404cd64c3bf34849ca5d05714c4e0c9ff4b17896a3928b2439c3e46",
+        "tests/titleSync.test.ts": "595d9cfd781b884272a6a76ea2b7e1fe33a2bc24e3e90df5411491dd29c6788c",
+        "tests/webvmCatalog.test.ts": "ce6e2e35ad9e311f95becec3c52d4b21c9520e9757668b098bd659b2d505685b"
       },
-      "permissionTestFiles": [],
-      "requiredPermissionContexts": 1
-    },
-    {
-      "id": "maps",
-      "commit": "acabbfb15745f48c9b60729c22b4a987f3dcd7d9",
-      "archive": "archives/maps-source.tar.gz",
-      "archiveSha256": "bc990f0fc6d58d49b261cd2ab8f99836878aa7d3322f17f39e3ff647a65698ec",
-      "archiveBytes": 2764850,
-      "lockSha256": "ce1e7e9bf6ec0cdcc8bd652d135adb0016c6efc850d4b347beced7f2df97023b",
-      "packageSha256": "21ccfa15195a18f8ee61ea5fef81cf50a1af925d34cc545733b40ae6ac69686a",
-      "distDir": "dist-maps",
-      "buildFromSource": true,
-      "releaseProfilePath": "scripts/release-profiles.mjs",
-      "releaseProfileSha256": "9b38d8d91c1ec27f77732e5c48a013eecee30d0e26782faf715818d94a59b644",
-      "playwright": "1.60.0",
-      "packageManager": "pnpm@10.23.0",
-      "testFiles": {
-        "e2e/fips-discovery.spec.ts": "bdd804a5f37eb7d1e99e53ae4b3e57bd2d1cc17040f8205ff5e45c75d964759f",
-        "e2e/fips-provider-bridge.spec.ts": "e7c7e35ea855abd519ce94dcd9529fc0244524e2b2ed8409f50021fe08b7e956",
-        "e2e/fixtures.ts": "1806469eba3151164bb05fe4649b9233b1c30b7d62311e849cbf7228d27c73fa",
-        "e2e/fixtures/localFipsWebSocketSeed.ts": "9ab30a2f14107808705b45fc3bc3bcecd4470c2c56c113ee516cc6daabbcf07d",
-        "e2e/htree-blossom.sh": "46f97c8169592d16471342c3330bf739c78395f7c2e40cacc51df9c4a6c92087",
-        "e2e/maps-active-place.spec.ts": "8b7a0bf2652a57eaa400f83a1cbd8a2710eef9915b3b545880fa0d63dd70def0",
-        "e2e/maps-app.spec.ts": "0d703e84753a730b219eaf5425cb6187b39512ad1d9aef9bde3b562bec5f495b",
-        "e2e/maps-pins.spec.ts": "b296ada44fd07d3f761471fffee637739ad4e8b875774c436f36f453611e2fbf",
-        "e2e/nostr-test-keys.ts": "37d4f7a1ddf1d0ab9395895973123265ac36a562c713f1c9aed34b04813a6288",
-        "e2e/public-follow.spec.ts": "20ef5a1c28188954403a76eefd8a76425d519b94f2249b4b2fec7cf79da6c593",
-        "e2e/relay/index.js": "6a521d8f52da23442ba67f7bc5479a4db4ac366d90d96bc5b2975e9db6d3bd7e",
-        "e2e/renderLoopGuard.ts": "23ed428dce812fbfe4d0a3dcc1bbbbc08a61627980a1e57054cfebcd76331d02",
-        "e2e/test-utils.ts": "578019d57df596ce06ffd7e45ef591e3a3c3dd6d25b41c022030c68e82e50b77",
-        "e2e/test-utils/core.ts": "8bbb2e430ced1bf576a69400ccd45b5b492e01623491f2aa90489a152f9ff16f",
-        "e2e/test-utils/navigation.ts": "ad159eaf9687591931a50de07cce40e06fae9f66509486b4537100615810cb50",
-        "e2e/test-utils/network.ts": "ab21d624fe5b91a81fc2ae5b78438e80f7fd8bc4894a486fd7f6d0f4d9e51d4f"
+      "acceptedRuntime": {
+        "tag": "runtime-v0.0.61",
+        "source": "d1f7dba4bfbfc6742ee2f597db0432866c1cf3ce",
+        "receiptSha256": "cf8f626a11c5d1f7f82ae81afcd3f00cb065330fc1fc8cfff3d4718105ceba0c"
       },
-      "permissionTestFiles": [
-        "e2e/fips-discovery.spec.ts"
-      ],
-      "requiredPermissionContexts": 1
+      "runtimePackages": [
+        {
+          "package": "@fips/core",
+          "version": "0.0.56",
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-core-0.0.56.tgz",
+          "sha256": "0b044cb417a01a7d495a1675dc4e650af2fec19224c89fe9beb8ccb56d6fc0a0",
+          "integrity": "sha512-vXfPsXWlXIEZFFl6K+x9YCwOhRPQr4gjw+GfWOfuyI1RW1O1tcdKQBcDbIszByNWVCt/Rs8UOAzv+k+iXNlIOQ==",
+          "manifest": {
+            "name": "@fips/core",
+            "version": "0.0.56",
+            "type": "module",
+            "main": "dist/index.js",
+            "types": "dist/index.d.ts",
+            "exports": {
+              ".": {
+                "types": "./dist/index.d.ts",
+                "import": "./dist/index.js"
+              }
+            },
+            "files": [
+              "dist",
+              "src"
+            ],
+            "dependencies": {
+              "@noble/ciphers": "^1.1.3",
+              "@noble/curves": "^1.7.0",
+              "@noble/hashes": "^1.6.1",
+              "@scure/base": "^2.2.0"
+            },
+            "devDependencies": {
+              "typescript": "^5.7.3",
+              "vitest": "^3.2.6"
+            },
+            "scripts": {
+              "build": "tsc -b",
+              "typecheck": "tsc --noEmit",
+              "test:unit": "vitest run --poolOptions.forks.singleFork"
+            }
+          }
+        },
+        {
+          "package": "@fips/transport-webrtc",
+          "version": "0.0.60",
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-webrtc-0.0.60.tgz",
+          "sha256": "646d05f2b89336a8a9d38f1d5155d3374ecef27a0bdcb28690c17c04e9a75b12",
+          "integrity": "sha512-te9hazkbDXnV4hBYX4pIX594WDY5XVClh9tZCVAm5GzE8bHyoFEAhIpyWiUpbciawaYdRLubkcar3D8A7bViYA==",
+          "manifest": {
+            "name": "@fips/transport-webrtc",
+            "version": "0.0.60",
+            "type": "module",
+            "main": "dist/index.js",
+            "types": "dist/index.d.ts",
+            "exports": {
+              ".": {
+                "types": "./dist/index.d.ts",
+                "import": "./dist/index.js"
+              }
+            },
+            "files": [
+              "dist",
+              "src"
+            ],
+            "dependencies": {
+              "@fips/core": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-core-0.0.56.tgz",
+              "@noble/ciphers": "^1.1.3",
+              "@noble/curves": "^1.7.0",
+              "@noble/hashes": "^1.6.1"
+            },
+            "devDependencies": {
+              "typescript": "^5.7.3",
+              "vitest": "^3.2.6"
+            },
+            "scripts": {
+              "build": "tsc -b",
+              "typecheck": "tsc --noEmit",
+              "test:unit": "vitest run"
+            }
+          }
+        },
+        {
+          "package": "@fips/transport-websocket",
+          "version": "0.0.14",
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-websocket-0.0.14.tgz",
+          "sha256": "dd1abad3b581b7326c4506ce6d66902fd05b6bb030b248d259f9e6a479637fb7",
+          "integrity": "sha512-B+CUOBXuMwfDzLCnr+QfLf/MuA4wcV+36mqwH+RS0DNRYFcoGgM60MZiwcjFVCb6xzl0ZTUYe9Sla+VJ2MJBnQ==",
+          "manifest": {
+            "name": "@fips/transport-websocket",
+            "version": "0.0.14",
+            "type": "module",
+            "main": "dist/index.js",
+            "types": "dist/index.d.ts",
+            "exports": {
+              ".": {
+                "types": "./dist/index.d.ts",
+                "import": "./dist/index.js"
+              }
+            },
+            "files": [
+              "dist",
+              "src"
+            ],
+            "dependencies": {
+              "@fips/core": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-core-0.0.56.tgz"
+            },
+            "devDependencies": {
+              "typescript": "^5.7.3",
+              "vitest": "^3.2.6"
+            },
+            "scripts": {
+              "build": "tsc -b",
+              "typecheck": "tsc --noEmit",
+              "test:unit": "vitest run"
+            }
+          }
+        }
+      ]
     }
-  ],
-  "mapsAssets": {
-    "maximumBytes": 134217728,
-    "assets": [
-      {
-        "pathname": "/blocks/550d7ab63375635d6130d5f05eb80f4c3b3502c2ded673c6aff067be00fc08f8",
-        "upstream": "https://cdn.iris.to/550d7ab63375635d6130d5f05eb80f4c3b3502c2ded673c6aff067be00fc08f8.bin",
-        "bytes": 388,
-        "sha256": "550d7ab63375635d6130d5f05eb80f4c3b3502c2ded673c6aff067be00fc08f8",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/3145d7160457496952235cabe4a5fcbe581ff048e8ebffd5604760ff93ac87d1",
-        "upstream": "https://cdn.iris.to/3145d7160457496952235cabe4a5fcbe581ff048e8ebffd5604760ff93ac87d1.bin",
-        "bytes": 781,
-        "sha256": "3145d7160457496952235cabe4a5fcbe581ff048e8ebffd5604760ff93ac87d1",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/23f5b5fdec0bf027bd2bd46380e38be97f6f1e5d2cea2ed01e4da7240157c8f7",
-        "upstream": "https://cdn.iris.to/23f5b5fdec0bf027bd2bd46380e38be97f6f1e5d2cea2ed01e4da7240157c8f7.bin",
-        "bytes": 48721,
-        "sha256": "23f5b5fdec0bf027bd2bd46380e38be97f6f1e5d2cea2ed01e4da7240157c8f7",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/d74641bb9d2a36e1c5dba9381f6cd5d0263b8cb5b6f0886e8694fc6fc0861f95",
-        "upstream": "https://cdn.iris.to/d74641bb9d2a36e1c5dba9381f6cd5d0263b8cb5b6f0886e8694fc6fc0861f95.bin",
-        "bytes": 387,
-        "sha256": "d74641bb9d2a36e1c5dba9381f6cd5d0263b8cb5b6f0886e8694fc6fc0861f95",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/fcf6fc13dec7401cc8375470e831c03f0a26e27283d84ee2752982ec0a81dd00",
-        "upstream": "https://cdn.iris.to/fcf6fc13dec7401cc8375470e831c03f0a26e27283d84ee2752982ec0a81dd00.bin",
-        "bytes": 197,
-        "sha256": "fcf6fc13dec7401cc8375470e831c03f0a26e27283d84ee2752982ec0a81dd00",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/64082ed82b7f4a784b1e2f41cf50353b1051fc1d7da008d60ac34f02f47169ca",
-        "upstream": "https://cdn.iris.to/64082ed82b7f4a784b1e2f41cf50353b1051fc1d7da008d60ac34f02f47169ca.bin",
-        "bytes": 27753,
-        "sha256": "64082ed82b7f4a784b1e2f41cf50353b1051fc1d7da008d60ac34f02f47169ca",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/876119907c2baac665a3340cf0a7d91d6a32ed5722a81f30976780eea9471a0f",
-        "upstream": "https://cdn.iris.to/876119907c2baac665a3340cf0a7d91d6a32ed5722a81f30976780eea9471a0f.bin",
-        "bytes": 14467,
-        "sha256": "876119907c2baac665a3340cf0a7d91d6a32ed5722a81f30976780eea9471a0f",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/4f8f3f5553ecc55ec3dbd7c87028058739a11580c42b7bc61a66d3761b868d4e",
-        "upstream": "https://cdn.iris.to/4f8f3f5553ecc55ec3dbd7c87028058739a11580c42b7bc61a66d3761b868d4e.bin",
-        "bytes": 49470,
-        "sha256": "4f8f3f5553ecc55ec3dbd7c87028058739a11580c42b7bc61a66d3761b868d4e",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/bd7e85bdd1ce9a5359786b2710675af96cffdbf0cc4d44c52c3f5be341ef3d2c",
-        "upstream": "https://cdn.iris.to/bd7e85bdd1ce9a5359786b2710675af96cffdbf0cc4d44c52c3f5be341ef3d2c.bin",
-        "bytes": 14467,
-        "sha256": "bd7e85bdd1ce9a5359786b2710675af96cffdbf0cc4d44c52c3f5be341ef3d2c",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/32df598687697d7ee9b655d4388a97c9ec8843554c23bbd2e4947d4481fc1848",
-        "upstream": "https://cdn.iris.to/32df598687697d7ee9b655d4388a97c9ec8843554c23bbd2e4947d4481fc1848.bin",
-        "bytes": 2097168,
-        "sha256": "32df598687697d7ee9b655d4388a97c9ec8843554c23bbd2e4947d4481fc1848",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/195e7a368dcd9925c6ad06a6ae517a8881d78209e6bf6c0cd62c2280e5973846",
-        "upstream": "https://cdn.iris.to/195e7a368dcd9925c6ad06a6ae517a8881d78209e6bf6c0cd62c2280e5973846.bin",
-        "bytes": 2097168,
-        "sha256": "195e7a368dcd9925c6ad06a6ae517a8881d78209e6bf6c0cd62c2280e5973846",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/0-255.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/0-255.pbf",
-        "bytes": 76580,
-        "sha256": "ef1f38a3f1978591e846e9eaddf8a54f7047f546fc6aaed7872cc53151a5de78",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/1024-1279.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/1024-1279.pbf",
-        "bytes": 125222,
-        "sha256": "834adb7f3ea9944ea530214841ee098e5482e85180f14df85036939261e0ffbb",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/768-1023.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/768-1023.pbf",
-        "bytes": 74752,
-        "sha256": "6e27cdd6edce5b11c469a24b333ecefc0d4b082491b71d6924ce0be6eeba71c3",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/65024-65279.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/65024-65279.pbf",
-        "bytes": 77890,
-        "sha256": "9c68b6cdeb252da3a7af7baca5c225594911a7972bb47f123d458d07e32a7782",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/1280-1535.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/1280-1535.pbf",
-        "bytes": 77856,
-        "sha256": "0f4f3f76dd76836efbcdf3c35219449aa46defb1d3e8e0f9b51153a539e64454",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/4608-4863.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/4608-4863.pbf",
-        "bytes": 125725,
-        "sha256": "0238b46c53798367facebb2e38e9a8454ded2edfb6c3a9e2db8242f9750011d6",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/8192-8447.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/8192-8447.pbf",
-        "bytes": 34070,
-        "sha256": "f061e5b4e42e5925228534d8822b423a029569263db09f5ce44573600d45295f",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/64256-64511.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/64256-64511.pbf",
-        "bytes": 92538,
-        "sha256": "45dac0159019fe4a6d5cb7e510c12cbb13344ebe9472b13dc5d8e2b1fd1095de",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/11520-11775.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/11520-11775.pbf",
-        "bytes": 66619,
-        "sha256": "69b80c3d3699d8a6b706f2d600d4b2d34a97ec2068301e50a6e2e2b8e965fc3c",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/4864-5119.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/4864-5119.pbf",
-        "bytes": 73523,
-        "sha256": "46fdc7f4c20b5260a140a0b3a391968f3e4eaecda06e9075f05ab1e0dcd08569",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/blocks/25d7fd4d10bd531a5bd15a1534202738a06c5c85ab2e55c6ffbc8d20f98f4d3e",
-        "upstream": "https://cdn.iris.to/25d7fd4d10bd531a5bd15a1534202738a06c5c85ab2e55c6ffbc8d20f98f4d3e.bin",
-        "bytes": 2097168,
-        "sha256": "25d7fd4d10bd531a5bd15a1534202738a06c5c85ab2e55c6ffbc8d20f98f4d3e",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/ae100418e814f1a390c1ae92296901be9de1a7c22608bea30157ee3e6204570e",
-        "upstream": "https://cdn.iris.to/ae100418e814f1a390c1ae92296901be9de1a7c22608bea30157ee3e6204570e.bin",
-        "bytes": 5005,
-        "sha256": "ae100418e814f1a390c1ae92296901be9de1a7c22608bea30157ee3e6204570e",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/fd26010abfd47a83c99c1d6460dea92bbf793f7659072d566fdc3fc5024994b3",
-        "upstream": "https://cdn.iris.to/fd26010abfd47a83c99c1d6460dea92bbf793f7659072d566fdc3fc5024994b3.bin",
-        "bytes": 14467,
-        "sha256": "fd26010abfd47a83c99c1d6460dea92bbf793f7659072d566fdc3fc5024994b3",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/121c1f800ccfaa5da7200dde322a347ea0a631084399abb584379c06caa911f0",
-        "upstream": "https://cdn.iris.to/121c1f800ccfaa5da7200dde322a347ea0a631084399abb584379c06caa911f0.bin",
-        "bytes": 2097168,
-        "sha256": "121c1f800ccfaa5da7200dde322a347ea0a631084399abb584379c06caa911f0",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/e70aa2ca198bbaac5c7ae291b13f44fbc3593f10d6bf845cfce9815a85fc7ccb",
-        "upstream": "https://cdn.iris.to/e70aa2ca198bbaac5c7ae291b13f44fbc3593f10d6bf845cfce9815a85fc7ccb.bin",
-        "bytes": 2097168,
-        "sha256": "e70aa2ca198bbaac5c7ae291b13f44fbc3593f10d6bf845cfce9815a85fc7ccb",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/a9a28027551a4c1fa80fb2da7e76f9b8b42f9ad6231c3a60d1c32e9e54371b0d",
-        "upstream": "https://cdn.iris.to/a9a28027551a4c1fa80fb2da7e76f9b8b42f9ad6231c3a60d1c32e9e54371b0d.bin",
-        "bytes": 14467,
-        "sha256": "a9a28027551a4c1fa80fb2da7e76f9b8b42f9ad6231c3a60d1c32e9e54371b0d",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/146d466001bf4c442d626403cb26080a45fd284aee6e39f3900ec9d735da173a",
-        "upstream": "https://cdn.iris.to/146d466001bf4c442d626403cb26080a45fd284aee6e39f3900ec9d735da173a.bin",
-        "bytes": 2097168,
-        "sha256": "146d466001bf4c442d626403cb26080a45fd284aee6e39f3900ec9d735da173a",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/dd3cbe212a906b1941ce2ad8fa84267d2bf48069f62036391c44985b7a7de0bd",
-        "upstream": "https://cdn.iris.to/dd3cbe212a906b1941ce2ad8fa84267d2bf48069f62036391c44985b7a7de0bd.bin",
-        "bytes": 2097168,
-        "sha256": "dd3cbe212a906b1941ce2ad8fa84267d2bf48069f62036391c44985b7a7de0bd",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/256-511.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/256-511.pbf",
-        "bytes": 127219,
-        "sha256": "992557f9e2574cfb9a75e16c7b52832578849772b7c9a6e480d6213fb008fe5d",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/blocks/b4e021adb9ddb2878721ba5bd5c9e7340cb017d17479ae65c12350d6c706fafc",
-        "upstream": "https://cdn.iris.to/b4e021adb9ddb2878721ba5bd5c9e7340cb017d17479ae65c12350d6c706fafc.bin",
-        "bytes": 2097168,
-        "sha256": "b4e021adb9ddb2878721ba5bd5c9e7340cb017d17479ae65c12350d6c706fafc",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/a22c417f133e230012ade4224cc1099b47a1b8cd8636627ff67a09780baed365",
-        "upstream": "https://cdn.iris.to/a22c417f133e230012ade4224cc1099b47a1b8cd8636627ff67a09780baed365.bin",
-        "bytes": 2097168,
-        "sha256": "a22c417f133e230012ade4224cc1099b47a1b8cd8636627ff67a09780baed365",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/80a623dfa876bad4a185c6e746441f51e3a1dfbc1a3f1c6c47586021dd71c50f",
-        "upstream": "https://cdn.iris.to/80a623dfa876bad4a185c6e746441f51e3a1dfbc1a3f1c6c47586021dd71c50f.bin",
-        "bytes": 2097168,
-        "sha256": "80a623dfa876bad4a185c6e746441f51e3a1dfbc1a3f1c6c47586021dd71c50f",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/72fbd53fb332732ca91d1508dbe478b957e62470feb816419b9605d9942660e2",
-        "upstream": "https://cdn.iris.to/72fbd53fb332732ca91d1508dbe478b957e62470feb816419b9605d9942660e2.bin",
-        "bytes": 2097168,
-        "sha256": "72fbd53fb332732ca91d1508dbe478b957e62470feb816419b9605d9942660e2",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/92e42591021cf4a823a8e9657004a66b39384a02a91441e4a58d686f60cd0263",
-        "upstream": "https://cdn.iris.to/92e42591021cf4a823a8e9657004a66b39384a02a91441e4a58d686f60cd0263.bin",
-        "bytes": 2097168,
-        "sha256": "92e42591021cf4a823a8e9657004a66b39384a02a91441e4a58d686f60cd0263",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/5d852833bbf3df4c3901bca47033e5170c4021c85bfad692218b92844a2dc1e1",
-        "upstream": "https://cdn.iris.to/5d852833bbf3df4c3901bca47033e5170c4021c85bfad692218b92844a2dc1e1.bin",
-        "bytes": 2097168,
-        "sha256": "5d852833bbf3df4c3901bca47033e5170c4021c85bfad692218b92844a2dc1e1",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/9de6eb4462e9baed7ce14e9b31175ad8e62dd8755172e83418e4a7bcaa9aba7d",
-        "upstream": "https://cdn.iris.to/9de6eb4462e9baed7ce14e9b31175ad8e62dd8755172e83418e4a7bcaa9aba7d.bin",
-        "bytes": 2097168,
-        "sha256": "9de6eb4462e9baed7ce14e9b31175ad8e62dd8755172e83418e4a7bcaa9aba7d",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/e8ae2f76c9caed1babd88a5657ef164e020dd756e3416c38fb4e709d8e37058a",
-        "upstream": "https://cdn.iris.to/e8ae2f76c9caed1babd88a5657ef164e020dd756e3416c38fb4e709d8e37058a.bin",
-        "bytes": 14467,
-        "sha256": "e8ae2f76c9caed1babd88a5657ef164e020dd756e3416c38fb4e709d8e37058a",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/fd14bb62efb8acc1cc0a19fbe99a4ebaf48652b249707f8b186d9f7ff81f6c86",
-        "upstream": "https://cdn.iris.to/fd14bb62efb8acc1cc0a19fbe99a4ebaf48652b249707f8b186d9f7ff81f6c86.bin",
-        "bytes": 2097168,
-        "sha256": "fd14bb62efb8acc1cc0a19fbe99a4ebaf48652b249707f8b186d9f7ff81f6c86",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/29ae234ab181d158cd5599b9fda250141dae54dd8d3b0e67a48783bdb02f5cae",
-        "upstream": "https://cdn.iris.to/29ae234ab181d158cd5599b9fda250141dae54dd8d3b0e67a48783bdb02f5cae.bin",
-        "bytes": 2097168,
-        "sha256": "29ae234ab181d158cd5599b9fda250141dae54dd8d3b0e67a48783bdb02f5cae",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/7df7d1279f3c0579a6aa3496d850008d960ad5e80c18ced25c76848fa3ca29ab",
-        "upstream": "https://cdn.iris.to/7df7d1279f3c0579a6aa3496d850008d960ad5e80c18ced25c76848fa3ca29ab.bin",
-        "bytes": 14467,
-        "sha256": "7df7d1279f3c0579a6aa3496d850008d960ad5e80c18ced25c76848fa3ca29ab",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/1536-1791.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/1536-1791.pbf",
-        "bytes": 96133,
-        "sha256": "50d81369a7ec80d4a77efa83e63bbb250ec3337f997a39f5e17c76ae7ab74ae8",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/blocks/11d891edaaaf16316e828e931d97e4537ca7cdf8dd263a9db58e0df420bbf8a7",
-        "upstream": "https://cdn.iris.to/11d891edaaaf16316e828e931d97e4537ca7cdf8dd263a9db58e0df420bbf8a7.bin",
-        "bytes": 14467,
-        "sha256": "11d891edaaaf16316e828e931d97e4537ca7cdf8dd263a9db58e0df420bbf8a7",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/2e35dde860835ade7a65417225438d237faa0be11233f59957ee88200c98964a",
-        "upstream": "https://cdn.iris.to/2e35dde860835ade7a65417225438d237faa0be11233f59957ee88200c98964a.bin",
-        "bytes": 2097168,
-        "sha256": "2e35dde860835ade7a65417225438d237faa0be11233f59957ee88200c98964a",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/8d43fd2e67a210cdec1af784e6689f327545dafa9f0edb7337ae5f1d62838a2f",
-        "upstream": "https://cdn.iris.to/8d43fd2e67a210cdec1af784e6689f327545dafa9f0edb7337ae5f1d62838a2f.bin",
-        "bytes": 2097168,
-        "sha256": "8d43fd2e67a210cdec1af784e6689f327545dafa9f0edb7337ae5f1d62838a2f",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/742fc366167208b85c90938e1a605659afc535f7e70b4f6dd805d224972cb78c",
-        "upstream": "https://cdn.iris.to/742fc366167208b85c90938e1a605659afc535f7e70b4f6dd805d224972cb78c.bin",
-        "bytes": 2097168,
-        "sha256": "742fc366167208b85c90938e1a605659afc535f7e70b4f6dd805d224972cb78c",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/cac58f0bb42ac30be4157b88d0a5c3aaa15cae9c52d5789897848d5cbe7eeb4b",
-        "upstream": "https://cdn.iris.to/cac58f0bb42ac30be4157b88d0a5c3aaa15cae9c52d5789897848d5cbe7eeb4b.bin",
-        "bytes": 2097168,
-        "sha256": "cac58f0bb42ac30be4157b88d0a5c3aaa15cae9c52d5789897848d5cbe7eeb4b",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/60f3dab48c0081487167c1cecbf78dd1551fd902a854bc01c1626b4f5205c416",
-        "upstream": "https://cdn.iris.to/60f3dab48c0081487167c1cecbf78dd1551fd902a854bc01c1626b4f5205c416.bin",
-        "bytes": 2097168,
-        "sha256": "60f3dab48c0081487167c1cecbf78dd1551fd902a854bc01c1626b4f5205c416",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/d195019f661a143f379df3354a638bb478379d4ac8dfc9faad34dbf1530cd9cf",
-        "upstream": "https://cdn.iris.to/d195019f661a143f379df3354a638bb478379d4ac8dfc9faad34dbf1530cd9cf.bin",
-        "bytes": 2097168,
-        "sha256": "d195019f661a143f379df3354a638bb478379d4ac8dfc9faad34dbf1530cd9cf",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/a13998c326de0d699d287a141f6ef21551a34ac2c5b4d129d68537cc2c85ce19",
-        "upstream": "https://cdn.iris.to/a13998c326de0d699d287a141f6ef21551a34ac2c5b4d129d68537cc2c85ce19.bin",
-        "bytes": 2097168,
-        "sha256": "a13998c326de0d699d287a141f6ef21551a34ac2c5b4d129d68537cc2c85ce19",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/3cac95695ca52f2af1bbc8aee80b7fa62999aed2da731a5743221696f5b29483",
-        "upstream": "https://cdn.iris.to/3cac95695ca52f2af1bbc8aee80b7fa62999aed2da731a5743221696f5b29483.bin",
-        "bytes": 2097168,
-        "sha256": "3cac95695ca52f2af1bbc8aee80b7fa62999aed2da731a5743221696f5b29483",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/c87c474808778366ad5003871ee6cb8d68132755cdf60100616d9155508a99f0",
-        "upstream": "https://cdn.iris.to/c87c474808778366ad5003871ee6cb8d68132755cdf60100616d9155508a99f0.bin",
-        "bytes": 2097168,
-        "sha256": "c87c474808778366ad5003871ee6cb8d68132755cdf60100616d9155508a99f0",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/2d1b28f8cf46f146e3dd57eeb681624f10699f3fe6dc948686faf40cc5dbc6c5",
-        "upstream": "https://cdn.iris.to/2d1b28f8cf46f146e3dd57eeb681624f10699f3fe6dc948686faf40cc5dbc6c5.bin",
-        "bytes": 2097168,
-        "sha256": "2d1b28f8cf46f146e3dd57eeb681624f10699f3fe6dc948686faf40cc5dbc6c5",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/d2b74f81d1f12e5979d7b01493c1f1d77b988a9331e02c1086064892e817ee9b",
-        "upstream": "https://cdn.iris.to/d2b74f81d1f12e5979d7b01493c1f1d77b988a9331e02c1086064892e817ee9b.bin",
-        "bytes": 2097168,
-        "sha256": "d2b74f81d1f12e5979d7b01493c1f1d77b988a9331e02c1086064892e817ee9b",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/0cc8730631cf01969ed493e68c4c4b054887efa0b116f91e0cde6bbf23513a0e",
-        "upstream": "https://cdn.iris.to/0cc8730631cf01969ed493e68c4c4b054887efa0b116f91e0cde6bbf23513a0e.bin",
-        "bytes": 2097168,
-        "sha256": "0cc8730631cf01969ed493e68c4c4b054887efa0b116f91e0cde6bbf23513a0e",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/2a4356cf213d731e19761dae9474819b2424544e59061cced2e60c12d804b9da",
-        "upstream": "https://cdn.iris.to/2a4356cf213d731e19761dae9474819b2424544e59061cced2e60c12d804b9da.bin",
-        "bytes": 2097168,
-        "sha256": "2a4356cf213d731e19761dae9474819b2424544e59061cced2e60c12d804b9da",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/5e4a1b1825db1a4970487c3b27b0474b59213163be53aad06067c3bda1ebbadf",
-        "upstream": "https://cdn.iris.to/5e4a1b1825db1a4970487c3b27b0474b59213163be53aad06067c3bda1ebbadf.bin",
-        "bytes": 2097168,
-        "sha256": "5e4a1b1825db1a4970487c3b27b0474b59213163be53aad06067c3bda1ebbadf",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/0c3e6516aea849979c693840e9fb52531222b3b373e16674c7aac914a3f3ca06",
-        "upstream": "https://cdn.iris.to/0c3e6516aea849979c693840e9fb52531222b3b373e16674c7aac914a3f3ca06.bin",
-        "bytes": 2097168,
-        "sha256": "0c3e6516aea849979c693840e9fb52531222b3b373e16674c7aac914a3f3ca06",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/68c46ed14e0bc6af3bdfeee5c49b7b900b72d5779fd424bf243da091be8e61ae",
-        "upstream": "https://cdn.iris.to/68c46ed14e0bc6af3bdfeee5c49b7b900b72d5779fd424bf243da091be8e61ae.bin",
-        "bytes": 2097168,
-        "sha256": "68c46ed14e0bc6af3bdfeee5c49b7b900b72d5779fd424bf243da091be8e61ae",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/39718947e698c985ed9e6f2f0454810ecba06df7f8768ee8eec12339adaff8c3",
-        "upstream": "https://cdn.iris.to/39718947e698c985ed9e6f2f0454810ecba06df7f8768ee8eec12339adaff8c3.bin",
-        "bytes": 2097168,
-        "sha256": "39718947e698c985ed9e6f2f0454810ecba06df7f8768ee8eec12339adaff8c3",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/090f553866ce4a27f0026052af0b619abf4da8386ec836b92cf6fbf508fd3923",
-        "upstream": "https://cdn.iris.to/090f553866ce4a27f0026052af0b619abf4da8386ec836b92cf6fbf508fd3923.bin",
-        "bytes": 2097168,
-        "sha256": "090f553866ce4a27f0026052af0b619abf4da8386ec836b92cf6fbf508fd3923",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/1f0044eed1b13fc25328dbe3db21f1e68df9178151c81bd092a2bffd25171dbf",
-        "upstream": "https://cdn.iris.to/1f0044eed1b13fc25328dbe3db21f1e68df9178151c81bd092a2bffd25171dbf.bin",
-        "bytes": 2097168,
-        "sha256": "1f0044eed1b13fc25328dbe3db21f1e68df9178151c81bd092a2bffd25171dbf",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/f61b69287e8934fa491800b21792c179c4d7ba4821ce800e3e762b5715a6be94",
-        "upstream": "https://cdn.iris.to/f61b69287e8934fa491800b21792c179c4d7ba4821ce800e3e762b5715a6be94.bin",
-        "bytes": 2097168,
-        "sha256": "f61b69287e8934fa491800b21792c179c4d7ba4821ce800e3e762b5715a6be94",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/6722e8ab4ec4c09eff3988d017c899e40dacf06f10c76abada07c712263c2026",
-        "upstream": "https://cdn.iris.to/6722e8ab4ec4c09eff3988d017c899e40dacf06f10c76abada07c712263c2026.bin",
-        "bytes": 2097168,
-        "sha256": "6722e8ab4ec4c09eff3988d017c899e40dacf06f10c76abada07c712263c2026",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/965a0fd15503854878047e7ab47ba44b326d91ed349652483fd0cd528741157f",
-        "upstream": "https://cdn.iris.to/965a0fd15503854878047e7ab47ba44b326d91ed349652483fd0cd528741157f.bin",
-        "bytes": 2097168,
-        "sha256": "965a0fd15503854878047e7ab47ba44b326d91ed349652483fd0cd528741157f",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/0d0d7c2958f5cb5a5f42d9df0bc93a1fcacab5ea9066ec5c3972cea36fd9b4cc",
-        "upstream": "https://cdn.iris.to/0d0d7c2958f5cb5a5f42d9df0bc93a1fcacab5ea9066ec5c3972cea36fd9b4cc.bin",
-        "bytes": 2097168,
-        "sha256": "0d0d7c2958f5cb5a5f42d9df0bc93a1fcacab5ea9066ec5c3972cea36fd9b4cc",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/1b040056f6500ede160768ee0766e1a20e396670400601c271931bd45206c9e2",
-        "upstream": "https://cdn.iris.to/1b040056f6500ede160768ee0766e1a20e396670400601c271931bd45206c9e2.bin",
-        "bytes": 2097168,
-        "sha256": "1b040056f6500ede160768ee0766e1a20e396670400601c271931bd45206c9e2",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/821a526dde8f781b87e1be7165ee96efdff1d5ea2e19397183d3291bb4ec3432",
-        "upstream": "https://cdn.iris.to/821a526dde8f781b87e1be7165ee96efdff1d5ea2e19397183d3291bb4ec3432.bin",
-        "bytes": 2097168,
-        "sha256": "821a526dde8f781b87e1be7165ee96efdff1d5ea2e19397183d3291bb4ec3432",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/8061cab36ef8ee23831ff9f3b5799ffbd755a3bd57a1b80fed7bbaa6a85a7a83",
-        "upstream": "https://cdn.iris.to/8061cab36ef8ee23831ff9f3b5799ffbd755a3bd57a1b80fed7bbaa6a85a7a83.bin",
-        "bytes": 2097168,
-        "sha256": "8061cab36ef8ee23831ff9f3b5799ffbd755a3bd57a1b80fed7bbaa6a85a7a83",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/4187c2ef4e6b237ecf2a9a12fcba1e556f9d20bb7f1c13149603cd3cda287e5f",
-        "upstream": "https://cdn.iris.to/4187c2ef4e6b237ecf2a9a12fcba1e556f9d20bb7f1c13149603cd3cda287e5f.bin",
-        "bytes": 2097168,
-        "sha256": "4187c2ef4e6b237ecf2a9a12fcba1e556f9d20bb7f1c13149603cd3cda287e5f",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/7e9f8c8af321e465461ad9ae4a4d19ddb047838b725015e8d6cfc2f5b7d3ed25",
-        "upstream": "https://cdn.iris.to/7e9f8c8af321e465461ad9ae4a4d19ddb047838b725015e8d6cfc2f5b7d3ed25.bin",
-        "bytes": 2097168,
-        "sha256": "7e9f8c8af321e465461ad9ae4a4d19ddb047838b725015e8d6cfc2f5b7d3ed25",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/56b025678094f497d7e92091fc27cd3ec7bf19aec2646decc6584a446fc4d567",
-        "upstream": "https://cdn.iris.to/56b025678094f497d7e92091fc27cd3ec7bf19aec2646decc6584a446fc4d567.bin",
-        "bytes": 2097168,
-        "sha256": "56b025678094f497d7e92091fc27cd3ec7bf19aec2646decc6584a446fc4d567",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/455b8f82b678601ea88e77ae78b31e673588f06b2ce98d6507971e212684c9d3",
-        "upstream": "https://cdn.iris.to/455b8f82b678601ea88e77ae78b31e673588f06b2ce98d6507971e212684c9d3.bin",
-        "bytes": 2097168,
-        "sha256": "455b8f82b678601ea88e77ae78b31e673588f06b2ce98d6507971e212684c9d3",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/fonts/Noto%20Sans%20Regular/7680-7935.pbf",
-        "upstream": "https://tiles.openfreemap.org/fonts/Noto%20Sans%20Regular/7680-7935.pbf",
-        "bytes": 130591,
-        "sha256": "21672116227dc22128cb43a58ae19d4bc5ebb5d7d321600317d2df828dced514",
-        "contentAddressVerified": false
-      },
-      {
-        "pathname": "/blocks/5f7ab52ff3c0ea03409a3cdf85282fd806bf9ae041fb6acc67d6983e160248ce",
-        "upstream": "https://cdn.iris.to/5f7ab52ff3c0ea03409a3cdf85282fd806bf9ae041fb6acc67d6983e160248ce.bin",
-        "bytes": 2097168,
-        "sha256": "5f7ab52ff3c0ea03409a3cdf85282fd806bf9ae041fb6acc67d6983e160248ce",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/43d4731fd0c64d0fd64200cdd029dd5ae7316a1a5aa5ac188342fa409162050d",
-        "upstream": "https://cdn.iris.to/43d4731fd0c64d0fd64200cdd029dd5ae7316a1a5aa5ac188342fa409162050d.bin",
-        "bytes": 14467,
-        "sha256": "43d4731fd0c64d0fd64200cdd029dd5ae7316a1a5aa5ac188342fa409162050d",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/b8396453c8b388914a78b84152737e7360b15b9b10f32fbed2cb0c0ac89b4827",
-        "upstream": "https://cdn.iris.to/b8396453c8b388914a78b84152737e7360b15b9b10f32fbed2cb0c0ac89b4827.bin",
-        "bytes": 2097168,
-        "sha256": "b8396453c8b388914a78b84152737e7360b15b9b10f32fbed2cb0c0ac89b4827",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/d52571bd83c9fc6309dd5e6007885f5d2b8b5b82b348cc06e69e7fa04ee9ff88",
-        "upstream": "https://cdn.iris.to/d52571bd83c9fc6309dd5e6007885f5d2b8b5b82b348cc06e69e7fa04ee9ff88.bin",
-        "bytes": 2097168,
-        "sha256": "d52571bd83c9fc6309dd5e6007885f5d2b8b5b82b348cc06e69e7fa04ee9ff88",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/40b92d35eaa39de67ae5dce0e47effc296900d70896ef77538267c182c0c6ea9",
-        "upstream": "https://cdn.iris.to/40b92d35eaa39de67ae5dce0e47effc296900d70896ef77538267c182c0c6ea9.bin",
-        "bytes": 2097168,
-        "sha256": "40b92d35eaa39de67ae5dce0e47effc296900d70896ef77538267c182c0c6ea9",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/a35dae3ed7e19959a20ff707b36e351f1e671abec86c18df9c0c546c8e93929b",
-        "upstream": "https://cdn.iris.to/a35dae3ed7e19959a20ff707b36e351f1e671abec86c18df9c0c546c8e93929b.bin",
-        "bytes": 2097168,
-        "sha256": "a35dae3ed7e19959a20ff707b36e351f1e671abec86c18df9c0c546c8e93929b",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/280363d40f2eab580a4a88619ddab7f0ddbb49f2e2d4b514a92c3486d2b152f4",
-        "upstream": "https://cdn.iris.to/280363d40f2eab580a4a88619ddab7f0ddbb49f2e2d4b514a92c3486d2b152f4.bin",
-        "bytes": 2097168,
-        "sha256": "280363d40f2eab580a4a88619ddab7f0ddbb49f2e2d4b514a92c3486d2b152f4",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/6fe581853b055221fd29ec37d9ba6b1e95ea75edd9a0817c35d726bbe93f0e8f",
-        "upstream": "https://cdn.iris.to/6fe581853b055221fd29ec37d9ba6b1e95ea75edd9a0817c35d726bbe93f0e8f.bin",
-        "bytes": 2097168,
-        "sha256": "6fe581853b055221fd29ec37d9ba6b1e95ea75edd9a0817c35d726bbe93f0e8f",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/2643bb4427fb9ff731733e47ae3c5b8685d0042d28ca3cf238c43a7ef805cabc",
-        "upstream": "https://cdn.iris.to/2643bb4427fb9ff731733e47ae3c5b8685d0042d28ca3cf238c43a7ef805cabc.bin",
-        "bytes": 2097168,
-        "sha256": "2643bb4427fb9ff731733e47ae3c5b8685d0042d28ca3cf238c43a7ef805cabc",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/4d5a2671083eba0980e4fd7c8dcd208c0053d0ceacb3421c5e6a91ee98321a8f",
-        "upstream": "https://cdn.iris.to/4d5a2671083eba0980e4fd7c8dcd208c0053d0ceacb3421c5e6a91ee98321a8f.bin",
-        "bytes": 2097168,
-        "sha256": "4d5a2671083eba0980e4fd7c8dcd208c0053d0ceacb3421c5e6a91ee98321a8f",
-        "contentAddressVerified": true
-      },
-      {
-        "pathname": "/blocks/0bec46991188ff12fda07293b1fd94bf392f5eb9c93f22d14ca92611203d19a3",
-        "upstream": "https://cdn.iris.to/0bec46991188ff12fda07293b1fd94bf392f5eb9c93f22d14ca92611203d19a3.bin",
-        "bytes": 2097168,
-        "sha256": "0bec46991188ff12fda07293b1fd94bf392f5eb9c93f22d14ca92611203d19a3",
-        "contentAddressVerified": true
-      }
-    ],
-    "source": "Exact retained public Maps cache, all bytes independently hash-verified; no external map fetch during hosted qualification",
-    "archives": [
-      {
-        "archive": "archives/maps-cache-1.tar.gz",
-        "sha256": "e987e00e58b10a868c17a89db5a9a6b82580d63f0ddc1ae613895de337c10ff7",
-        "bytes": 15376514,
-        "files": [
-          "9942db131cd73981a41ee0c6b86744d5ca1af08779746092aa256b7713594d34",
-          "40f3d3027cc59d2ede242fe2a3b853281f703aa5f985920b665a5975e4675ac4",
-          "35b90e86a839f4297fcee28ac20ea2ca8aec7e355d6d6cf073bcc3565ee1c8b0",
-          "0c4d6e59a5cf53d1408f25d039f8012e6977fc9782af9c897a1e2e7eda1215e3",
-          "930286277999bdd9b4fe2879a8f684bf82d08ea3fb983527df4daa11c16d640f",
-          "cbbad604b42a70755cb8b327e86124410fa75116fe2afbd02e6ce92ff2222811",
-          "e2f67d499c8baf2d9409349fe252102a9ecdb09a64fce8b5f0240e95b9755c9e",
-          "b9520cb7e920d2cfebc8e370f36a9e8cb8458ba8ed9108f35733dbadd45fa200",
-          "ff07e80d3459c95477de3bbbaf94f08914a82ed68475b9f8b15c705dd32c2178",
-          "a17bac2185930b552d76219f8483892599fe4cdd86f3e8f890adf02c17a16f58",
-          "7ca1ca2bc55995713ae43957b3966964fd10cf397bf8978ce1502f3c025f91f9",
-          "9b59be5c5799fee6d0abf3599257f549fde68cd766e065588d7e2537050bcc04",
-          "c894241ff796a79b1ed5daa807791f4f1b87b77a7c6acda9847e30e575a247cc",
-          "8c1c9579e9d1d500900fbc5616d1be509ad0da481c50f78fdc496438d1e96fc9",
-          "0c184b3c648a2275f165c9aee0bae945a40d27d0409302b2e4feada1f22922ba",
-          "d1a8d05264bfe15a96c7d7db4d772494d9a3d00fa30ab509ca73262628a163d9",
-          "db3f98972f26b903b5df38821d24ece33b5576255fd665f212b19b4ca199c975",
-          "95528ba40c22e309673d8e53a85e6cfde88718b97c3fd433267e15f96a9b51a2",
-          "c0642bca807eb1caf33e2fb8989c323a1d73a443ddfbcc5f444f26686af88363",
-          "54a14528ef8fe92ec9b3c06c3f47ab3c1252502ea3899d7cb439bc32ce5867fa",
-          "c5577c390316fa3a5a01d74954692c108babce538e4e8b362da3c206229f67a6",
-          "cc32eaef9a691fdf0188a5b186f9f59fe362d3599c30bdacf67db1b41165edd4",
-          "f6817f99e2a27f87fece7b829b9c2deaaacd77bf58d75dd04891e4704cdbf287",
-          "61dcf0fcbe5fcc536e66cae9dad584ffcb4ca489f1ff8ef9c009791b2461c902",
-          "1b6ab1f12d4e7bd62211dc1a37cbbdec295fea67de85f6dd45be608ae409dedc",
-          "ae45ca1d5608e95ec5f5a46c8ff389e17e8b7d63d0a247e6e03553d42cd45909",
-          "a3cfdd92c8c952023e9dff36d8d480be3312c3bed696d90ecba5052310661b8e",
-          "28734d301097c303a93c01638473fde900d57fb45477f9080c0d41b353bfc738",
-          "9f5a477b62bebfb90395d43cb39d72c021eae1a10e99f235e3fd78b42cf1b5a7",
-          "85f639f26c86be3488e775e170afa4dd2d3e981818942f180fefc6ff11f9a5e1"
-        ]
-      },
-      {
-        "archive": "archives/maps-cache-2.tar.gz",
-        "sha256": "dca2815dfd9a8d7a423ac183ac4959a43eb22d5e4d0013d2438bb5e22d4caf2a",
-        "bytes": 14700677,
-        "files": [
-          "6ab8ccc592ba65fa8dd654a5f6d0ad918349374929467e7bfcadd56250deeb1c",
-          "5e6e0cc599bed3f232cab98368647f5548566fc65bdf22c9d1b5b494d3bc1164",
-          "73dec512617cae271ddd1a862ab7160401069f98db9f1c2fa61fc4a94209dfc0",
-          "f96f35191af860b801786e80bb2dab40ef7e6c3737a3dbd15ac4c27728243434",
-          "b023b94d8e4612447335132c16bf4b7d0524ba5bd7c71fe26f63395b95db393c",
-          "8d1f01c2b07c282b875923b2d9f4bb2ed518c3b308c1f07995499281ce9934a4",
-          "21d58d5a0429c0f1887fbbbd3589e247eba4ee3c20b5ca77421545921235238b",
-          "9241e6d94f9d76b0011283ff7bfe2e0c9fb774afc53e6519f921662a67a99bf9"
-        ]
-      },
-      {
-        "archive": "archives/maps-cache-3.tar.gz",
-        "sha256": "8e51a3a7804e896630434f2d5b7e3206dc1051c0f697259b118f558fb856481d",
-        "bytes": 14763186,
-        "files": [
-          "4b2223224ea022c151f86d87278dbcaf402eee15068a25ecd3b74753bacc07e3",
-          "382258a30a74d24da40603db86f32749bc155b2b0e29140f8d10eed9f786a009",
-          "6c9a7cfc9d5fd883bbac285ddaae433ae534afa50dd0a7ec1562bd1cdaeb7ba7",
-          "d1ba9609b556eb4215a35cf2140ef397d6155fbe1396458ab3603c253b4ad9c5",
-          "f1c12b0d28712b921e701467d6baeb824f7dc985a1657e49c81a3f01bf27daea",
-          "de2248309836472d4a0517b2fa3c8a3239963a2ffe34e8f7526e55daea53f8a2",
-          "b81c410fda09e89eda74263ea3898f3aaf9ff783d0240e6eec7768141f35811b",
-          "c4296ef56d31bc63d443fa0ab7f141baa8238a4dd7b91ff69ef24d639d1bc23e",
-          "921630a434cc98862a3ff423c947e3e8bd6d15198c3ebcdea7a0bf1dee388514",
-          "9200b0896e2672eafb02c818c1b906e1ca905e5a417591d0d1ca3c16a740bcd2"
-        ]
-      },
-      {
-        "archive": "archives/maps-cache-4.tar.gz",
-        "sha256": "96347449813cbde19c78fd0c78fb02df407cc583cce82c1cd46b9e96b0badf42",
-        "bytes": 14686064,
-        "files": [
-          "325dd23c7adf950daf34c2b3a44bf3e1df0b9b50c1a8c9c3f9408be463b8395b",
-          "d844f6128e5557ceb11dd7d012961039a72bd6786bbe38766616d4162645d5d4",
-          "d8fb660232f55ee31761152c5bfdbaeda579c094c61dc2b79368f0a9d862f463",
-          "b78d2f0253d07832885a27484764d9290c05be0e5dd9d833a043607c52f4edb2",
-          "6fdf57079afc6ef78f2696481f998e70670d25800f65255a3420e62454b49a0f",
-          "d1a2cffb19d4ba97b9c6453180a231a3da97fbfe07a78b65c1f3ea0748e52138",
-          "a571c771fbf182e53b6c63c5cd3912d10660b71d9b26c63ae9f3ed8c1f0dae52"
-        ]
-      },
-      {
-        "archive": "archives/maps-cache-5.tar.gz",
-        "sha256": "756fc1f21a518fe88d326c67dc11fa8dae309bf2a334d40706bf3d1f62499a34",
-        "bytes": 14686065,
-        "files": [
-          "f4233b7e2648ff73ee5bd55d80538b206bfe46427296047f4d535a7801eaea07",
-          "475296042fe1d7ca9fda85013da19084c7ba6acfcff27759c6daf5991ca67e2a",
-          "70ff00457e29d90a7c83c571f0cf8add7e17084ce6010c38f346a42f68641e0d",
-          "60b52ad451c67e0928eebe2b3a06315c4c1db82517c924db6fecc7c5c7f1e582",
-          "5e4298a1c4507efe6326a3d14e4aed7e7a1d771dfeecfc542a4489446f5fd35b",
-          "f41cc77f11cc3445ab01cf578e7dd1a0b9f3d99ddd16c18e5bcba8619c06ba29",
-          "2a2f03222bc79cbd3ea5bda85690d6bcd5db9ea44362ea9a5974776fa3283efb"
-        ]
-      },
-      {
-        "archive": "archives/maps-cache-6.tar.gz",
-        "sha256": "e65f2d7e12f81c4c7314ce772ed34041148ad057e478f06dd0a6b831271c9f70",
-        "bytes": 14686062,
-        "files": [
-          "e367811e0e2a4406d9caa2fb8dd67aba8593acc2eda9c0e158c7017e0b0a9b2f",
-          "6935eeb8736326a822e22e66aa48707349549b2505c464e7fe80ca99d6cbd2b6",
-          "bf4308c36b23c988959b8fe239f0a8f5e6056a747f012cceaa53905dbbe84ff1",
-          "027abcaecb5ce582c486b50833bd19a70a35eda94f23b1024f66e63d9a776ca7",
-          "6b747040bb1b0669332b429441e71c4439bae7f8feb028021877111c3295fad2",
-          "aac2e421bcd6f90e6da112decd4ad9c313bb864b3106a48d2d1f4046a0762464",
-          "3d76b8592e79956f3d3d030ce6271f51b9e5bb89efc262dfdc26220f7bf813b7"
-        ]
-      },
-      {
-        "archive": "archives/maps-cache-7.tar.gz",
-        "sha256": "8fe595fb9b7729f99329f923183559e5c159e086ec3d2372c09dadf9e877fef5",
-        "bytes": 14738919,
-        "files": [
-          "cc3f772bf6ff5c63e66e8c25f8288e0898500c54f6da17e2dacb4181112afbd4",
-          "4fa5befd6a21f979c399df0d76177d2712566f6f3f30c0f2cc2c0dabc645f6d7",
-          "b807615739b1968208ed8041491029340ced424307ae185bbd383161c6485ba7",
-          "5bedeaf6f64bc2f2eb1359c6ade5c7d95ed786cff898df4ce27dd7c99cce11b4",
-          "4eaeec7b917cc2d3d8bfc46351dccacd55c035d289d15d4171ae9f77dc66e993",
-          "671512e7ffb74a5297600c398546210f759b854c4821543338c0a842f55c9228",
-          "b307b468113fa575164294ab76d685a3c06a20bcc6389bf58b1944e66f1cb061",
-          "6c92199b786e465c2615bb41c475a98f5f5290ea4507abf824b781b5f40b5620",
-          "b23f8bee425c9bdbfd0f0620ccbd11311dfa5367133dd7e33efd5ac908e572c2"
-        ]
-      },
-      {
-        "archive": "archives/maps-cache-8.tar.gz",
-        "sha256": "7fbd4a9f3f409145b99b0dbcb953e95abff959918dd3e40d70e22e5d2b2409b1",
-        "bytes": 14686059,
-        "files": [
-          "8666455d83607499f6309379cb954d1b7b54109bbab5034903b0c752e9751c73",
-          "cfb80d7533dec071c6d5183fac6c04b7753142c68cf56d6ba4562f0e6cbd8522",
-          "84fd127c7d3d342f915d1a43737ebdd1e21185653e976e5c055b7566c6460ec4",
-          "31c255cbabdf36d77041567b79e22175c29231767557c4b643af9c6abe2ec362",
-          "9adfd5b50ee0a7419e31ad3cb92f5db115f6432104ae37e7e1254ccda90afadf",
-          "95092821f45f8c2fcc454689db22df8c76ffc703af89c1ea12efa986e45139c6",
-          "bbb141ca4a47ce442c4fed13fd821f366cf8f7286897c315434f3623cebd0df5"
-        ]
-      }
-    ]
-  }
+  ]
 }

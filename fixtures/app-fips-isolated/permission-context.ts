@@ -4,8 +4,8 @@ const isolatedFipsContexts = new WeakSet<object>();
 
 export async function grantIsolatedPermission(context: BrowserContext) {
   if (isolatedFipsContexts.has(context)) return;
-  const origin = `http://localhost:${process.env.PW_APP_PORT}`;
-  if (origin !== 'http://localhost:43810' || !process.env.FIPS_APP_EVIDENCE) {
+  const origin = process.env.FIPS_PERMISSION_ORIGIN;
+  if (origin !== 'http://127.0.0.1:49316' || !process.env.FIPS_APP_EVIDENCE) {
     throw new Error('Unexpected isolated app origin/evidence directory');
   }
   // An origin grant replaces that origin's inherited grants. Observe existing
