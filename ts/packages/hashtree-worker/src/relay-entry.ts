@@ -1,1 +1,0 @@
-import './relay/worker.js';

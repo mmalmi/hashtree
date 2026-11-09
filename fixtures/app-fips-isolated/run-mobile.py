@@ -11,14 +11,15 @@ beforeEvents=read_events()
 assert int(beforeEvents['oom'])==int(beforeEvents['oom_kill'])==0
 for name,digest in spec['mobileSourceInputs'].items():assert sha(root/name)==digest
 assert sha(root/'package.json')==spec['packageSha256'] and sha(root/'pnpm-lock.yaml')==spec['lockSha256']
-archive=base/'evidence/chat/qualified-dist.tar.gz';assert sha(archive)==spec['priorEvidence']['distArchiveSha256']
-manifest=base/'evidence/chat/dist-manifest.json';rows=json.loads(manifest.read_text());assert rows['source']==spec['commit']
+archive=base/'earlier/chat/qualified-dist.tar.gz';assert sha(archive)==spec['priorEvidence']['distArchiveSha256']
+manifest=base/'earlier/chat/dist-manifest.json';rows=json.loads(manifest.read_text());assert rows['source']==spec['commit']
 def verify_dist():
     actual={p.relative_to(root/'dist').as_posix():p for p in (root/'dist').rglob('*') if p.is_file()}
     assert set(actual)=={r['path'] for r in rows['files']}
     for row in rows['files']:
         p=actual[row['path']];assert not p.is_symlink() and p.stat().st_size==row['bytes'] and sha(p)==row['sha256']
 verify_dist()
+subprocess.run(['node','/stage/procedure/installed-runtime-proof.cjs',str(base/'evidence/mobile-installed-runtime.json')],check=True,timeout=15)
 plan={'source':spec['commit'],'sourceRoot':str(root),'site':'https://chat.iris.to',
     'distManifest':str(manifest),'distManifestSha256':sha(manifest),
     'sourceFiles':spec['mobileSourceInputs'],'productionVerified':False}
@@ -33,6 +34,7 @@ try:
     assert receipt['offlineReload'] and receipt['serviceWorkerControlled'] and receipt['anonymous']
     assert receipt['permissionsGranted']==[] and not receipt['captureInvoked']
     assert receipt['rawWorkerDenial']==[True]*4
+    assert all(receipt[k] for k in ('downloadPromptDismissedThroughUI','downloadPromptAbsentOnline','downloadPromptAbsentOffline','visibleShell'))
     assert receipt['geometry']['documentWidth']<=receipt['geometry']['width']==390
     assert receipt['sourceWorkerResponseFiles']==len(rows['files'])
     (evidence/'source-plan.json').write_bytes(planPath.read_bytes())

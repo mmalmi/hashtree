@@ -66,6 +66,10 @@ try {
   assert.deepEqual(rawWorkerDenial, [true,true,true,true]);
   page.on('pageerror', () => errors.push('page-error'));
   await page.goto(origin, {waitUntil:'domcontentloaded'});
+  const downloadPrompt = page.getByRole('dialog', {name:'Download Iris',exact:true});
+  await downloadPrompt.waitFor({state:'visible',timeout:15000});
+  await downloadPrompt.getByRole('button', {name:'Continue in browser',exact:true}).click({timeout:15000});
+  await downloadPrompt.waitFor({state:'hidden',timeout:15000});
   await page.getByText('Secure, private messaging').waitFor({state:'visible',timeout:15000});
   const registration = await page.evaluate(() => Promise.race([navigator.serviceWorker.ready.then(r => ({scope:r.scope,active:r.active?.state})), new Promise((_,reject) => setTimeout(() => reject(Error('Service worker deadline')),20000))]));
   await page.reload({waitUntil:'domcontentloaded'});
@@ -73,9 +77,11 @@ try {
   await page.waitForFunction(() => !!navigator.serviceWorker.controller, undefined, {timeout:10000});
   const geometry = await page.evaluate(() => ({width:innerWidth,documentWidth:document.documentElement.scrollWidth}));
   assert.equal(geometry.width, 390); assert(geometry.documentWidth <= geometry.width);
+  await downloadPrompt.waitFor({state:'hidden',timeout:15000});
   await page.screenshot({path:path.join(outputDir,'mobile-online.png'),fullPage:true});
   await context.setOffline(true); await page.reload({waitUntil:'domcontentloaded'});
   await page.getByText('Secure, private messaging').waitFor({state:'visible',timeout:15000});
+  await downloadPrompt.waitFor({state:'hidden',timeout:15000});
   await page.screenshot({path:path.join(outputDir,'mobile-offline.png'),fullPage:true});
   assert.deepEqual(errors, []); await context.close();
   const after = await boundary('network-after'); assert.equal(after.netNamespace, before.netNamespace);
@@ -86,6 +92,7 @@ try {
   await writeFile(path.join(outputDir,'mobile-offline.json'), JSON.stringify({passed:true,source:plan.source,
     sourcePlanSha256:planSha,productionVerified:false,sourceWorkerResponseFiles:files.size,sourceWorkerResponses:generatedResponses,geometry,
     viewport:{width:390,height:844},browser:'Chromium desktop user agent at mobile viewport',
+    downloadPromptDismissedThroughUI:true,downloadPromptAbsentOnline:true,downloadPromptAbsentOffline:true,visibleShell:true,
     offlineReload:true,serviceWorkerControlled:true,registration,anonymous:true,accountCreated:false,syntheticPosts:false,
     rawWorkerDenial,permissionsGranted:[],captureInvoked:false,pageErrors:errors,requests,screenshots,
     scope:'Exact retained dist rendered through the unchanged source Worker on isolated loopback before deployment; no live public-byte or NEG claim'},null,2)+'\n',{flag:'wx'});

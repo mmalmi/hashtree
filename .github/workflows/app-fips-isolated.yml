@@ -1,4 +1,4 @@
-name: Chat same-build consent peer continuation
+name: Chat same-build visible mobile shell
 on:
   workflow_dispatch:
 permissions:
@@ -12,7 +12,7 @@ jobs:
       FIPS_APPS: chat
     steps:
       - name: Set task-exclusive stage
-        run: echo "FIPS_STAGE=$RUNNER_TEMP/chat-browser-isolated" >> "$GITHUB_ENV"
+        run: echo "FIPS_STAGE=$RUNNER_TEMP/chat-mobile-shell-isolated" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
@@ -20,14 +20,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: timeout --signal=TERM --kill-after=15s 1200s python3 fixtures/app-fips-isolated/controller.py prepare
-      - name: Test exact apps after unsigned transport and denial controls
-        run: timeout --signal=TERM --kill-after=15s 1260s python3 fixtures/app-fips-isolated/controller.py test
+      - name: Verify visible mobile shell after unsigned boundary controls
+        run: timeout --signal=TERM --kill-after=15s 300s python3 fixtures/app-fips-isolated/controller.py test
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: app-fips-isolated-${{ github.sha }}
-          path: ${{ runner.temp }}/chat-browser-isolated/evidence
+          path: ${{ runner.temp }}/chat-mobile-shell-isolated/evidence
           if-no-files-found: error
           retention-days: 7
           include-hidden-files: true

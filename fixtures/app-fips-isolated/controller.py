@@ -11,7 +11,7 @@ SAFE_ENV={k:v for k,v in os.environ.items() if k in ('PATH','HOME','USER','DOCKE
 SELECTED=os.environ.get('FIPS_APPS','').split(',') if os.environ.get('FIPS_APPS') else [a['id'] for a in M['apps']]
 assert len(SELECTED)==len(set(SELECTED)) and set(SELECTED)<=set(a['id'] for a in M['apps'])
 APPS=[next(a for a in M['apps'] if a['id']==name) for name in SELECTED]
-APP_CONTAINERS={'iris-fips-test-chat'}
+APP_CONTAINERS=set()
 assert SELECTED==['chat']
 def sha(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 proof=M['acceptedImageProof'];assert sha(HERE/proof['path'])==proof['sha256']
@@ -157,27 +157,17 @@ def prepare():
         assert json.loads((target/'package.json').read_text())['packageManager']==app['packageManager']
         for file,digest in app['testFiles'].items():assert sha(target/file)==digest
         for file,digest in app['sourceInputs'].items():assert sha(target/file)==digest
-        for relative,item in app['testOverlays'].items():
-            assert sha(HERE/item['file'])==item['sha256']
-            destination=target/relative;assert not destination.exists()
-            destination.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(HERE/item['file'],destination)
         assert sha(target/'package.json')==app['packageSha256']
-        run(['python3',str(HERE/'apply-app-overlay.py'),app['id'],str(STAGE)],'overlay-'+app['id']+'.log',10)
         docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
     (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'buildFromExactSource':False,'reusedExactBuiltArchive':True},indent=2)+'\n')
 
 def test():
     assert json.loads((EVIDENCE/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json')
     assert set(SELECTED)<=set(json.loads((EVIDENCE/'prepared.json').read_text())['apps'])
-    budgets=json.loads((HERE/'app-budgets.json').read_text()); results=[]
-    for app in APPS:
-        code=docker('iris-fips-test-'+app['id'],['python3','/stage/procedure/run-one.py',app['id']],cwd='/stage/apps/'+app['id'],seconds=budgets[app['id']]+240,dummy=True,allow_failure=True)
-        assert not CONTAINERS,'No later app may start before cleanup'
-        results.append({'app':app['id'],'exitCode':code,'passed':code==0})
-        if code==0:
-            mobile=docker('iris-fips-mobile-chat',['python3','/stage/procedure/run-mobile.py'],cwd='/stage/apps/chat',seconds=240,dummy=False,allow_failure=True)
-            assert not CONTAINERS
-            results.append({'app':'chat-mobile','exitCode':mobile,'passed':mobile==0})
+    results=[]
+    code=docker('iris-fips-mobile-chat',['python3','/stage/procedure/run-mobile.py'],cwd='/stage/apps/chat',seconds=240,dummy=False,allow_failure=True)
+    assert not CONTAINERS
+    results.append({'app':'chat-mobile','exitCode':code,'passed':code==0})
     passed=all(row['passed'] for row in results)
     (EVIDENCE/'passed.json').write_text(json.dumps({'passed':passed,'manifestSha256':sha(HERE/'manifest.json'),'apps':SELECTED,'results':results,'containersReaped':not CONTAINERS},indent=2)+'\n')
     assert passed,'One or more unchanged app tests failed; see per-app evidence'

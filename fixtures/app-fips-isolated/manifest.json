@@ -324,16 +324,7 @@
         "fullReleaseAccepted": false
       },
       "reuseMode": "Exact prior source/build; fresh frozen install and consent peer case, no rebuild",
-      "testOverlays": {
-        "e2e/peer-recovery-consent.spec.ts": {
-          "file": "peer-recovery-consent.spec.ts",
-          "sha256": "0e193fdf9c782c342114891ba6fc555b19660e4309c6fa2dc030847550109051"
-        },
-        "e2e/fixtures/recoveryFipsWebSocketSeed.ts": {
-          "file": "recoveryFipsWebSocketSeed.ts",
-          "sha256": "b5773bdddd4cc25f6180b41cee093f2e525ce53bac87bfb4520bc84295305aac"
-        }
-      },
+      "testOverlays": {},
       "priorEvidence": {
         "runId": 42645943802,
         "carrier": "e417686c0b407a0b8558451d42f6a04d073147c4",
@@ -364,7 +355,17 @@
         "scripts/static-assets-worker.mjs": "47dc10c772af63af10dbfc82d5a93a9348bf7a0c188d0c4be170d2e8dc966a69",
         "wrangler.jsonc": "93bb19906ece24f87a938ea5f1c0625058dafe12415f468b26873387ae2be4b2"
       },
-      "freshAdditionalMobileScope": "Anonymous390px online+serviceworker offline shell, exact retained dist/source Worker responses, lo-only separate container, no live production claim"
+      "freshAdditionalMobileScope": "Anonymous390px online+serviceworker offline shell, exact retained dist/source Worker responses, lo-only separate container, no live production claim",
+      "freshScopes": [
+        "anonymous-visible-mobile-online-offline-source-worker"
+      ],
+      "mobileVisibleShellOnly": true,
+      "priorMobilePromptEvidence": {
+        "runId": 42651825355,
+        "carrier": "83969cb0223d1f5cb48bcfa9f351e4aef25f38f2",
+        "artifactSha256": "67cdd3d6ce3eb51cd1d0af8391da0f34587b3851534680653a839c888c734908",
+        "scope": "download-prompt screenshots only; peer/dry-run/network/SW evidence remains valid"
+      }
     }
   ],
   "acceptedImageProof": {
@@ -376,5 +377,6 @@
     "floorBytes": 8589934592,
     "commandSampleSeconds": 0.5
   },
-  "node": "v26.13.0"
+  "node": "v26.13.0",
+  "qualificationScope": "Only visible anonymous mobile shell; no build, peer, dry-run or original app gates replayed"
 }
