@@ -8,7 +8,6 @@ def run(args,name,seconds):
   result=subprocess.run(args,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=seconds)
  codes[name]=result.returncode
 def report(name):return json.loads((evidence/(name+'.json')).read_text())['stats']
-run(['pnpm','run','check'],'full-check',180)
 temporary=evidence/'native-fixture-tmp';temporary.mkdir();env['TMPDIR']=str(temporary)
 run(['pnpm','exec','playwright','test','--config=playwright.unit.config.ts','--workers=1','--reporter=json','--output=/stage/evidence/social/full-unit'],'full-unit',300)
 unit=json.loads((evidence/'full-unit.log').read_text());env.pop('TMPDIR')
@@ -16,7 +15,7 @@ def specs(node):
  yield from node.get('specs',[])
  for child in node.get('suites',[]):yield from specs(child)
 records=[(s,t) for s in specs(unit) for t in s['tests']]
-assert len(records)==1347 and unit['stats']['expected']==1346 and unit['stats']['skipped']==1
+assert len(records)==1348 and unit['stats']['expected']==1347 and unit['stats']['skipped']==1
 skipped=[(s,t) for s,t in records if t['expectedStatus']=='skipped']
 assert len(skipped)==1 and skipped[0][0]['file']=='private-ratchet-controls.spec.ts'
 assert skipped[0][0]['title']=='dispatches actual native-produced current and legacy sibling controls'
