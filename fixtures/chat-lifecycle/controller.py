@@ -81,7 +81,7 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
     assert not dummy or (network=='none' and name in APP_CONTAINERS)
     if dummy:command=['python3','/stage/procedure/await-start.py',name,*command]
     command=['timeout','--signal=TERM','--kill-after=5s',str(seconds-10)+'s',*command]
-    args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home/file-transfer','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','npm_config_manage_package_manager_versions=false','--env','npm_config_package_manager_strict_version=true','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,'--env','FIPS_MEDIA_PERMISSION='+str(int(name in APP_CONTAINERS)),IMAGE,*command]
+    args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home/chat-lifecycle','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','npm_config_manage_package_manager_versions=false','--env','npm_config_package_manager_strict_version=true','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,'--env','FIPS_MEDIA_PERMISSION='+str(int(name in APP_CONTAINERS)),IMAGE,*command]
     CONTAINERS.add(name)
     run(args,name+'-create.log',30)
     inspect=json.loads(subprocess.check_output(['docker','inspect',name],env=SAFE_ENV,text=True,timeout=5))[0]
@@ -109,26 +109,26 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
 def prepare():
     assert not STAGE.exists(),'Use one empty task stage'
     disk_guard(entry=True)
-    STAGE.mkdir(mode=0o700);EVIDENCE.mkdir();(STAGE/'home/file-transfer').mkdir(parents=True);(STAGE/'tools/bin').mkdir(parents=True)
+    STAGE.mkdir(mode=0o700);EVIDENCE.mkdir();(STAGE/'home/chat-lifecycle').mkdir(parents=True);(STAGE/'tools/bin').mkdir(parents=True)
     disk_guard()
     shutil.copytree(HERE,STAGE/'procedure',ignore=shutil.ignore_patterns('source.tar.gz'))
     fetch(M['pnpm'],STAGE/'pnpm.tgz');extract(STAGE/'pnpm.tgz',STAGE/'tools/pnpm')
     wrapper=STAGE/'tools/bin/pnpm';wrapper.write_text('#!/bin/sh\nexec node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');wrapper.chmod(0o755)
     run(['docker','pull',IMAGE],'image-pull.log',300)
-    docker('iris-file-transfer-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
+    docker('iris-chat-lifecycle-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
     assert json.loads((EVIDENCE/'image-toolchain.json').read_text())=={k:ACCEPTED_IMAGE[k] for k in ('node','nodeSha256')}
     archive=HERE/M['sourceArchive'];assert sha(archive)==M['sourceArchiveSha256'];extract(archive,STAGE/'source')
     for file,digest in M['sourceFiles'].items():assert sha(STAGE/'source'/file)==digest,file
-    package=STAGE/'source/file-transfer-ts';assert json.loads((package/'package.json').read_text())['packageManager']==M['packageManager']
-    docker('iris-file-transfer-install',['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/source/file-transfer-ts',seconds=300)
-    assert sha(package/'pnpm-lock.yaml')==M['sourceFiles']['file-transfer-ts/pnpm-lock.yaml']
+    package=STAGE/'source';assert json.loads((package/'package.json').read_text())['packageManager']==M['packageManager']
+    docker('iris-chat-lifecycle-install',['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/source',seconds=300)
+    assert sha(package/'pnpm-lock.yaml')==M['sourceFiles']['pnpm-lock.yaml']
     (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'source':M['source'],'sourceArchiveSha256':M['sourceArchiveSha256'],'image':IMAGE,'frozenInstallPassed':True},indent=2)+'\n')
 def test():
     assert json.loads((EVIDENCE/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json')
-    code=docker('iris-file-transfer-test',['python3','/stage/procedure/run-ts.py'],cwd='/stage/source/file-transfer-ts',seconds=900,allow_failure=True)
+    code=docker('iris-chat-lifecycle-test',['python3','/stage/procedure/run-lifecycle.py'],cwd='/stage/source',seconds=900,allow_failure=True)
     assert not CONTAINERS
-    (EVIDENCE/'phase-result.json').write_text(json.dumps({'typescriptPhasePassed':code==0,'scope':M['scope'],'source':M['source'],'manifestSha256':sha(HERE/'manifest.json'),'containersReaped':True,'liveInteropPassed':False,'publicSourceClosurePassed':False,'allReleaseGatesPassed':False},indent=2)+'\n')
-    assert code==0,'TypeScript phase failed; preserve full evidence'
+    (EVIDENCE/'phase-result.json').write_text(json.dumps({'focusedLifecyclePhasePassed':code==0,'scope':M['scope'],'source':M['source'],'manifestSha256':sha(HERE/'manifest.json'),'containersReaped':True,'liveInteropPassed':False,'publicSourceClosurePassed':False,'allReleaseGatesPassed':False},indent=2)+'\n')
+    assert code==0,'Focused lifecycle phase failed; preserve full evidence'
 try:
     {'prepare':prepare,'test':test}[sys.argv[1]]()
 finally:cleanup()

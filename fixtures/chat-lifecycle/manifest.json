@@ -1,0 +1,33 @@
+{
+  "packageManager": "pnpm@10.24.0",
+  "node": "v26.13.0",
+  "vitest": "4.1.12",
+  "pnpm": {
+    "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.24.0.tgz",
+    "sha256": "196f4bd174ebcbd99786b33452f144cb2dc32ef4e7138ed44491e9d43d702d75"
+  },
+  "image": "mcr.microsoft.com/playwright@sha256:ee15712262f017b8157421b212b12099146645f44b1bc5c0514cbbe6a229b1d0",
+  "acceptedImageProof": {
+    "path": "accepted-image-proof.json",
+    "sha256": "7c20abd24c0db92b8c16e511a61e8e9616471bd519427681f3d8316ec4f8f368"
+  },
+  "hostedDiskPolicy": {
+    "entryBytes": 21474836480,
+    "floorBytes": 8589934592,
+    "commandSampleSeconds": 0.5
+  },
+  "source": "a25983a4bcf1c1abc9bd2dd84a232785c357fa67",
+  "sourceArchive": "source.tar.gz",
+  "sourceArchiveSha256": "2e65d6a0a80432a117c0b2befa4c5e685972bd2328df6fa5b374687464948c2a",
+  "scope": "Four focused Chat page lifecycle unit cases only; no SDK vendor integration or app release qualification",
+  "releaseAcceptance": false,
+  "sourceFiles": {
+    "package.json": "0565e7fce28b3655c59b34b9809112051205e25814651388d637fb2dba6768e5",
+    "pnpm-lock.yaml": "34bd8b6022181fa591b284e584c8ac529680da340cfc85ff26f6d75fee0a6895",
+    "src/App.svelte": "14e49bc1262857e22fa339dac508580e0a32eec8f15a511c8b8624a0c2d10bea",
+    "src/lib/deviceSyncLifecycle.ts": "169a3ab56e09807819a5c77f0107c82a0eac83cda3362f01f7e3bb35fc85dd27",
+    "src/lib/deviceSyncLifecycle.test.ts": "36c61f05035786836a4ff906f7c0f4f20e3e4e8f8d2708701753dbee466bc7b4",
+    "scripts/verify-dependency-lock.mjs": "6f208ba5ac0266f2f2f3bc3423e4a53e77d53b666980e5306b0d598d1f8b279b",
+    "vendor/fips-file-transfer-0.1.0.tgz": "665ead6d3302b9f012fea5a0d7ea9b19ee3ff8a5414f6125ee44a0f00998fb1f"
+  }
+}

@@ -1,28 +1,28 @@
-name: TypeScript file-transfer shutdown qualification
+name: Chat focused page lifecycle qualification
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  typescript:
+  lifecycle:
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     steps:
       - name: Set task-exclusive stage
-        run: echo "FIPS_STAGE=$RUNNER_TEMP/ts-file-transfer-shutdown" >> "$GITHUB_ENV"
+        run: echo "FIPS_STAGE=$RUNNER_TEMP/chat-lifecycle" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
       - name: Prepare digest-pinned image and frozen dependencies
-        run: timeout --signal=TERM --kill-after=15s 900s python3 fixtures/ts-file-transfer-shutdown/controller.py prepare
-      - name: Qualify RED and GREEN under isolated resource limits
-        run: timeout --signal=TERM --kill-after=15s 1020s python3 fixtures/ts-file-transfer-shutdown/controller.py test
-      - name: Preserve complete evidence and candidate vendor bytes
+        run: timeout --signal=TERM --kill-after=15s 900s python3 fixtures/chat-lifecycle/controller.py prepare
+      - name: Qualify focused lifecycle units under isolated resource limits
+        run: timeout --signal=TERM --kill-after=15s 1020s python3 fixtures/chat-lifecycle/controller.py test
+      - name: Preserve complete focused unit evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: ts-file-transfer-shutdown-${{ github.sha }}
-          path: ${{ runner.temp }}/ts-file-transfer-shutdown/evidence
+          name: chat-lifecycle-${{ github.sha }}
+          path: ${{ runner.temp }}/chat-lifecycle/evidence
           if-no-files-found: error
           retention-days: 7
           include-hidden-files: true
