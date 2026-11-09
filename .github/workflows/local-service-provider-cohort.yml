@@ -44,7 +44,7 @@ jobs:
           toolchain: 1.99.0
       - name: Verify the actual daemon and transport consumer
         working-directory: rust
-        run: python3 scripts/check_local_service_provider.py --logs "$RUNNER_TEMP/local-service-provider"
+        run: python3 scripts/check_local_service_provider.py --logs "$RUNNER_TEMP/local-service-provider" --prepare-cli-package
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:

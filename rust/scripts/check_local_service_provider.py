@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import time
+import tarfile
 import tomllib
 
 
@@ -45,7 +46,7 @@ def run(name, command, output, receipt, timeout):
     return stdout.read_text()
 
 
-def main(output, receipt):
+def main(output, receipt, prepare_cli_package=False):
     assert shutil.disk_usage('.').free >= 30 * 1024**3, 'Insufficient hosted build headroom'
     receipt['source'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
     receipt['rustc'] = subprocess.check_output(['rustc', '-Vv'], text=True)
@@ -58,7 +59,7 @@ def main(output, receipt):
         'negentropy': ('0.5.3', 'fd6f12461d14b5768028d39fab3cdfbcefb0bc7f09e95f413a00b6fdedcc9c2d'),
         'nostr-pubsub-fips': ('0.6.1', '23568533712a3635e45e86ed79895e42f87a11dfcd43ba9bcf02a5e9b90db90f'),
         'nostr-pubsub-social-graph': ('0.3.0', 'e9dd2d0a1cdacf1ea254ea05d7f63dd6624ff4ee6dae62c4c4000dd4db8b9666'),
-        'nostr-social-graph': ('0.2.0', '83a7c3e6dedf8c0474c9e09938496abde4a9c77cd38ec4832d9b56ee9602b8f8'),
+        'nostr-social-graph': ('0.2.1', 'c791a910d0dfe97088bb9ebac2b0551e21102ae4f272ad2a8b20cec27e188402'),
         'nostr-social-memory': ('0.2.0', '39fb16cde2e5bb0e6eeed1c5c8740b01a3c90daa277c30c397715e84aa7a89c9'),
         'nvpn-fips-core': ('0.4.119', 'ba0e1a75a2b7fb5d71e4a602c41d8a1ed163417e56798e2198df1dfe3f73cda2'),
         'nvpn-fips-tcp-endpoint': ('0.2.54', '5a6e31c1319cb5ef6dc754905828436c7a1596a6f4888b16223673330f23bf8e'),
@@ -166,15 +167,47 @@ def main(output, receipt):
     run('source-unchanged', ['git', 'diff', '--exit-code'], output, receipt, 30)
     assert not failures, '; '.join(failures)
 
+    if prepare_cli_package:
+        # Preserve the reviewed wrapper feature tests above. This only prepares
+        # an archive for the release owner's separate package/public-byte gate.
+        run('package-cli', ['cargo', 'package', '--locked', '--no-verify',
+                            '-p', 'hashtree-cli'], output, receipt, 300)
+        archive = Path(os.environ.get('CARGO_TARGET_DIR', 'target')) / 'package' / 'hashtree-cli-0.4.2.crate'
+        copied = output / archive.name
+        shutil.copyfile(archive, copied)
+        prefix = 'hashtree-cli-0.4.2/'
+        metadata = {}
+        with tarfile.open(copied) as packed:
+            for original, saved in [('Cargo.toml', 'package-cli-Cargo.toml'),
+                                    ('Cargo.toml.orig', 'package-cli-Cargo.toml.orig'),
+                                    ('Cargo.lock', 'package-cli-Cargo.lock'),
+                                    ('.cargo_vcs_info.json', 'package-cli-vcs-info.json')]:
+                member = packed.getmember(prefix + original)
+                assert member.isfile(), original
+                data = packed.extractfile(member).read()
+                (output / saved).write_bytes(data)
+                metadata[original] = {'file': saved, 'sha256': hashlib.sha256(data).hexdigest()}
+        receipt['packagePreparation'] = {
+            'name': 'hashtree-cli', 'version': '0.4.2',
+            'source': receipt['source'], 'archive': copied.name,
+            'bytes': copied.stat().st_size, 'sha256': digest(copied),
+            'metadata': metadata, 'preparationOnly': True,
+            'packageQualification': False, 'registryPublished': False,
+        }
+        assert receipt['cargoLockSha256'] == digest(Path('Cargo.lock'))
+        run('package-source-unchanged', ['git', 'diff', '--exit-code'], output, receipt, 30)
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--logs', required=True, type=Path)
-    output = parser.parse_args().logs
+    parser.add_argument('--prepare-cli-package', action='store_true')
+    args = parser.parse_args()
+    output = args.logs
     output.mkdir(parents=True, exist_ok=False)
-    receipt = {'steps': [], 'status': 'running'}
+    receipt = {'steps': [], 'status': 'running', 'scriptSha256': digest(Path(__file__))}
     try:
-        main(output, receipt)
+        main(output, receipt, args.prepare_cli_package)
         receipt['status'] = 'passed'
     except BaseException as error:
         receipt.update(status='failed', error=str(error))
