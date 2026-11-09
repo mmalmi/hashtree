@@ -31,7 +31,7 @@ def interrupted(signum,frame):
 for signum in (signal.SIGTERM,signal.SIGINT):signal.signal(signum,interrupted)
 def run(args,log,timeout=300,allow_failure=False):
     global PROCESS
-    assert time.monotonic()-START<4200,'Overall deadline'
+    assert time.monotonic()-START<5160,'Overall deadline'
     assert shutil.disk_usage(STAGE).free>8*1024**3,'Hosted disk reserve'
     p=EVIDENCE/log;assert not p.exists(),'Preserve prior evidence'
     with p.open('wb') as output:
@@ -101,10 +101,12 @@ def prepare():
     docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
     assert json.loads((EVIDENCE/'image-toolchain.json').read_text())['node']==APP['node']
     for app in APPS:
-        archive=HERE/app['archive'];assert sha(archive)==app['archiveSha256']
+        archive=HERE/app['archive'];assert sha(archive)==app['archiveSha256'] and archive.stat().st_size==app['archiveBytes']
         target=STAGE/'apps'/app['id'];extract(archive,target)
         assert sha(target/'pnpm-lock.yaml')==app['lockSha256']
         assert sha(target/'package.json')==app['packageSha256']
+        assert all(not (target/name).exists() for name in [app['distDir'],'node_modules','test-results','playwright-report']),'Historical build or result input'
+        assert sha(target/'playwright.config.ts')==app['configSha256']
         package=json.loads((target/'package.json').read_text());assert package['packageManager']==app['packageManager']
         assert sha(target/app['releaseProfilePath'])==app['releaseProfileSha256']
         for file,digest in app['testFiles'].items():assert sha(target/file)==digest

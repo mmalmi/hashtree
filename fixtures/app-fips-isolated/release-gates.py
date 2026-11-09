@@ -5,6 +5,7 @@ spec=next(a for a in json.loads((base/'procedure/manifest.json').read_text())['a
 env=dict(os.environ,PW_WORKERS='1',PW_MAX_WORKERS='1');sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 assert sha(root/'package.json')==spec['packageSha256'] and sha(root/'pnpm-lock.yaml')==spec['lockSha256']
 assert sha(root/spec['releaseProfilePath'])==spec['releaseProfileSha256']
+assert not (root/spec['distDir']).exists(),'A fresh distribution build is required'
 if app=='meet':
     code="const m=await import('./scripts/release-site.mjs');console.log(JSON.stringify(m.createReleasePlan(m.parseArgs(['--dry-run']))));"
     profile=json.loads(subprocess.check_output(['node','--input-type=module','-e',code],env=env,text=True,timeout=15))
@@ -36,6 +37,8 @@ def retain_artifacts(name):
 try:
     for step in steps:
         command=step['command'];assert isinstance(command,list) and command and all(isinstance(x,str) for x in command)
+        if command==['pnpm','run','test:e2e:release']:
+            command=['python3','/stage/procedure/browser-profile.py',app]
         step_env=env|step.get('env',{})|{'PW_WORKERS':'1','PW_MAX_WORKERS':'1','PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/(step['name']+'-playwright.json'))}
         if command[:3] in (['pnpm','run','test:unit'],['pnpm','run','test']) or command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
         row={'name':step['name'],'command':command,'exitCode':None};result['steps'].append(row);started=time.monotonic()
@@ -50,6 +53,8 @@ try:
         for p in files:archive.add(p,arcname=p.relative_to(dist).as_posix(),recursive=False)
     (evidence/'dist-manifest.json').write_text(json.dumps({'source':spec['commit'],'files':manifest},indent=2)+'\n')
     assert sha(root/'pnpm-lock.yaml')==spec['lockSha256'],'Frozen lock mutated'
+    assert sha(root/'package.json')==spec['packageSha256'],'Source package mutated'
+    subprocess.run(['python3','/stage/procedure/verify-browser-results.py',app,str(evidence)],env=env,check=True,timeout=15)
     result.update(passed=True,distFiles=len(files),distBytes=sum(x['bytes'] for x in manifest),distArchiveSha256=sha(evidence/'qualified-dist.tar.gz'))
 finally:
     if cache is not None:

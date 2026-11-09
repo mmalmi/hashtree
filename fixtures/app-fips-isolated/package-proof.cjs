@@ -11,7 +11,7 @@ function manifestPath(name,req){
 function qualify(root,output){
  const req=createRequire(root+'/package.json');
  const spec=JSON.parse(fs.readFileSync('/stage/procedure/manifest.json')).apps.find(a=>a.id===process.env.FIPS_APP_ID);assert(spec);
- const expected={'@playwright/test':spec.playwright,'@hashtree/worker':'0.4.25','nostr-social-graph':'4.0.4','@fips/browser':'0.0.19','@fips/core':'0.0.54','@fips/transport-webrtc':'0.0.58','@fips/transport-websocket':'0.0.12'};
+ const expected={'@playwright/test':spec.playwright,'@hashtree/worker':'0.4.25','nostr-social-graph':'4.0.4','@fips/browser':'0.0.21','@fips/core':'0.0.56','@fips/transport-webrtc':'0.0.60','@fips/transport-websocket':'0.0.14'};
  const packages=[],resolved={};
  const own=JSON.parse(fs.readFileSync(root+'/package.json'));
  for(const [name,version] of Object.entries(expected)){

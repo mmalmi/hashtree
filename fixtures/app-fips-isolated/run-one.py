@@ -8,6 +8,7 @@ env['PATH']='/stage/tools/native/hashtree:'+env['PATH'];env.update(spec.get('env
 subprocess.run(['python3','/stage/procedure/network-proof.py',str(evidence/'network.json')],env=env,check=True,timeout=15)
 subprocess.run(['node','/stage/procedure/package-proof.cjs',str(evidence/'packages.json')],env=env,check=True,timeout=15)
 subprocess.run(['node','/stage/procedure/browser-proof.cjs',str(evidence/'browser.json')],env=env,check=True,timeout=35)
+subprocess.run(['node','/stage/procedure/installed-runtime-proof.cjs',str(evidence/'installed-runtime.json')],env=env,check=True,timeout=30)
 versions={'node':subprocess.check_output(['node','--version'],env=env,text=True).strip(),'pnpm':subprocess.check_output(['pnpm','--version'],env=env,text=True).strip(),'htree':subprocess.check_output([env['HTREE_BIN'],'--version'],env=env,text=True).strip(),'command':['python3','/stage/procedure/release-gates.py',app],'sourceCommit':spec['commit'],'runtimeMode':'Exact frozen source built inside OS boundary; complete checked-in release profile and qualified dist'}
 assert versions['node']==json.loads((base/'evidence/image-toolchain.json').read_text())['node']
 assert versions['pnpm']==spec['packageManager'].removeprefix('pnpm@') and versions['htree']=='htree 0.2.142'

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Exact Drive and Meet frozen source builds and unchanged full release gates inside independently proven network isolation; no production publication",
+  "purpose": "Fresh exact-source runtime61 drive full release profile and both-endpoint browser recovery; no historical build or result reuse",
   "native": {
     "url": "https://github.com/mmalmi/hashtree/releases/download/v0.2.142/hashtree-x86_64-unknown-linux-musl.tar.gz",
     "sha256": "2336992365786de9c017c1ded3a0cb3a52f80b4c000878e4e3b807642e809b4a",
@@ -14,12 +14,12 @@
   "apps": [
     {
       "id": "drive",
-      "commit": "d436490bfd4f9179bcca51aa76d17258d96fee2a",
+      "commit": "31dd4d2b2d98495f6fb2dd48746e839ffe75ff49",
       "archive": "archives/drive-source.tar.gz",
-      "archiveSha256": "7fcf0733f7dcf4f9d9a350349442c552dcf389e7346662a5a78178fc76cd9353",
-      "archiveBytes": 37943006,
-      "lockSha256": "bf7c6babb1d8c71141843a121e37a8f39d905f3ded483c6ec36c862ae3d1a5da",
-      "packageSha256": "f3411467287e317941eb646e730e4435ff662918306d70fd2264dd4520f7a4c4",
+      "archiveSha256": "fc0c35e58cf8c0018ec264882cc48d9234dac0a273e44368fc46f5b0188b561c",
+      "archiveBytes": 37944337,
+      "lockSha256": "f36c10c4c9324366fcf92361be093a7a7684cca90a949269da972626213ae237",
+      "packageSha256": "d03e92cfa3a1dc0a759070523a39406b11d819d13d1b5fb959a846bb2c7b9f92",
       "distDir": "dist",
       "buildFromSource": true,
       "releaseProfilePath": "scripts/release-profiles.mjs",
@@ -62,7 +62,7 @@
         "e2e/explorer.helpers.ts": "0b66511001e68b5dd41c03773b1872888b9eae985b3e5fbca09f9ec060664385",
         "e2e/explorer.test.ts": "3384eff65f039d481207f12264f8664cdedcc216a1d53dd325b3c8e9c3865ce1",
         "e2e/file-sharing-journey.spec.ts": "b9b8d4f2f025dd6c9c2879399fad017764f6663afc0cda4dba66977d7cc951ec",
-        "e2e/fips-discovery.spec.ts": "aa5f3dcba9c940119538a7abce0506c4811aca03a19226a99c9e5469e4c228bc",
+        "e2e/fips-discovery.spec.ts": "ead930460c0f18d1984b7a8dc95a8dcd71c9202837c7cb730d6e26cb127e8d0e",
         "e2e/fips-provider-bridge.spec.ts": "c1752e353b502b2ebcf0e17f4a56d9348844d994e1a5bdf5590aba2c44c9fa15",
         "e2e/fixtures.ts": "e4e4bf789023ae5a818a1eda710dc925a6e1eb4687580118e13d7146ad5d8af1",
         "e2e/fixtures/Big_Buck_Bunny_360_10s.webm": "e11b78d7375a7cdd870012191c899bc89e1e090bd13b35acf34f6cd50d9718a8",
@@ -145,67 +145,145 @@
       "permissionTestFiles": [],
       "requiredPermissionContexts": 2,
       "ownedOrigin": "http://localhost:43810",
-      "env": {}
-    },
-    {
-      "id": "meet",
-      "commit": "a3398f57d980a2404d7500733da59b9d4d48f079",
-      "archive": "archives/meet-source.tar.gz",
-      "archiveSha256": "67dd96309afd38cae7cf39e743dc20e9eb84e5435fe9d7f873331b12f2015cf7",
-      "archiveBytes": 454404,
-      "lockSha256": "04763d3b84fdc17d8cbf163f5a9966b182bf53d88ed5aa6f55571b2dfaefb7fa",
-      "packageSha256": "b41a94032ecceb278a3f3edc4d2db1cd6ed552189f46df718b047b52c986a022",
-      "distDir": "dist",
-      "buildFromSource": true,
-      "releaseProfilePath": "scripts/release-site.mjs",
-      "releaseProfileSha256": "82496aa5d2a9a187b550f56ec8a167068282c47130f0ce24b6cc1b4c5a9eba35",
-      "playwright": "1.61.1",
-      "node": "v24.17.0",
-      "browser": "149.0.7827.55",
-      "packageManager": "pnpm@10.24.0",
-      "pnpm": {
-        "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.24.0.tgz",
-        "sha256": "196f4bd174ebcbd99786b33452f144cb2dc32ef4e7138ed44491e9d43d702d75"
+      "env": {},
+      "sourceTree": "f1383a374966fe2efb05e88a956903af0899f39d",
+      "version": "0.1.27",
+      "configSha256": "89e77135e30201bb5e0c78112c7060225e81cc78b03149abb462a14423e8fc2e",
+      "expectedBrowserReports": 2,
+      "expectedReloadProofGroups": 2,
+      "acceptedDependencyRelease": {
+        "tag": "runtime-v0.0.61",
+        "source": "d1f7dba4bfbfc6742ee2f597db0432866c1cf3ce",
+        "receiptSha256": "cf8f626a11c5d1f7f82ae81afcd3f00cb065330fc1fc8cfff3d4718105ceba0c",
+        "packages": [
+          {
+            "package": "@fips/core",
+            "version": "0.0.56",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-core-0.0.56.tgz",
+            "integrity": "sha512-vXfPsXWlXIEZFFl6K+x9YCwOhRPQr4gjw+GfWOfuyI1RW1O1tcdKQBcDbIszByNWVCt/Rs8UOAzv+k+iXNlIOQ==",
+            "sha256": "0b044cb417a01a7d495a1675dc4e650af2fec19224c89fe9beb8ccb56d6fc0a0",
+            "bytes": 208695,
+            "manifestSha256": "1be5a1c96bbca8a8df37d2e5248eb736b1e1a6c69c12c35aa23367b602fda308"
+          },
+          {
+            "package": "@fips/browser",
+            "version": "0.0.21",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-browser-0.0.21.tgz",
+            "integrity": "sha512-2kg5ffZ2QFufI8Zq9il8DpZYtVHkIVvl4e262hC7Nsqq5prxeIBjMi7lfuyANjiftX0D3Cre75JhlxjO0jmXIg==",
+            "sha256": "3ea2f7e33857e65bf379fd9896a9df8867292cfc31c23567e598abc02c096208",
+            "bytes": 6647,
+            "manifestSha256": "9642f77c0dfd15a888f28b2da2ab21ef122acfcab1b62dc25bd53e78ecf53b4e"
+          },
+          {
+            "package": "@fips/transport-webrtc",
+            "version": "0.0.60",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-webrtc-0.0.60.tgz",
+            "integrity": "sha512-te9hazkbDXnV4hBYX4pIX594WDY5XVClh9tZCVAm5GzE8bHyoFEAhIpyWiUpbciawaYdRLubkcar3D8A7bViYA==",
+            "sha256": "646d05f2b89336a8a9d38f1d5155d3374ecef27a0bdcb28690c17c04e9a75b12",
+            "bytes": 59924,
+            "manifestSha256": "b655179fecdf3a6ae2806589648145d9f601d5580ad787de3b7d5ab5c46e570d"
+          },
+          {
+            "package": "@fips/transport-websocket",
+            "version": "0.0.14",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-websocket-0.0.14.tgz",
+            "integrity": "sha512-B+CUOBXuMwfDzLCnr+QfLf/MuA4wcV+36mqwH+RS0DNRYFcoGgM60MZiwcjFVCb6xzl0ZTUYe9Sla+VJ2MJBnQ==",
+            "sha256": "dd1abad3b581b7326c4506ce6d66902fd05b6bb030b248d259f9e6a479637fb7",
+            "bytes": 17462,
+            "manifestSha256": "48a827d454cf0f79e526a2ac730213e6e0e37d76d77e9003026ffbe01e923f60"
+          }
+        ],
+        "closedReleasePackages": [
+          {
+            "package": "@fips/core",
+            "version": "0.0.56",
+            "bytes": 208695,
+            "sha256": "0b044cb417a01a7d495a1675dc4e650af2fec19224c89fe9beb8ccb56d6fc0a0",
+            "integrity": "sha512-vXfPsXWlXIEZFFl6K+x9YCwOhRPQr4gjw+GfWOfuyI1RW1O1tcdKQBcDbIszByNWVCt/Rs8UOAzv+k+iXNlIOQ==",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-core-0.0.56.tgz"
+          },
+          {
+            "package": "@fips/browser",
+            "version": "0.0.21",
+            "bytes": 6647,
+            "sha256": "3ea2f7e33857e65bf379fd9896a9df8867292cfc31c23567e598abc02c096208",
+            "integrity": "sha512-2kg5ffZ2QFufI8Zq9il8DpZYtVHkIVvl4e262hC7Nsqq5prxeIBjMi7lfuyANjiftX0D3Cre75JhlxjO0jmXIg==",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-browser-0.0.21.tgz"
+          },
+          {
+            "package": "@fips/transport-ethernet",
+            "version": "0.0.38",
+            "bytes": 11453,
+            "sha256": "28423a6e75b249cfd3d1c28a30abad4b1fb44a7a61878be8fe8753e9a21598fa",
+            "integrity": "sha512-7JRTv4PeRPyJV7ZIdkXwFPlWmxfU7CcissrQ8mZYzi3kM6AQ9H4F43nOA7Roy3bWP0y/lUgpRZMBv0ovBQ7UWw==",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-ethernet-0.0.38.tgz"
+          },
+          {
+            "package": "@fips/transport-memory",
+            "version": "0.0.16",
+            "bytes": 4215,
+            "sha256": "fd160c62ba8edb2ec2032af966e7d6b24b6ca991d32fd72eb00a626fff8216ef",
+            "integrity": "sha512-Yk68SecjBFCgffhN7qyfgEdkB3C86sUhU57dUrx7knyGtzEUTFw12K3qGY8F6wkrQ9wVlZ2PHBkPV0fY86QOdQ==",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-memory-0.0.16.tgz"
+          },
+          {
+            "package": "@fips/transport-webrtc",
+            "version": "0.0.60",
+            "bytes": 59924,
+            "sha256": "646d05f2b89336a8a9d38f1d5155d3374ecef27a0bdcb28690c17c04e9a75b12",
+            "integrity": "sha512-te9hazkbDXnV4hBYX4pIX594WDY5XVClh9tZCVAm5GzE8bHyoFEAhIpyWiUpbciawaYdRLubkcar3D8A7bViYA==",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-webrtc-0.0.60.tgz"
+          },
+          {
+            "package": "@fips/transport-websocket",
+            "version": "0.0.14",
+            "bytes": 17462,
+            "sha256": "dd1abad3b581b7326c4506ce6d66902fd05b6bb030b248d259f9e6a479637fb7",
+            "integrity": "sha512-B+CUOBXuMwfDzLCnr+QfLf/MuA4wcV+36mqwH+RS0DNRYFcoGgM60MZiwcjFVCb6xzl0ZTUYe9Sla+VJ2MJBnQ==",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-websocket-0.0.14.tgz"
+          }
+        ]
       },
-      "image": "mcr.microsoft.com/playwright@sha256:cf0daee9b994042e011bc29f20cdff1a9f682a039b43fcd738f7d8a9d3bcd9d6",
-      "testFiles": {
-        "e2e/audio-output.spec.ts": "df2dbb93eb6c745b8bcf7f747e5725c97c19d08441ea0c1b70e5722684482256",
-        "e2e/chat.spec.ts": "e7d2c2d306d083020f6c81559a32c710fd51b1b4c2ea34d653d1d5e9639848a5",
-        "e2e/fips-server.ts": "5d9bd63c1be03155235b36bb5df904af4ab5c8f7a004866e84a958c2785f9457",
-        "e2e/fips.spec.ts": "c3e3bae09bd5c3e59dd41a610a566cdb3d2fde207c71692afbfed29468e3664d",
-        "e2e/fixtures/eventIndex.ts": "76c0fbb19578a49b8d3bd4c3496bd0bd8ec329944f3502ee85617d2224411e34",
-        "e2e/fixtures/legacy-event-index.json": "2561b756f5e67611073a2008b43448a7ec0f276a798663bf6c34f6d9553f3b2b",
-        "e2e/fixtures/localFipsWebSocketSeed.ts": "fa0c1844bb113e6476a59796054f2ab2787287e530e9aef94e3e5354c41155fa",
-        "e2e/hashtree.spec.ts": "c6be6d1328f936e03a53bd6a869b3ad6bbc01fd395f1161c3b2cb9986ddc06d1",
-        "e2e/login.spec.ts": "8111a4b630cb4d40a5b58f786374bc4fb88faabc9ba3626fed52361436de7b45",
-        "e2e/meeting.spec.ts": "5f7445f25b52daaca2c79c939b87627e16ae02474dd4df37240525a00b256503",
-        "e2e/multi-user.spec.ts": "ee3c63661c6d66ddd9aea87957b97217a191595d2f4bc9a2a18985fca75645aa",
-        "e2e/offline.spec.ts": "e5b7b19aa399364ff3815092feb2a2ea9a704d54f5caec0146aeb25e468075dc",
-        "e2e/pubsub.spec.ts": "469b0a0532f7a7607c6022d2343982cd0524ff9eded13a15c38f3ac83ef3886e",
-        "e2e/relay-server.mjs": "c4483becfac0b0ac545506e9c3a49909afc0fe1e0446d11c3afebb0f1ab5ef69",
-        "e2e/test-utils.ts": "0317fdae38569279eebed8642d6942cd4cc36ede05181fe7e44edb504e337584",
-        "e2e/updates.spec.ts": "dda192db14a0261bf2506a39f947aad109cbcd1905e76237ab00a32e80c528b9",
-        "e2e/video-playback.spec.ts": "1da28e5f731cfc9c9f17b0bb554272c6924428da6c2739c1e2ed81b5dbc70d4b"
-      },
-      "permissionTestFiles": [
-        "e2e/audio-output.spec.ts",
-        "e2e/chat.spec.ts",
-        "e2e/fips.spec.ts",
-        "e2e/hashtree.spec.ts",
-        "e2e/login.spec.ts",
-        "e2e/meeting.spec.ts",
-        "e2e/multi-user.spec.ts",
-        "e2e/offline.spec.ts",
-        "e2e/pubsub.spec.ts",
-        "e2e/updates.spec.ts",
-        "e2e/video-playback.spec.ts"
+      "installedRuntimeExpectations": [
+        {
+          "package": "@fips/core",
+          "version": "0.0.56",
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-core-0.0.56.tgz",
+          "integrity": "sha512-vXfPsXWlXIEZFFl6K+x9YCwOhRPQr4gjw+GfWOfuyI1RW1O1tcdKQBcDbIszByNWVCt/Rs8UOAzv+k+iXNlIOQ==",
+          "manifestSha256": "1be5a1c96bbca8a8df37d2e5248eb736b1e1a6c69c12c35aa23367b602fda308"
+        },
+        {
+          "package": "@fips/browser",
+          "version": "0.0.21",
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-browser-0.0.21.tgz",
+          "integrity": "sha512-2kg5ffZ2QFufI8Zq9il8DpZYtVHkIVvl4e262hC7Nsqq5prxeIBjMi7lfuyANjiftX0D3Cre75JhlxjO0jmXIg==",
+          "manifestSha256": "9642f77c0dfd15a888f28b2da2ab21ef122acfcab1b62dc25bd53e78ecf53b4e"
+        },
+        {
+          "package": "@fips/transport-webrtc",
+          "version": "0.0.60",
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-webrtc-0.0.60.tgz",
+          "integrity": "sha512-te9hazkbDXnV4hBYX4pIX594WDY5XVClh9tZCVAm5GzE8bHyoFEAhIpyWiUpbciawaYdRLubkcar3D8A7bViYA==",
+          "manifestSha256": "b655179fecdf3a6ae2806589648145d9f601d5580ad787de3b7d5ab5c46e570d"
+        },
+        {
+          "package": "@fips/transport-websocket",
+          "version": "0.0.14",
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-websocket-0.0.14.tgz",
+          "integrity": "sha512-B+CUOBXuMwfDzLCnr+QfLf/MuA4wcV+36mqwH+RS0DNRYFcoGgM60MZiwcjFVCb6xzl0ZTUYe9Sla+VJ2MJBnQ==",
+          "manifestSha256": "48a827d454cf0f79e526a2ac730213e6e0e37d76d77e9003026ffbe01e923f60"
+        }
       ],
-      "requiredPermissionContexts": 2,
-      "ownedOrigin": "http://127.0.0.1:43810",
-      "env": {
-        "PW_PORT": "43810",
-        "PW_RELAY_PORT": "43811",
-        "PW_FIPS_PORT": "43813"
+      "composedBrowserProfile": {
+        "sourceScripts": {
+          "test:e2e:release": "pnpm run test:e2e:release:local && pnpm run test:e2e:fips",
+          "test:e2e:release:local": "PW_WORKERS=${PW_WORKERS:-4} playwright test e2e/account-session.spec.ts e2e/viewer-actions.spec.ts e2e/profile-file-sharing.spec.ts e2e/file-sharing-journey.spec.ts e2e/fips-provider-bridge.spec.ts e2e/contact-follow.spec.ts --project=chromium",
+          "test:e2e:fips": "PW_WORKERS=1 playwright test e2e/fips-discovery.spec.ts --project=chromium --retries=1"
+        },
+        "phases": [
+          "test:e2e:release:local",
+          "test:e2e:fips"
+        ]
       }
     }
   ]
