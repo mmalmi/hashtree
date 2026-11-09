@@ -104,7 +104,7 @@ try:
     for step in steps:
         command=step['command'];assert isinstance(command,list) and command and all(isinstance(x,str) for x in command)
         step_env=env|step.get('env',{})|{'BROWSER_BOUNDARY_RECEIPT':str(evidence/(step['name']+'-browser-boundary.jsonl'))}|{'PW_WORKERS':'1','PW_MAX_WORKERS':'1','PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/(step['name']+'-playwright.json'))}
-        if app=='sites' and command==['pnpm','exec','vitest','run']:
+        if app=='sites' and command[:4]==['pnpm','exec','vitest','run']:
             # This fixture asserts the default command name; pinned PATH remains in force.
             step_env.pop('HTREE_BIN',None);step_env.pop('GIT_REMOTE_HTREE_BIN',None)
         if command[:3] in (['pnpm','run','test:unit'],['pnpm','run','test:model']) or command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
