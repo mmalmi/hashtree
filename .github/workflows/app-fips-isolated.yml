@@ -6,7 +6,7 @@ permissions:
 jobs:
   qualify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 65
+    timeout-minutes: 90
     env:
       FIPS_APPS: social
     steps:
@@ -18,7 +18,7 @@ jobs:
       - name: Prepare pinned inputs before isolation
         run: timeout --signal=TERM --kill-after=15s 900s python3 fixtures/app-fips-isolated/controller.py prepare
       - name: Qualify after independent unsigned denial controls
-        run: timeout --signal=TERM --kill-after=15s 3300s python3 fixtures/app-fips-isolated/controller.py test
+        run: timeout --signal=TERM --kill-after=15s 3900s python3 fixtures/app-fips-isolated/controller.py test
       - name: Preserve qualification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

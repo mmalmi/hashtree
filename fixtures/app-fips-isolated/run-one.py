@@ -60,18 +60,21 @@ export default defineConfig({...original,workers:1,retries:0,outputDir:process.e
  args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection',
  '--proxy-server='+process.env.REJECT_PROXY,'--proxy-bypass-list=localhost;127.0.0.1;[::1]']}}});
 """)
-    env['GRAPH_REPORT']=str(evidence/'peer-roles.json')
-    env['GRAPH_OUTPUT']=str(evidence/'peer-roles')
-    peer=subprocess.run(['pnpm','exec','playwright','test','--config',config.name,'tests/fips-p2p.spec.ts'],
-        env=env,stdout=(evidence/'peer-roles.log').open('wb'),stderr=subprocess.STDOUT,timeout=220)
-    remaining=subprocess.run(['python3','/stage/procedure/finish-remaining.py'],env=env,
-        stdout=(evidence/'full-profile.log').open('wb'),stderr=subprocess.STDOUT,timeout=1500)
-    peer_report=json.loads((evidence/'peer-roles.json').read_text())
-    counts=peer_report['stats']
-    passed=peer.returncode==remaining.returncode==0 and counts['expected']==2 and counts['unexpected']==counts['flaky']==counts['skipped']==0
-    (evidence/'completed-gates.json').write_text(json.dumps(dict(passed=passed,source=spec['commit'],peer=counts,
-        peerExit=peer.returncode,remainingExit=remaining.returncode,priorSelectedRun='42534884779'))+'\n')
-    assert passed,'Remaining gate or two-role peer test failed'
+    command=['pnpm','exec','playwright','test','--config',config.name]
+    counts={}
+    for name,cases,expected,seconds in [('selected',spec['specs'],22,940),('idle',['tests/idle-cpu.spec.ts'],1,150)]:
+        env['GRAPH_REPORT']=str(evidence/(name+'.json'));env['GRAPH_OUTPUT']=str(evidence/name)
+        with (evidence/(name+'.log')).open('wb') as log:
+            result=subprocess.run(command+cases,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=seconds)
+        stats=json.loads((evidence/(name+'.json')).read_text())['stats']
+        counts[name]=dict(exit=result.returncode,stats=stats,expected=expected)
+    with (evidence/'full-profile.log').open('wb') as log:
+        remaining=subprocess.run(['python3','/stage/procedure/finish-full.py'],env=env,stdout=log,stderr=subprocess.STDOUT,timeout=1700)
+    passed=remaining.returncode==0 and all(row['exit']==0 and row['stats']['expected']==row['expected']
+        and row['stats']['unexpected']==row['stats']['flaky']==row['stats']['skipped']==0 for row in counts.values())
+    (evidence/'completed-gates.json').write_text(json.dumps(dict(passed=passed,source=spec['commit'],counts=counts,
+        remainingExit=remaining.returncode,scope='Complete original release profile plus mobile and both peer reload roles'))+'\n')
+    assert passed,'Original release profile failed'
 
 finally:
     run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after.json')],'network-after',15)
