@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "cc",
-      "commit": "b3b0550d5163dc5814b90da0d158cc3974cba286",
+      "commit": "e2ca5f856e14536320d7f0a781fdb1a6287cb533",
       "archive": "archives/source.tar.gz",
-      "archiveSha256": "21f16ce1ea054c85e9164d6cf7f1cd5021d6b71fca5fcfcd0b33735c265da4a8",
-      "archiveBytes": 402290,
+      "archiveSha256": "260bcba9db897f1d2f168b42cab2c976ea3ad09dcb85c007816a44948a119d17",
+      "archiveBytes": 404518,
       "lockSha256": "befafe903f0ac9229028b9e0d5de0539dcc97c1ec0b81c74dd802a8032cfff1f",
       "rootPackageSha256": "7ca9e253ddaed3cd3692768125f9cb59ce4a31f89120f0a5bf76c59864cf8093",
       "packageSha256": "77c72638311e8bc334a1edb8012354d9bd81cf76afd03b177ab0eb4b1a53a3ba",
@@ -44,7 +44,7 @@
         "apps/hashtree-cc/e2e/file-upload.spec.ts": "43ed08810ebaedb4814780007518ed755a406504f66cabd3215275bae00e511d",
         "apps/hashtree-cc/e2e/fixtures.ts": "32cad8c66741568c3f1670080ce9175778bb7e1b08254103c039dddfda170232",
         "apps/hashtree-cc/e2e/inactivity-timeout.spec.ts": "eaccc242a4235a1a669ea100f184cc9b93c14fc7d73828e928bbb9177cd0233b",
-        "apps/hashtree-cc/e2e/p2p-connection.spec.ts": "abb38d63047468054c32b235f9e604256daa73e30ae37a5bfbb99cf10cb06d67",
+        "apps/hashtree-cc/e2e/p2p-connection.spec.ts": "70eba06caebc4fa2cb0fec29f04f4679ece8eb41623d85cfb95a0a70b086afaf",
         "apps/hashtree-cc/e2e/relay/index.js": "fc48565f2a1ab22b17356fc97cbca14994443147089fb3d5cae780015f74ee2f",
         "apps/hashtree-cc/e2e/render-loop-guard.spec.ts": "a300159b6d353911eb58ebdfc86f89896a67d01f673fa96b20083c85b920dfc8",
         "apps/hashtree-cc/e2e/renderLoopGuard.ts": "93b23220283cc4b3044ef81e6fbde1872e8720bbd6eadd6e9fbee7f24dcc2772",
@@ -55,7 +55,8 @@
         "apps/hashtree-cc/tests/httpsStaticAssetsWorker.test.mjs": "b64d2895cff1cbaa6c9c26b1d801211d25d47ec1361a6a640accdb123b0268ae",
         "apps/hashtree-cc/tests/portable-build.test.mjs": "850978fbc123d7591e348f86b4a2110fd5f4ba807cb1c7e073ccff1e1f1c69ba",
         "apps/hashtree-cc/tests/relaySettings.test.mjs": "49844b2d3ea580ce5ef6157b9b19d834a63441aa0f9d6e60d662ed3fe3a6e9d3",
-        "apps/hashtree-cc/tests/releaseSite.test.mjs": "909e4b52a5e170c6d1860eaae63252e38af1e97c438bd2e42a17442f565966be"
+        "apps/hashtree-cc/tests/releaseSite.test.mjs": "909e4b52a5e170c6d1860eaae63252e38af1e97c438bd2e42a17442f565966be",
+        "apps/hashtree-cc/e2e/localFipsWebSocketSeed.ts": "981992f8cb67b03988d01ed19e768b82016be55601920483c8345ffb606610b4"
       },
       "acceptedRuntime": {
         "tag": "runtime-v0.0.61",
