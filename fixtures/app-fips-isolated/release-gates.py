@@ -5,6 +5,7 @@ spec=next(a for a in json.loads((base/'procedure/manifest.json').read_text())['a
 env=dict(os.environ,PW_WORKERS='1',PW_MAX_WORKERS='1');sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 assert sha(root/'package.json')==spec['packageSha256'] and sha(root/'pnpm-lock.yaml')==spec['lockSha256']
 assert sha(root/spec['releaseProfilePath'])==spec['releaseProfileSha256']
+assert not (root/spec['distDir']).exists(),'A fresh distribution build is required'
 code="const m=await import('./scripts/release-site.mjs');const p=m.releaseProfiles[process.argv[1]];if(!p)throw Error('No release profile');console.log(JSON.stringify(p));"
 profile=json.loads(subprocess.check_output(['node','--input-type=module','-e',code,app],env=env,text=True,timeout=15));assert profile['distDir']==spec['distDir']
 steps=[{'name':'build','command':profile['buildCommand']}]
@@ -96,6 +97,8 @@ try:
         assert ready.select(15),'Map cache startup deadline';env['MAP_FIXTURE_CACHE_URL']=json.loads(cache.stdout.readline())['url'];ready.close()
     for step in steps:
         command=step['command'];assert isinstance(command,list) and command and all(isinstance(x,str) for x in command)
+        if command==['pnpm','run','test:e2e:release']:
+            command=['python3','/stage/procedure/browser-profile.py',app]
         step_env=env|step.get('env',{})|{'PW_WORKERS':'1','PW_MAX_WORKERS':'1','PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/(step['name']+'-playwright.json'))}
         if command[:3]==['pnpm','run','test:unit'] or command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
         row={'name':step['name'],'command':command,'exitCode':None};result['steps'].append(row);started=time.monotonic()
@@ -121,6 +124,8 @@ try:
         for p in files:archive.add(p,arcname=p.relative_to(dist).as_posix(),recursive=False)
     (evidence/'dist-manifest.json').write_text(json.dumps({'source':spec['commit'],'files':manifest},indent=2)+'\n')
     assert sha(root/'pnpm-lock.yaml')==spec['lockSha256'],'Frozen lock mutated'
+    assert sha(root/'package.json')==spec['packageSha256'],'Source package mutated'
+    subprocess.run(['python3','/stage/procedure/verify-browser-results.py',app,str(evidence)],env=env,check=True,timeout=15)
     result.update(passed=True,distFiles=len(files),distBytes=sum(x['bytes'] for x in manifest),distArchiveSha256=sha(evidence/'qualified-dist.tar.gz'))
 finally:
     resource_stop.set();resource_thread.join(timeout=5)
