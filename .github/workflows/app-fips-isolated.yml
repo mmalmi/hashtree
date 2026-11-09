@@ -1,4 +1,4 @@
-name: Fresh chat runtime61 complete release qualification
+name: Fresh Chat shutdown repair complete release qualification
 on:
   workflow_dispatch:
 permissions:

@@ -11,10 +11,10 @@
   "apps": [
     {
       "id": "chat",
-      "commit": "4b34b199d8ed1ee3a174c54b30466129b0e060f6",
+      "commit": "2c1a58c69e56ec405bbf33d615b75645d3922b2a",
       "archive": "archives/chat-source.tar.gz",
-      "archiveSha256": "ea7edf0855f540816c3144542613fb6499e14359d97971d19024c102bbca4293",
-      "lockSha256": "34bd8b6022181fa591b284e584c8ac529680da340cfc85ff26f6d75fee0a6895",
+      "archiveSha256": "45512cec7f8e3aef284d0451f963fc60fbddf472c138ae574b476c649e1472cc",
+      "lockSha256": "1bf965d46c80b53b04d4643028b1bd96796d09aa0a4e8ba9faad17aacf66a4bb",
       "distDir": "dist",
       "specs": [
         "e2e/private-key-login.spec.ts",
@@ -49,7 +49,8 @@
         "e2e/private-key-login.spec.ts": "ca3f53ef51bcda1f65f340962466db009406853dfedd3ecb728c7ff8f7f5a78c",
         "e2e/sw-push-handler.spec.ts": "b7278299f36655c5c64e0e669af4901f166956a8e4c01964d2cd443a0efcf312",
         "e2e/timed-mute.spec.ts": "30a0480a591e7787397a1b16c4a00435aea6296a28255bd6db895515f9d6fb97",
-        "e2e/web-join.spec.ts": "3d2a60e0c39a5f854ef71f37a6ef34fbab7c134f08aa62d2b76a99a14a27aa59"
+        "e2e/web-join.spec.ts": "3d2a60e0c39a5f854ef71f37a6ef34fbab7c134f08aa62d2b76a99a14a27aa59",
+        "src/lib/deviceSyncLifecycle.test.ts": "36c61f05035786836a4ff906f7c0f4f20e3e4e8f8d2708701753dbee466bc7b4"
       },
       "fixtureSha256": "7c411f44a1630a461485bb08338d508fe253433f562e7bbecee38af345e47404",
       "configSha256": "dff2d67de101409c41bd52eeb932a600e16d73d7e5ba3f0741b7b1777cffed4d",
@@ -77,10 +78,10 @@
         "webkit-composer",
         "webkit-notifications"
       ],
-      "packageSha256": "0565e7fce28b3655c59b34b9809112051205e25814651388d637fb2dba6768e5",
-      "sourceArchiveSha256": "ea7edf0855f540816c3144542613fb6499e14359d97971d19024c102bbca4293",
-      "sourceArchiveBytes": 1255010,
-      "version": "2.6.62",
+      "packageSha256": "1030d4ac5be2a06cf9828f5d58fb9a801dab54ee85a757f09c5614f7ac085695",
+      "sourceArchiveSha256": "45512cec7f8e3aef284d0451f963fc60fbddf472c138ae574b476c649e1472cc",
+      "sourceArchiveBytes": 1257912,
+      "version": "2.6.63",
       "buildFromSource": true,
       "installedRuntimeExpectations": [
         {
@@ -106,6 +107,13 @@
           "integrity": "sha512-B+CUOBXuMwfDzLCnr+QfLf/MuA4wcV+36mqwH+RS0DNRYFcoGgM60MZiwcjFVCb6xzl0ZTUYe9Sla+VJ2MJBnQ==",
           "sha256": "dd1abad3b581b7326c4506ce6d66902fd05b6bb030b248d259f9e6a479637fb7",
           "manifestSha256": "48a827d454cf0f79e526a2ac730213e6e0e37d76d77e9003026ffbe01e923f60"
+        },
+        {
+          "package": "@fips/file-transfer",
+          "version": "0.1.1",
+          "manifestSha256": "ed13780d352e7f079e75485994da84a6cbf8494adf81e8814cdf59268777a28d",
+          "url": "file:vendor/fips-file-transfer-0.1.0.tgz",
+          "integrity": "sha512-M4+KerF8mCx8MjAjnCyJKt1kq0d5Dvq/Ac20TJd0uRgyc3mxriBMYH37HOqnBQ5ehGqiGd9bY7wzrCdqOq8LTw=="
         }
       ],
       "acceptedDependencyRelease": {
@@ -169,7 +177,161 @@
       "acceptedSourceReceiptSha256": "39aa446d658890a7a1c35cbc04b0cbf024ed6511c051893d65e38d4596436720",
       "releaseProfilePath": "scripts/release-site.mjs",
       "releaseProfileSha256": "ec293b2ff127a3a9c310bf48885cf544d6faf47b6dc27883930f50e6ded427ca",
-      "archiveBytes": 1255010
+      "archiveBytes": 1257912,
+      "derivedFromRuntime61Source": "4b34b199d8ed1ee3a174c54b30466129b0e060f6",
+      "sourceInputs": {
+        "src/App.svelte": "14e49bc1262857e22fa339dac508580e0a32eec8f15a511c8b8624a0c2d10bea",
+        "src/lib/deviceSyncLifecycle.ts": "169a3ab56e09807819a5c77f0107c82a0eac83cda3362f01f7e3bb35fc85dd27",
+        "scripts/verify-dependency-lock.mjs": "6c07f2ab7884304fcc562c5081748ab2784d6e05c44f80316382a9362f4b03f4",
+        "vendor/fips-file-transfer-0.1.0.tgz": "fd40ec68ea586d2adf460859ce86794c33b39af5b8f44cfec7d03d851bafc9ef"
+      },
+      "additionalLifecycleUnitCases": 4,
+      "originalPortableUnitFiles": 34,
+      "originalPortableUnitCases": 258,
+      "fileTransferRelease": {
+        "source": "8c7290e63bce040a318c941ff8e1a1dc9a1409e3",
+        "version": "0.1.1",
+        "vendorPath": "vendor/fips-file-transfer-0.1.0.tgz",
+        "archiveSha256": "fd40ec68ea586d2adf460859ce86794c33b39af5b8f44cfec7d03d851bafc9ef",
+        "integrity": "sha512-M4+KerF8mCx8MjAjnCyJKt1kq0d5Dvq/Ac20TJd0uRgyc3mxriBMYH37HOqnBQ5ehGqiGd9bY7wzrCdqOq8LTw==",
+        "members": [
+          {
+            "path": "package/LICENSE",
+            "bytes": 1102,
+            "sha256": "f87d2b9e05dde538dbbfa5adfb22fb1d45904ea3c8350c5f91f6ece35135fd7f"
+          },
+          {
+            "path": "package/dist/files.js",
+            "bytes": 6454,
+            "sha256": "eb97a6b67ec0a72960f31d54e33e3dd4f8780c4dfdc0a8c75683eaab8c4284c2"
+          },
+          {
+            "path": "package/dist/index.js",
+            "bytes": 19015,
+            "sha256": "fd9276f6ee1988d618b4da0264d6647c1fd4723901df3eb03c8e94adcbe6f9c1"
+          },
+          {
+            "path": "package/dist/protocol.js",
+            "bytes": 11304,
+            "sha256": "88302ea63f0bf37a09721732cc948c0b254e37fdfe4388051364303a31c2ded6"
+          },
+          {
+            "path": "package/dist/state.js",
+            "bytes": 1504,
+            "sha256": "c509c6728f74c13dc80f734dc3fcb188efc5a2ff90a70f167ad80bb9477f012a"
+          },
+          {
+            "path": "package/dist/types.js",
+            "bytes": 11,
+            "sha256": "8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881"
+          },
+          {
+            "path": "package/dist/wire.js",
+            "bytes": 7067,
+            "sha256": "ad1042652ea772a0917613b00f2f8c20d2ebf93d2431d801e498667b70939916"
+          },
+          {
+            "path": "package/dist/work.js",
+            "bytes": 1027,
+            "sha256": "cbe6155c60d4e4de58e370434c8f79ca61bb8cfe303b570ecbfc631e4603d9d1"
+          },
+          {
+            "path": "package/package.json",
+            "bytes": 1003,
+            "sha256": "ed13780d352e7f079e75485994da84a6cbf8494adf81e8814cdf59268777a28d"
+          },
+          {
+            "path": "package/README.md",
+            "bytes": 1094,
+            "sha256": "c2520141d72a014d714f846a85e7bddbdcb59d3daed85751496a8db6a612f9b5"
+          },
+          {
+            "path": "package/dist/files.d.ts",
+            "bytes": 1182,
+            "sha256": "9fb2ffb7fa73fb029e852c445f5b5005712aec4cbac364261f804aef98d0d6ac"
+          },
+          {
+            "path": "package/src/files.ts",
+            "bytes": 5929,
+            "sha256": "2ebc46e1af1afa37f4bd4ec9e9e329e622f5bd4033581face2f4f9563837050e"
+          },
+          {
+            "path": "package/dist/index.d.ts",
+            "bytes": 1499,
+            "sha256": "f7222e112eff7dcf2bd49916fa94b13a5d03160181b22aca1e6e018e38d8d929"
+          },
+          {
+            "path": "package/src/index.ts",
+            "bytes": 16919,
+            "sha256": "c5c7610f00041673801ddb1fb11bc06da19d8e8c07130f6f658f6f896d355cf6"
+          },
+          {
+            "path": "package/dist/protocol.d.ts",
+            "bytes": 345,
+            "sha256": "32df51833b78ea230ab8de8d19019a7ecb3a3bd7185196b7388aed6ffa7d8beb"
+          },
+          {
+            "path": "package/src/protocol.ts",
+            "bytes": 10426,
+            "sha256": "521ff35d99d76f0a5513d7713fbdb43caf88b4c278f341c335bc803210b73c04"
+          },
+          {
+            "path": "package/dist/state.d.ts",
+            "bytes": 2080,
+            "sha256": "f57590c7c85a3f8ed52797fbac1a40ce426fe5f946252aa2aeaae0ae06e49fdf"
+          },
+          {
+            "path": "package/src/state.ts",
+            "bytes": 2918,
+            "sha256": "6257ce25caf21156b5eb972c51da3e58d2228dd82d73139119e503561d573810"
+          },
+          {
+            "path": "package/dist/types.d.ts",
+            "bytes": 2303,
+            "sha256": "a7f8689d22489d7ab12823ca2d53c9f75f99da29977dbfc467c03f3183415b34"
+          },
+          {
+            "path": "package/src/types.ts",
+            "bytes": 2220,
+            "sha256": "681083f51c7f3db36ca81821fd2703dd5a656f9065eabfad7ee8976941b7696a"
+          },
+          {
+            "path": "package/dist/wire.d.ts",
+            "bytes": 1998,
+            "sha256": "a496da578601f99e56e194640b10603e7ef1876b566a1b1d954dde4a83aea07b"
+          },
+          {
+            "path": "package/src/wire.ts",
+            "bytes": 7775,
+            "sha256": "a6108bba200cac564860a0500a7d717af5d5666f7ca45d78e5d686313fb8431b"
+          },
+          {
+            "path": "package/dist/work.d.ts",
+            "bytes": 725,
+            "sha256": "5516dc2b659b75096eecc0a29fe5750567028b83e28351b54961e323fc0f8571"
+          },
+          {
+            "path": "package/src/work.ts",
+            "bytes": 1423,
+            "sha256": "3ee1bd98bc7083702aa9f7767a867f6ece35b149e7de2c2bb8ce220f80c34f46"
+          }
+        ],
+        "typescriptRunId": 42641791677,
+        "rootScopedAcceptanceSha256": "0238c4d5cce94d0f4bdc6ba626b6015de95069134eafaa83fb245121bb5fabd9",
+        "packageProvenanceSha256": "72e39510b4c9918e3b3350f891e81b12bcf463f1a649a6ca0de5c78177aec6e8",
+        "liveInteropPending": true,
+        "publicSourceClosurePending": true,
+        "fullReleaseAccepted": false
+      }
     }
-  ]
+  ],
+  "acceptedImageProof": {
+    "path": "accepted-image-proof.json",
+    "sha256": "7c20abd24c0db92b8c16e511a61e8e9616471bd519427681f3d8316ec4f8f368"
+  },
+  "hostedDiskPolicy": {
+    "entryBytes": 21474836480,
+    "floorBytes": 8589934592,
+    "commandSampleSeconds": 0.5
+  }
 }

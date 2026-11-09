@@ -10,6 +10,7 @@ def verify_inputs():
     assert sha('package.json')==spec['packageSha256'] and sha('pnpm-lock.yaml')==spec['lockSha256']
     assert sha(spec['releaseProfilePath'])==spec['releaseProfileSha256']
     for file,digest in spec['testFiles'].items():assert sha(file)==digest
+    for file,digest in spec['sourceInputs'].items():assert sha(file)==digest
 verify_inputs()
 versions={'node':subprocess.check_output(['node','--version'],env=env,text=True).strip(),
           'pnpm':subprocess.check_output(['pnpm','--version'],env=env,text=True,timeout=10).strip(),
@@ -93,7 +94,8 @@ try:
         else:
             if name=='test-portable':
                 assert command[:2]==['pnpm','test']
-                command=[*command,'--maxWorkers=1','--reporter=verbose','--reporter=json','--outputFile='+str(evidence/'units.json')]
+                assert 'src/lib/deviceSyncLifecycle.test.ts' not in command
+                command=[*command,'src/lib/deviceSyncLifecycle.test.ts','--maxWorkers=1','--reporter=verbose','--reporter=json','--outputFile='+str(evidence/'units.json')]
             execute(name,command,600 if name=='build' else 300)
             if name=='build':
                 dist_files=snapshot_dist()
@@ -103,7 +105,7 @@ try:
             if name=='test-portable':
                 units=json.loads((evidence/'units.json').read_text())
                 actual=[a for file in units['testResults'] for a in file['assertionResults']]
-                assert units['success'] and len(units['testResults'])==34 and len(actual)==258 and all(a['status']=='passed' for a in actual)
+                assert units['success'] and len(units['testResults'])==35 and len(actual)==262 and all(a['status']=='passed' for a in actual)
     execute('dry-run',['node','scripts/release-site.mjs','--dry-run'],30)
     assert snapshot_dist()==dist_files
     result.update(passed=True,originalBrowserPassed=62,originalPlatformSkips=3,additionalPeerCases=1,distArchiveSha256=sha(evidence/'qualified-dist.tar.gz'))
@@ -111,6 +113,9 @@ finally:
     for process in reversed(processes):stop(process)
     verify_inputs()
     subprocess.run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after-attempt.json')],env=env,check=True,timeout=15)
+    memory=pathlib.Path('/sys/fs/cgroup');events=dict(line.split() for line in (memory/'memory.events').read_text().splitlines())
+    assert int(events['oom_kill'])==0
+    (evidence/'resource-final.json').write_text(json.dumps({'noChildOOM':True,'events':events,'memoryPeak':int((memory/'memory.peak').read_text())},indent=2)+'\n')
     (evidence/'release-gates.json').write_text(json.dumps(result,indent=2)+'\n')
 contexts=[json.loads(line) for line in (evidence/'context-permissions.jsonl').read_text().splitlines()]
 assert set(c['engine'] for c in contexts)=={'chromium','firefox','webkit'}
