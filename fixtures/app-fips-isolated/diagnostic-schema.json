@@ -24,5 +24,20 @@
     "maxRows": 1000
   },
   "wireMaxRows": 800,
-  "noRawErrorsOrEvents": true
+  "noRawErrorsOrEvents": true,
+  "outerDiagnostic": {
+    "keys": [
+      "devices",
+      "relayPublications",
+      "relayPublicationObservation",
+      "collectionFailures"
+    ],
+    "deviceCountMax": 2,
+    "unavailableAlternative": {
+      "observationUnavailable": true
+    },
+    "collectionAbortAlternative": {
+      "collectionAborted": true
+    }
+  }
 }

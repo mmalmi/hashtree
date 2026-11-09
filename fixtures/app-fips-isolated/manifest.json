@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "da35133215011cccbbf3e7c0c44f763ceb1fcb0e",
+      "commit": "1fcd16ae18cc1da3f437e4a3aa07549a1d42d3fb",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "84163c24078bd1669c7017cf12691dc552a0f1dbda280107a39c86471c254730",
+      "archiveSha256": "77b926af39a4ceba96732863fc8f89d5ccca6a4da9c0d26229844abcbf59e589",
       "lockSha256": "c86c1adab9d9e6d6af88397450cad045e9e979b0ac57c718100751708e682721",
       "packageManager": "pnpm@10.28.2",
       "distDir": "dist",
@@ -22,7 +22,7 @@
         "tests/private-contact-sync-ui.spec.ts"
       ],
       "testFiles": {
-        "tests/private-contact-sync-ui.spec.ts": "41bee5da47e513d27160c42c243d5e29c8ffc2ac5179a7784d727e4a77d95d79"
+        "tests/private-contact-sync-ui.spec.ts": "63ac47e0247437a98483e2d5e79ee1515880e79b18e196d2e7ac6e570d1c04b1"
       },
       "expectedProjects": [
         "chromium"
@@ -33,7 +33,7 @@
         "PLAYWRIGHT_RUNTIME_PORT": "4181",
         "PLAYWRIGHT_USE_PREVIEW": "1"
       },
-      "archiveBytes": 2883941,
+      "archiveBytes": 2884157,
       "packageSha256": "1b866201dae52c8989369fc5f5235fcef8d43e9830a4b8ee56de5be141d5e7fc",
       "acceptedDependencyRelease": {
         "tag": "runtime-v0.0.61",
@@ -119,7 +119,7 @@
           }
         ]
       },
-      "sourceTree": "6b540a9be3e919ff7ce8b0d6a4b5e1ccd9460d7a",
+      "sourceTree": "ea542bacb48ddecbbdd2ed08857a5527a25cf628",
       "version": "0.1.30",
       "buildFromSource": false,
       "installedRuntimeExpectations": [
@@ -175,7 +175,7 @@
         "originRun": "42606628728",
         "originRunPassed": false,
         "productSource": "3ec8fc86e926d44a0afeee508190caa6effba6d3",
-        "diagnosticSource": "da35133215011cccbbf3e7c0c44f763ceb1fcb0e",
+        "diagnosticSource": "1fcd16ae18cc1da3f437e4a3aa07549a1d42d3fb",
         "sourceDifference": [
           "tests/private-contact-sync-ui.spec.ts"
         ],
