@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Fresh complete original chat release profile and both actual browser endpoints recovering on accepted runtime61",
+  "purpose": "One fixed-category WebKit routed-file restart diagnostic; exact previous product dist; no full qualification or chance-pass acceptance",
   "image": "mcr.microsoft.com/playwright@sha256:ee15712262f017b8157421b212b12099146645f44b1bc5c0514cbbe6a229b1d0",
   "imageTagForProvenance": "v1.64.1-noble",
   "imageIndexSha256": "2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f",
@@ -11,27 +11,13 @@
   "apps": [
     {
       "id": "chat",
-      "commit": "4b34b199d8ed1ee3a174c54b30466129b0e060f6",
+      "commit": "efeaa98f949f874d882a314283bc2cd9dcd02f94",
       "archive": "archives/chat-source.tar.gz",
-      "archiveSha256": "ea7edf0855f540816c3144542613fb6499e14359d97971d19024c102bbca4293",
+      "archiveSha256": "d4b7555581b4d3a2d7ff8619a51698f2fc39f5d2058fab1e6306c6cd76c2b5aa",
       "lockSha256": "34bd8b6022181fa591b284e584c8ac529680da340cfc85ff26f6d75fee0a6895",
       "distDir": "dist",
       "specs": [
-        "e2e/private-key-login.spec.ts",
-        "e2e/nip07.spec.ts",
-        "e2e/contact-memory.spec.ts",
-        "e2e/private-contact-sync.spec.ts",
-        "e2e/web-join.spec.ts",
-        "e2e/direct-file-first.spec.ts",
-        "e2e/message-mutations.spec.ts",
-        "e2e/link-device.spec.ts",
-        "e2e/invite-roleplay.spec.ts",
-        "e2e/composer-identity.spec.ts",
-        "e2e/composer-completions.spec.ts",
-        "e2e/timed-mute.spec.ts",
-        "e2e/notification-navigation.spec.ts",
-        "e2e/sw-push-handler.spec.ts",
-        "e2e/device-removal.spec.ts"
+        "e2e/direct-file-first.spec.ts"
       ],
       "testFiles": {
         "e2e/composer-completions.spec.ts": "cc7310e7b1821183142db0bc924e4d518bdb25e739e10145a803b47a1c4f95dd",
@@ -49,7 +35,8 @@
         "e2e/private-key-login.spec.ts": "ca3f53ef51bcda1f65f340962466db009406853dfedd3ecb728c7ff8f7f5a78c",
         "e2e/sw-push-handler.spec.ts": "b7278299f36655c5c64e0e669af4901f166956a8e4c01964d2cd443a0efcf312",
         "e2e/timed-mute.spec.ts": "30a0480a591e7787397a1b16c4a00435aea6296a28255bd6db895515f9d6fb97",
-        "e2e/web-join.spec.ts": "3d2a60e0c39a5f854ef71f37a6ef34fbab7c134f08aa62d2b76a99a14a27aa59"
+        "e2e/web-join.spec.ts": "3d2a60e0c39a5f854ef71f37a6ef34fbab7c134f08aa62d2b76a99a14a27aa59",
+        "e2e/fixtures/directFileDiagnostics.ts": "a4bd210b2886089ce393f9ce7cc4b701de6dfcac0e8d7c6e7d6653dffd814184"
       },
       "fixtureSha256": "7c411f44a1630a461485bb08338d508fe253433f562e7bbecee38af345e47404",
       "configSha256": "dff2d67de101409c41bd52eeb932a600e16d73d7e5ba3f0741b7b1777cffed4d",
@@ -71,17 +58,13 @@
       "playwright": "1.64.1",
       "packageManager": "pnpm@10.24.0",
       "expectedProjects": [
-        "chromium",
-        "webkit-files",
-        "firefox-files",
-        "webkit-composer",
-        "webkit-notifications"
+        "webkit-files"
       ],
       "packageSha256": "0565e7fce28b3655c59b34b9809112051205e25814651388d637fb2dba6768e5",
-      "sourceArchiveSha256": "ea7edf0855f540816c3144542613fb6499e14359d97971d19024c102bbca4293",
-      "sourceArchiveBytes": 1255010,
+      "sourceArchiveSha256": "d4b7555581b4d3a2d7ff8619a51698f2fc39f5d2058fab1e6306c6cd76c2b5aa",
+      "sourceArchiveBytes": 1255970,
       "version": "2.6.62",
-      "buildFromSource": true,
+      "buildFromSource": false,
       "installedRuntimeExpectations": [
         {
           "package": "@fips/core",
@@ -169,7 +152,170 @@
       "acceptedSourceReceiptSha256": "39aa446d658890a7a1c35cbc04b0cbf024ed6511c051893d65e38d4596436720",
       "releaseProfilePath": "scripts/release-site.mjs",
       "releaseProfileSha256": "ec293b2ff127a3a9c310bf48885cf544d6faf47b6dc27883930f50e6ded427ca",
-      "archiveBytes": 1255010
+      "archiveBytes": 1255970,
+      "productionSource": "4b34b199d8ed1ee3a174c54b30466129b0e060f6",
+      "diagnosticOnly": true,
+      "qualifiesEarlierFailure": false,
+      "distArchive": "archives/chat-dist.tar.gz",
+      "distArchiveSha256": "2cd586e8b97386c2c8e45a9fa99f44fb145a46d9bda666e2d6eb13594d1e658b",
+      "distFiles": [
+        {
+          "path": ".well-known/apple-app-site-association",
+          "bytes": 397,
+          "sha256": "e1ef574fde27adaac7112b117d761572e9d4c1ae4dff3320625455c8a2f15afb"
+        },
+        {
+          "path": ".well-known/assetlinks.json",
+          "bytes": 666,
+          "sha256": "5d51c03e753cefff4659b10e54ccec351da6a47cbc846569ca302f504ddec249"
+        },
+        {
+          "path": "apple-app-site-association",
+          "bytes": 397,
+          "sha256": "e1ef574fde27adaac7112b117d761572e9d4c1ae4dff3320625455c8a2f15afb"
+        },
+        {
+          "path": "assets/directFileWriter.worker-C2cgA_wI.js",
+          "bytes": 695,
+          "sha256": "eafed86cf12d45c9926b3a672c2bdf8f5fd0b400c8d302a5d6fb034e83abdfa9"
+        },
+        {
+          "path": "assets/foregroundMessageNotifications-DFO6EHR6.js",
+          "bytes": 3425,
+          "sha256": "7e4212b19a2627563ba112a8e98f0e4a4ee318b509b466fcc37b794ee833e74d"
+        },
+        {
+          "path": "assets/index-B3sdaUPP.js",
+          "bytes": 1141112,
+          "sha256": "5775f71ed94ede35669d729da8c97992a42b57f7a23e30411b02ce957f4c4a1e"
+        },
+        {
+          "path": "assets/index-Dh3XnsvO.css",
+          "bytes": 83277,
+          "sha256": "7514d58d5cede2fb43aeea024a17e17a857f8b9e97e4c4aeff294bfb8e4013c6"
+        },
+        {
+          "path": "assets/nostrWorker-C3AcdQxw.js",
+          "bytes": 523094,
+          "sha256": "47b13e7d3879f036ddc12ce09fe4a83e97674ea13d8cd0444eda84b63e8d31e9"
+        },
+        {
+          "path": "assets/opus-DaKiHsGi.wasm",
+          "bytes": 340912,
+          "sha256": "36e1116e6e4604917eca9b72de018f897c9cc429e0f69f404e2c0cc65cf94c0f"
+        },
+        {
+          "path": "assets/ownReadState-Bn5oBjP4.js",
+          "bytes": 592,
+          "sha256": "fcd7a35c8f102bf8a323d7f15f948e43599b19054e091bd5db704e02679f864b"
+        },
+        {
+          "path": "assets/peopleSearchIndex-Bm2_i5C3.js",
+          "bytes": 6201,
+          "sha256": "93291d656ad8045f6b8820ac216f1c803694b9a70dd735ce2a7529671b5a793e"
+        },
+        {
+          "path": "assets/privateStateView-NcGBo9dK.js",
+          "bytes": 1320,
+          "sha256": "2370145ed814ac3c274cd98c020e448204b0d15bd21bcda1548856bee15f2dd1"
+        },
+        {
+          "path": "assets/socialGraph-Cc2MnZG2.bin",
+          "bytes": 1034502,
+          "sha256": "9af2ad6aaf830ff08aa14f83233e56c49d1379fb5da05efd1ebe9166aceabcb0"
+        },
+        {
+          "path": "assets/vendor-BPDUCCMg.css",
+          "bytes": 1734,
+          "sha256": "77e733947d5ff6b0139ff3092ea4eb153f88d0eaaf8465dbdda9766fe2902fd4"
+        },
+        {
+          "path": "assets/vendor-Db1mBbup.js",
+          "bytes": 1293238,
+          "sha256": "89083f89560c986c2785519d7fffe4a4385b90da078d1f13bb3e1281828b72eb"
+        },
+        {
+          "path": "csae/index.html",
+          "bytes": 1724,
+          "sha256": "192083da1c016cc690bcdf4f3116ab95cc6b366eddc97802a37dfba00cc4b98a"
+        },
+        {
+          "path": "csae.html",
+          "bytes": 1724,
+          "sha256": "192083da1c016cc690bcdf4f3116ab95cc6b366eddc97802a37dfba00cc4b98a"
+        },
+        {
+          "path": "img/android-chrome-192x192.png",
+          "bytes": 18063,
+          "sha256": "3e0317436b4f3dca79197c5332350746a7ab171200955004a808649cfd1f14a6"
+        },
+        {
+          "path": "img/android-chrome-512x512.png",
+          "bytes": 39301,
+          "sha256": "8ef711c98312bbf5041baf15cc7f18cbda598bb348431716089bb05c700d3266"
+        },
+        {
+          "path": "img/apple-touch-icon.png",
+          "bytes": 16058,
+          "sha256": "a0856b5ab5b9f286ef629ce16f3f3b4bd4443cf6bf28f8fe8a7362590535ce21"
+        },
+        {
+          "path": "img/maskable_icon.png",
+          "bytes": 43539,
+          "sha256": "5436571afbe36940f2008260b4d8f9f16e25ec8d7f09b50b85a706c3bd048ab2"
+        },
+        {
+          "path": "img/maskable_icon_x192.png",
+          "bytes": 18063,
+          "sha256": "3e0317436b4f3dca79197c5332350746a7ab171200955004a808649cfd1f14a6"
+        },
+        {
+          "path": "index.html",
+          "bytes": 1748,
+          "sha256": "76ff9ce331ffa5379611ebaf20c8ca7c6c1efd89b2b41a4d8218d470746253f4"
+        },
+        {
+          "path": "iris-logo.png",
+          "bytes": 16963,
+          "sha256": "3e7ffe75bd96399dcf81c7319ab67e4b9266ac0db5763fe0422b3f3b0924db8c"
+        },
+        {
+          "path": "manifest.json",
+          "bytes": 747,
+          "sha256": "fcf80ca527667c459ddd2e0e8fc9241240ace767754a09b4a697976719c3dc9d"
+        },
+        {
+          "path": "privacy/index.html",
+          "bytes": 4413,
+          "sha256": "b86d2989c5a410350e268964070c61b47ea68cb4b73dca6cadd86f22ad2afb6b"
+        },
+        {
+          "path": "privacy.html",
+          "bytes": 4413,
+          "sha256": "b86d2989c5a410350e268964070c61b47ea68cb4b73dca6cadd86f22ad2afb6b"
+        },
+        {
+          "path": "registerSW.js",
+          "bytes": 148,
+          "sha256": "0dda2470c908c594d357bbb21f3495c470963187163f8d371dd6880d95340b0d"
+        },
+        {
+          "path": "service-worker.js",
+          "bytes": 426516,
+          "sha256": "694a5002c35f64484474a035881b307b3bfaa1ebc286973dff0f9c235371dfe8"
+        },
+        {
+          "path": "terms/index.html",
+          "bytes": 1854,
+          "sha256": "f06ab5fd7941f7e859a659c45a45bdb3c52f8a2ed7c074d4ae19523564990efd"
+        },
+        {
+          "path": "terms.html",
+          "bytes": 1854,
+          "sha256": "f06ab5fd7941f7e859a659c45a45bdb3c52f8a2ed7c074d4ae19523564990efd"
+        }
+      ],
+      "distFromRun": 42613141253
     }
   ]
 }

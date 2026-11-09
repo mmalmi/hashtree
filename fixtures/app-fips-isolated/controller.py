@@ -94,10 +94,16 @@ def prepare():
         assert sha(target/'pnpm-lock.yaml')==app['lockSha256']
         assert json.loads((target/'package.json').read_text())['packageManager']==app['packageManager']
         for file,digest in app['testFiles'].items():assert sha(target/file)==digest
-        assert sha(target/'package.json')==app['packageSha256']
+        dist=HERE/app['distArchive'];assert sha(dist)==app['distArchiveSha256']
+        with tarfile.open(dist) as tar:
+            assert all(m.isfile() and not pathlib.PurePosixPath(m.name).is_absolute() and '..' not in pathlib.PurePosixPath(m.name).parts for m in tar.getmembers())
+        extract(dist,target/app['distDir'])
+        expected={file['path']:file['sha256'] for file in app['distFiles']}
+        actual={str(p.relative_to(target/app['distDir'])):sha(p) for p in (target/app['distDir']).rglob('*') if p.is_file()}
+        assert actual==expected,'Exact dist file set and bytes'
         run(['python3',str(HERE/'apply-app-overlay.py'),app['id'],str(STAGE)],'overlay-'+app['id']+'.log',10)
         docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
-    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'buildFromExactSource':True},indent=2)+'\n')
+    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'distInputsVerified':True},indent=2)+'\n')
 
 def test():
     assert json.loads((EVIDENCE/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json')
