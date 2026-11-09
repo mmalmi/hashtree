@@ -1,4 +1,4 @@
-name: Chat same-build visible mobile shell
+name: Chat mobile shell exact live policy responses
 on:
   workflow_dispatch:
 permissions:
@@ -12,7 +12,7 @@ jobs:
       FIPS_APPS: chat
     steps:
       - name: Set task-exclusive stage
-        run: echo "FIPS_STAGE=$RUNNER_TEMP/chat-mobile-shell-isolated" >> "$GITHUB_ENV"
+        run: echo "FIPS_STAGE=$RUNNER_TEMP/chat-mobile-live-isolated" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
@@ -27,7 +27,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: app-fips-isolated-${{ github.sha }}
-          path: ${{ runner.temp }}/chat-mobile-shell-isolated/evidence
+          path: ${{ runner.temp }}/chat-mobile-live-isolated/evidence
           if-no-files-found: error
           retention-days: 7
           include-hidden-files: true

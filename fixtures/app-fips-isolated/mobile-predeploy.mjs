@@ -24,23 +24,52 @@ async function boundary(label) {
 }
 const before = await boundary('network-before');
 const {files, expected} = await loadPayloads(plan);
+const liveBytes=await readFile(plan.actualLiveBinding.path);assert.equal(sha(liveBytes),plan.actualLiveBinding.sha256);
+const live=JSON.parse(liveBytes);assert(live.passed);assert.equal(live.source,plan.source);assert.equal(live.origin,plan.site);
+assert.equal(live.productionVersion,plan.actualLiveBinding.productionVersion);
+assert.equal(live.adapterPlanSha256,plan.actualLiveBinding.adapterPlanSha256);
+assert.equal(live.deploymentReceiptSha256,plan.actualLiveBinding.deploymentReceiptSha256);
+const policyAliases=new Map([['/csae.html','/csae'],['/csae/index.html','/csae/'],['/terms.html','/terms'],['/terms/index.html','/terms/']]);
+assert.deepEqual(Object.fromEntries(policyAliases),plan.actualLiveBinding.exactPolicyRedirects);
+assert.equal(live.files.length,files.size+1);assert.equal(live.matchedFiles,files.size);assert(live.rootRouteVerified);
+const liveRows=new Map(live.files.map(row=>[row.route,row]));assert.equal(liveRows.size,live.files.length);
+assert.deepEqual([...liveRows.keys()].sort(),['/',...[...files.keys()].map(name=>'/'+name)].sort());
+assert.deepEqual(live.files.filter(row=>row.redirects.length).map(row=>row.route).sort(),[...policyAliases.keys()].sort());
+for(const [from,to]of policyAliases){
+  const query='?release='+plan.source.slice(0,12);
+  assert.deepEqual(liveRows.get(from).redirects,[{from:plan.site+from+query,to:plan.site+to+query,status:307}]);
+}
+
 const generatedResponses = [];
 const payloads = new Map(), types = new Map();
 for (const [name, item] of files) {
-  const bytes = await expected(plan.site + '/' + name, item);
+  const route='/'+name,canonical=policyAliases.get(route)??route;
+  const bytes = await expected(plan.site + canonical, item);
+  const observed=liveRows.get(route);
+  assert.equal(observed.status,200);assert.equal(observed.sha256,item.sha256);assert.equal(observed.bytes,item.bytes);
+  assert.equal(sha(bytes),observed.servedSha256);assert.equal(bytes.length,observed.servedBytes);
+  assert.equal(observed.expectedSha256,observed.servedSha256);assert.equal(observed.expectedBytes,observed.servedBytes);
   const extension = name.split('.').at(-1);
   const contentType = name.includes('apple-app-site-association') ? 'application/json' : ({html:'text/html; charset=utf-8',js:'text/javascript',css:'text/css',json:'application/json',webmanifest:'application/manifest+json',wasm:'application/wasm',svg:'image/svg+xml',png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',ico:'image/x-icon'}[extension] ?? 'application/octet-stream');
   payloads.set(name, bytes); types.set(name, contentType);
   generatedResponses.push({...item,servedBytes:bytes.length,servedSha256:sha(bytes),contentType});
 }
+assert.equal(liveRows.get('/').servedSha256,sha(payloads.get('index.html')));
+assert.equal(liveRows.get('/').servedBytes,payloads.get('index.html').length);
+const canonicalAssets=new Map([...policyAliases].map(([from,to])=>[to,from.slice(1)]));
 const errors = [], requests = [];
 const server = createServer((request, response) => {
   try {
     const url = new URL(request.url, 'http://local');
     if (url.pathname === '/__boundary') return response.writeHead(200, {'content-type':'text/html'}).end('<!doctype html><title>Boundary</title>');
-    let name = decodeURIComponent(url.pathname).slice(1) || 'index.html';
+    const canonical=policyAliases.get(url.pathname);
+    if(canonical){
+      requests.push({path:url.pathname,asset:url.pathname.slice(1),status:307,redirectTo:canonical+url.search});
+      return response.writeHead(307,{location:canonical+url.search}).end();
+    }
+    let name = canonicalAssets.get(url.pathname) ?? (decodeURIComponent(url.pathname).slice(1) || 'index.html');
     if (!payloads.has(name)) name = 'index.html';
-    const bytes = payloads.get(name); requests.push({path:url.pathname, asset:name, sha256:sha(bytes)});
+    const bytes = payloads.get(name); requests.push({path:url.pathname, asset:name, status:200, sha256:sha(bytes)});
     response.writeHead(200, {'content-type':types.get(name), 'service-worker-allowed':'/'}).end(bytes);
   } catch { errors.push('fixture-response'); response.writeHead(500).end(); }
 });
@@ -75,6 +104,30 @@ try {
   await page.reload({waitUntil:'domcontentloaded'});
   await page.getByText('Secure, private messaging').waitFor({state:'visible',timeout:15000});
   await page.waitForFunction(() => !!navigator.serviceWorker.controller, undefined, {timeout:10000});
+  async function verifiedPrecache(){
+    const entries=await page.evaluate(async()=>{
+      const names=(await caches.keys()).filter(name=>name.startsWith('iris-chat-shell-'));
+      if(names.length!==1)throw Error('Unexpected shell cache count');
+      const cache=await caches.open(names[0]),entries=[];
+      for(const request of await cache.keys()){
+        const url=new URL(request.url);if(url.origin!==location.origin||url.search)throw Error('Unexpected cache URL');
+        const response=await cache.match(request);if(!response||response.status!==200)throw Error('Missing successful cached response');
+        const bytes=await response.arrayBuffer();
+        const digest=await crypto.subtle.digest('SHA-256',bytes);
+        entries.push({path:url.pathname.slice(1),bytes:bytes.byteLength,sha256:Array.from(new Uint8Array(digest),x=>x.toString(16).padStart(2,'0')).join(''),redirected:response.redirected,responsePath:new URL(response.url).pathname});
+      }
+      return entries.sort((a,b)=>a.path.localeCompare(b.path));
+    });
+    assert.deepEqual(entries.map(row=>row.path).sort(),plan.expectedPrecachePaths);
+    for(const entry of entries){
+      const route='/'+entry.path,observed=liveRows.get(route);assert(observed);
+      assert.equal(entry.sha256,observed.servedSha256);assert.equal(entry.bytes,observed.servedBytes);
+      assert.equal(entry.responsePath,policyAliases.get(route)??route);
+      assert.equal(entry.redirected,policyAliases.has(route));
+    }
+    return entries;
+  }
+  const cachedBeforeOffline=await verifiedPrecache();
   const geometry = await page.evaluate(() => ({width:innerWidth,documentWidth:document.documentElement.scrollWidth}));
   assert.equal(geometry.width, 390); assert(geometry.documentWidth <= geometry.width);
   await downloadPrompt.waitFor({state:'hidden',timeout:15000});
@@ -83,6 +136,10 @@ try {
   await page.getByText('Secure, private messaging').waitFor({state:'visible',timeout:15000});
   await downloadPrompt.waitFor({state:'hidden',timeout:15000});
   await page.screenshot({path:path.join(outputDir,'mobile-offline.png'),fullPage:true});
+  const cachedAfterOffline=await verifiedPrecache();assert.deepEqual(cachedAfterOffline,cachedBeforeOffline);
+  const observedRedirects=requests.filter(row=>row.status===307);
+  assert.deepEqual([...new Set(observedRedirects.map(row=>row.path))].sort(),[...policyAliases.keys()].sort());
+  for(const row of observedRedirects)assert.equal(row.redirectTo,policyAliases.get(row.path));
   assert.deepEqual(errors, []); await context.close();
   const after = await boundary('network-after'); assert.equal(after.netNamespace, before.netNamespace);
   const screenshots = [];
@@ -90,10 +147,12 @@ try {
     const bytes = await readFile(path.join(outputDir,file)); screenshots.push({file,bytes:bytes.length,sha256:sha(bytes)});
   }
   await writeFile(path.join(outputDir,'mobile-offline.json'), JSON.stringify({passed:true,source:plan.source,
-    sourcePlanSha256:planSha,productionVerified:false,sourceWorkerResponseFiles:files.size,sourceWorkerResponses:generatedResponses,geometry,
+    sourcePlanSha256:planSha,productionVerified:false,liveReceiptSha256:plan.actualLiveBinding.sha256,productionVersion:live.productionVersion,allLiveResponsesMatched:true,
+    actualPrecacheVerified:cachedBeforeOffline.length,cachedPolicyCanonicalResponsesVerified:policyAliases.size,cachedBeforeOffline,cachedAfterOffline,policyRedirects:Object.fromEntries(policyAliases),
+    sourceWorkerResponseFiles:files.size,sourceWorkerResponses:generatedResponses,geometry,
     viewport:{width:390,height:844},browser:'Chromium desktop user agent at mobile viewport',
     downloadPromptDismissedThroughUI:true,downloadPromptAbsentOnline:true,downloadPromptAbsentOffline:true,visibleShell:true,
     offlineReload:true,serviceWorkerControlled:true,registration,anonymous:true,accountCreated:false,syntheticPosts:false,
     rawWorkerDenial,permissionsGranted:[],captureInvoked:false,pageErrors:errors,requests,screenshots,
-    scope:'Exact retained dist rendered through the unchanged source Worker on isolated loopback before deployment; no live public-byte or NEG claim'},null,2)+'\n',{flag:'wx'});
+    scope:'Exact deployed dist rendered on isolated loopback with4 bound production policy redirects; all31 generated responses/root and27 actual cached entries match the retained live receipt; anonymous visible-shell online/offline proof, not public-origin browser or NEG proof'},null,2)+'\n',{flag:'wx'});
 } finally { await browser?.close(); await new Promise(resolve => server.close(resolve)); }

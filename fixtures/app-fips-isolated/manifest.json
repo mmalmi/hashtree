@@ -357,7 +357,7 @@
       },
       "freshAdditionalMobileScope": "Anonymous390px online+serviceworker offline shell, exact retained dist/source Worker responses, lo-only separate container, no live production claim",
       "freshScopes": [
-        "anonymous-visible-mobile-online-offline-source-worker"
+        "anonymous-mobile-online-offline-exact-live-responses"
       ],
       "mobileVisibleShellOnly": true,
       "priorMobilePromptEvidence": {
@@ -365,7 +365,51 @@
         "carrier": "83969cb0223d1f5cb48bcfa9f351e4aef25f38f2",
         "artifactSha256": "67cdd3d6ce3eb51cd1d0af8391da0f34587b3851534680653a839c888c734908",
         "scope": "download-prompt screenshots only; peer/dry-run/network/SW evidence remains valid"
-      }
+      },
+      "actualLiveBinding": {
+        "file": "live-response.json",
+        "sha256": "06adf87e4e916b853022962db951e24a6693ceb9016597d8a85c865e6d8dfe5b",
+        "source": "2c1a58c69e56ec405bbf33d615b75645d3922b2a",
+        "productionVersion": "6014a817-7fe0-40dd-a14c-5601b1c67e16",
+        "adapterPlanSha256": "93af765a976d8123318095dd7bed008bf09197e9d0c7f82a3c72ed29f5c2c229",
+        "deploymentReceiptSha256": "8b2fc4eb165b17852f86be7321552ee0288a06bb9b5eeb2a718b48093d4c3aa4",
+        "exactPolicyRedirects": {
+          "/csae.html": "/csae",
+          "/csae/index.html": "/csae/",
+          "/terms.html": "/terms",
+          "/terms/index.html": "/terms/"
+        }
+      },
+      "expectedPrecachePaths": [
+        "assets/directFileWriter.worker-C2cgA_wI.js",
+        "assets/foregroundMessageNotifications-BuMpayAn.js",
+        "assets/index-BjtNeT2W.js",
+        "assets/index-Dh3XnsvO.css",
+        "assets/nostrWorker-C3AcdQxw.js",
+        "assets/opus-DaKiHsGi.wasm",
+        "assets/ownReadState-BVQujwVi.js",
+        "assets/peopleSearchIndex-5pFVD7WW.js",
+        "assets/privateStateView-BrMTGMt4.js",
+        "assets/socialGraph-Cc2MnZG2.bin",
+        "assets/vendor-BPDUCCMg.css",
+        "assets/vendor-CXn6mLED.js",
+        "csae.html",
+        "csae/index.html",
+        "img/android-chrome-192x192.png",
+        "img/android-chrome-512x512.png",
+        "img/apple-touch-icon.png",
+        "img/maskable_icon.png",
+        "img/maskable_icon_x192.png",
+        "index.html",
+        "iris-logo.png",
+        "manifest.json",
+        "privacy.html",
+        "privacy/index.html",
+        "registerSW.js",
+        "terms.html",
+        "terms/index.html"
+      ],
+      "expectedPrecacheManifestSourceSha256": "59eb911ef709d0187417ff41d808243adf28b75f02c49b61e2582a3f6df191ea"
     }
   ],
   "acceptedImageProof": {
@@ -378,5 +422,5 @@
     "commandSampleSeconds": 0.5
   },
   "node": "v26.13.0",
-  "qualificationScope": "Only visible anonymous mobile shell; no build, peer, dry-run or original app gates replayed"
+  "qualificationScope": "Only mobile fixture fidelity: exact4 observed307policy redirects and all31 live response hashes; actual27-entry precache; no source/build/app/peer/deploy replay"
 }

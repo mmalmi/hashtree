@@ -20,9 +20,14 @@ def verify_dist():
         p=actual[row['path']];assert not p.is_symlink() and p.stat().st_size==row['bytes'] and sha(p)==row['sha256']
 verify_dist()
 subprocess.run(['node','/stage/procedure/installed-runtime-proof.cjs',str(base/'evidence/mobile-installed-runtime.json')],check=True,timeout=15)
+liveBinding=spec['actualLiveBinding'];livePath=base/'procedure'/liveBinding['file']
+assert sha(livePath)==liveBinding['sha256']
+live=json.loads(livePath.read_text());assert live['passed'] and live['source']==spec['commit'] and live['productionVersion']==liveBinding['productionVersion']
+assert sha(root/'dist/service-worker.js')==spec['expectedPrecacheManifestSourceSha256']
 plan={'source':spec['commit'],'sourceRoot':str(root),'site':'https://chat.iris.to',
     'distManifest':str(manifest),'distManifestSha256':sha(manifest),
-    'sourceFiles':spec['mobileSourceInputs'],'productionVerified':False}
+    'sourceFiles':spec['mobileSourceInputs'],'productionVerified':False,
+    'actualLiveBinding':dict(liveBinding,path=str(livePath)),'expectedPrecachePaths':spec['expectedPrecachePaths']}
 planPath=base/'mobile-source-plan.json';assert not planPath.exists();planPath.write_text(json.dumps(plan,indent=2)+'\n')
 try:
     with (base/'evidence/mobile.log').open('xb') as log:
@@ -36,7 +41,10 @@ try:
     assert receipt['rawWorkerDenial']==[True]*4
     assert all(receipt[k] for k in ('downloadPromptDismissedThroughUI','downloadPromptAbsentOnline','downloadPromptAbsentOffline','visibleShell'))
     assert receipt['geometry']['documentWidth']<=receipt['geometry']['width']==390
-    assert receipt['sourceWorkerResponseFiles']==len(rows['files'])
+    assert receipt['sourceWorkerResponseFiles']==len(rows['files'])==31
+    assert receipt['liveReceiptSha256']==liveBinding['sha256'] and receipt['allLiveResponsesMatched']
+    assert receipt['actualPrecacheVerified']==27 and receipt['cachedPolicyCanonicalResponsesVerified']==4
+    assert receipt['productionVersion']==liveBinding['productionVersion']
     (evidence/'source-plan.json').write_bytes(planPath.read_bytes())
 finally:
     verify_dist()
