@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "boards",
-      "commit": "bcca64570377d0360e6c69b4164d9cc3305b0876",
+      "commit": "689d3aa1976b5b73d8d68b58d8b20b016e537096",
       "archive": "archives/boards-source.tar.gz",
-      "archiveSha256": "0998548cd77873ff7cda59903893ae785082b9359285a4914bed663596c5c8f5",
-      "archiveBytes": 1357131,
+      "archiveSha256": "8b655cc3b0539eb6feb41caaf3f103945c5bb4287bb62fd9eb550cb5be5b774c",
+      "archiveBytes": 1357254,
       "lockSha256": "e8e9e3835ad18bf35a25fb02f016ffc225a6231dad9217c1cf3f60b82203d9f2",
       "packageSha256": "947457e41e6af1befa30a452ae0f0fcfa9e6d29686af60ecce20a627dc2cf12a",
       "distDir": "dist-boards",
@@ -36,7 +36,7 @@
         "e2e/boards-access.spec.ts": "5bce77d80b9a9298f213c9a4fdc1f29ac3635e53ae8b758746be14cdec1d6f27",
         "e2e/boards-app.helpers.ts": "768c2569ede19ba3ae8658a0c0408d841df2772821547101acd91c468c7c8ef6",
         "e2e/boards-app.spec.ts": "5178440832f6dfaa9605dfcc6e777b08fa7c0733447b3eeb474d92621dd1700a",
-        "e2e/fips-discovery.spec.ts": "57cc3d8eb179c73960c443806ce4a9c8f6e1acc822b546f2c6859015276a0479",
+        "e2e/fips-discovery.spec.ts": "3757ccad2a94e9624148ee203e1a95bf0fd0da154dd27282b81fa016afb41264",
         "e2e/fips-provider-bridge.spec.ts": "7a3d604b38fd8a5705ae6d9512d497e14e0af29eb07d832f21a2d771adcc9886",
         "e2e/fixtures.ts": "1806469eba3151164bb05fe4649b9233b1c30b7d62311e849cbf7228d27c73fa",
         "e2e/fixtures/localFipsWebSocketSeed.ts": "9ab30a2f14107808705b45fc3bc3bcecd4470c2c56c113ee516cc6daabbcf07d",
@@ -54,7 +54,7 @@
         "e2e/fips-discovery.spec.ts"
       ],
       "requiredPermissionContexts": 1,
-      "sourceTree": "1f3e13873b4e2d49aaa6f8069a9d68167f6a436f",
+      "sourceTree": "d754a1e621009e2e25f606ba8261ad65447f7898",
       "version": "0.1.17",
       "configSha256": "39886f8aa7d807328a22d0532430dd488ea34b4129a87c19a62d99e553773db9",
       "expectedBrowserReports": 1,

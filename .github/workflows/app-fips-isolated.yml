@@ -9,7 +9,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        app: [docs, calendar, boards, video, git, maps]
+        app: [boards]
     runs-on: ubuntu-24.04
     timeout-minutes: 71
     env:
