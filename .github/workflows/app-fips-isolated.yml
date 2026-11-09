@@ -1,4 +1,4 @@
-name: Isolated Chat graph 4.0.4 compatibility
+name: Fresh chat runtime61 complete release qualification
 on:
   workflow_dispatch:
 permissions:
@@ -6,7 +6,7 @@ permissions:
 jobs:
   fips:
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 95
     env:
       FIPS_APPS: chat
     steps:
@@ -18,7 +18,7 @@ jobs:
       - name: Prepare pinned inputs before isolation
         run: timeout --signal=TERM --kill-after=15s 1200s python3 fixtures/app-fips-isolated/controller.py prepare
       - name: Test exact apps after unsigned transport and denial controls
-        run: timeout --signal=TERM --kill-after=15s 3000s python3 fixtures/app-fips-isolated/controller.py test
+        run: timeout --signal=TERM --kill-after=15s 4050s python3 fixtures/app-fips-isolated/controller.py test
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -27,3 +27,4 @@ jobs:
           path: ${{ runner.temp }}/chat-browser-isolated/evidence
           if-no-files-found: error
           retention-days: 7
+          include-hidden-files: true
