@@ -1,4 +1,4 @@
-"""Task-only, hash-pinned browser qualification. Never builds native code."""
+"""Hash-pinned TypeScript-only qualification; never compiles native code."""
 import hashlib,json,os,pathlib,shutil,signal,subprocess,sys,tarfile,time,urllib.request
 HERE=pathlib.Path(__file__).resolve().parent
 M=json.loads((HERE/'manifest.json').read_text())
@@ -7,11 +7,7 @@ EVIDENCE=STAGE/'evidence'
 IMAGE=M['image']
 CONTAINERS=set();PROCESS=None;START=time.monotonic()
 SAFE_ENV={k:v for k,v in os.environ.items() if k in ('PATH','HOME','USER','DOCKER_HOST','DOCKER_CONFIG','XDG_RUNTIME_DIR')}
-SELECTED=os.environ.get('FIPS_APPS','').split(',') if os.environ.get('FIPS_APPS') else [a['id'] for a in M['apps']]
-assert len(SELECTED)==len(set(SELECTED)) and set(SELECTED)<=set(a['id'] for a in M['apps'])
-APPS=[next(a for a in M['apps'] if a['id']==name) for name in SELECTED]
-APP_CONTAINERS={'iris-fips-test-chat'}
-assert SELECTED==['chat']
+APP_CONTAINERS=set()
 def sha(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
 def cleanup():
     global PROCESS
@@ -55,7 +51,7 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
     assert not dummy or (network=='none' and name in APP_CONTAINERS)
     if dummy:command=['python3','/stage/procedure/await-start.py',name,*command]
     command=['timeout','--signal=TERM','--kill-after=5s',str(seconds-10)+'s',*command]
-    args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home/chat','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','npm_config_manage_package_manager_versions=false','--env','npm_config_package_manager_strict_version=true','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,'--env','FIPS_MEDIA_PERMISSION='+str(int(name in APP_CONTAINERS)),IMAGE,*command]
+    args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home/file-transfer','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','npm_config_manage_package_manager_versions=false','--env','npm_config_package_manager_strict_version=true','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,'--env','FIPS_MEDIA_PERMISSION='+str(int(name in APP_CONTAINERS)),IMAGE,*command]
     CONTAINERS.add(name)
     run(args,name+'-create.log',30)
     inspect=json.loads(subprocess.check_output(['docker','inspect',name],env=SAFE_ENV,text=True,timeout=5))[0]
@@ -72,7 +68,7 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
             run(['docker','attach',name],name+'.log',seconds,allow_failure=True)
         else:run(['docker','start','--attach',name],name+'.log',seconds,allow_failure=True)
         terminal=json.loads(subprocess.check_output(['docker','inspect',name],env=SAFE_ENV,text=True,timeout=5))[0]
-        assert terminal['Id']==inspect['Id'] and not terminal['State']['Running'],'No terminal container identity'
+        assert terminal['Id']==inspect['Id'] and not terminal['State']['Running'] and not terminal['State']['OOMKilled'],'No terminal container identity'
         (EVIDENCE/(name+'-terminal.json')).write_text(json.dumps(terminal['State'],indent=2)+'\n')
         code=terminal['State']['ExitCode']
         if not allow_failure:assert code==0,f'{name} exited {code}'
@@ -81,36 +77,25 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
 
 def prepare():
     assert not STAGE.exists(),'Use one empty task stage'
-    STAGE.mkdir(mode=0o700);EVIDENCE.mkdir();(STAGE/'home/chat').mkdir(parents=True);(STAGE/'tools/bin').mkdir(parents=True)
-    shutil.copytree(HERE,STAGE/'procedure',ignore=shutil.ignore_patterns('archives'))
+    STAGE.mkdir(mode=0o700);EVIDENCE.mkdir();(STAGE/'home/file-transfer').mkdir(parents=True);(STAGE/'tools/bin').mkdir(parents=True)
+    shutil.copytree(HERE,STAGE/'procedure',ignore=shutil.ignore_patterns('source.tar.gz'))
     fetch(M['pnpm'],STAGE/'pnpm.tgz');extract(STAGE/'pnpm.tgz',STAGE/'tools/pnpm')
-    (STAGE/'tools/bin/pnpm').write_text('#!/bin/sh\nexec node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');(STAGE/'tools/bin/pnpm').chmod(0o755)
+    wrapper=STAGE/'tools/bin/pnpm';wrapper.write_text('#!/bin/sh\nexec node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');wrapper.chmod(0o755)
     run(['docker','pull',IMAGE],'image-pull.log',300)
-    docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
-    assert json.loads((EVIDENCE/'image-toolchain.json').read_text())['node']=='v26.13.0'
-    for app in APPS:
-        archive=HERE/app['archive'];assert sha(archive)==app['archiveSha256']
-        target=STAGE/'apps'/app['id'];extract(archive,target)
-        assert sha(target/'pnpm-lock.yaml')==app['lockSha256']
-        assert json.loads((target/'package.json').read_text())['packageManager']==app['packageManager']
-        for file,digest in app['testFiles'].items():assert sha(target/file)==digest
-        assert sha(target/'package.json')==app['packageSha256']
-        run(['python3',str(HERE/'apply-app-overlay.py'),app['id'],str(STAGE)],'overlay-'+app['id']+'.log',10)
-        docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
-    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'buildFromExactSource':True},indent=2)+'\n')
-
+    docker('iris-file-transfer-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
+    assert json.loads((EVIDENCE/'image-toolchain.json').read_text())['node']==M['node']
+    archive=HERE/M['sourceArchive'];assert sha(archive)==M['sourceArchiveSha256'];extract(archive,STAGE/'source')
+    for file,digest in M['sourceFiles'].items():assert sha(STAGE/'source'/file)==digest,file
+    package=STAGE/'source/file-transfer-ts';assert json.loads((package/'package.json').read_text())['packageManager']==M['packageManager']
+    docker('iris-file-transfer-install',['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/source/file-transfer-ts',seconds=300)
+    assert sha(package/'pnpm-lock.yaml')==M['sourceFiles']['file-transfer-ts/pnpm-lock.yaml']
+    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'source':M['source'],'sourceArchiveSha256':M['sourceArchiveSha256'],'image':IMAGE,'frozenInstallPassed':True},indent=2)+'\n')
 def test():
     assert json.loads((EVIDENCE/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json')
-    assert set(SELECTED)<=set(json.loads((EVIDENCE/'prepared.json').read_text())['apps'])
-    budgets=json.loads((HERE/'app-budgets.json').read_text()); results=[]
-    for app in APPS:
-        code=docker('iris-fips-test-'+app['id'],['python3','/stage/procedure/run-one.py',app['id']],cwd='/stage/apps/'+app['id'],seconds=budgets[app['id']]+240,dummy=True,allow_failure=True)
-        assert not CONTAINERS,'No later app may start before cleanup'
-        results.append({'app':app['id'],'exitCode':code,'passed':code==0})
-    passed=all(row['passed'] for row in results)
-    (EVIDENCE/'passed.json').write_text(json.dumps({'passed':passed,'manifestSha256':sha(HERE/'manifest.json'),'apps':SELECTED,'results':results,'containersReaped':not CONTAINERS},indent=2)+'\n')
-    assert passed,'One or more unchanged app tests failed; see per-app evidence'
-
+    code=docker('iris-file-transfer-test',['python3','/stage/procedure/run-ts.py'],cwd='/stage/source/file-transfer-ts',seconds=900,allow_failure=True)
+    assert not CONTAINERS
+    (EVIDENCE/'phase-result.json').write_text(json.dumps({'typescriptPhasePassed':code==0,'scope':M['scope'],'source':M['source'],'manifestSha256':sha(HERE/'manifest.json'),'containersReaped':True,'liveInteropPassed':False,'publicSourceClosurePassed':False,'allReleaseGatesPassed':False},indent=2)+'\n')
+    assert code==0,'TypeScript phase failed; preserve full evidence'
 try:
     {'prepare':prepare,'test':test}[sys.argv[1]]()
 finally:cleanup()
