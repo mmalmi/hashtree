@@ -10,7 +10,7 @@ function manifestPath(name,req){
 }
 function qualify(root,output){
  const req=createRequire(root+'/package.json');
- const expected={'@playwright/test':'1.60.0','@hashtree/worker':'0.4.25','nostr-social-graph':'4.0.4','@fips/browser':'0.0.19','@fips/core':'0.0.54','@fips/transport-webrtc':'0.0.58','@fips/transport-websocket':'0.0.12'};
+ const expected={'@playwright/test':'1.60.0','@hashtree/worker':'0.4.25','nostr-social-graph':'4.0.4','@fips/browser':'0.0.21','@fips/core':'0.0.56','@fips/transport-webrtc':'0.0.60','@fips/transport-websocket':'0.0.14'};
  const packages=[],resolved={};
  for(const [name,version] of Object.entries(expected)){
   const entry=manifestPath(name,req),bytes=fs.readFileSync(entry),manifest=JSON.parse(bytes);assert.equal(manifest.name,name);assert.equal(manifest.version,version);
