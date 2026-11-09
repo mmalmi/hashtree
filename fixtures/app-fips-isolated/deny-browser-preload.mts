@@ -4,7 +4,9 @@ import {spawnSync} from 'node:child_process';
 import {createDenyProxy, assertWorkerNetworkBlocked} from './standalone-browser-boundary.ts';
 import {grantIsolatedPermission} from './permission-context.ts';
 const require=createRequire(`${process.cwd()}/package.json`);
-const {chromium}=require('@playwright/test');
+// Import the browser library without installing Playwright's global matchers in Vitest.
+const playwrightRequire=createRequire(require.resolve('@playwright/test'));
+const {chromium}=playwrightRequire('playwright');
 const launch=chromium.launch.bind(chromium);
 chromium.launch=async(options={})=>{
   const proof=process.env.BROWSER_BOUNDARY_RECEIPT;
