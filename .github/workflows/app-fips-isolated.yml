@@ -1,30 +1,28 @@
-name: Original Rust wire fixture and missing TypeScript interoperability gate
+name: Isolated private publication successor package
 on:
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
-  qualify:
+  package:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 25
     steps:
       - name: Set task-exclusive stage
-        run: echo "PUBSUB_STAGE=$RUNNER_TEMP/pubsub-wire-fixture" >> "$GITHUB_ENV"
+        run: echo "PUBSUB_STAGE=$RUNNER_TEMP/pubsub-successor-package" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Verify immutable source and compilers then fetch locked inputs
-        run: timeout --signal=TERM --kill-after=15s 1300s python3 fixtures/pubsub-wire-fixture/controller.py prepare
-      - name: Compile only original Rust fixture offline
-        run: timeout --signal=TERM --kill-after=15s 1250s python3 fixtures/pubsub-wire-fixture/controller.py build
-      - name: Run only missing original TypeScript process-boundary case
-        run: timeout --signal=TERM --kill-after=15s 180s python3 fixtures/pubsub-wire-fixture/controller.py test
-      - name: Preserve fixture provenance and case evidence
+      - name: Prepare immutable inputs and frozen installation
+        run: timeout --signal=TERM --kill-after=15s 700s python3 fixtures/pubsub-successor-package/controller.py prepare
+      - name: Build fresh distribution and package exact version
+        run: timeout --signal=TERM --kill-after=15s 650s python3 fixtures/pubsub-successor-package/controller.py package
+      - name: Preserve package and derived-source evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pubsub-wire-fixture-${{ github.sha }}
-          path: ${{ runner.temp }}/pubsub-wire-fixture/evidence
+          name: pubsub-successor-package-${{ github.sha }}
+          path: ${{ runner.temp }}/pubsub-successor-package/evidence
           if-no-files-found: error
           retention-days: 7
           include-hidden-files: true
