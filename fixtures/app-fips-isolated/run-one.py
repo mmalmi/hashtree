@@ -16,6 +16,11 @@ env=dict(os.environ,CI='1',FIPS_APP_EVIDENCE=str(evidence),**spec['env'],REJECT_
 def run(command,log,timeout):
     with (evidence/(log+'.log')).open('wb') as out:
         subprocess.run(command,stdout=out,stderr=subprocess.STDOUT,env=env,check=True,timeout=timeout)
+def memory_proof(label):
+    folder=pathlib.Path('/sys/fs/cgroup');events={k:int(v) for k,v in (line.split() for line in (folder/'memory.events').read_text().splitlines())}
+    (evidence/('memory-'+label+'.json')).write_text(json.dumps(dict(scope='whole container and descendants',events=events,current=(folder/'memory.current').read_text().strip(),peak=(folder/'memory.peak').read_text().strip(),limit=(folder/'memory.max').read_text().strip()),indent=2)+'\n')
+    assert events['oom']==events['oom_kill']==0
+memory_proof('before')
 try:
     run(['python3','/stage/procedure/network-proof.py',str(evidence/'network.json')],'network',15)
     run(['node','/stage/procedure/browser-proof.cjs',str(evidence/'browser.json')],'browser',50)
@@ -82,5 +87,6 @@ export default defineConfig({...original,workers:1,retries:0,outputDir:process.e
     assert passed,'Original release profile failed'
 
 finally:
-    run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after.json')],'network-after',15)
-    proxy.shutdown();proxy.server_close()
+    try:run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after.json')],'network-after',15)
+    finally:
+        proxy.shutdown();proxy.server_close();memory_proof('after')

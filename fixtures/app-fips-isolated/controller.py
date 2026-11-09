@@ -1,5 +1,5 @@
 """Task-only, hash-pinned browser qualification. Never builds native code."""
-import hashlib,json,os,pathlib,shutil,signal,subprocess,sys,tarfile,time,urllib.request
+import base64,hashlib,json,os,pathlib,shutil,signal,subprocess,sys,tarfile,time,urllib.request
 HERE=pathlib.Path(__file__).resolve().parent
 M=json.loads((HERE/'manifest.json').read_text())
 STAGE=pathlib.Path(os.environ['FIPS_STAGE']).resolve()
@@ -31,18 +31,25 @@ def interrupted(signum,frame):
 for signum in (signal.SIGTERM,signal.SIGINT):signal.signal(signum,interrupted)
 def run(args,log,timeout=300,allow_failure=False):
     global PROCESS
-    assert time.monotonic()-START<4200,'Overall deadline'
-    assert shutil.disk_usage(STAGE).free>8*1024**3,'Hosted disk reserve'
-    p=EVIDENCE/log;assert not p.exists(),'Preserve prior evidence'
-    with p.open('wb') as output:
-        PROCESS=subprocess.Popen(args,env=SAFE_ENV,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
-        try:code=PROCESS.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
+    assert time.monotonic()-START<4200
+    p=EVIDENCE/log;assert not p.exists();started=time.monotonic();minimum=None;before=None;after=None;code=None;failure=None
+    try:
+        with p.open('wb') as output:
+            before=shutil.disk_usage(STAGE).free;minimum=before;assert before>=20*1024**3
+            PROCESS=subprocess.Popen(args,env=SAFE_ENV,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
+            while PROCESS.poll() is None:
+                minimum=min(minimum,shutil.disk_usage(STAGE).free);assert minimum>=20*1024**3 and time.monotonic()-started<timeout;time.sleep(1)
+            code=PROCESS.wait();after=shutil.disk_usage(STAGE).free;minimum=min(minimum,after);assert after>=20*1024**3
+    except BaseException as exc:failure=type(exc).__name__;raise
+    finally:
+        if PROCESS is not None and PROCESS.poll() is None:
             os.killpg(PROCESS.pid,signal.SIGTERM)
             try:PROCESS.wait(timeout=5)
             except subprocess.TimeoutExpired:os.killpg(PROCESS.pid,signal.SIGKILL);PROCESS.wait(timeout=5)
-            raise
-        finally:PROCESS=None
+        if PROCESS is not None and code is None:code=PROCESS.returncode
+        PROCESS=None
+        final_free=shutil.disk_usage(STAGE).free;minimum=final_free if minimum is None else min(minimum,final_free)
+        with (EVIDENCE/'commands.jsonl').open('a') as f:f.write(json.dumps(dict(log=log,exitCode=code,beforeFreeBytes=before,afterCommandFreeBytes=after,finalFreeBytes=final_free,minimumFreeBytes=minimum,seconds=time.monotonic()-started,failureType=failure,directChildWaited=True))+'\n')
     if not allow_failure:assert code==0,f'{log} exited {code}'
     return code
 def fetch(item,path):
@@ -59,6 +66,7 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
     CONTAINERS.add(name)
     run(args,name+'-create.log',30)
     inspect=json.loads(subprocess.check_output(['docker','inspect',name],env=SAFE_ENV,text=True,timeout=5))[0]
+    assert inspect['Image']==M['imageId']
     h=inspect['HostConfig'];assert h['NetworkMode']==network and h['PidMode']=='' and h['Memory']==4294967296 and h['MemorySwap']==h['Memory'] and h['NanoCpus']==2000000000 and h['PidsLimit']==512
     assert h['CapDrop']==['ALL'] and h['ReadonlyRootfs'] and inspect['Config']['User']==f'{os.getuid()}:{os.getgid()}'
     (EVIDENCE/(name+'-container.json')).write_text(json.dumps({'imageId':inspect['Image'],'config':inspect['Config'],'hostConfig':h},indent=2)+'\n')
@@ -72,7 +80,7 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
             run(['docker','attach',name],name+'.log',seconds,allow_failure=True)
         else:run(['docker','start','--attach',name],name+'.log',seconds,allow_failure=True)
         terminal=json.loads(subprocess.check_output(['docker','inspect',name],env=SAFE_ENV,text=True,timeout=5))[0]
-        assert terminal['Id']==inspect['Id'] and not terminal['State']['Running'],'No terminal container identity'
+        assert terminal['Id']==inspect['Id'] and not terminal['State']['Running'] and not terminal['State']['OOMKilled'],'No terminal container identity'
         (EVIDENCE/(name+'-terminal.json')).write_text(json.dumps(terminal['State'],indent=2)+'\n')
         code=terminal['State']['ExitCode']
         if not allow_failure:assert code==0,f'{name} exited {code}'
@@ -80,14 +88,24 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
     finally:cleanup()
 
 def prepare():
-    assert not STAGE.exists(),'Use one empty task stage'
+    assert not STAGE.exists() and shutil.disk_usage(STAGE.parent).free>=30*1024**3,'Empty task stage and30GiB entry required'
     STAGE.mkdir(mode=0o700);EVIDENCE.mkdir();(STAGE/'home/social').mkdir(parents=True);(STAGE/'tools/bin').mkdir(parents=True)
     shutil.copytree(HERE,STAGE/'procedure',ignore=shutil.ignore_patterns('archives'))
     fetch(M['pnpm'],STAGE/'pnpm.tgz');extract(STAGE/'pnpm.tgz',STAGE/'tools/pnpm')
     (STAGE/'tools/bin/pnpm').write_text('#!/bin/sh\nexec node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');(STAGE/'tools/bin/pnpm').chmod(0o755)
     run(['docker','pull',IMAGE],'image-pull.log',300)
     docker('iris-fips-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
-    assert json.loads((EVIDENCE/'image-toolchain.json').read_text())['node'].startswith('v24.')
+    assert json.loads((EVIDENCE/'image-toolchain.json').read_text())==M['nodeProof']
+    published=M['pubsubPublishedInput'];archive=STAGE/'pubsub-public.tgz'
+    fetch(published,archive);raw=archive.read_bytes()
+    assert len(raw)==published['bytes'] and 'sha512-'+base64.b64encode(hashlib.sha512(raw).digest()).decode()==published['integrity']
+    with tarfile.open(archive) as tar:
+        members={}
+        for member in tar:
+            assert member.isfile() and member.name not in members and member.name in published['members']
+            data=tar.extractfile(member).read();members[member.name]=dict(bytes=len(data),sha256=hashlib.sha256(data).hexdigest())
+        assert members==published['members']
+    (EVIDENCE/'pubsub-public-input.json').write_text(json.dumps(dict(source=published['source'],url=published['url'],sha256=sha(archive),bytes=len(raw),integrity=published['integrity'],allMembersVerified=len(members),anonymousHttp=True),indent=2)+'\n')
     for app in APPS:
         archive=HERE/app['archive'];assert sha(archive)==app['archiveSha256']
         target=STAGE/'apps'/app['id'];extract(archive,target)

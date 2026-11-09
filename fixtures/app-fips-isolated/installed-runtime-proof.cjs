@@ -22,7 +22,18 @@ for(const expected of spec.installedRuntimeExpectations){
 }
 for(const name of ['@fips/transport-webrtc','@fips/transport-websocket'])
  assert.equal(manifest('@fips/core',createRequire(entries[name])),entries['@fips/core'],'All FIPS transports must resolve the accepted core');
+const sharedPubsubOwners=['@hashtree/fips-transport','@hashtree/nostr-pubsub','@hashtree/worker'];
+for(const name of sharedPubsubOwners){
+ const owner=manifest(name,req);
+ assert.equal(manifest('nostr-pubsub',createRequire(owner)),entries['nostr-pubsub'],'Worker and peer adapters must use the qualified receipt implementation');
+ if(name==='@hashtree/fips-transport')assert.equal(manifest('@fips/core',createRequire(owner)),entries['@fips/core']);
+}
+const pubsub=JSON.parse(fs.readFileSync('/stage/procedure/manifest.json')).pubsubPublishedInput;
+for(const [name,expected] of Object.entries(pubsub.members)){
+ const file=path.join(path.dirname(entries['nostr-pubsub']),name.replace(/^package\//,'')),raw=fs.readFileSync(file);
+ assert.equal(raw.length,expected.bytes);assert.equal(sha(raw),expected.sha256);
+}
 const installedLock=path.join(root,'node_modules/.pnpm/lock.yaml');assert(fs.existsSync(installedLock));
 fs.writeFileSync(process.argv[2],JSON.stringify({passed:true,source:spec.commit,acceptedDependencyReceiptSha256:spec.acceptedDependencyRelease.receiptSha256,
  releaseSource:spec.acceptedDependencyRelease.source,packageSha256:spec.packageSha256,lockSha256:spec.lockSha256,installedLockSha256:sha(fs.readFileSync(installedLock)),packages,
- fipsCoreResolutionShared:true,node:process.version},null,2)+'\n');
+ fipsCoreResolutionShared:true,pubsubResolutionShared:true,sharedPubsubOwners,pubsubInstalledMembersVerified:Object.keys(pubsub.members).length,pubsubArchiveSha256:pubsub.sha256,node:process.version},null,2)+'\n');

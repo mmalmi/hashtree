@@ -1,4 +1,4 @@
-name: Isolated Social runtime61 full release gates
+name: Isolated Social runtime61 private receipt full release gates
 on:
   workflow_dispatch:
 permissions:
@@ -11,7 +11,7 @@ jobs:
       FIPS_APPS: social
     steps:
       - name: Set task-exclusive stage
-        run: echo "FIPS_STAGE=$RUNNER_TEMP/social-runtime61" >> "$GITHUB_ENV"
+        run: echo "FIPS_STAGE=$RUNNER_TEMP/social-runtime61-pubsub025" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
@@ -23,8 +23,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: social-runtime61-${{ github.sha }}
-          path: ${{ runner.temp }}/social-runtime61/evidence
+          name: social-runtime61-pubsub025-${{ github.sha }}
+          path: ${{ runner.temp }}/social-runtime61-pubsub025/evidence
           if-no-files-found: error
           retention-days: 7
           include-hidden-files: true
