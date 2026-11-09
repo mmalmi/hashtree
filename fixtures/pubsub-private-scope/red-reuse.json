@@ -1,0 +1,96 @@
+{
+  "run": 42616839587,
+  "runUrl": "https://github.com/mmalmi/hashtree/actions/runs/42616839587",
+  "carrier": "f8457ed44b0046f4803cb9ee3025b5a463ae83ab",
+  "manifestSha256": "9c426fd1102139533f7cb317c106c695bcacc8385d3366e67945d42953f5c83b",
+  "source": "d6cefb96c6476f12d70247f577ee5597420b0920",
+  "archiveSha256": "c117914eed755f9747d06a3099899909fb71e34ab69ce7f157ff0e3f7c25ce39",
+  "testSha256": "5ea1a7864f42ee472f916ec6120bf5f39986f7d2fff5d1aa6c769d9f6ba526ed",
+  "reportSha256": "e153d2b972325bf840ede257f3408852bca4c5fcd31b61e3cd86a9d5a68ad646",
+  "expectedFullNames": [
+    "private publication connection boundary does not coalesce different 'acknowledgment policy' options and retires settled attempts",
+    "private publication connection boundary does not coalesce different 'local echo policy' options and retires settled attempts",
+    "private publication connection boundary does not coalesce different 'queue policy' options and retires settled attempts",
+    "private publication connection boundary does not coalesce different 'source destination' options and retires settled attempts",
+    "private publication connection boundary keeps peer and relay receipts independent for one envelope (peer-first)",
+    "private publication connection boundary keeps peer and relay receipts independent for one envelope (relay-first)",
+    "private publication connection boundary opens independent authenticated connections for different explicit relay scopes"
+  ],
+  "sevenExpectedIdentityFailuresVerified": true,
+  "unselectedOriginalAssertions": 12,
+  "harnessStop": "Vitest4 uses quoted table labels and skipped assertion status (aggregate numPendingTests); unchanged input evidence reused",
+  "evidence": {
+    "red-tests.json": "e153d2b972325bf840ede257f3408852bca4c5fcd31b61e3cd86a9d5a68ad646",
+    "steps.json": "bbeb328ce5af3048874c78d628c17428e219c01df5172855923abacf3dc3ed38",
+    "installed-inputs.json": "f52c60c6b14b70917830c55c8c461f925690b42e2efdb3a4d668f0a7666ba89b",
+    "toolchain.json": "090816b12f9f89a4a1caa099fb80fba4a67809615c03700476a87cd76c4dcfd3",
+    "prepared.json": "a2d1d2ec1145fef86178595a803328cc0db6de072a5df52a3f6e7cd8f390b761",
+    "network-before.json": "abf5d61b25916328544566dc3232f95437d5b8a76e8b82ad001ba639bafe8835",
+    "pubsub-scope-red-green-container.json": "fb5138817afe8468b252536a0db664cf2c1e070940dcb9e7728fa596a37d0347",
+    "pubsub-scope-red-green-terminal.json": "ae432f039a08d161c2da98b8aa641fbdbdd41a30454f46289e432d98fea36bff",
+    "hosted-result.json": "0b6ee08253962372a30259f76b96375ad8f92590ea2d62a3a5b8ae0db74e689a"
+  },
+  "installed": {
+    "packages": {
+      "@fips/tcp": {
+        "version": "0.2.3",
+        "manifestSha256": "c87d85ebc6fff5884c41d1e8d88ebfb07e062cb5913186f9ecb9ea4f621af3e1"
+      },
+      "nostr-pubsub-reconcile": {
+        "version": "0.1.1",
+        "manifestSha256": "231a31a95cb3d768fac92dacf0af4b174ff501ecbbdeba91b14d799adfe7c6b6"
+      },
+      "nostr-tools": {
+        "version": "2.23.3",
+        "manifestSha256": "533d1e694356ee060f33dc4de079df58d68356ff1ed1abd758267556f7fb8db5"
+      },
+      "typescript": {
+        "version": "5.9.3",
+        "manifestSha256": "822ef7ca6452205657b6288b066481ecf508bfbf43455d715cf7d3ec457561e6"
+      },
+      "vitest": {
+        "version": "4.1.9",
+        "manifestSha256": "e12762a5b629bea6cbb2b0540a8a15c50f3098bb3193d3e319293b58b64c4ed9"
+      },
+      "ws": {
+        "version": "8.22.0",
+        "manifestSha256": "c1ef91ca04eb4754c011c5f0e7638b5078ff71104fada400c44ac761cf93e0b1"
+      },
+      "@types/node": {
+        "version": "24.13.2",
+        "manifestSha256": "de241e8cdbb736fdd4927a1519aba5a55c7fd2170c5dcdd4e4876aec346f632c"
+      },
+      "@types/ws": {
+        "version": "8.18.1",
+        "manifestSha256": "92f0a87117b71231a0864f7bb7c6a84b7fc91dbdd7d33379fc23d655980ad083"
+      }
+    },
+    "sourceLockSha256": "c978221fe808774a8d25d800f72ae50f5ff577eb55ea1eb95cf1d89a6eed2e20",
+    "installedLockSha256": "c978221fe808774a8d25d800f72ae50f5ff577eb55ea1eb95cf1d89a6eed2e20",
+    "osRelease": "PRETTY_NAME=\"Ubuntu 24.04.4 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.4 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n"
+  },
+  "toolchain": {
+    "node": "v24.14.1",
+    "nodeSha256": "bf9112eb83a827dc9f9c8d19bb7bddcbf00f7b2fedae18fdcaee05406981f20a",
+    "pnpm": "11.7.0",
+    "platform": "linux",
+    "arch": "x64"
+  },
+  "step": {
+    "name": "red-regression",
+    "args": [
+      "pnpm",
+      "--filter",
+      "nostr-pubsub",
+      "test",
+      "tests/private-relay-publisher.test.ts",
+      "--testNamePattern",
+      "keeps peer and relay receipts independent|does not coalesce different|opens independent authenticated connections",
+      "--reporter=json",
+      "--outputFile=/stage/evidence/red-tests.json"
+    ],
+    "exitCode": 1,
+    "elapsedSeconds": 1.2685931130000085,
+    "logSha256": "890e98c499b9354f263d7c35427fda559b788ec2edf19b1b3647e424e46bc5ab"
+  }
+}

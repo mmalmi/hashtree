@@ -1,4 +1,4 @@
-name: Isolated private publication scope regression
+name: Isolated private publication GREEN continuation
 on:
   workflow_dispatch:
 permissions:
@@ -15,7 +15,7 @@ jobs:
           persist-credentials: false
       - name: Prepare hash-pinned inputs and locked dependencies
         run: timeout --signal=TERM --kill-after=15s 700s python3 fixtures/pubsub-private-scope/controller.py prepare
-      - name: Prove failure then qualify corrected scope and existing private publication gates
+      - name: Qualify corrected scope and existing gates against retained RED evidence
         run: timeout --signal=TERM --kill-after=15s 1550s python3 fixtures/pubsub-private-scope/controller.py test
       - name: Preserve RED and GREEN evidence
         if: always()

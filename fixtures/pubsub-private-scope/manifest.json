@@ -2835,10 +2835,10 @@
     "fullNames": [
       "private publication connection boundary keeps peer and relay receipts independent for one envelope (peer-first)",
       "private publication connection boundary keeps peer and relay receipts independent for one envelope (relay-first)",
-      "private publication connection boundary does not coalesce different acknowledgment policy options and retires settled attempts",
-      "private publication connection boundary does not coalesce different queue policy options and retires settled attempts",
-      "private publication connection boundary does not coalesce different local echo policy options and retires settled attempts",
-      "private publication connection boundary does not coalesce different source destination options and retires settled attempts",
+      "private publication connection boundary does not coalesce different 'acknowledgment policy' options and retires settled attempts",
+      "private publication connection boundary does not coalesce different 'queue policy' options and retires settled attempts",
+      "private publication connection boundary does not coalesce different 'local echo policy' options and retires settled attempts",
+      "private publication connection boundary does not coalesce different 'source destination' options and retires settled attempts",
       "private publication connection boundary opens independent authenticated connections for different explicit relay scopes"
     ],
     "pattern": "keeps peer and relay receipts independent|does not coalesce different|opens independent authenticated connections"
@@ -2871,5 +2871,10 @@
   },
   "qualificationOnly": true,
   "releaseAccepted": false,
-  "noNativeRuntimeOrConsumerGates": true
+  "noNativeRuntimeOrConsumerGates": true,
+  "redReuse": {
+    "provenanceSha256": "ffec8e62b916e61546610bb3918d627dbc7963393fe62820300483d5b8a44d6e",
+    "reportSha256": "e153d2b972325bf840ede257f3408852bca4c5fcd31b61e3cd86a9d5a68ad646",
+    "run": 42616839587
+  }
 }
