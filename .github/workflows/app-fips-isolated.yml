@@ -32,3 +32,4 @@ jobs:
           path: ${{ runner.temp }}/app-runtime61-${{ matrix.app }}/evidence
           if-no-files-found: error
           retention-days: 7
+          include-hidden-files: true
