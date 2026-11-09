@@ -1,9 +1,8 @@
-name: Isolated graph consumer release gates
+name: Fresh git runtime61 complete release qualification
 on:
   workflow_dispatch:
 permissions:
   contents: read
-  actions: read
 jobs:
   qualify:
     strategy:
@@ -12,7 +11,7 @@ jobs:
       matrix:
         app: [git]
     runs-on: ubuntu-24.04
-    timeout-minutes: 65
+    timeout-minutes: 70
     env:
       FIPS_APPS: ${{ matrix.app }}
     steps:
@@ -23,16 +22,8 @@ jobs:
           persist-credentials: false
       - name: Prepare pinned inputs before isolation
         run: timeout --signal=TERM --kill-after=15s 900s python3 fixtures/app-fips-isolated/controller.py prepare
-      - name: Verify the immutable browser-run artifact
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          mkdir "$FIPS_STAGE/earlier"
-          gh api repos/mmalmi/hashtree/actions/artifacts/13566378424/zip > "$FIPS_STAGE/earlier.zip"
-          echo "e1c1dad63a3c49b4474d7193a0a68931aceafccaa1cb81ad7f0b4a555197e05d  $FIPS_STAGE/earlier.zip" | sha256sum --check
-          python3 -m zipfile -e "$FIPS_STAGE/earlier.zip" "$FIPS_STAGE/earlier"
       - name: Build and qualify after independent unsigned denial controls
-        run: timeout --signal=TERM --kill-after=15s 3000s python3 fixtures/app-fips-isolated/controller.py test
+        run: timeout --signal=TERM --kill-after=15s 3090s python3 fixtures/app-fips-isolated/controller.py test
       - name: Preserve logs and exact qualified distribution
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
