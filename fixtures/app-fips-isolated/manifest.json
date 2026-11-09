@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "eb532a1b39e70510d1daf8ddaafb520fbd5d3728",
+      "commit": "eaa29969eac5f6dbeba9d6f45f3a8224dbca7b70",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "fe6cf544ff33e950d11a41be2b8f5f4ed250d61ef9c5a98b0aa2ceb7efcbd157",
+      "archiveSha256": "7915f5d0bc2caec9f01488c8a0f1eab0b4c8ffcee4e91069d888ba543396d77b",
       "lockSha256": "835523417f95d16417f25d2200ee7a45b573a720efe126cd501a08e74e815836",
       "packageManager": "pnpm@10.28.2",
       "distDir": "dist",
@@ -299,7 +299,7 @@
         "PLAYWRIGHT_RUNTIME_PORT": "4181",
         "PLAYWRIGHT_USE_PREVIEW": "1"
       },
-      "archiveBytes": 2879610,
+      "archiveBytes": 2880391,
       "packageSha256": "40e71af0c07dd430f4eb536c984da99c865f088184eb5f32263b5c9b00493fb4",
       "acceptedDependencyRelease": {
         "tag": "runtime-v0.0.60",
