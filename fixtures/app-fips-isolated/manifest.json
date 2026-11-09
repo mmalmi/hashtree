@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Fresh exact-source runtime61 Social build and complete unchanged release profile; no historical browser/build reuse",
+  "purpose": "Private clear publication diagnostic only; existing production bytes, original four UI assertions",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,40 +11,29 @@
   "apps": [
     {
       "id": "social",
-      "commit": "3ec8fc86e926d44a0afeee508190caa6effba6d3",
+      "commit": "da35133215011cccbbf3e7c0c44f763ceb1fcb0e",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "dbc087e3cf30b6116b046fe93fab655a9ecd8ff71af0b76480c7d0e114a4f220",
+      "archiveSha256": "84163c24078bd1669c7017cf12691dc552a0f1dbda280107a39c86471c254730",
       "lockSha256": "c86c1adab9d9e6d6af88397450cad045e9e979b0ac57c718100751708e682721",
       "packageManager": "pnpm@10.28.2",
       "distDir": "dist",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
       "specs": [
-        "tests/initial-paint.spec.ts",
-        "tests/favorites-feed-ui.spec.ts",
-        "tests/private-contact-sync-ui.spec.ts",
-        "tests/recent-searches.spec.ts",
-        "tests/fips-p2p.spec.ts",
-        "tests/personal-event-index-publication.spec.ts"
+        "tests/private-contact-sync-ui.spec.ts"
       ],
       "testFiles": {
-        "tests/initial-paint.spec.ts": "5d55dcfea8f841b195945b6bf496f912abdf6cbe5ffaaf9e0c484ffb2a3f818b",
-        "tests/favorites-feed-ui.spec.ts": "d1eba8bd2534e4f6765025bf5ab56ccf308bfc9f8aee930d0665c53c49319a23",
-        "tests/private-contact-sync-ui.spec.ts": "eb16cd060367488eb0eda37ea66e1185f5453e2199865aa2fc9482612f90955f",
-        "tests/recent-searches.spec.ts": "5a1f0ad5e96b48aafa96465dabc749d5c80135b6047567fc02d65e8837e4a68f",
-        "tests/fips-p2p.spec.ts": "2fa157dd37152cdbfc8334ffd0a9c265cb8cc15ef102a9f75af2cfeb85ec5416",
-        "tests/personal-event-index-publication.spec.ts": "935c4ffadb55d54054066e57029cc428396897628aca4f52c7b86a5e13bdc5d4"
+        "tests/private-contact-sync-ui.spec.ts": "41bee5da47e513d27160c42c243d5e29c8ffc2ac5179a7784d727e4a77d95d79"
       },
       "expectedProjects": [
-        "chromium",
-        "source-runtime"
+        "chromium"
       ],
-      "expectedCases": 22,
+      "expectedCases": 4,
       "env": {
         "PLAYWRIGHT_PORT": "4180",
         "PLAYWRIGHT_RUNTIME_PORT": "4181",
         "PLAYWRIGHT_USE_PREVIEW": "1"
       },
-      "archiveBytes": 2883397,
+      "archiveBytes": 2883941,
       "packageSha256": "1b866201dae52c8989369fc5f5235fcef8d43e9830a4b8ee56de5be141d5e7fc",
       "acceptedDependencyRelease": {
         "tag": "runtime-v0.0.61",
@@ -130,9 +119,9 @@
           }
         ]
       },
-      "sourceTree": "88849aef3d8123cfaffc72b7c3894d17c92f454f",
+      "sourceTree": "6b540a9be3e919ff7ce8b0d6a4b5e1ccd9460d7a",
       "version": "0.1.30",
-      "buildFromSource": true,
+      "buildFromSource": false,
       "installedRuntimeExpectations": [
         {
           "package": "@fips/core",
@@ -180,8 +169,76 @@
           "version": "0.0.183"
         }
       ],
-      "dependencyGuardSha256": "1aecc5090999ef0a7b58e2da427ab3354c20936ad1a71a692e5fef2e12f8ab8b"
+      "dependencyGuardSha256": "1aecc5090999ef0a7b58e2da427ab3354c20936ad1a71a692e5fef2e12f8ab8b",
+      "diagnosticBuild": {
+        "diagnosticOnly": true,
+        "originRun": "42606628728",
+        "originRunPassed": false,
+        "productSource": "3ec8fc86e926d44a0afeee508190caa6effba6d3",
+        "diagnosticSource": "da35133215011cccbbf3e7c0c44f763ceb1fcb0e",
+        "sourceDifference": [
+          "tests/private-contact-sync-ui.spec.ts"
+        ],
+        "productEntriesSha256": "c82d3f46d59c908130a3c5638c706bf002b0270594987ceec40b71d343fb0deb",
+        "archive": "diagnostic-dist.tar.gz",
+        "archiveSha256": "772e4e3c45bfd08a379e5e83e8894ab57bea3919a12ed2842080c55f2edc9a19",
+        "archiveBytes": 2802091,
+        "files": {
+          "app-icon.svg": "d2c34897b8c77486300448391606bd1f26d74613c89fc452ae59be71baf15fff",
+          "assets/AccountSheet-CP2Cd9uC.js": "4587b1a79684ce987dd4e67f61d748f76f94d6e0822cec2ca678bff1a8ea6292",
+          "assets/ArticleContent-DcTzqRfk.js": "bdbd0b06b13ed273e82c4a704b7b93efc004b279d83e89ebc230d2d34381592b",
+          "assets/ArticleContent-sASPTX0G.css": "abfdf9c40028c97a0fada3408fb10c8195b114a41229e7ad47e592bb6ce389c1",
+          "assets/FeedSourceEditorSheet-DCj_bfF4.js": "5a00cfaac6452c6fa19a06b8efa31e0b9a9dc3b249c6e92c7f06f8337922cb5d",
+          "assets/NoteDetailSheet-ffvKK2gp.js": "4b57134ab005131ab27dbb681bdcd9fb57ac82a0de61ab764f36873e50751690",
+          "assets/ProfilePeopleModal-C1ji663a.js": "0b5729a47b66e9ddbe68196507c0cde0a9bcf06b97e0b33ed8ae0d30f02a343b",
+          "assets/ProfileQrModal-3Ivknql5.js": "91d07509b1c097505cc93aece594c4d7ca34a25c742e0135eae7d3466bcc114a",
+          "assets/QrScanner-DZlx3AGA.js": "b5282cb755abb07905b0e810b92a4c4f9cc76a9c87d7fa33e2dfd42e15baa766",
+          "assets/SearchPage-WSlFdwx8.js": "7e6486b7573d4f3def83c6c2be76e6a88c024a55356cdad45ab4bff37a5d78b6",
+          "assets/SettingsPage-CSwbJSog.js": "6aaf52fc76f0bc7739aabe7eeeb0537a2668f17ebf7cb034ac1d9bfe9982caf4",
+          "assets/SocialGraph-BxdWTlny-DdPZuNuz.js": "25597ab087c747abc8857f89918ffa94f231f17a2b5671ece1977d83c08e38eb",
+          "assets/WalletPage-DmCM9Es3.js": "e2b5aec49971c24b23aaa03f840769b31415f86549d9e08685e36caa1b7fd4e2",
+          "assets/ZapAllSheet-COjmDzBb.js": "b29f8a7db09ec817ce1b175291e66b6e26315f910e59cf68fdfc7aa1a798e2b2",
+          "assets/_commonjsHelpers-Cpj98o6Y.js": "9625379badd4849610dfe6c15453cdf0c0071264c90eef177307fac094d2aa6c",
+          "assets/browser-AJ-GTtSI.js": "4757c0ed06ed0a1ea41076f6f0e02d56015f423afa4adc21a8bd97b043ddcf8f",
+          "assets/browserNotifications-Bel5Gnxd.js": "3bdcb74685357001408345b71e7480088890dd6894d167b4cce8f7b4b8bb1772",
+          "assets/browserProvider-DS4NeoTB.js": "a534b9bf001cdf509aea173aa902669b9c42ec029ac94026b7ac76cab75a35e5",
+          "assets/browserShadowReadComparator-JmI9srKR.js": "1de9738d9f45774bd33601f9fa7e7651ba2a0770ed3fc243de363aea82e65947",
+          "assets/hashtree.worker-Nq9U6Xs3.js": "477db1734f9f253fb73b4a9259fddbb897975c630fe1846fdc74659cc0aedd49",
+          "assets/index-Cs8XsgIR.js": "b203e3391912386fd7f7044b4e29c8028b6adb503bf9e309936ee23a1a985a70",
+          "assets/index-D7ZkJxDD.js": "e675289b609032f8cf3928eaf6d7f8764514f64cd0d236e943b09a57403d5bf4",
+          "assets/index-DZA_8kdO.js": "8cec70d0612ab5caf84a3843b01a66703c85f6e7bccf948566fb3ad1bfbf66f2",
+          "assets/nostr-social-graph.es-C8QVl_NV.js": "b6b29e313d134098c17ba9950d6291d3b1ded5f6a08dfdfd7247f71404fa3a5c",
+          "assets/nwcWallet-CqdbOX8k.js": "8815b47a82d51004e444866d6d3f6db6e85820718740dc2af4574b8a81439363",
+          "assets/postSearchRuntime-Cd6_FOgr.js": "1ea7a709067dced8dc8e9a96849888a399e3b67c3d7fef749730a4c2fd2bff39",
+          "assets/postSearchTermRouting-ChAZmzxH.js": "1e29e8feaba869034fa7b452e265b1f649d3f8523281d7015e6d3127b2d14127",
+          "assets/postSearchV5PageRouter-iyTVgBl0.js": "083c3b265a890d64787d1cf6fb91b91902fc4e5595ab20e8fae2aa53a358b858",
+          "assets/privateContactSyncV2-B0Vot6HE.js": "bd16b06664f8a39df199cc86b9802312b8f27d26751121af12450b3828d89c58",
+          "assets/privateContactSyncV2Controller-Ct3KL7QY.js": "a70371724e15dfcb735a28222d56d6ccf191095b72b19645c76076e842caf036",
+          "assets/privateRatchetRuntime-DSuj_V-Y.js": "153b969fb33ae91d2f8d2e6161149deb95327aaa7cde785aaa7c57dd6f7765c3",
+          "assets/profileSearch-BVSC-2rs.js": "599afece84d29423786312c266b4bb1530b543e223ac7a4e5c061c50896fc4f2",
+          "assets/profileSearchV3Runtime-DG902Ooa.js": "ce6e219ccfa15dfc0c22db0ab3552618ddc8214c8faf4598e3acaca13f1f980f",
+          "assets/publicGraphSync-BHdy53ug.js": "2e8f07866a3684c1f5766e7ae805cf9950dfa66f69ddb4e28c6767ab9fab2c67",
+          "assets/retained-peer-discovery-BEL281OR.js": "db764a3338743af7cba0a97ed34bbf372dd6bb9172608c7d78debb288f69f616",
+          "assets/signers-DYOmaviZ.js": "2bea4386b31755a93b8ed3c888666c9a3c9c0b80303722470d1cde70e5d26a16",
+          "assets/socialRelationshipRuntime-Qs9m1wRs.js": "aeb6c5017486d89b3fd943f6c2c969fb6e726f4795fee86c5d433f40e00780fd",
+          "assets/wallet.worker-Dh61wnKZ.js": "9a0f66e156f59a59af4abd10bc7af5815fa28ba984bcc6f8c20666fbc88d399a",
+          "assets/walletStore-CJJIAqsC.js": "60850b2f852eddef8b7c67d4c579f2977b9593cc97340b2697257af4b8fd8913",
+          "assets/walletUi-6nqc4p-0.js": "d8325fe8ed345fe765d782b6ea8400699bcd03eb1ebb17f6f06057d1ad15a235",
+          "assets/walletWorkerTransport-cvL55Uqb.js": "6b07673e660e06c828edfe5ca9f32ccb148c472952c0ba3c25a74e2ec51bbb28",
+          "assets/workerClient-DCj7OVlr.js": "6d3eb68659c17ebb52b4999567e9054146b7c7956ddfbb398402b31c87212b87",
+          "browser-notifications.js": "8dc6a445ab66e5b08a5f75341f78c9068e334434a8beaadf36ca97241fbd4fce",
+          "favicon.svg": "87081c44f9ccbc423b90a5a37fa4a65525dd1f5774415f25462e070b94828f61",
+          "index.html": "2a1e2ffc6391296299d2512c6516f7f2ea70f4059a8aa8b9e5eb8ef2faa6b8eb",
+          "iris-icons.svg": "096da41f9f1b43a38904062fe975a3b0dbe026f913a98814f232155acd505ef4",
+          "service-worker.js": "e7041c51c0500f00a1acfbbfd71f284681a8b5873cab7c42daf6b8365d0dfd1d",
+          "socialGraph.bin": "19b490ce9c8715cc5c8dc24b73719051ce932febaec4ec369ab1ed9f7c575d20",
+          "socialGraphFrontier.bin": "1b050f7f7b5805647eb18a0b990584605c177186f18200d42ed53cdb0a31a642",
+          "socialGraphSnapshot.provenance.json": "b90438e4c5ba5b0886c4678a093f339f461c137571dc6b503e5d95bad3cb1a82"
+        },
+        "originalSourceBuildFresh": true,
+        "notReleaseAccepted": true
+      }
     }
   ],
-  "expectedBrowserCases": 84
+  "expectedBrowserCases": 4
 }

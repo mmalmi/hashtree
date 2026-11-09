@@ -1,4 +1,4 @@
-name: Isolated Social runtime61 full release gates
+name: Isolated Social runtime61 private publication diagnostic
 on:
   workflow_dispatch:
 permissions:
@@ -6,25 +6,25 @@ permissions:
 jobs:
   qualify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
+    timeout-minutes: 40
     env:
       FIPS_APPS: social
     steps:
       - name: Set task-exclusive stage
-        run: echo "FIPS_STAGE=$RUNNER_TEMP/social-runtime61" >> "$GITHUB_ENV"
+        run: echo "FIPS_STAGE=$RUNNER_TEMP/social-runtime61-private" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
       - name: Prepare pinned inputs before isolation
         run: timeout --signal=TERM --kill-after=15s 900s python3 fixtures/app-fips-isolated/controller.py prepare
-      - name: Build and qualify full profile after independent unsigned denial controls
-        run: timeout --signal=TERM --kill-after=15s 3900s python3 fixtures/app-fips-isolated/controller.py test
+      - name: Diagnose four private cases on identical build after denial controls
+        run: timeout --signal=TERM --kill-after=15s 1740s python3 fixtures/app-fips-isolated/controller.py test
       - name: Preserve qualification evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: social-runtime61-${{ github.sha }}
-          path: ${{ runner.temp }}/social-runtime61/evidence
+          name: social-runtime61-private-${{ github.sha }}
+          path: ${{ runner.temp }}/social-runtime61-private/evidence
           if-no-files-found: error
           retention-days: 7
           include-hidden-files: true

@@ -1,0 +1,28 @@
+{
+  "workerErrorCodes": [
+    "worker-signature",
+    "runtime-signature",
+    "no-remote-acceptance",
+    "event-shape",
+    "event-capacity",
+    "private-envelope-policy",
+    "private-publication-policy",
+    "other"
+  ],
+  "relayOutcome": {
+    "keys": [
+      "at",
+      "id",
+      "accepted",
+      "reason"
+    ],
+    "reasons": [
+      "invalid-signature",
+      "temporarily-unavailable",
+      "stored"
+    ],
+    "maxRows": 1000
+  },
+  "wireMaxRows": 800,
+  "noRawErrorsOrEvents": true
+}

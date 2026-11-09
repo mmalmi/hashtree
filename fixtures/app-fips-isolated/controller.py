@@ -98,7 +98,7 @@ def prepare():
         assert not (target/app['distDir']).exists(),'Source archive unexpectedly includes a built dist'
         assert sha(target/'playwright.config.ts')==app['configSha256']
         docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
-    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'freshBuildRequired':True},indent=2)+'\n')
+    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'diagnosticBuildReuse':True,'notReleaseAccepted':True},indent=2)+'\n')
 
 def test():
     assert json.loads((EVIDENCE/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json')
