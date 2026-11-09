@@ -12,7 +12,7 @@ class Reject(http.server.BaseHTTPRequestHandler):
 proxy=http.server.ThreadingHTTPServer(('127.0.0.1',0),Reject)
 proxy.rejected=0
 threading.Thread(target=proxy.serve_forever,daemon=True).start()
-env=dict(os.environ,CI='1',**spec['env'],REJECT_PROXY='http://127.0.0.1:'+str(proxy.server_port))
+env=dict(os.environ,CI='1',FIPS_APP_EVIDENCE=str(evidence),**spec['env'],REJECT_PROXY='http://127.0.0.1:'+str(proxy.server_port))
 def run(command,log,timeout):
     with (evidence/(log+'.log')).open('wb') as out:
         subprocess.run(command,stdout=out,stderr=subprocess.STDOUT,env=env,check=True,timeout=timeout)
@@ -22,12 +22,22 @@ try:
     run(['node','/stage/procedure/browser-default-origin-proof.cjs',str(evidence/'browser-default-origin.json')],'browser-default-origin',60)
     assert json.loads((evidence/'browser-default-origin.json').read_text())['passed']
     assert proxy.rejected>0,'Unsigned rejecting-proxy probe received no requests'
-    import hashlib
-    proof=json.loads((base/'procedure/private-qualified-inputs.json').read_text());dist=root/spec['distDir']
-    files=[dict(path=str(f.relative_to(dist)),sha256=hashlib.sha256(f.read_bytes()).hexdigest(),bytes=f.stat().st_size)for f in sorted(dist.rglob('*'))if f.is_file()]
-    assert proof['source']==spec['commit']and files==proof['distFiles']==spec['distFiles']
-    raw=(base/'procedure/reused-dist.tar.gz').read_bytes();assert hashlib.sha256(raw).hexdigest()==proof['distArchiveSha256']
-    (evidence/'new-dist.tar.gz').write_bytes(raw);(evidence/'reused-dist.json').write_text(json.dumps(proof)+'\n')
+    import hashlib,tarfile
+    file_sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
+    assert file_sha(root/'package.json')==spec['packageSha256'] and file_sha(root/'pnpm-lock.yaml')==spec['lockSha256']
+    assert file_sha(root/'scripts/verify-dependency-lock.mjs')==spec['dependencyGuardSha256']
+    run(['node','scripts/verify-dependency-lock.mjs'],'check-lock',30)
+    run(['node','/stage/procedure/installed-runtime-proof.cjs',str(evidence/'installed-runtime.json')],'installed-runtime',30)
+    run(['node','--import','tsx','scripts/verify-social-graph-snapshot.ts'],'check-seed',45)
+    dist=root/spec['distDir'];assert not dist.exists(),'No prior dist may supply qualification'
+    run(['pnpm','run','build'],'build-candidate',300)
+    assert not any(f.is_symlink() for f in dist.rglob('*'))
+    new={str(f.relative_to(dist)):file_sha(f) for f in sorted(dist.rglob('*')) if f.is_file()}
+    assert new and 'index.html' in new and sum(f.stat().st_size for f in dist.rglob('*') if f.is_file())<128*1024**2
+    (evidence/'candidate-dist.json').write_text(json.dumps(dict(source=spec['commit'],files=new,freshBuild=True),indent=2)+'\n')
+    with tarfile.open(evidence/'new-dist.tar.gz','w:gz') as archive:
+        for name in new:archive.add(dist/name,arcname=name,recursive=False)
+    run(['pnpm','run','check'],'check',180)
     # Match the paired unsigned RTC control only in the two ephemeral source-runtime
     # peer contexts, after the routing and raw-worker denial checks. No capture.
     assert os.environ['FIPS_DUMMY']=='1' and spec['env']['PLAYWRIGHT_RUNTIME_PORT']=='4181'
@@ -55,7 +65,7 @@ export default defineConfig({...original,workers:1,retries:0,outputDir:process.e
 """)
     command=['pnpm','exec','playwright','test','--config',config.name]
     counts={}
-    for name,cases,expected,seconds in [('selected',[case for case in spec['specs']if case!='tests/private-contact-sync-ui.spec.ts'],18,940),('idle',['tests/idle-cpu.spec.ts'],1,150)]:
+    for name,cases,expected,seconds in [('selected',spec['specs'],22,940),('idle',['tests/idle-cpu.spec.ts'],1,150)]:
         env['GRAPH_REPORT']=str(evidence/(name+'.json'));env['GRAPH_OUTPUT']=str(evidence/name)
         with (evidence/(name+'.log')).open('wb') as log:
             result=subprocess.run(command+cases,env=env,stdout=log,stderr=subprocess.STDOUT,timeout=seconds)
@@ -66,7 +76,9 @@ export default defineConfig({...original,workers:1,retries:0,outputDir:process.e
     passed=remaining.returncode==0 and all(row['exit']==0 and row['stats']['expected']==row['expected']
         and row['stats']['unexpected']==row['stats']['flaky']==row['stats']['skipped']==0 for row in counts.values())
     (evidence/'completed-gates.json').write_text(json.dumps(dict(passed=passed,source=spec['commit'],counts=counts,
-        remainingExit=remaining.returncode,scope='Remaining original release profile on the private-sync-qualified exact build'))+'\n')
+        remainingExit=remaining.returncode,scope='Fresh runtime61 build; full original release profile including both reload roles and private clears'))+'\n')
+    assert file_sha(root/'pnpm-lock.yaml')==spec['lockSha256'] and file_sha(root/'package.json')==spec['packageSha256']
+    assert {str(f.relative_to(dist)):file_sha(f) for f in sorted(dist.rglob('*')) if f.is_file()}==new,'Qualified distribution mutated'
     assert passed,'Original release profile failed'
 
 finally:

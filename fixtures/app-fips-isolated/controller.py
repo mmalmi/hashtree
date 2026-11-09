@@ -94,16 +94,11 @@ def prepare():
         assert sha(target/'pnpm-lock.yaml')==app['lockSha256']
         assert json.loads((target/'package.json').read_text())['packageManager']==app['packageManager']
         for file,digest in app['testFiles'].items():assert sha(target/file)==digest
-        dist=HERE/app['distArchive'];assert sha(dist)==app['distArchiveSha256']
-        with tarfile.open(dist) as tar:
-            assert all(pathlib.PurePosixPath(p.name).parts[0]==app['distArchivePrefix'] for p in tar.getmembers())
-        extract(dist,target)
-        expected={file['path']:file['sha256'] for file in app['distFiles']}
-        actual={str(p.relative_to(target/app['distDir'])):sha(p) for p in (target/app['distDir']).rglob('*') if p.is_file()}
-        assert actual==expected,'Exact dist file set and bytes'
+        assert sha(target/'package.json')==app['packageSha256']
+        assert not (target/app['distDir']).exists(),'Source archive unexpectedly includes a built dist'
         assert sha(target/'playwright.config.ts')==app['configSha256']
         docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
-    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'distInputsVerified':True},indent=2)+'\n')
+    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'freshBuildRequired':True},indent=2)+'\n')
 
 def test():
     assert json.loads((EVIDENCE/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json')

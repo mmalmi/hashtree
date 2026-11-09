@@ -1,4 +1,4 @@
-"""Qualify unexecuted gates, reusing exact-source checks and unit results."""
+"""Run the full unchanged unit, graph, mobile and smoke profiles on the fresh build."""
 import hashlib,json,os,pathlib,subprocess,tarfile,time
 root=pathlib.Path.cwd();procedure=pathlib.Path('/stage/procedure');evidence=pathlib.Path('/stage/evidence/social')
 env=dict(os.environ);sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest();codes={}
