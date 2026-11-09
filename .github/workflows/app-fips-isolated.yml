@@ -1,4 +1,4 @@
-name: Isolated Social runtime61 private publication diagnostic
+name: Isolated private publication scope regression
 on:
   workflow_dispatch:
 permissions:
@@ -7,24 +7,22 @@ jobs:
   qualify:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
-    env:
-      FIPS_APPS: social
     steps:
       - name: Set task-exclusive stage
-        run: echo "FIPS_STAGE=$RUNNER_TEMP/social-runtime61-private" >> "$GITHUB_ENV"
+        run: echo "PUBSUB_STAGE=$RUNNER_TEMP/pubsub-private-scope" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Prepare pinned inputs before isolation
-        run: timeout --signal=TERM --kill-after=15s 900s python3 fixtures/app-fips-isolated/controller.py prepare
-      - name: Diagnose four private cases on identical build after denial controls
-        run: timeout --signal=TERM --kill-after=15s 1740s python3 fixtures/app-fips-isolated/controller.py test
-      - name: Preserve qualification evidence
+      - name: Prepare hash-pinned inputs and locked dependencies
+        run: timeout --signal=TERM --kill-after=15s 700s python3 fixtures/pubsub-private-scope/controller.py prepare
+      - name: Prove failure then qualify corrected scope and existing private publication gates
+        run: timeout --signal=TERM --kill-after=15s 1550s python3 fixtures/pubsub-private-scope/controller.py test
+      - name: Preserve RED and GREEN evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: social-runtime61-private-${{ github.sha }}
-          path: ${{ runner.temp }}/social-runtime61-private/evidence
+          name: pubsub-private-scope-${{ github.sha }}
+          path: ${{ runner.temp }}/pubsub-private-scope/evidence
           if-no-files-found: error
           retention-days: 7
           include-hidden-files: true
