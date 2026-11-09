@@ -21,7 +21,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: timeout --signal=TERM --kill-after=15s 1200s python3 fixtures/app-fips-isolated/controller.py prepare
       - name: Test exact apps after unsigned transport and denial controls
-        run: timeout --signal=TERM --kill-after=15s 1050s python3 fixtures/app-fips-isolated/controller.py test
+        run: timeout --signal=TERM --kill-after=15s 1260s python3 fixtures/app-fips-isolated/controller.py test
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

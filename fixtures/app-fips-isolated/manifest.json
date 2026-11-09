@@ -359,7 +359,12 @@
           "consent-peer-recovery",
           "dry-run"
         ]
-      }
+      },
+      "mobileSourceInputs": {
+        "scripts/static-assets-worker.mjs": "47dc10c772af63af10dbfc82d5a93a9348bf7a0c188d0c4be170d2e8dc966a69",
+        "wrangler.jsonc": "93bb19906ece24f87a938ea5f1c0625058dafe12415f468b26873387ae2be4b2"
+      },
+      "freshAdditionalMobileScope": "Anonymous390px online+serviceworker offline shell, exact retained dist/source Worker responses, lo-only separate container, no live production claim"
     }
   ],
   "acceptedImageProof": {

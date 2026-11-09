@@ -174,6 +174,10 @@ def test():
         code=docker('iris-fips-test-'+app['id'],['python3','/stage/procedure/run-one.py',app['id']],cwd='/stage/apps/'+app['id'],seconds=budgets[app['id']]+240,dummy=True,allow_failure=True)
         assert not CONTAINERS,'No later app may start before cleanup'
         results.append({'app':app['id'],'exitCode':code,'passed':code==0})
+        if code==0:
+            mobile=docker('iris-fips-mobile-chat',['python3','/stage/procedure/run-mobile.py'],cwd='/stage/apps/chat',seconds=240,dummy=False,allow_failure=True)
+            assert not CONTAINERS
+            results.append({'app':'chat-mobile','exitCode':mobile,'passed':mobile==0})
     passed=all(row['passed'] for row in results)
     (EVIDENCE/'passed.json').write_text(json.dumps({'passed':passed,'manifestSha256':sha(HERE/'manifest.json'),'apps':SELECTED,'results':results,'containersReaped':not CONTAINERS},indent=2)+'\n')
     assert passed,'One or more unchanged app tests failed; see per-app evidence'
