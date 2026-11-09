@@ -333,5 +333,6 @@
     "entryBytes": 21474836480,
     "floorBytes": 8589934592,
     "commandSampleSeconds": 0.5
-  }
+  },
+  "node": "v26.13.0"
 }
