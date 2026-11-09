@@ -1,0 +1,1532 @@
+{
+  "sourceReportSha256": "09bdd2bca29c24762c0aee29404d8d3bdc913e6405498c224406d70d61a88595",
+  "sourceRun": 42236212540,
+  "correctedPreviouslyFailedCase": "fresh shipped defaults route reading, graph sync and signed public posts to Ditto",
+  "correctedPassingRun": 42341752427,
+  "cases": [
+    {
+      "file": "chat-registration.spec.ts",
+      "title": "desktop: new chat users go to Iris Chat with the intended recipient",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "chat-registration.spec.ts",
+      "title": "mobile: new chat users go to Iris Chat with the intended recipient",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "chat-registration.spec.ts",
+      "title": "unregistered browsers hand off chats without starting message subscriptions",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "chat-registration.spec.ts",
+      "title": "signed-out and read-only users can open Iris Chat without signing in here",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "chat-registration.spec.ts",
+      "title": "existing registered devices keep chats and history after reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "chat-registration.spec.ts",
+      "title": "a device registered elsewhere does not opt a new browser into chats",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "chat-registration.spec.ts",
+      "title": "another tab still explains how to recover existing chats",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "client-tag.spec.ts",
+      "title": "public activity uses the standard iris tag and honors the persisted opt-out",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "contact-memory.spec.ts",
+      "title": "private favorites and approved names survive profile changes and chat reloads",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "debug-market-map.spec.ts",
+      "title": "debug market map dots for Electronics category",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "devices-current-npub.spec.ts",
+      "title": "shows the current device key as npub in the devices list",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "dm-reply.spec.ts",
+      "title": "reply preview shows correct author name in DMs",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "draft-persistence.spec.ts",
+      "title": "should persist draft content between page reloads",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "draft-persistence.spec.ts",
+      "title": "should clear draft after publishing",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "feed-history.spec.ts",
+      "title": "media feed loads past hidden timestamp ties and retains live bursts",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "feed-history.spec.ts",
+      "title": "profile grid scrolls past the first relay page and includes picture posts",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "feed-stability.spec.ts",
+      "title": "profile preserves mounted posts and scroll during graph updates",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "feed-stability.spec.ts",
+      "title": "mobile profile preserves mounted posts and scroll during graph updates",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "feed-stability.spec.ts",
+      "title": "latest preserves mounted posts and scroll during graph updates",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "feed-stability.spec.ts",
+      "title": "adventure preserves mounted posts and scroll during graph updates",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "feed-stability.spec.ts",
+      "title": "visibility changes recover received posts and apply mutes without clearing read posts",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "feed-startup.spec.ts",
+      "title": "a slow initial feed read stays open and never reports an empty feed",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "follow-user.spec.ts",
+      "title": "can follow user by npub",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "For You uses the default network until the viewer follows someone",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "a restored low-activity for you feed displays relay posts without the five-second fallback",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "restored For You starts from its saved graph when relays never send EOSE",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "an empty For You feed displays late relay posts without another refresh",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "a saved discovery graph without a contact event does not wait for silent relays",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "available chronological posts render while an earlier recommendation remains unavailable",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "For You shows cached recommendations while other recommended posts are unavailable",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "For You separates prolific authors across pages and restores the same order",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "For You defers a same-author burst until other authors arrive",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "For You keeps quiet small networks readable with 1 follows",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "For You keeps quiet small networks readable with 2 follows",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "For You keeps quiet small networks readable with 3 follows",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "For You keeps quiet small networks readable with 4 follows and one mute",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "a short For You feed fills with late posts and keeps paginating",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "logged-in relay subscriptions survive page suspension and recover after worker crashes",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "for-you-feed.spec.ts",
+      "title": "for you filters overmuted authors and unknown engagement actors",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "for-you-replies.spec.ts",
+      "title": "For You excludes recommended replies but keeps quotes at 1280px",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "for-you-replies.spec.ts",
+      "title": "For You excludes recommended replies but keeps quotes at 390px",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap.spec.ts",
+      "title": "cold anonymous discovery uses the real company bundle and preserves personal lists",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap.spec.ts",
+      "title": "legacy cached discovery uses the real company bundle and preserves personal lists",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-cold-start.spec.ts",
+      "title": "cold personal For You hydrates mutes and posts without waiting for a silent relay",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-cold-start.spec.ts",
+      "title": "cold discovery For You hydrates mutes and posts without waiting for a silent relay",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-cold-start.spec.ts",
+      "title": "cold late-personal For You hydrates mutes and posts without waiting for a silent relay",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "group-admin-edit.spec.ts",
+      "title": "group admins can edit metadata + members; non-admins cannot",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "groups.spec.ts",
+      "title": "group discovery can retry unavailable results",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "groups.spec.ts",
+      "title": "group discovery shows partial results quietly",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "groups.spec.ts",
+      "title": "group creation, membership, posts, polls and direct links preserve access",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "groups.spec.ts",
+      "title": "only direct contacts enter the request inbox, even when a contact introduces a swarm",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "groups.spec.ts",
+      "title": "a shared request still accepts three independent confirmations",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "groups.spec.ts",
+      "title": "a rejected group post is saved and delivered automatically after recovery",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "groups.spec.ts",
+      "title": "a fully offline group post is saved and delivered automatically after recovery",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "groups.spec.ts",
+      "title": "a shortcut post clears its draft without waiting for relay acknowledgement",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "hashtree-attachment.spec.ts",
+      "title": "can attach an image by dropping it in message input",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "hashtree-attachment.spec.ts",
+      "title": "can attach an image by pasting from clipboard",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "hashtree-attachment.spec.ts",
+      "title": "can attach and display an image in DMs",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "hashtree-attachment.spec.ts",
+      "title": "can open hashtree image in full size modal",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "hashtree-attachment.spec.ts",
+      "title": "pauses hashtree videos when scrolled out of view",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "home-scroll-behavior.spec.ts",
+      "title": "Mobile: scroll works and header is outside pull-to-refresh",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "home-scroll-behavior.spec.ts",
+      "title": "Mobile: header hides on scroll down and shows on scroll up",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "home-scroll-behavior.spec.ts",
+      "title": "Desktop two-column: middle column scrolls properly",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "home-scroll-behavior.spec.ts",
+      "title": "Desktop single-column: scroll works with header visible",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "home-scroll-behavior.spec.ts",
+      "title": "Desktop: clicking header scrolls to top",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "home-scroll-behavior.spec.ts",
+      "title": "Pull-to-refresh: header remains fixed during pull",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "legacy-wallet-redirect.spec.ts",
+      "title": "the wallet recovers an installed redirected cache through its parent view",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "like-post.spec.ts",
+      "title": "user can like a post",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "link-device-auto-accept.spec.ts",
+      "title": "link device invite auto-accepts on paste",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "link-device-login.spec.ts",
+      "title": "link device entry opens from login dialog",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "logout.spec.ts",
+      "title": "logout without a service worker is fast and clears private data",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "logout.spec.ts",
+      "title": "logout still removes browser push when the notification server fails",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "market-map-location.spec.ts",
+      "title": "shows map interface and navigation between market and map pages",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "market-map-location.spec.ts",
+      "title": "map shows geohash input field and can navigate to specific geohash",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "market-map-location.spec.ts",
+      "title": "can select market categories and see them in URL",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "mention-picker.spec.ts",
+      "title": "one-character mentions search immediately and rank like the top search",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "mention-picker.spec.ts",
+      "title": "underscores search spaces, preserve the selected person through updates, and insert at the caret",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "mention-picker.spec.ts",
+      "title": "dismissal and changing the query ignore delayed results without closing the composer",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "mention-picker.spec.ts",
+      "title": "pasted npubs resolve a profile and mouse selection publishes the correct mention",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "message-form.spec.ts",
+      "title": "message input text is left-aligned (not centered)",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "message-form.spec.ts",
+      "title": "can send a basic text message using Enter key",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "message-form.spec.ts",
+      "title": "empty message cannot be sent",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "message-form.spec.ts",
+      "title": "shift + enter adds a new line",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "message-form.spec.ts",
+      "title": "multiple shift + enter presses add multiple new lines",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "message-form.spec.ts",
+      "title": "New lines are trimmed but exist in the middle of the message",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "message-form.spec.ts",
+      "title": "textarea resizes based on content",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "message-persistence.spec.ts",
+      "title": "messages persist after page refresh",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "message-persistence.spec.ts",
+      "title": "can continue conversation after refresh",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "message-persistence.spec.ts",
+      "title": "session state persists across multiple refreshes",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "message-reaction.spec.ts",
+      "title": "user can react to a chat message",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "message-requests-tab.spec.ts",
+      "title": "stays on Requests tab after opening a request chat",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "multi-device-groups.spec.ts",
+      "title": "can create and use a group chat with self",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "mute-user.spec.ts",
+      "title": "user can access profile and mute functionality",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "mute-user.spec.ts",
+      "title": "mute service functions work correctly",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "native-messaging-interop.spec.ts",
+      "title": "exchanges direct and group messages with the native Iris Chat runtime",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "navigation-stack.spec.ts",
+      "title": "back/forward navigation should work correctly",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "navigation-stack.spec.ts",
+      "title": "settings navigation with back button",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "navigation-stack.spec.ts",
+      "title": "connectivity indicator returns to settings root when already on network settings",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "new-chat.spec.ts",
+      "title": "can start a private chat with self via profile",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "notification-visibility.spec.ts",
+      "title": "notifications reject an overmuted reply while preserving a followed reply",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "notification-visibility.spec.ts",
+      "title": "opening a post reads only its activity and later reactions are still unread",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "notification.spec.ts",
+      "title": "user sees a highlighted notification when a followed user likes their post",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "npubcash-wallet.spec.ts",
+      "title": "npub.cash imports paginated payments exactly once (none)",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "npubcash-wallet.spec.ts",
+      "title": "npub.cash imports paginated payments exactly once (mint)",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "npubcash-wallet.spec.ts",
+      "title": "npub.cash imports paginated payments exactly once (provider)",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "offline-pubsub.spec.ts",
+      "title": "a public post completes before its relay acknowledges delivery",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "offline-pubsub.spec.ts",
+      "title": "saved account and queued post survive an offline reload and publish on reconnect",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "peer-files.spec.ts",
+      "title": "cached encrypted attachment is served across real browser peers without file servers",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "peer-files.spec.ts",
+      "title": "seed-only connectivity stays amber and disconnects clear the visible peer list",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "peer-files.spec.ts",
+      "title": "a routed Nostr endpoint appears separately from its forwarding seed",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "peer-files.spec.ts",
+      "title": "opens a note from a peer-served index fork and still receives relay events",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "people-search-index.spec.ts",
+      "title": "cold people search requests its public index without cached profiles",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "people-search-ranking.spec.ts",
+      "title": "people search keeps an exact stranger above a familiar partial name at 1280px with relay profiles true",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "people-search-ranking.spec.ts",
+      "title": "people search keeps an exact stranger above a familiar partial name at 1280px with relay profiles false",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "people-search-ranking.spec.ts",
+      "title": "people search keeps an exact stranger above a familiar partial name at 390px with relay profiles true",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "people-search-ranking.spec.ts",
+      "title": "people search keeps an exact stranger above a familiar partial name at 390px with relay profiles false",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "popular-feed-debug.spec.ts",
+      "title": "popular feed debug",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "popular-feed.spec.ts",
+      "title": "anonymous Popular loads posts from the default social graph",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "a conversational topic search finds technical posts and substantive replies",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "relay matches appear before GPU scoring, then a backlog and a lone arrival both get scored",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "Automatic adds one observed tag when the ordinary MiniLM planner has no terms",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "the local model searches previously seen and incoming hashtags in their original spelling",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "the result view follows submitted searches and survives a reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "a feed remembers AI selection independently of search and other feeds",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "automatic search falls back to on-device discovery when the browser returns unusable scores",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "text results stay interactive during a cold model load and subsequent searches reuse it",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "a selected browser model can rank paraphrases and an unavailable provider preserves text results",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "late browser scores preserve the reading position until Update results is pressed",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "returning to bare search shows progress and recent notes without rerunning the saved query",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "post-relevance.spec.ts",
+      "title": "nature search keeps political media out of the grid and filters and sorts matching posts",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "private-contact-sync.spec.ts",
+      "title": "private details sync between devices with durable clears and account isolation",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "private-messaging-single-tab.spec.ts",
+      "title": "keeps the encrypted messaging runtime single-writer across tabs",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-dropdown.spec.ts",
+      "title": "dropdown button appears in header for other profiles and shows mute option",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-dropdown.spec.ts",
+      "title": "dropdown button does not appear for own profile",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-follows-list.spec.ts",
+      "title": "fresh viewer can open another user's follows list without following them first",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "profile-late-arrival.spec.ts",
+      "title": "a mounted profile receives metadata after empty history and a delayed relay arrival",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-lightning-address.spec.ts",
+      "title": "npub.cash address stays a draft until saved at 1280px",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-lightning-address.spec.ts",
+      "title": "npub.cash address stays a draft until saved at 390px",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-picture.spec.ts",
+      "title": "profile pictures can be added, replaced, and cleared across reloads",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-picture.spec.ts",
+      "title": "an uploaded photo stays a draft until saved with the visible mobile save bar",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-picture.spec.ts",
+      "title": "a nameless new account can save its first profile edit",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-qr.spec.ts",
+      "title": "can open QR code on own profile",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-search.spec.ts",
+      "title": "search input shows results from worker",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-search.spec.ts",
+      "title": "search navigates to search results page on enter",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-search.spec.ts",
+      "title": "search shows user results when available",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-search.spec.ts",
+      "title": "search handles npub input directly",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "profile-search.spec.ts",
+      "title": "recent searches are stored and displayed",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "public-chat-direct-nav.spec.ts",
+      "title": "opens a public chat even when public chats are disabled",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "public-lookup.spec.ts",
+      "title": "profile and post lookups follow public relay hints and skip local addresses",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "public-lookup.spec.ts",
+      "title": "an explicitly configured local relay can serve a poll without dialing its advertised LAN relay",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "pubsub-load.spec.ts",
+      "title": "worker batches 500 concurrent interests and releases them without blocking the app",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "relay-hints-setting.spec.ts",
+      "title": "following relay hints is opt-in and the preference survives reloads",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "relay-manual-add.spec.ts",
+      "title": "manually added relay connects and shows in count",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "relay-offline-detection.spec.ts",
+      "title": "relay status updates when going offline and back online",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "relay-reconciliation.spec.ts",
+      "title": "relay worker preserves immediate history and live events with NIP-77 supported=true",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "relay-reconciliation.spec.ts",
+      "title": "relay worker preserves immediate history and live events with NIP-77 supported=false",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "reply-count-visibility.spec.ts",
+      "title": "reply count follows the thread's live author moderation",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "reply-count-visibility.spec.ts",
+      "title": "reply count follows the thread's live mention moderation",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "reply-draft-persistence.spec.ts",
+      "title": "should persist reply draft after page reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "reply-draft-persistence.spec.ts",
+      "title": "should keep main draft separate from reply drafts",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "reply-draft-persistence.spec.ts",
+      "title": "should clear reply draft after publishing reply",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "reply-nip07-cached.spec.ts",
+      "title": "NIP-07 login can reply to a cached post detail event",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "reply-nip07-cached.spec.ts",
+      "title": "important NIP-07 reply failures keep the draft and show a toast",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "reply-nip07-cached.spec.ts",
+      "title": "NIP-07 login can like a cached post without an attached client",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "reply-nip07-cached.spec.ts",
+      "title": "important NIP-07 reaction failures roll back and show a toast",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "reply-post.spec.ts",
+      "title": "user can view post details",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "repost.spec.ts",
+      "title": "user can create a post",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "search-back.spec.ts",
+      "title": "Back restores post search results and the reading position on mobile",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "search-back.spec.ts",
+      "title": "Back restores post search results and the reading position on desktop",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "search-back.spec.ts",
+      "title": "Back restores post search results and the reading position on two columns",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "search-layout.spec.ts",
+      "title": "desktop search preserves the right sidebar and its saved hide/show control",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "search-layout.spec.ts",
+      "title": "a long mobile search title stays above the tabs when connectivity changes",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "search-layout.spec.ts",
+      "title": "search photo carousel fits the active image at 1440px",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "search-layout.spec.ts",
+      "title": "search photo carousel fits the active image at 390px",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "search.spec.ts",
+      "title": "plain search displays matches immediately and retains a slow text index",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "search.spec.ts",
+      "title": "can search for content",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "search.spec.ts",
+      "title": "search uses the starter network and does not skip between recent and old matches",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "search.spec.ts",
+      "title": "post search matches whole words and collapses repeated authors across pages",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "search.spec.ts",
+      "title": "an empty search can continue past several pages of nonmatches",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "self-messaging-linked-devices.spec.ts",
+      "title": "syncs self and peer DMs, then logs out a revoked linked sibling",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "self-messaging.spec.ts",
+      "title": "should sync messages between two sessions with same key",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "self-messaging.spec.ts",
+      "title": "should keep same-key chats accepted when both sessions are already open",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "self-messaging.spec.ts",
+      "title": "should sync same-key messages across three open sessions",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "service-worker-cache.spec.ts",
+      "title": "preserves runtime caches, omits legacy Cashu, and serves Iris offline",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "service-worker-cache.spec.ts",
+      "title": "direct and embedded legacy wallets retain saved funds on an offline full reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "session-persistence.spec.ts",
+      "title": "user remains logged in after refresh",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "session-persistence.spec.ts",
+      "title": "can create post after refresh",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "session-persistence.spec.ts",
+      "title": "can like post after refresh",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "settings-devices.spec.ts",
+      "title": "lists devices section in settings and opens shared devices manager",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "settings-notifications-advanced.spec.ts",
+      "title": "notification advanced settings are collapsed under Notifications",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "settings.spec.ts",
+      "title": "can navigate to About page",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "sidebar-readonly.spec.ts",
+      "title": "shows read-only status above the viewed account in the sidebar",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "sidebar-recommendation-visibility.spec.ts",
+      "title": "sidebar people recommendations hide a one-follow/one-mute candidate",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "signup.spec.ts",
+      "title": "user can sign up without a name",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "social-graph-merge.spec.ts",
+      "title": "Load & merge preserves people and newer follow and mute lists after export",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "social-graph-snapshot.spec.ts",
+      "title": "social graph stats update after snapshot download",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "sparse-discovery.spec.ts",
+      "title": "bounded discovery preserves originals for one-follow",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "sparse-discovery.spec.ts",
+      "title": "bounded discovery preserves originals for zero-follow",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "sparse-discovery.spec.ts",
+      "title": "bounded discovery preserves originals for anonymous",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "sparse-discovery.spec.ts",
+      "title": "bounded discovery preserves originals for four-follows",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "sparse-discovery.spec.ts",
+      "title": "bounded discovery preserves originals for popular",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "thread-view.spec.ts",
+      "title": "can sign up and see home feed",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "thread-view.spec.ts",
+      "title": "thread replies have no repeated history controls at 390px",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "thread-view.spec.ts",
+      "title": "thread replies have no repeated history controls at 1280px",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "thread-visibility.spec.ts",
+      "title": "mounted replies and counts recover when the social graph arrives later",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "unseen-notifications-indicator.spec.ts",
+      "title": "should show notification badge in desktop sidebar and mobile header after reloading an unseen notification",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "unseen-notifications-indicator.spec.ts",
+      "title": "should show notification badge after real like notification",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "user-journey.spec.ts",
+      "title": "core user journey stays responsive",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "user-journey.spec.ts",
+      "title": "startup recovers from corrupt user storage",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "view-profile.spec.ts",
+      "title": "can sign up with a username",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "wallet-pubsub.spec.ts",
+      "title": "wallet requests retain their signer and dedicated response relay",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "wallet-pubsub.spec.ts",
+      "title": "rejected wallet actions are not retained for a later retry",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "widget-stability.spec.ts",
+      "title": "Popular keeps posts, scroll and subscriptions during background graph updates",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "widget-stability.spec.ts",
+      "title": "Follows keeps mounted recommendations during graph updates",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "widget-stability.spec.ts",
+      "title": "Relevant people keeps mounted recommendations during graph updates",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "widget-stability.spec.ts",
+      "title": "More from this author keeps mounted recommendations during graph updates",
+      "project": "chromium",
+      "status": "skipped"
+    },
+    {
+      "file": "zap-reactions-layout.spec.ts",
+      "title": "zap reactions keep names readable and comments contained at 390px",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "zap-reactions-layout.spec.ts",
+      "title": "zap reactions keep names readable and comments contained at 1280px",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "zaps-feed.spec.ts",
+      "title": "zaps show their target once while replies keep their parent context",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "worker network boundary rejects unmodified worker connections",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "fresh shipped defaults route reading, graph sync and signed public posts to Ditto",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 0 custom relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 0 empty relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 0 disabled relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 0 legacy custom relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 0 legacy empty relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 1 custom relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 1 empty relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 1 disabled relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 1 legacy custom relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 1 legacy empty relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 2 custom relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 2 empty relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 2 disabled relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 2 legacy custom relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 2 legacy empty relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 3 custom relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 3 empty relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 3 disabled relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 3 legacy custom relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "saved version 3 legacy empty relay choices survive hydration and reload",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "previous shipped relay choices retain graph bootstrap without adding Ditto",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "default HTTP bootstrap imports real binary in empty graph",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "default HTTP bootstrap imports real binary in retained graph",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "custom relay scope uses bundled graph without default graph traffic",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "disabled relay scope uses bundled graph without default graph traffic",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "empty relay scope uses bundled graph without default graph traffic",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "native relay scope uses bundled graph without default graph traffic",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "changing relay settings aborts a pending public bootstrap and preserves personal lists",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "graph catch-up stops without list fetches when negotiation is unsupported",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "graph catch-up stops without list fetches when negotiation is malformed",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "graph catch-up stops without list fetches when negotiation is disconnect",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "graph catch-up stops without list fetches when negotiation is silent",
+      "project": "chromium",
+      "status": "passed"
+    },
+    {
+      "file": "graph-bootstrap-policy.spec.ts",
+      "title": "graph reconciliation retrieves 130 exact IDs across relay response caps and preserves personal lists",
+      "project": "chromium",
+      "status": "passed"
+    }
+  ]
+}

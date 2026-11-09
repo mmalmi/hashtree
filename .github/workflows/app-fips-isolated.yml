@@ -1,4 +1,4 @@
-name: Isolated Client graph release qualification
+name: Fresh client runtime61 complete release qualification
 on:
   workflow_dispatch:
 permissions:
@@ -6,7 +6,7 @@ permissions:
 jobs:
   qualify-client:
     runs-on: ubuntu-24.04
-    timeout-minutes: 80
+    timeout-minutes: 90
     env:
       FIPS_APPS: client
     steps:
@@ -18,7 +18,7 @@ jobs:
       - name: Verify exact Git history and frozen dependencies
         run: timeout --signal=TERM --kill-after=15s 900s python3 fixtures/client-graph404/controller.py prepare
       - name: Qualify complete original release plan after independent OS denial
-        run: timeout --signal=TERM --kill-after=15s 3750s python3 fixtures/client-graph404/controller.py test
+        run: timeout --signal=TERM --kill-after=15s 4110s python3 fixtures/client-graph404/controller.py test
       - name: Preserve evidence and qualified distribution
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
