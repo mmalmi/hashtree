@@ -1,0 +1,17 @@
+{
+  "source": "8c7290e63bce040a318c941ff8e1a1dc9a1409e3",
+  "rootProofSha256": "0238c4d5cce94d0f4bdc6ba626b6015de95069134eafaa83fb245121bb5fabd9",
+  "sdkPackageSha256": "fd40ec68ea586d2adf460859ce86794c33b39af5b8f44cfec7d03d851bafc9ef",
+  "sdkProvenanceSha256": "72e39510b4c9918e3b3350f891e81b12bcf463f1a649a6ca0de5c78177aec6e8",
+  "acceptedChatSource": "4b34b199d8ed1ee3a174c54b30466129b0e060f6",
+  "acceptedChatLockSha256": "34bd8b6022181fa591b284e584c8ac529680da340cfc85ff26f6d75fee0a6895",
+  "packages": 10,
+  "snapshots": 10,
+  "packageSha256": "3dd9545e6e845e46ad9e96bdde8c92dde312013ee04c1c6a0ec9e14dbab8ecdd",
+  "lockSha256": "b04ddff2423eba464f48c4629f0b6ac014cb7313e139900bdfd3a7f0208a3543",
+  "allUnchangedResolutionRecordsInherited": true,
+  "onlyChangedResolution": "Qualified local file-transfer archive version/integrity/path; same peer and transitive edges",
+  "rootDirectDependenciesOnly": true,
+  "frozenInstallValidated": false,
+  "compilerExecuted": false
+}

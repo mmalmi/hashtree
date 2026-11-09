@@ -1,0 +1,18 @@
+[package]
+name = "runtime61-mixed-file-fixture"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[dependencies]
+nvpn-fips-file-transfer = "=0.1.5"
+nvpn-fips-core = "=0.4.121"
+flume = { version = "0.11", default-features = false, features = ["async"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "time"] }
+
+[profile.dev]
+debug = 0
+incremental = false

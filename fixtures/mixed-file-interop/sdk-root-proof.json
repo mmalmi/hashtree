@@ -1,0 +1,19 @@
+{
+  "rootAccepted": true,
+  "scope": "TypeScript SDK phase only",
+  "source": "8c7290e63bce040a318c941ff8e1a1dc9a1409e3",
+  "passed": 27,
+  "redExpectedFailures": 1,
+  "redOtherCasesPassed": 2,
+  "skipped": 0,
+  "artifactFiles": 34,
+  "packageSha256": "fd40ec68ea586d2adf460859ce86794c33b39af5b8f44cfec7d03d851bafc9ef",
+  "qualificationSha256": "6c4356eeedf9315702d5467d19246249bb9d03a2cca76b1b9026f8ef0da40df1",
+  "verifierSha256": "09369f1547384d3171e4135375e5c2f4185113a6e0f2a613bdd6b34bf8ce3e02",
+  "liveInteropPassed": false,
+  "publicSourceClosurePassed": false,
+  "releaseAccepted": false,
+  "acceptedAt": "2026-11-09T15:14:28.382686+00:00",
+  "rootVerifierSha256": "f2e07bdc9e31e124f82cb5f93c533f1779810deeef10bc98d8d1cbbfcd781d77",
+  "rootProofSha256": "0238c4d5cce94d0f4bdc6ba626b6015de95069134eafaa83fb245121bb5fabd9"
+}

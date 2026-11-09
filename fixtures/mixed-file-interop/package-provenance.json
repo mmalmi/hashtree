@@ -1,0 +1,144 @@
+{
+  "source": "8c7290e63bce040a318c941ff8e1a1dc9a1409e3",
+  "sourceArchiveSha256": "af28c84224ff11882b054d3fe5a9b55e29385f6a1ce7d3983d011ec70eb8daac",
+  "lockSha256": "7a783d0ad4f17c0cd736f275eecd46cecf32a46bc1b0c067b2d831d28ad0575a",
+  "packageSha256": "5c08dc04f9f555385e49a6678d7ae95c83bfd5d69a45b5afa5d136ed4dfc673a",
+  "versions": {
+    "node": "v26.13.0",
+    "pnpm": "10.24.0",
+    "typescript": "Version 5.9.3",
+    "vitest": "vitest/4.1.12 linux-x64 node-v26.13.0"
+  },
+  "package": "@fips/file-transfer",
+  "version": "0.1.1",
+  "archive": "fips-file-transfer-0.1.1.tgz",
+  "archiveSha256": "fd40ec68ea586d2adf460859ce86794c33b39af5b8f44cfec7d03d851bafc9ef",
+  "archiveIntegrity": "sha512-M4+KerF8mCx8MjAjnCyJKt1kq0d5Dvq/Ac20TJd0uRgyc3mxriBMYH37HOqnBQ5ehGqiGd9bY7wzrCdqOq8LTw==",
+  "members": [
+    {
+      "path": "package/LICENSE",
+      "bytes": 1102,
+      "sha256": "f87d2b9e05dde538dbbfa5adfb22fb1d45904ea3c8350c5f91f6ece35135fd7f"
+    },
+    {
+      "path": "package/dist/files.js",
+      "bytes": 6454,
+      "sha256": "eb97a6b67ec0a72960f31d54e33e3dd4f8780c4dfdc0a8c75683eaab8c4284c2"
+    },
+    {
+      "path": "package/dist/index.js",
+      "bytes": 19015,
+      "sha256": "fd9276f6ee1988d618b4da0264d6647c1fd4723901df3eb03c8e94adcbe6f9c1"
+    },
+    {
+      "path": "package/dist/protocol.js",
+      "bytes": 11304,
+      "sha256": "88302ea63f0bf37a09721732cc948c0b254e37fdfe4388051364303a31c2ded6"
+    },
+    {
+      "path": "package/dist/state.js",
+      "bytes": 1504,
+      "sha256": "c509c6728f74c13dc80f734dc3fcb188efc5a2ff90a70f167ad80bb9477f012a"
+    },
+    {
+      "path": "package/dist/types.js",
+      "bytes": 11,
+      "sha256": "8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881"
+    },
+    {
+      "path": "package/dist/wire.js",
+      "bytes": 7067,
+      "sha256": "ad1042652ea772a0917613b00f2f8c20d2ebf93d2431d801e498667b70939916"
+    },
+    {
+      "path": "package/dist/work.js",
+      "bytes": 1027,
+      "sha256": "cbe6155c60d4e4de58e370434c8f79ca61bb8cfe303b570ecbfc631e4603d9d1"
+    },
+    {
+      "path": "package/package.json",
+      "bytes": 1003,
+      "sha256": "ed13780d352e7f079e75485994da84a6cbf8494adf81e8814cdf59268777a28d"
+    },
+    {
+      "path": "package/README.md",
+      "bytes": 1094,
+      "sha256": "c2520141d72a014d714f846a85e7bddbdcb59d3daed85751496a8db6a612f9b5"
+    },
+    {
+      "path": "package/dist/files.d.ts",
+      "bytes": 1182,
+      "sha256": "9fb2ffb7fa73fb029e852c445f5b5005712aec4cbac364261f804aef98d0d6ac"
+    },
+    {
+      "path": "package/src/files.ts",
+      "bytes": 5929,
+      "sha256": "2ebc46e1af1afa37f4bd4ec9e9e329e622f5bd4033581face2f4f9563837050e"
+    },
+    {
+      "path": "package/dist/index.d.ts",
+      "bytes": 1499,
+      "sha256": "f7222e112eff7dcf2bd49916fa94b13a5d03160181b22aca1e6e018e38d8d929"
+    },
+    {
+      "path": "package/src/index.ts",
+      "bytes": 16919,
+      "sha256": "c5c7610f00041673801ddb1fb11bc06da19d8e8c07130f6f658f6f896d355cf6"
+    },
+    {
+      "path": "package/dist/protocol.d.ts",
+      "bytes": 345,
+      "sha256": "32df51833b78ea230ab8de8d19019a7ecb3a3bd7185196b7388aed6ffa7d8beb"
+    },
+    {
+      "path": "package/src/protocol.ts",
+      "bytes": 10426,
+      "sha256": "521ff35d99d76f0a5513d7713fbdb43caf88b4c278f341c335bc803210b73c04"
+    },
+    {
+      "path": "package/dist/state.d.ts",
+      "bytes": 2080,
+      "sha256": "f57590c7c85a3f8ed52797fbac1a40ce426fe5f946252aa2aeaae0ae06e49fdf"
+    },
+    {
+      "path": "package/src/state.ts",
+      "bytes": 2918,
+      "sha256": "6257ce25caf21156b5eb972c51da3e58d2228dd82d73139119e503561d573810"
+    },
+    {
+      "path": "package/dist/types.d.ts",
+      "bytes": 2303,
+      "sha256": "a7f8689d22489d7ab12823ca2d53c9f75f99da29977dbfc467c03f3183415b34"
+    },
+    {
+      "path": "package/src/types.ts",
+      "bytes": 2220,
+      "sha256": "681083f51c7f3db36ca81821fd2703dd5a656f9065eabfad7ee8976941b7696a"
+    },
+    {
+      "path": "package/dist/wire.d.ts",
+      "bytes": 1998,
+      "sha256": "a496da578601f99e56e194640b10603e7ef1876b566a1b1d954dde4a83aea07b"
+    },
+    {
+      "path": "package/src/wire.ts",
+      "bytes": 7775,
+      "sha256": "a6108bba200cac564860a0500a7d717af5d5666f7ca45d78e5d686313fb8431b"
+    },
+    {
+      "path": "package/dist/work.d.ts",
+      "bytes": 725,
+      "sha256": "5516dc2b659b75096eecc0a29fe5750567028b83e28351b54961e323fc0f8571"
+    },
+    {
+      "path": "package/src/work.ts",
+      "bytes": 1423,
+      "sha256": "3ee1bd98bc7083702aa9f7767a867f6ece35b149e7de2c2bb8ce220f80c34f46"
+    }
+  ],
+  "typescriptGatesPassed": true,
+  "sharedVectorsPassed": true,
+  "liveInteropPassed": false,
+  "publicSourceClosurePassed": false,
+  "releaseAccepted": false
+}

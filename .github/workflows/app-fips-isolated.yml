@@ -1,4 +1,4 @@
-name: Original Rust wire fixture and missing TypeScript interoperability gate
+name: Published Rust and repaired TypeScript file-transfer interoperability
 on:
   workflow_dispatch:
 permissions:
@@ -6,25 +6,25 @@ permissions:
 jobs:
   qualify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 50
+    timeout-minutes: 60
     steps:
-      - name: Set task-exclusive stage
-        run: echo "PUBSUB_STAGE=$RUNNER_TEMP/pubsub-wire-fixture" >> "$GITHUB_ENV"
+      - name: Set task-owned stage
+        run: echo "MIXED_FILE_STAGE=$RUNNER_TEMP/mixed-file-interop" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Verify immutable source and compilers then fetch locked inputs
-        run: timeout --signal=TERM --kill-after=15s 1300s python3 fixtures/pubsub-wire-fixture/controller.py prepare
-      - name: Compile only original Rust fixture offline
-        run: timeout --signal=TERM --kill-after=15s 1250s python3 fixtures/pubsub-wire-fixture/controller.py build
-      - name: Run only missing original TypeScript process-boundary case
-        run: timeout --signal=TERM --kill-after=15s 180s python3 fixtures/pubsub-wire-fixture/controller.py test
-      - name: Preserve fixture provenance and case evidence
+      - name: Verify pinned runtimes and fetch frozen inputs
+        run: timeout --signal=TERM --kill-after=15s 1300s python3 fixtures/mixed-file-interop/controller.py prepare
+      - name: Compile the published-crate fixture offline
+        run: timeout --signal=TERM --kill-after=15s 1250s python3 fixtures/mixed-file-interop/controller.py build
+      - name: Run four actual mixed file-transfer scenarios
+        run: timeout --signal=TERM --kill-after=15s 680s python3 fixtures/mixed-file-interop/controller.py test
+      - name: Retain all provenance and failure evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pubsub-wire-fixture-${{ github.sha }}
-          path: ${{ runner.temp }}/pubsub-wire-fixture/evidence
+          name: mixed-file-interop-${{ github.sha }}
+          path: ${{ runner.temp }}/mixed-file-interop/evidence
           if-no-files-found: error
-          retention-days: 7
           include-hidden-files: true
+          retention-days: 7
