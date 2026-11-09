@@ -64,6 +64,7 @@ export default defineConfig({...original,workers:1,retries:0,outputDir:process.e
     (evidence/'diagnostic-gates.json').write_text(json.dumps(dict(passed=passed,source=spec['commit'],counts=counts,diagnosticOnly=True,releaseAccepted=False))+'\n')
     assert file_sha(root/'pnpm-lock.yaml')==spec['lockSha256'] and file_sha(root/'package.json')==spec['packageSha256']
     assert {str(f.relative_to(dist)):file_sha(f) for f in sorted(dist.rglob('*')) if f.is_file()}==new,'Qualified distribution mutated'
+    run(['python3','/stage/procedure/transport-control.py',str(evidence)],'transport-control',20)
     assert passed,'Original private contact cases failed; preserve diagnostic evidence'
 
 finally:

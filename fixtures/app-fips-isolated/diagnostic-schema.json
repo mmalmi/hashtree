@@ -30,7 +30,8 @@
       "devices",
       "relayPublications",
       "relayPublicationObservation",
-      "collectionFailures"
+      "collectionFailures",
+      "browserTransport"
     ],
     "deviceCountMax": 2,
     "unavailableAlternative": {
@@ -39,5 +40,53 @@
     "collectionAbortAlternative": {
       "collectionAborted": true
     }
+  },
+  "browserTransport": {
+    "maxWorkers": 16,
+    "maxSockets": 512,
+    "maxRowsPerDevice": 1000,
+    "stages": [
+      "network-enabled",
+      "socket-created",
+      "socket-handshake",
+      "socket-error",
+      "socket-closed",
+      "socket-event",
+      "socket-ok"
+    ],
+    "socketErrorCodes": [
+      "ERR_CONNECTION_REFUSED",
+      "ERR_CONNECTION_CLOSED",
+      "ERR_CONNECTION_RESET",
+      "ERR_NETWORK_CHANGED",
+      "ERR_INTERNET_DISCONNECTED",
+      "ERR_INSUFFICIENT_RESOURCES",
+      "ERR_WS_PROTOCOL_ERROR",
+      "ERR_TIMED_OUT",
+      "ERR_FAILED",
+      "closed-before-open",
+      "other"
+    ],
+    "destinations": [
+      "private",
+      "other"
+    ],
+    "okReasons": [
+      "stored",
+      "temporarily-unavailable",
+      "auth-required",
+      "other"
+    ],
+    "waitForDebuggerOnStart": false,
+    "noRawFramesUrlsOrErrorsRetained": true,
+    "positiveControl": "private worker socket-event and positive socket-ok matching relay stored id"
+  },
+  "workerPublish": {
+    "destinationCount": "nonnegative integer",
+    "destination": [
+      "empty",
+      "private-only",
+      "mixed-or-other"
+    ]
   }
 }
