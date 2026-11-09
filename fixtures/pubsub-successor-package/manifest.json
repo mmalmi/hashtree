@@ -1,4 +1,10 @@
 {
+  "networkProofSha256": "ad53bbfab4f7089b6981ed0e30b7544437bff6ba94dd04245d74b2acc2f7612f",
+  "memoryGate": {
+    "wholeContainerMemoryEvents": true,
+    "oom": 0,
+    "oom_kill": 0
+  },
   "purpose": "Fresh versioned package build and tracked generated output provenance after accepted scope regression",
   "source": {
     "archiveSha256": "7ee762f7a588363e3cb3e24a4ba4334561c22e2b32c586132c7497c2e701584a",

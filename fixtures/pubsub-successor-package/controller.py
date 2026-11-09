@@ -20,21 +20,30 @@ def interrupted(signum,frame):cleanup();raise SystemExit(128+signum)
 for sig in (signal.SIGTERM,signal.SIGINT):signal.signal(sig,interrupted)
 def run(args,log,seconds=300,allow_failure=False):
  global PROCESS
- assert time.monotonic()-START<1200;output=E/log;assert not output.exists();started=time.monotonic();minimum=shutil.disk_usage(STAGE).free
- with output.open('wb') as f:
-  PROCESS=subprocess.Popen(args,env=ENV,stdout=f,stderr=subprocess.STDOUT,start_new_session=True)
-  try:
+ output=E/log;assert not output.exists();started=time.monotonic();minimum=None;before=None;after=None;code=None;failure=None
+ try:
+  assert time.monotonic()-START<1200
+  with output.open('wb') as f:
+   before=shutil.disk_usage(STAGE).free;minimum=before
+   assert before>=20*1024**3,'Hosted disk floor before command'
+   PROCESS=subprocess.Popen(args,env=ENV,stdout=f,stderr=subprocess.STDOUT,start_new_session=True)
    while PROCESS.poll() is None:
     minimum=min(minimum,shutil.disk_usage(STAGE).free)
-    assert minimum>=20*1024**3,'Hosted disk floor';assert time.monotonic()-started<seconds,'Bounded command deadline';time.sleep(1)
-   code=PROCESS.wait()
-  finally:
+    assert minimum>=20*1024**3,'Hosted disk floor during command';assert time.monotonic()-started<seconds,'Bounded command deadline';time.sleep(1)
+   code=PROCESS.wait();after=shutil.disk_usage(STAGE).free;minimum=min(minimum,after)
+   assert after>=20*1024**3,'Hosted disk floor after command'
+ except BaseException as error:
+  failure=type(error).__name__;raise
+ finally:
+  if PROCESS is not None:
    if PROCESS.poll() is None:
     os.killpg(PROCESS.pid,signal.SIGTERM)
     try:PROCESS.wait(timeout=5)
     except subprocess.TimeoutExpired:os.killpg(PROCESS.pid,signal.SIGKILL);PROCESS.wait(timeout=5)
+   if code is None:code=PROCESS.returncode
    PROCESS=None
- with (E/'commands.jsonl').open('a') as f:f.write(json.dumps({'log':log,'exitCode':code,'seconds':time.monotonic()-started,'minimumFreeBytes':minimum})+'\n')
+  final_free=shutil.disk_usage(STAGE).free;minimum=final_free if minimum is None else min(minimum,final_free)
+  with (E/'commands.jsonl').open('a') as f:f.write(json.dumps({'log':log,'exitCode':code,'seconds':time.monotonic()-started,'beforeFreeBytes':before,'afterCommandFreeBytes':after,'finalFreeBytes':final_free,'minimumFreeBytes':minimum,'failureType':failure,'knownChildProcessReaped':PROCESS is None})+'\n')
  if not allow_failure:assert code==0,f'{log} exited {code}'
  return code
 def docker(name,command,*,rust=False,network='none',cwd='/stage',seconds=300,allow_failure=False):
