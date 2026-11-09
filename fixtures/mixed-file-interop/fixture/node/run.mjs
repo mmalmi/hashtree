@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import { Peer, until } from './process.mjs';
 import { sha } from './durable.mjs';
+import { resumeEvidence } from './ready-proof.mjs';
 const here = dirname(fileURLToPath(import.meta.url));
 const admittedBytes = await readFile(process.env.FIPS_FILE_INTEROP_INPUTS);
 assert.equal(sha(admittedBytes), process.env.FIPS_FILE_INTEROP_INPUTS_SHA256, 'root-reviewed admission binding required');
@@ -96,7 +97,7 @@ try {
       await startTransfer(pair, rustSender, command, false);
     }
     await until(() => { pair.ts.live(); pair.rust.live(); return [pair.ts, pair.rust].every(p => p.events.some(e => e.event === 'completed' && e.id === command.id)); }, 'both application completions', 90000);
-    if (interrupted) assert(pair.ts.events.some(e => e.event === 'accepted' && e.bytes === prefix), 'resume must acknowledge the saved offset');
+    const resumeProof = interrupted ? resumeEvidence(rustSender, pair.rust.events, pair.ts.events, command.id, prefix, pair.r.peer) : undefined;
     const receiver = rustSender ? pair.ts : pair.rust;
     const files = await receiver.command({ ...command, op: 'verify' });
     const native = (await pair.rust.command({ op: 'snapshots' })).find(r => r.id === command.id);
@@ -111,8 +112,10 @@ try {
     assert.deepEqual(await (rustSender ? pair.ts : pair.rust).command({ ...command, op: 'verify' }), files);
     await stopPair(pair); await currentSeed.stop(); const network = currentSeed.stats(); currentSeed = undefined;
     assert(network.ingressBytes > 0 && network.ingressBytes <= network.ingressLimitBytes && network.egressBytes > 0 && network.maxConcurrent <= 8);
-    scenarios.push({ name, resumed: interrupted, durablePrefixBytes: prefix, files: files.map(({ modifiedNs, ...r }) => r),
-      bothTerminalCompleted: true, identitiesStable: true, completedStateSurvivesRestart: true, outputUnchangedAfterRestart: true, network });
+    const result = { name, resumed: interrupted, durablePrefixBytes: prefix, resumeProof, files: files.map(({ modifiedNs, ...r }) => r),
+      bothTerminalCompleted: true, identitiesStable: true, completedStateSurvivesRestart: true, outputUnchangedAfterRestart: true, network };
+    await writeFile(join(directory, 'scenario.json'), JSON.stringify(result, null, 2) + '\n', { flag: 'wx', mode: 0o600 });
+    scenarios.push(result);
   }
   await writeFile(join(out, 'interop-receipt.json'), JSON.stringify({ passed: true, scenarios, source: admitted.source,
     inputSha256: sha(admittedBytes), rustCrateSha256: admitted.rustCrateSha256, rustBinarySha256: admitted.rustBinarySha256,

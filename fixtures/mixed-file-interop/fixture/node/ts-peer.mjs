@@ -4,8 +4,9 @@ import { readFile } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
 import { FipsNode, identityFromSecretKey, npubFromHex, toHex } from '@fips/core';
 import { WebSocketTransport } from '@fips/transport-websocket';
-import { DirectFileTcp, directFileFrame, manifestDigest, prefixDigest } from '@fips/file-transfer';
-import { Segment } from '@fips/tcp';
+import { DirectFileTcp, DirectFileReader, directFileFrame, manifestDigest, prefixDigest } from '@fips/file-transfer';
+import { Segment, Flags } from '@fips/tcp';
+import { ReadyProof } from './ready-proof.mjs';
 import { storage, contents, sha } from './durable.mjs';
 const emit = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const config = JSON.parse(await readFile(process.argv[2], 'utf8'));
@@ -22,14 +23,29 @@ for (const row of vectors.prefixes) assert.equal(await prefixDigest(vectorFiles,
 for (const row of vectors.controls) assert.equal(Buffer.from(directFileFrame(0, Buffer.from(JSON.stringify(row.control)))).toString('hex'), row.frame_hex);
 const node = new FipsNode({ identity, transports: [new WebSocketTransport({ seedUrls: [config.seed] })],
   forwarding: false, routingMode: 'reply_learned' });
-let gate = false, armed = false, role, sentPayload = 0, stopped = false;
+let gate = false, armed = false, role, sentPayload = 0, stopped = false, readyProof, readyId;
 const events = [];
 function closeGate(reason, count) {
   if (gate) return; gate = true; emit({ event: 'gate', reason, count });
 }
 const disk = await storage(config.directory, length => { if (armed && role === 'receive' && length >= 65536) closeGate('saved-prefix', length); });
 const endpoint = {
-  registerService: (port, handler) => node.registerService(port, incoming => { if (!gate) return handler(incoming); }),
+  registerService: (port, handler) => node.registerService(port, incoming => {
+    if (gate) return;
+    if (readyProof && !readyProof.complete) {
+      const segment = Segment.decode(incoming.payload);
+      const frame = readyProof.observe(incoming, { ...segment, syn: segment.flags.has(Flags.Syn), ack: segment.flags.has(Flags.Ack) });
+      if (frame) {
+        const packets = new DirectFileReader().push(frame); assert.equal(packets.length, 1); assert.equal(packets[0][0], 0);
+        const ready = JSON.parse(Buffer.from(packets[0].subarray(1)).toString('utf8'));
+        assert.deepEqual(Object.keys(ready).sort(), ['id', 'offset', 'type']);
+        assert.equal(ready.type, 'ready'); assert.equal(ready.id, readyId);
+        assert(Number.isSafeInteger(ready.offset) && ready.offset >= 0);
+        emit({ event: 'sender-ready', id: ready.id, peer: readyProof.peer, bytes: ready.offset });
+      }
+    }
+    return handler(incoming);
+  }),
   async sendDatagram(args) {
     if (gate) return;
     if (armed && role === 'offer') {
@@ -59,7 +75,8 @@ try {
         const files = contents(command.size, command.salt).map(([filename, bytes]) => ({ filename,
           sizeBytes: bytes.length, sha256: sha(bytes), blob: new Blob([bytes]) }));
         if (role === 'offer') engine.registerOffer(command.id, command.token, [command.peer], files, { version: 2 });
-        else await engine.receive(command.id, command.token, command.peer, files, { version: 2 });
+        else { readyProof = new ReadyProof(command.peer); readyId = command.id;
+          await engine.receive(command.id, command.token, command.peer, files, { version: 2 }); }
         value = true;
       } else if (command.op === 'snapshots') value = { retained: await disk.retained(command.id),
         send: await disk.store.load(`send/${command.id}`), receive: await disk.store.load(`receive/${command.id}`), ...disk.counters() };

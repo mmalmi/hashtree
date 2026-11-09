@@ -20,6 +20,12 @@ assert [r['name'] for r in receipt['scenarios']]==['rust-to-ts-complete','rust-t
 for row in receipt['scenarios']:
  assert row['bothTerminalCompleted'] and row['identitiesStable'] and row['completedStateSurvivesRestart'] and row['outputUnchangedAfterRestart']
  assert (row['durablePrefixBytes']>0)==row['resumed'] and len(row['files'])==3
+ if row['resumed']:
+  proof=row['resumeProof'];sender='rust' if row['name'].startswith('rust-to-ts') else 'ts'
+  assert proof['sender']==sender and proof['accepted'] and proof['acceptedOffset']==proof['receiverSavedOffset']==row['durablePrefixBytes']
+  assert proof['senderEvent']['event']=='accepted' and proof['senderEvent']['id']==row['name']
+  if sender=='rust':assert proof['method']=='sender-event-and-authenticated-ready' and proof['readyEvent']['event']=='sender-ready' and proof['readyEvent']['id']==row['name'] and proof['readyEvent']['bytes']==row['durablePrefixBytes']
+  else:assert proof['method']=='sender-event-offset' and proof['senderEvent']['bytes']==row['durablePrefixBytes']
  assert row['network']['ingressBytes']>0 and row['network']['ingressBytes']<=row['network']['ingressLimitBytes']==128*1024**2
  assert row['network']['egressBytes']>0 and row['network']['maxConcurrent']<=8
 print(json.dumps({'passed':True,'scenarios':4,'freshDirections':2,'interruptedRestartDirections':2}))

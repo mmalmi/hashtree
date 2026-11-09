@@ -16,8 +16,8 @@
   "vectorsSha256": "39254c05fb2a2dc9bc4b6dd21e775f79c25f9da089685b62254f6afdde099cf9",
   "fixtureFiles": {
     "README.md": {
-      "sha256": "d68e50140e41bacbde97116d1997a86809a3c5120e0b7210071a4ec22759e98c",
-      "bytes": 6910
+      "sha256": "5d2194197bbc67017dbb37aaed8cd67b7a9b0d40f0c824282833629019af226a",
+      "bytes": 7069
     },
     "file-transfer-v2-vectors.json": {
       "sha256": "39254c05fb2a2dc9bc4b6dd21e775f79c25f9da089685b62254f6afdde099cf9",
@@ -32,16 +32,16 @@
       "bytes": 3531
     },
     "node/run.mjs": {
-      "sha256": "f4d0cb883ce542304add20e2a91e253e6ad0b0551b9c0300f3c2c6bb4b9687e8",
-      "bytes": 9294
+      "sha256": "19fe6696c8c498273a8b938d44a996f6b474a1f26f987f173717da7eee3e599e",
+      "bytes": 9510
     },
     "node/seed.mjs": {
       "sha256": "aa8147db32e7a4905b196726bb5b263b7657e49e91d6365b9705140c384350a1",
       "bytes": 3251
     },
     "node/ts-peer.mjs": {
-      "sha256": "fe6d19f4fb12304f8fd2f0ea8c8d958af0728705f8b843e892968c093929fc17",
-      "bytes": 4793
+      "sha256": "ddf3a0143a7bf1344007a0bd5adb310d21b41f4057f04efeffc424cc65f72353",
+      "bytes": 5794
     },
     "rust/Cargo.lock": {
       "sha256": "86444b5fb1024a35a3aa6b03a93828a50fe17429252f9dea81a49dc06c17e690",
@@ -54,6 +54,10 @@
     "rust/src/main.rs": {
       "sha256": "6718e8ea3702977f45016b9dc85676e139b6cd18a197854d372a5cd5b57c4530",
       "bytes": 8546
+    },
+    "node/ready-proof.mjs": {
+      "sha256": "1af0ad31ba11473d7d3b86d99bf32652367ca70cfa2901f6c51b947b72aea6ad",
+      "bytes": 2849
     }
   },
   "nodeClosure": {

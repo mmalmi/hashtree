@@ -61,8 +61,9 @@ or cancelled, and must not abort its retained sink.
 
 Both actual child processes exit and are recreated with the same fixture-only
 identities and separate on-disk stores. Durable partial bytes and claimed state
-must survive, and the TS public accepted event must name the exact saved resume
-offset. After completion both processes restart again: completed claims and
+must survive. Each sender must emit acceptance: the TS sender event carries the
+exact saved offset; for the Rust sender, the fixture also passively observes its
+authenticated Ready control with that exact offset (bounded first-frame observation). After completion both processes restart again: completed claims and
 Rust snapshots must remain completed, and receiver bytes/hash/mtime must remain
 unchanged. No persisted claim is edited to manufacture a recovery.
 
