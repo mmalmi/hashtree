@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "git",
-      "commit": "61d57597cadd4220814fb34d9fb09c86fe3971dc",
+      "commit": "b917bc4c6fc0ffe9e608bbf5d8f1229c79ebba28",
       "archive": "archives/git-source.tar.gz",
-      "archiveSha256": "b25f7b021213eee93ec666fc0757afff3f20666488b8a99e9e50d9af791dd035",
-      "archiveBytes": 6481081,
+      "archiveSha256": "317bbc9be958c5fe2fa07700788ea8c672d1f26dcd227f30792a42570032c6d8",
+      "archiveBytes": 6481039,
       "lockSha256": "9ac7b9b9a03b0a92825f3e9c7d3742f35e426f149fddf0e160417e9d8de23929",
       "packageSha256": "3073536b4b38c891a4d94916539452f86bd3a92a563046782bfb041846f11d67",
       "distDir": "iris-git",
@@ -49,7 +49,7 @@
         "e2e/git-favorites.spec.ts": "706f412a8562bed52981c50b35d508e5bba80eee65079eae4c28dcd9406cd0d5",
         "e2e/git-file-bar.helpers.ts": "76a3ee585fe228e29f790e4c3d40ad1065e459b3a02c20c91a1207eb9fef408c",
         "e2e/git-file-bar.spec.ts": "d97d54c674e2651ec6a049a43042539aebac900e6f8c6d78b3e3f5c4f97f6d5c",
-        "e2e/git-fips-provider-bridge.spec.ts": "e87e34d2389e6654c93104beb33479465db4130395e32030319e7d61ffc6518b",
+        "e2e/git-fips-provider-bridge.spec.ts": "05686b684e49f14ff9b9247688b36afef3274ec18cd43304bd6578febd5d48f0",
         "e2e/git-fork-pr.spec.ts": "fb0f3b05ae4c983e83e89187cdddf92a6cab589676aaf56147fb89ca5b211909",
         "e2e/git-forks.spec.ts": "8fa8b95ddd0761675d1386e423f94ebe32c342b6eb2acc755a778416af60dec8",
         "e2e/git-history-cache.spec.ts": "aa36ada8f39cb1e46260539bb4b68b7afdcfcfa080354677675fc879c74439ac",
@@ -87,8 +87,8 @@
       },
       "permissionTestFiles": [],
       "requiredPermissionContexts": 1,
-      "sourceArchiveSha256": "b25f7b021213eee93ec666fc0757afff3f20666488b8a99e9e50d9af791dd035",
-      "sourceArchiveBytes": 6481081,
+      "sourceArchiveSha256": "317bbc9be958c5fe2fa07700788ea8c672d1f26dcd227f30792a42570032c6d8",
+      "sourceArchiveBytes": 6481039,
       "version": "0.1.21",
       "installedRuntimeExpectations": [
         {
@@ -182,7 +182,8 @@
           }
         ]
       },
-      "acceptedSourceReceiptSha256": "509cbab7adea1ff930cb2c09464de1a199641ab1ba0c81020d0d652f14dca384"
+      "acceptedSourceReceiptSha256": "509cbab7adea1ff930cb2c09464de1a199641ab1ba0c81020d0d652f14dca384",
+      "testOnlySourceParent": "61d57597cadd4220814fb34d9fb09c86fe3971dc"
     }
   ]
 }
