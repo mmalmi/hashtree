@@ -1,6 +1,7 @@
 """One published-baseline Rust example and one unchanged mandatory TS interoperability case."""
 from pathlib import Path
 import hashlib,json,os,shutil,signal,struct,subprocess,sys,tarfile,time,urllib.request
+from system_setup import prepare_system
 HERE=Path(__file__).resolve().parent;M=json.loads((HERE/'manifest.json').read_text())
 STAGE=Path(os.environ['PUBSUB_STAGE']).resolve();E=STAGE/'evidence';START=time.monotonic();NAMES=set();PROCESS=None
 ENV={k:v for k,v in os.environ.items() if k in ('PATH','HOME','USER','DOCKER_HOST','DOCKER_CONFIG','XDG_RUNTIME_DIR')}
@@ -39,7 +40,10 @@ def run(args,log,seconds=300,allow_failure=False):
  return code
 def docker(name,command,*,rust=False,network='none',cwd='/stage',seconds=300,allow_failure=False):
  tool=M['rust'] if rust else M['node'];assert network in ('none','bridge')
- extra=['CARGO_HOME=/stage/cargo-home','CARGO_TARGET_DIR=/stage/cargo-target','CARGO_BUILD_JOBS=1','CARGO_INCREMENTAL=0','CARGO_PROFILE_DEV_DEBUG=0','RUSTC_WRAPPER=','RUSTC_WORKSPACE_WRAPPER='] if rust else ['npm_config_manage_package_manager_versions=false','npm_config_package_manager_strict_version=true']
+ if rust and (E/'system-image.json').exists():
+  system=json.loads((E/'system-image.json').read_text());assert system['baseImageId']==M['rust']['imageId'] and system['closureSha256']==M['system']['closureSha256']
+  tool={'image':system['imageId'],'imageId':system['imageId']}
+ extra=['CARGO_HOME=/stage/cargo-home','CARGO_TARGET_DIR=/stage/cargo-target','CARGO_BUILD_JOBS=1','CARGO_INCREMENTAL=0','CARGO_PROFILE_DEV_DEBUG=0','RUSTC_WRAPPER=','RUSTC_WORKSPACE_WRAPPER=','LIBCLANG_PATH=/usr/lib/llvm-14/lib'] if rust else ['npm_config_manage_package_manager_versions=false','npm_config_package_manager_strict_version=true']
  path='/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin' if rust else '/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
  args=['docker','create','--name',name,'--label','iris.task=pubsub-wire-fixture','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd]
  for value in ['HOME=/stage/home','CI=true','PATH='+path,*extra]:args+=['--env',value]
@@ -87,12 +91,16 @@ def prepare():
  for label in ['node','rust']:run(['docker','pull',M[label]['image']],label+'-image-pull.log',300)
  docker('pubsub-wire-node-proof',['node','/stage/procedure/toolchain.cjs'],seconds=30)
  node=json.loads((E/'toolchain.json').read_text());assert node==M['priorGreen']['toolchain']
- docker('pubsub-wire-rust-proof',['sh','/stage/procedure/rust-proof.sh'],rust=True,seconds=30)
- assert (E/'rustc-version.txt').read_text()==M['rust']['rustcVersion'];assert (E/'cargo-version.txt').read_text().strip()==M['rust']['cargoVersion']
+ docker('pubsub-wire-rust-base-proof',['sh','/stage/procedure/rust-proof.sh','base'],rust=True,seconds=30)
+ assert (E/'base-rustc-version.txt').read_text()==M['rust']['rustcVersion'];assert (E/'base-cargo-version.txt').read_text().strip()==M['rust']['cargoVersion']
+ prepare_system(HERE,STAGE,E,M,run,docker,cleanup,ENV,NAMES)
+ docker('pubsub-wire-rust-proof',['sh','/stage/procedure/rust-proof.sh','derived'],rust=True,seconds=30)
+ for name in ['rustc-version.txt','cargo-version.txt','rust-tool-binary-sha256.txt','cc-version.txt','ld-version.txt','cc-ld-binary-sha256.txt']:
+  assert (E/('base-'+name)).read_bytes()==(E/('derived-'+name)).read_bytes(),'Compiler inputs changed during system setup: '+name
  docker('pubsub-wire-install',['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/workspace/ts',seconds=300)
  docker('pubsub-wire-fetch',['cargo','fetch','--locked','--target','x86_64-unknown-linux-gnu'],rust=True,network='bridge',cwd='/stage/native-fixture',seconds=600)
  source('native');source('green')
- write('prepared.json',{'manifestSha256':sha(HERE/'manifest.json'),'cargoLockSha256':sha(STAGE/'native-fixture/Cargo.lock'),'node':node,'rustImage':M['rust']['image'],'rustImageId':M['rust']['imageId'],'sourceUnchangedAfterLockedFetch':True})
+ write('prepared.json',{'manifestSha256':sha(HERE/'manifest.json'),'cargoLockSha256':sha(STAGE/'native-fixture/Cargo.lock'),'node':node,'rustImage':json.loads((E/'system-image.json').read_text())['imageId'],'rustBaseImage':M['rust']['image'],'systemClosureSha256':M['system']['closureSha256'],'sourceUnchangedAfterLockedFetch':True})
 def build():
  assert json.loads((E/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json');source('native')
  code=docker('pubsub-wire-build',['sh','/stage/procedure/build-fixture.sh'],rust=True,cwd='/stage/native-fixture',seconds=1200,allow_failure=True)
@@ -108,7 +116,7 @@ def build():
    begin=struct.unpack_from('<Q',data,start+8)[0];length=struct.unpack_from('<Q',data,start+32)[0];interpreters.append(data[begin:begin+length].rstrip(b'\0').decode())
  assert interpreters==['/lib64/ld-linux-x86-64.so.2']
  write('compiled-artifacts.json',[{k:r[k] for k in ['package_id','target','profile','features','filenames','executable']} for r in artifacts])
- write('wire-binary.json',{'path':str(absolute),'sha256':sha(binary),'bytes':len(data),'architecture':'ELF64 little-endian x86_64','loader':interpreters[0],'source':M['nativeSource']['commit'],'sourceArchiveSha256':M['nativeSource']['archiveSha256'],'cargoLockSha256':sha(STAGE/'native-fixture/Cargo.lock'),'rustImage':M['rust']['image'],'artifact':artifact,'buildCommand':M['fixtureBuildCommand'],'defaultFeatures':True,'explicitFeatures':[],'nativeScope':'one original example; no native tests or consumers'})
+ write('wire-binary.json',{'path':str(absolute),'sha256':sha(binary),'bytes':len(data),'architecture':'ELF64 little-endian x86_64','loader':interpreters[0],'source':M['nativeSource']['commit'],'sourceArchiveSha256':M['nativeSource']['archiveSha256'],'cargoLockSha256':sha(STAGE/'native-fixture/Cargo.lock'),'rustImage':json.loads((E/'system-image.json').read_text())['imageId'],'rustBaseImage':M['rust']['image'],'systemClosureSha256':M['system']['closureSha256'],'artifact':artifact,'buildCommand':M['fixtureBuildCommand'],'defaultFeatures':True,'explicitFeatures':[],'nativeScope':'one original example; no native tests or consumers'})
  shutil.copyfile(binary,E/'fips-pubsub-wire-stdio');(E/'fips-pubsub-wire-stdio').chmod(binary.stat().st_mode&0o777)
  write('native-source-after.json',source('native'))
 def test():

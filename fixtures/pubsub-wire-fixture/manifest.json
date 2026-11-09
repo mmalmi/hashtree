@@ -3636,5 +3636,18 @@
   "qualificationOnly": true,
   "releaseAccepted": false,
   "fixtureSubstitution": "Original exact cargo invocation launches SHA-verified binary from original Rust example; source/test/assertions are unchanged",
-  "noSourcePackageOrConsumerPublication": true
+  "noSourcePackageOrConsumerPublication": true,
+  "system": {
+    "closureSha256": "cf42015eaa87ca080bbc6d4e66a877626e7ad67145f0f0ef6f415bb64bd5bb8c",
+    "newPackages": 8,
+    "downloadBytes": 36583844,
+    "basePackagesChanged": 0,
+    "rootSetupOnly": true,
+    "offlineInstallation": true,
+    "setupMounts": "read-only procedure, packages and verified proof; dedicated0770 output with runner supplementary group; no whole-stage bind",
+    "globalStageMode": "0700",
+    "compilerUser": "nonroot",
+    "libclangPath": "/usr/lib/llvm-14/lib",
+    "publishedImageByteEquivalenceClaimed": false
+  }
 }
