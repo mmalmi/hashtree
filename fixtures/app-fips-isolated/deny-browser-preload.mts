@@ -1,7 +1,6 @@
 import {createRequire} from 'node:module';
 import {appendFileSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
-import {createDenyProxy, assertWorkerNetworkBlocked} from './standalone-browser-boundary.ts';
 import {grantIsolatedPermission} from './permission-context.ts';
 const require=createRequire(`${process.cwd()}/package.json`);
 // Import the browser library without installing Playwright's global matchers in Vitest.
@@ -9,6 +8,8 @@ const playwrightRequire=createRequire(require.resolve('@playwright/test'));
 const {chromium}=playwrightRequire('playwright');
 const launch=chromium.launch.bind(chromium);
 chromium.launch=async(options={})=>{
+  // The helper owns Playwright assertions; load it only for a browser launch.
+  const {createDenyProxy, assertWorkerNetworkBlocked}=await import('./standalone-browser-boundary.ts');
   const proof=process.env.BROWSER_BOUNDARY_RECEIPT;
   if(!proof)throw Error('Missing boundary evidence path');
   const check=spawnSync('python3',['/stage/procedure/network-proof.py',`${proof}.network-${process.pid}.json`],{encoding:'utf8',timeout:15000});
