@@ -101,8 +101,8 @@ finally:
     verify_inputs()
     subprocess.run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after-attempt.json')],env=env,check=True,timeout=15)
     memory=pathlib.Path('/sys/fs/cgroup');events=dict(line.split() for line in (memory/'memory.events').read_text().splitlines())
-    assert int(events['oom_kill'])==0
-    (evidence/'resource-final.json').write_text(json.dumps({'noChildOOM':True,'events':events,'memoryPeak':int((memory/'memory.peak').read_text())},indent=2)+'\n')
+    assert int(events['oom'])==int(events['oom_kill'])==0
+    (evidence/'resource-final.json').write_text(json.dumps({'noChildOOM':True,'noOOM':True,'events':events,'memoryPeak':int((memory/'memory.peak').read_text())},indent=2)+'\n')
     (evidence/'release-gates.json').write_text(json.dumps(result,indent=2)+'\n')
 contexts=[json.loads(line) for line in (evidence/'context-permissions.jsonl').read_text().splitlines()]
 assert set(c['engine'] for c in contexts)=={'chromium'}

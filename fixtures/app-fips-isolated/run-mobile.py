@@ -5,6 +5,10 @@ spec=json.loads((base/'procedure/manifest.json').read_text())['apps'][0]
 sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
 assert not evidence.exists();evidence.mkdir()
 assert os.environ['FIPS_DUMMY']=='0' and os.environ['FIPS_MEDIA_PERMISSION']=='0'
+memory=pathlib.Path('/sys/fs/cgroup')
+read_events=lambda:dict(line.split() for line in (memory/'memory.events').read_text().splitlines())
+beforeEvents=read_events()
+assert int(beforeEvents['oom'])==int(beforeEvents['oom_kill'])==0
 for name,digest in spec['mobileSourceInputs'].items():assert sha(root/name)==digest
 assert sha(root/'package.json')==spec['packageSha256'] and sha(root/'pnpm-lock.yaml')==spec['lockSha256']
 archive=base/'evidence/chat/qualified-dist.tar.gz';assert sha(archive)==spec['priorEvidence']['distArchiveSha256']
@@ -35,6 +39,6 @@ try:
 finally:
     verify_dist()
     for name,digest in spec['mobileSourceInputs'].items():assert sha(root/name)==digest
-    memory=pathlib.Path('/sys/fs/cgroup');events=dict(line.split() for line in (memory/'memory.events').read_text().splitlines())
-    assert int(events['oom_kill'])==0
-    (evidence/'resource-final.json').write_text(json.dumps({'noChildOOM':True,'events':events,'memoryPeak':int((memory/'memory.peak').read_text())},indent=2)+'\n')
+    events=read_events()
+    assert int(events['oom'])==int(events['oom_kill'])==0
+    (evidence/'resource-final.json').write_text(json.dumps({'noChildOOM':True,'noOOM':True,'beforeAndAfterWholeContainer':True,'beforeEvents':beforeEvents,'afterEvents':events,'events':events,'memoryPeak':int((memory/'memory.peak').read_text())},indent=2)+'\n')
