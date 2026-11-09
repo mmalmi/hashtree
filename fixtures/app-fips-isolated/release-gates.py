@@ -22,6 +22,9 @@ steps.append({'name':'dry-run','command':['node','scripts/release-site.mjs']+(['
 if app=='sites':
     (evidence/'worker-optout').mkdir()
     steps.append({'name':'worker-optout','command':['node','/stage/procedure/worker-optout.mjs',str(root),str(evidence/'worker-optout')],'env':{'NODE_OPTIONS':''}})
+if app=='contacts':
+    graph=next(s for s in steps if s['command']==['node','./scripts/smoke-negentropy-graph.mjs','contacts'])
+    graph['env']={'NODE_OPTIONS':''} # The original graph smoke owns its rejecting proxy and raw-worker control.
 result={'source':spec['commit'],'profileSha256':sha(source_root/spec['releaseProfilePath']),'steps':[],'passed':False};cache=None
 (evidence/'release-plan.json').write_text(json.dumps({'profile':profile,'steps':steps},indent=2)+'\n')
 def retain_artifacts(name):

@@ -4,6 +4,7 @@ spec=next(a for a in json.loads((base/'procedure/manifest.json').read_text())['a
 evidence=base/'evidence'/app;evidence.mkdir();home=base/'home'/app;home.mkdir(exist_ok=True)
 env=dict(os.environ,CI='1',PW_WORKERS='1',PW_MAX_WORKERS='1',HTREE_BIN='/stage/tools/native/hashtree/htree',GIT_REMOTE_HTREE_BIN='/stage/tools/native/hashtree/git-remote-htree',HTREE_CONFIG_DIR=str(home/'config'),HTREE_DATA_DIR=str(home/'data'),HTREE_PREFER_LOCAL_DAEMON='false',FIPS_APP_EVIDENCE=str(evidence),FIPS_PERMISSION_ORIGIN=spec['runtimeOrigin'])
 env['PATH']='/stage/tools/native/hashtree:'+env['PATH']
+if app=='contacts':env['PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK']='1'
 for name,command,seconds in [('network',['python3','/stage/procedure/network-proof.py'],15),('packages',['node','/stage/procedure/package-proof.cjs'],15),('browser',['node','/stage/procedure/browser-proof.cjs'],35)]:
     subprocess.run(command+[str(evidence/(name+'.json'))],env=env,check=True,timeout=seconds)
 versions={'node':subprocess.check_output(['node','--version'],env=env,text=True).strip(),'pnpm':subprocess.check_output(['pnpm','--version'],env=env,text=True).strip(),'htree':subprocess.check_output([env['HTREE_BIN'],'--version'],env=env,text=True).strip(),'sourceCommit':spec['commit']}
