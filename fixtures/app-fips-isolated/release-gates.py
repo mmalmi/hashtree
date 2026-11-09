@@ -3,19 +3,26 @@ import hashlib,json,os,pathlib,selectors,shutil,subprocess,sys,tarfile,time,thre
 app=sys.argv[1];base=pathlib.Path('/stage');evidence=pathlib.Path(os.environ['FIPS_APP_EVIDENCE']);root=pathlib.Path.cwd()
 spec=next(a for a in json.loads((base/'procedure/manifest.json').read_text())['apps'] if a['id']==app)
 env=dict(os.environ,PW_WORKERS='1',PW_MAX_WORKERS='1');sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest()
-assert sha(root/'package.json')==spec['packageSha256'] and sha(root/'pnpm-lock.yaml')==spec['lockSha256']
-assert sha(root/spec['releaseProfilePath'])==spec['releaseProfileSha256']
-code="const m=await import('./scripts/release-site.mjs');const p=m.releaseProfiles[process.argv[1]];if(!p)throw Error('No release profile');console.log(JSON.stringify(p));"
+source_root=base/'apps'/app
+assert sha(root/'package.json')==spec['packageSha256'] and sha(source_root/'pnpm-lock.yaml')==spec['lockSha256']
+assert sha(source_root/spec['releaseProfilePath'])==spec['releaseProfileSha256']
+code="const m=await import('./scripts/release-site.mjs');const p=m.releaseProfiles?.[process.argv[1]] ?? m.releaseProfile;if(!p)throw Error('No release profile');console.log(JSON.stringify(p));"
 profile=json.loads(subprocess.check_output(['node','--input-type=module','-e',code,app],env=env,text=True,timeout=15));assert profile['distDir']==spec['distDir']
 steps=[{'name':'build','command':profile['buildCommand']}]
 for i,item in enumerate(profile['testCommands']):steps.append({'name':f'release-check-{i+1}',**({'command':item} if isinstance(item,list) else item)})
-if ['pnpm','run','test:unit'] not in [s['command'] for s in steps]:steps.append({'name':'unit','command':['pnpm','run','test:unit']})
-steps.append({'name':'dry-run','command':['node','scripts/release-site.mjs',app,'--dry-run']})
-if app=='git':
-    original=next(s for s in steps if s['command']==['pnpm','run','test:e2e:git'])
-    position=steps.index(original)
-    steps[position:position+1]=[dict(original,name=original['name']+f'-shard-{i}',command=original['command']+[f'--shard={i}/4'],originalCommand=original['command'],gitShard=i) for i in range(1,5)]
-result={'source':spec['commit'],'profileSha256':sha(root/spec['releaseProfilePath']),'steps':[],'passed':False};cache=None
+if app=='cc':
+    steps.append({'name':'release-units','command':['pnpm','run','test:release']})
+    portable=next(s for s in steps if s['command']==['node','./scripts/portable-smoke.mjs'])
+    portable['originalCommand']=portable['command'];portable['command']=['node','/stage/procedure/cached-portable.mjs']
+    peer=['pnpm','exec','playwright','test','e2e/p2p-connection.spec.ts','--workers=1','--retries=0']
+else:
+    peer=['pnpm','run','test:runtime','--workers=1','--retries=0']
+steps.append({'name':'peer-recovery','command':peer})
+steps.append({'name':'dry-run','command':['node','scripts/release-site.mjs']+(['contacts'] if app=='contacts' else [])+['--dry-run']})
+if app=='sites':
+    (evidence/'worker-optout').mkdir()
+    steps.append({'name':'worker-optout','command':['node','/stage/procedure/worker-optout.mjs',str(root),str(evidence/'worker-optout')],'env':{'NODE_OPTIONS':''}})
+result={'source':spec['commit'],'profileSha256':sha(source_root/spec['releaseProfilePath']),'steps':[],'passed':False};cache=None
 (evidence/'release-plan.json').write_text(json.dumps({'profile':profile,'steps':steps},indent=2)+'\n')
 def retain_artifacts(name):
     records=[];total=0
@@ -96,8 +103,8 @@ try:
         assert ready.select(15),'Map cache startup deadline';env['MAP_FIXTURE_CACHE_URL']=json.loads(cache.stdout.readline())['url'];ready.close()
     for step in steps:
         command=step['command'];assert isinstance(command,list) and command and all(isinstance(x,str) for x in command)
-        step_env=env|step.get('env',{})|{'PW_WORKERS':'1','PW_MAX_WORKERS':'1','PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/(step['name']+'-playwright.json'))}
-        if command[:3]==['pnpm','run','test:unit'] or command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
+        step_env=env|step.get('env',{})|{'BROWSER_BOUNDARY_RECEIPT':str(evidence/(step['name']+'-browser-boundary.jsonl'))}|{'PW_WORKERS':'1','PW_MAX_WORKERS':'1','PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/(step['name']+'-playwright.json'))}
+        if command[:3] in (['pnpm','run','test:unit'],['pnpm','run','test:model']) or command[:4]==['pnpm','exec','vitest','run']:command=[*command,'--maxWorkers=2']
         row={'name':step['name'],'command':command,'exitCode':None};result['steps'].append(row);started=time.monotonic()
         is_shard='gitShard' in step
         if is_shard:assert_git_ports_closed()
@@ -113,6 +120,11 @@ try:
         if is_shard and step['gitShard']==4:
             assert all(r['exitCode']==0 for r in result['steps'] if '-shard-' in r['name']),'Original Git shard failed'
             git_coverage()
+    if app=='sites':
+        assert json.loads((evidence/'worker-optout/worker-optout.json').read_text())['status']=='passed'
+    if app=='cc':
+        fixture=json.loads((evidence/'cached-portable-reads.json').read_text())
+        assert fixture['exitCode']==0 and fixture['signal'] is None and fixture['uniqueBlocks']>0 and fixture['noForwarding'] is True
     assert not resource_errors,'Resource sampler failed'
     dist=root/spec['distDir'];files=[p for p in sorted(dist.rglob('*')) if p.is_file()]
     assert files and not any(p.is_symlink() for p in dist.rglob('*'));assert sum(p.stat().st_size for p in files)<128*1024**2
@@ -120,7 +132,7 @@ try:
     with tarfile.open(evidence/'qualified-dist.tar.gz','w:gz') as archive:
         for p in files:archive.add(p,arcname=p.relative_to(dist).as_posix(),recursive=False)
     (evidence/'dist-manifest.json').write_text(json.dumps({'source':spec['commit'],'files':manifest},indent=2)+'\n')
-    assert sha(root/'pnpm-lock.yaml')==spec['lockSha256'],'Frozen lock mutated'
+    assert sha(source_root/'pnpm-lock.yaml')==spec['lockSha256'],'Frozen lock mutated'
     result.update(passed=True,distFiles=len(files),distBytes=sum(x['bytes'] for x in manifest),distArchiveSha256=sha(evidence/'qualified-dist.tar.gz'))
 finally:
     resource_stop.set();resource_thread.join(timeout=5)

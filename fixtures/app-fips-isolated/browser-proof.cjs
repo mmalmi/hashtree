@@ -1,7 +1,7 @@
 const {chromium}=require(process.cwd()+'/node_modules/@playwright/test');
 const fs=require('node:fs'),http=require('node:http'),assert=require('node:assert/strict');
 const version=require(process.cwd()+'/node_modules/@playwright/test/package.json').version;
-assert.equal(version,'1.60.0');
+assert.equal(version,'1.58.1');
 assert.equal(process.version,JSON.parse(fs.readFileSync('/stage/evidence/image-toolchain.json')).node);
 const crypto=require('node:crypto');
 const record={passed:false,node:process.version,playwright:version};
@@ -10,7 +10,7 @@ const record={passed:false,node:process.version,playwright:version};
  await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));let browser;
  try {
   browser=await chromium.launch({args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']});
-  record.browser=browser.version();assert.equal(record.browser,'148.0.7778.96');
+  record.browser=browser.version();assert.equal(record.browser,'145.0.7632.6');
   record.actualBrowserExecutables=[];
   for(const pid of fs.readdirSync('/proc').filter(p=>/^\d+$/.test(p))){
    try{const status=fs.readFileSync('/proc/'+pid+'/status','utf8');if(Number(status.match(/^PPid:\s+(\d+)/m)?.[1])!==process.pid)continue;const exe=fs.readlinkSync('/proc/'+pid+'/exe');if(!exe.startsWith('/ms-playwright/'))continue;record.actualBrowserExecutables.push({pid:Number(pid),path:exe,sha256:crypto.createHash('sha256').update(fs.readFileSync(exe)).digest('hex')});}catch(error){if(error.code!=='ENOENT')throw error;}
@@ -74,7 +74,7 @@ const record={passed:false,node:process.version,playwright:version};
    try{
     await grantIsolatedPermission(late);
     await late.grantPermissions(['geolocation']);
-    const probe=await late.newPage();const owned='http://localhost:43810/__late_permission_control';
+    const probe=await late.newPage();const owned=process.env.FIPS_PERMISSION_ORIGIN+'/__late_permission_control';
     await probe.route(owned,r=>r.fulfill({contentType:'text/html',body:'<!doctype html>'}));await probe.goto(owned);
     const states=await probe.evaluate(async()=>Object.fromEntries(await Promise.all(['microphone','geolocation','camera','clipboard-read','clipboard-write'].map(async name=>[name,(await navigator.permissions.query({name})).state]))));
     assert.equal(states.microphone,'granted');assert.equal(states.geolocation,'granted');
