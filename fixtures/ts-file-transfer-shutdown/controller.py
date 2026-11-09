@@ -5,10 +5,22 @@ M=json.loads((HERE/'manifest.json').read_text())
 STAGE=pathlib.Path(os.environ['FIPS_STAGE']).resolve()
 EVIDENCE=STAGE/'evidence'
 IMAGE=M['image']
-CONTAINERS=set();PROCESS=None;START=time.monotonic()
+CONTAINERS=set();PROCESS=None;START=time.monotonic();MIN_FREE=None;FIRST_FREE=None;DISK_SAMPLES=0
 SAFE_ENV={k:v for k,v in os.environ.items() if k in ('PATH','HOME','USER','DOCKER_HOST','DOCKER_CONFIG','XDG_RUNTIME_DIR')}
 APP_CONTAINERS=set()
 def sha(p):return hashlib.sha256(pathlib.Path(p).read_bytes()).hexdigest()
+proof=M['acceptedImageProof'];assert sha(HERE/proof['path'])==proof['sha256']
+ACCEPTED_IMAGE=json.loads((HERE/proof['path']).read_text())
+assert ACCEPTED_IMAGE['configImage']==IMAGE and ACCEPTED_IMAGE['node']==M['node']
+def disk_guard(*,entry=False):
+    global MIN_FREE,FIRST_FREE,DISK_SAMPLES
+    free=shutil.disk_usage(STAGE if STAGE.exists() else STAGE.parent).free
+    if FIRST_FREE is None:FIRST_FREE=free
+    MIN_FREE=free if MIN_FREE is None else min(MIN_FREE,free);DISK_SAMPLES+=1
+    limit=M['hostedDiskPolicy']['entryBytes' if entry else 'floorBytes']
+    if EVIDENCE.is_dir():
+        (EVIDENCE/('disk-'+sys.argv[1]+'.json')).write_text(json.dumps({'firstFreeBytes':FIRST_FREE,'minimumFreeBytes':MIN_FREE,'lastFreeBytes':free,'samples':DISK_SAMPLES,'entryBytes':M['hostedDiskPolicy']['entryBytes'],'floorBytes':M['hostedDiskPolicy']['floorBytes'],'sampleSeconds':M['hostedDiskPolicy']['commandSampleSeconds'],'floorViolated':MIN_FREE<M['hostedDiskPolicy']['floorBytes']},indent=2)+'\n')
+    assert free>=limit,'Hosted disk entry/floor gate'
 def cleanup():
     global PROCESS
     if PROCESS is not None and PROCESS.poll() is None:
@@ -28,21 +40,39 @@ for signum in (signal.SIGTERM,signal.SIGINT):signal.signal(signum,interrupted)
 def run(args,log,timeout=300,allow_failure=False):
     global PROCESS
     assert time.monotonic()-START<4200,'Overall deadline'
-    assert shutil.disk_usage(STAGE).free>8*1024**3,'Hosted disk reserve'
+    disk_guard()
     p=EVIDENCE/log;assert not p.exists(),'Preserve prior evidence'
     with p.open('wb') as output:
         PROCESS=subprocess.Popen(args,env=SAFE_ENV,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
-        try:code=PROCESS.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(PROCESS.pid,signal.SIGTERM)
-            try:PROCESS.wait(timeout=5)
-            except subprocess.TimeoutExpired:os.killpg(PROCESS.pid,signal.SIGKILL);PROCESS.wait(timeout=5)
+        process=PROCESS;deadline=time.monotonic()+timeout
+        try:
+            while True:
+                disk_guard()
+                code=process.poll()
+                if code is not None:break
+                remaining=deadline-time.monotonic()
+                if remaining<=0:raise subprocess.TimeoutExpired(args,timeout)
+                try:process.wait(timeout=min(M['hostedDiskPolicy']['commandSampleSeconds'],remaining))
+                except subprocess.TimeoutExpired:pass
+        except BaseException:
+            if process.poll() is None:
+                try:os.killpg(process.pid,signal.SIGTERM)
+                except ProcessLookupError:pass
+                try:process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    try:os.killpg(process.pid,signal.SIGKILL)
+                    except ProcessLookupError:pass
+                    process.wait(timeout=5)
             raise
         finally:PROCESS=None
     if not allow_failure:assert code==0,f'{log} exited {code}'
     return code
 def fetch(item,path):
-    with urllib.request.urlopen(item['url'],timeout=60) as response,path.open('wb') as output:shutil.copyfileobj(response,output)
+    with urllib.request.urlopen(item['url'],timeout=60) as response,path.open('wb') as output:
+        while True:
+            disk_guard();chunk=response.read(1024*1024)
+            if not chunk:break
+            output.write(chunk)
     assert sha(path)==item['sha256'],str(path)
 def extract(archive,destination):
     destination.mkdir(parents=True,exist_ok=True)
@@ -55,6 +85,7 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
     CONTAINERS.add(name)
     run(args,name+'-create.log',30)
     inspect=json.loads(subprocess.check_output(['docker','inspect',name],env=SAFE_ENV,text=True,timeout=5))[0]
+    assert inspect['Image']==ACCEPTED_IMAGE['imageId'] and inspect['Config']['Image']==ACCEPTED_IMAGE['configImage'],'Accepted Chat image identity changed'
     h=inspect['HostConfig'];assert h['NetworkMode']==network and h['PidMode']=='' and h['Memory']==4294967296 and h['MemorySwap']==h['Memory'] and h['NanoCpus']==2000000000 and h['PidsLimit']==512
     assert h['CapDrop']==['ALL'] and h['ReadonlyRootfs'] and inspect['Config']['User']==f'{os.getuid()}:{os.getgid()}'
     (EVIDENCE/(name+'-container.json')).write_text(json.dumps({'imageId':inspect['Image'],'config':inspect['Config'],'hostConfig':h},indent=2)+'\n')
@@ -77,13 +108,15 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
 
 def prepare():
     assert not STAGE.exists(),'Use one empty task stage'
+    disk_guard(entry=True)
     STAGE.mkdir(mode=0o700);EVIDENCE.mkdir();(STAGE/'home/file-transfer').mkdir(parents=True);(STAGE/'tools/bin').mkdir(parents=True)
+    disk_guard()
     shutil.copytree(HERE,STAGE/'procedure',ignore=shutil.ignore_patterns('source.tar.gz'))
     fetch(M['pnpm'],STAGE/'pnpm.tgz');extract(STAGE/'pnpm.tgz',STAGE/'tools/pnpm')
     wrapper=STAGE/'tools/bin/pnpm';wrapper.write_text('#!/bin/sh\nexec node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');wrapper.chmod(0o755)
     run(['docker','pull',IMAGE],'image-pull.log',300)
     docker('iris-file-transfer-image-proof',['node','-e',"const fs=require('node:fs'),c=require('node:crypto');fs.writeFileSync('/stage/evidence/image-toolchain.json',JSON.stringify({node:process.version,nodeSha256:c.createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}))"],seconds=30)
-    assert json.loads((EVIDENCE/'image-toolchain.json').read_text())['node']==M['node']
+    assert json.loads((EVIDENCE/'image-toolchain.json').read_text())=={k:ACCEPTED_IMAGE[k] for k in ('node','nodeSha256')}
     archive=HERE/M['sourceArchive'];assert sha(archive)==M['sourceArchiveSha256'];extract(archive,STAGE/'source')
     for file,digest in M['sourceFiles'].items():assert sha(STAGE/'source'/file)==digest,file
     package=STAGE/'source/file-transfer-ts';assert json.loads((package/'package.json').read_text())['packageManager']==M['packageManager']

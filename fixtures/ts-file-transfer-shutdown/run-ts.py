@@ -36,7 +36,8 @@ try:
             assert row['status']==('failed' if intent=='dispose' else 'passed')
             if intent=='dispose':
                 failure='\n'.join(row['failureMessages']);assert 'claimed' in failure and 'cancelled' in failure
-        assert all(r['status']=='pending' for r in rows if r not in selected)
+        unselected=[r for r in rows if r not in selected]
+        assert len(unselected)==12 and all(r['status'] in ('skipped','pending') for r in unselected)
     finally:
         index.write_bytes(green);source_check();restored=True
         dump('source-restored.json',{'restored':True,'source':M['source'],'indexSha256':sha(index),'redIndexSha256':sha(red),'sourceFiles':M['sourceFiles']})

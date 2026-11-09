@@ -33,5 +33,14 @@
   "image": "mcr.microsoft.com/playwright@sha256:ee15712262f017b8157421b212b12099146645f44b1bc5c0514cbbe6a229b1d0",
   "scope": "TypeScript frozen install, deterministic RED/GREEN, all units/shared vectors, check/build and package byte closure only",
   "requiredLiveInterop": "Fresh bidirectional native interoperability; not run or waived by this phase",
-  "releaseAcceptance": false
+  "releaseAcceptance": false,
+  "acceptedImageProof": {
+    "path": "accepted-image-proof.json",
+    "sha256": "7c20abd24c0db92b8c16e511a61e8e9616471bd519427681f3d8316ec4f8f368"
+  },
+  "hostedDiskPolicy": {
+    "entryBytes": 21474836480,
+    "floorBytes": 8589934592,
+    "commandSampleSeconds": 0.5
+  }
 }
