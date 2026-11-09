@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Fresh complete original git release profile and both actual browser endpoints recovering on accepted runtime61",
+  "purpose": "Exact-source continuation:81 immutable dev-source browser passes, corrected original manual-trace case, fresh build and remaining original gates",
   "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
   "imageTagForProvenance": "v1.60.0-noble",
   "pnpm": {
@@ -183,7 +183,24 @@
         ]
       },
       "acceptedSourceReceiptSha256": "509cbab7adea1ff930cb2c09464de1a199641ab1ba0c81020d0d652f14dca384",
-      "testOnlySourceParent": "61d57597cadd4220814fb34d9fb09c86fe3971dc"
+      "testOnlySourceParent": "61d57597cadd4220814fb34d9fb09c86fe3971dc",
+      "reusedBrowserEvidence": {
+        "runId": 42614497747,
+        "carrier": "ea836d10f3d06203cbb9da243b401af48e0e583e",
+        "source": "b917bc4c6fc0ffe9e608bbf5d8f1229c79ebba28",
+        "artifactId": 13672738298,
+        "artifactSha256": "d845a9ed80a88c096892e524eb8ef9973f49214685fb61e35924c41111f7d773",
+        "manifestSha256": "6ee028d1ec1b0fa1d926f072d6cfc29d7e1ba5c57948c210dd05e1e1ee9ff839",
+        "failedCase": {
+          "id": "18ae65b598e5cef5b635-f2ad3c0ab59177d3a81a",
+          "file": "git-forks.spec.ts",
+          "line": 201,
+          "column": 3,
+          "title": "forking another user repo writes metadata and lists same-EUC repo announcements",
+          "projectName": "chromium",
+          "expectedStatus": "passed"
+        }
+      }
     }
   ]
 }

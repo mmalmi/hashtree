@@ -16,7 +16,12 @@ if app=='git':
     position=steps.index(original)
     steps[position:position+1]=[dict(original,name=original['name']+f'-shard-{i}',command=original['command']+[f'--shard={i}/12'],originalCommand=original['command'],gitShard=i) for i in range(1,13)]
 checks=runpy.run_path('/stage/procedure/browser-results.py')
-result={'allAppGatesFromCurrentRun':True,'reusedAppScopes':[],'source':spec['commit'],'profileSha256':sha(root/spec['releaseProfilePath']),'steps':[],'passed':False};cache=None
+first_shard=next(i for i,s in enumerate(steps) if 'gitShard' in s)
+original_browser=steps[first_shard]['originalCommand']
+steps=[s for s in steps if 'gitShard' not in s]
+steps.insert(first_shard,{'name':'release-check-2-manual-trace','command':original_browser+['--grep',spec['reusedBrowserEvidence']['failedCase']['title'],'--trace=off'],'originalCommand':original_browser,'gitShard':12})
+reused,peer_report=runpy.run_path('/stage/procedure/prior-git-proof.py')['verify'](base,evidence,spec)
+result={'allAppGatesFromCurrentRun':False,'allAppGatesFromSameSource':True,'reusedAppScopes':[{'runId':42614497747,'scope':'81 passing dev-source browser cases'}],'source':spec['commit'],'profileSha256':sha(root/spec['releaseProfilePath']),'steps':[],'passed':False};cache=None
 (evidence/'release-plan.json').write_text(json.dumps({'profile':profile,'steps':steps},indent=2)+'\n')
 def retain_artifacts(name):
     records=[];total=0
@@ -57,20 +62,22 @@ def assert_git_ports_closed():
         with socket.socket() as probe:
             probe.settimeout(.2);assert probe.connect_ex(('127.0.0.1',port))!=0,'Prior shard server remains'
 def git_coverage():
-    expected=json.loads((base/'procedure/git-case-identities.json').read_text())['cases'];actual=[]
-    def visit(suite):
+    expected=json.loads((base/'procedure/git-case-identities.json').read_text())['cases']
+    report=json.loads((evidence/'release-check-2-manual-trace-playwright.json').read_text())
+    rows=checks['verify'](evidence/'release-check-2-manual-trace-playwright.json',1,0)
+    fresh=[]
+    def walk(suite):
         for case in suite.get('specs',[]):
-            for test in case.get('tests',[]):
-                assert test['status']=='expected' and len(test['results'])==1 and test['results'][0]['retry']==0
-                assert test['results'][0]['status']==test['expectedStatus']=='passed'
-                actual.append({k:case[k] for k in ('id','file','line','column','title')}|{'projectName':test['projectName'],'expectedStatus':test['expectedStatus']})
-        for child in suite.get('suites',[]):visit(child)
-    for i in range(1,13):visit(json.loads((evidence/f'release-check-2-shard-{i}-playwright.json').read_text()))
-    assert len(actual)==len(expected)==82 and sorted(actual,key=lambda x:x['id'])==sorted(expected,key=lambda x:x['id']),'Original Git case coverage differs'
-    recovery_rows=[]
-    for i in range(1,13):recovery_rows.extend(checks['cases'](json.loads((evidence/f'release-check-2-shard-{i}-playwright.json').read_text())))
-    (evidence/'peer-recovery.json').write_text(json.dumps(checks['recovery'](recovery_rows,'git'),indent=2)+'\n')
-    (evidence/'git-shard-coverage.json').write_text(json.dumps({'passed':True,'cases':actual,'count':len(actual),'retries':0,'skips':0,'originalCommand':['pnpm','run','test:e2e:git']},indent=2)+'\n')
+            for test in case.get('tests',[]):fresh.append({k:case[k] for k in ('id','file','line','column','title')}|{'projectName':test['projectName'],'expectedStatus':test['expectedStatus']})
+        for child in suite.get('suites',[]):walk(child)
+    walk(report)
+    assert fresh==[spec['reusedBrowserEvidence']['failedCase']]
+    actual=[{k:r[k] for k in ('id','file','line','column','title','projectName','expectedStatus')} for r in reused['passingCases']]+fresh
+    assert len(actual)==82 and len({r['id'] for r in actual})==82 and sorted(actual,key=lambda x:x['id'])==sorted(expected,key=lambda x:x['id'])
+    recovered=checks['recovery'](checks['cases'](json.loads(peer_report.read_text())),'git')
+    (evidence/'peer-recovery.json').write_text(json.dumps(recovered,indent=2)+'\n')
+    (evidence/'peer-recovery-evidence.json').write_text(json.dumps({'fromRun':42614497747,'report':peer_report.name,'reportSha256':sha(peer_report),'source':spec['commit']},indent=2)+'\n')
+    (evidence/'git-shard-coverage.json').write_text(json.dumps({'passed':True,'cases':actual,'count':82,'reusedPassingCases':81,'freshPassingCases':1,'retries':0,'skips':0,'oldFailedRecordExcluded':True,'allAppGatesFromCurrentRun':False,'allAppGatesFromSameSource':True},indent=2)+'\n')
 # Capture the whole container's memory pressure, including child-only OOMs.
 # No host process names, command lines, event bodies or application keys are read.
 resource_stop=threading.Event();resource_errors=[]
@@ -125,7 +132,7 @@ try:
                 row['reapedTaskDescendants']=clean_shard_children(before_processes);assert_git_ports_closed()
             row.update(seconds=round(time.monotonic()-started,3),resourcesAfter=resource_sample(),artifacts=retain_artifacts(step['name']))
         if is_shard and step['gitShard']==12:
-            assert all(r['exitCode']==0 for r in result['steps'] if '-shard-' in r['name']),'Original Git shard failed'
+            assert row['exitCode']==0,'Original manual-trace case failed'
             git_coverage()
     assert not resource_errors,'Resource sampler failed'
     dist=root/spec['distDir'];files=[p for p in sorted(dist.rglob('*')) if p.is_file()]

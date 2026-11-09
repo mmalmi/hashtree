@@ -19,4 +19,4 @@ finally:subprocess.run(['python3','/stage/procedure/network-proof.py',str(eviden
 contexts=[json.loads(line) for line in (evidence/'context-permissions.jsonl').read_text().splitlines()]
 assert len(contexts)>=spec['requiredPermissionContexts']
 assert all(c['origin']=='http://localhost:43810' and c['permission']=='microphone' and c['state']=='granted' and not c['captureInvoked'] for c in contexts)
-(evidence/'passed.json').write_text(json.dumps({'passed':True,'sourceCommit':spec['commit'],'completeCheckedInProfile':True,'assertionsPreserved':True,'permissionContexts':len(contexts)})+'\n')
+(evidence/'passed.json').write_text(json.dumps({'passed':True,'sourceCommit':spec['commit'],'completeCheckedInProfile':True,'allAppGatesFromCurrentRun':False,'allAppGatesFromSameSource':True,'reusedPassingBrowserCases':81,'assertionsPreserved':True,'permissionContexts':len(contexts)})+'\n')

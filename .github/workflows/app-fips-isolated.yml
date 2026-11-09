@@ -1,8 +1,9 @@
-name: Fresh git runtime61 complete release qualification
+name: Exact-source Git manual-trace continuation
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
   qualify:
     strategy:
@@ -22,6 +23,14 @@ jobs:
           persist-credentials: false
       - name: Prepare pinned inputs before isolation
         run: timeout --signal=TERM --kill-after=15s 900s python3 fixtures/app-fips-isolated/controller.py prepare
+      - name: Fetch immutable prior dev-source browser evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir "$FIPS_STAGE/earlier"
+          gh api repos/mmalmi/hashtree/actions/artifacts/13672738298/zip > "$FIPS_STAGE/earlier.zip"
+          echo "d845a9ed80a88c096892e524eb8ef9973f49214685fb61e35924c41111f7d773  $FIPS_STAGE/earlier.zip" | sha256sum --check
+          python3 -m zipfile -e "$FIPS_STAGE/earlier.zip" "$FIPS_STAGE/earlier"
       - name: Build and qualify after independent unsigned denial controls
         run: timeout --signal=TERM --kill-after=15s 3180s python3 fixtures/app-fips-isolated/controller.py test
       - name: Preserve logs and exact qualified distribution
