@@ -1,4 +1,4 @@
-name: Isolated private publication GREEN continuation
+name: Original Rust wire fixture and missing TypeScript interoperability gate
 on:
   workflow_dispatch:
 permissions:
@@ -6,23 +6,25 @@ permissions:
 jobs:
   qualify:
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - name: Set task-exclusive stage
-        run: echo "PUBSUB_STAGE=$RUNNER_TEMP/pubsub-private-scope" >> "$GITHUB_ENV"
+        run: echo "PUBSUB_STAGE=$RUNNER_TEMP/pubsub-wire-fixture" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Prepare hash-pinned inputs and locked dependencies
-        run: timeout --signal=TERM --kill-after=15s 700s python3 fixtures/pubsub-private-scope/controller.py prepare
-      - name: Qualify corrected scope and existing gates against retained RED evidence
-        run: timeout --signal=TERM --kill-after=15s 1550s python3 fixtures/pubsub-private-scope/controller.py test
-      - name: Preserve RED and GREEN evidence
+      - name: Verify immutable source and compilers then fetch locked inputs
+        run: timeout --signal=TERM --kill-after=15s 1300s python3 fixtures/pubsub-wire-fixture/controller.py prepare
+      - name: Compile only original Rust fixture offline
+        run: timeout --signal=TERM --kill-after=15s 1250s python3 fixtures/pubsub-wire-fixture/controller.py build
+      - name: Run only missing original TypeScript process-boundary case
+        run: timeout --signal=TERM --kill-after=15s 180s python3 fixtures/pubsub-wire-fixture/controller.py test
+      - name: Preserve fixture provenance and case evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: pubsub-private-scope-${{ github.sha }}
-          path: ${{ runner.temp }}/pubsub-private-scope/evidence
+          name: pubsub-wire-fixture-${{ github.sha }}
+          path: ${{ runner.temp }}/pubsub-wire-fixture/evidence
           if-no-files-found: error
           retention-days: 7
           include-hidden-files: true

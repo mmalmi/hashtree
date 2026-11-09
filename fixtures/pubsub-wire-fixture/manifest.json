@@ -1,0 +1,3640 @@
+{
+  "purpose": "Complete only mandatory original Rust/TypeScript wire process case; reuse reviewed172passes/check/build and REDcounterexample",
+  "nativeSource": {
+    "commit": "e88b590b43a48d1d144e559405951e83ad094cc5",
+    "tree": "4de91a3fe33abf5e2ce86ec9deb19cd4cc0a089f",
+    "archiveSha256": "35cd3ee70fc9cedabc16ab5a38f7523de3196ccfe4b11f3623ecf42e5b70aeff",
+    "archiveBytes": 801280,
+    "files": {
+      ".gitignore": {
+        "sha256": "f9b9a52b551d97c5b95b7539c13e2f6215e156d0c318b57eecd8b7488edd6103",
+        "mode": "100644"
+      },
+      "Cargo.lock": {
+        "sha256": "6e83065d68bdb6a1c1759565bb6124fc8be302a580d3d598c180bab5b136f02d",
+        "mode": "100644"
+      },
+      "Cargo.toml": {
+        "sha256": "0ccb2d668e277987c1f017a229aa9a67a18d46eb046b92966e922d55a90571ed",
+        "mode": "100644"
+      },
+      "LICENSE": {
+        "sha256": "982ce07ee9bb009354f86905562d0fd7607ebd64c8f31cbd5ff89387c3e9cf5f",
+        "mode": "100644"
+      },
+      "README.md": {
+        "sha256": "20072d29c670b028f5e0259ed8ccb184415dc8d6d5a400ee6756910567a4cf1f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/CHANGELOG.md": {
+        "sha256": "6ce5f6618918f218bd9cfb41883f0365c1ffa4d67ee49447e1a54a919aa5cdcf",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/Cargo.toml": {
+        "sha256": "79aa26b41bd001904868c6f826f8f39eed67a12992fe14bc018ab3a5eced14dc",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/LICENSE": {
+        "sha256": "982ce07ee9bb009354f86905562d0fd7607ebd64c8f31cbd5ff89387c3e9cf5f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/README.md": {
+        "sha256": "05f708ac113ca9a4dac9d3da744146e6760159f7585c64832df5dac816bde06d",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/examples/fips-pubsub-wire-stdio.rs": {
+        "sha256": "9bb95a5ba92e35212a8f8eb8a8cc23e74a5075805d794b845dddd4c36c2a5127",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/examples/inv-want-stdio.rs": {
+        "sha256": "d7d8bb84602a54978a05eab3a24077227be5cc834f748eac18b03912298debba",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/anonymous_publication.rs": {
+        "sha256": "a096d8b78b94b71de12d86521f744acdaf739ae2a956b4491421e6d2df6d97b0",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/client_inner.rs": {
+        "sha256": "fb6cdc37993ee3b8a65aac69cc668f55c79061dd1219e3d5ba53a476d0349b54",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/client_lifecycle.rs": {
+        "sha256": "27a58fece8815e7c54e8394719819ece32da14e696ae6188b6b6f04b3dd6e9d8",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/client_peers.rs": {
+        "sha256": "fd61e13f1df142bf79350cd0e78ed0eb6885ded049399705fd7cdeb7462f84b1",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/client_publication.rs": {
+        "sha256": "86210a10bebeb0aba805cf4acf53aa76f3ff54b59096e3e76641565dcae3de4c",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/client_received_event.rs": {
+        "sha256": "57655b2203231fe74ffb064da305fdb66b30a1153ae66e69cfae7339bc29f2fc",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/client_reputation.rs": {
+        "sha256": "4e4cfcbcda62638b7811e23dc46d094a10b89e2a52087457296224410e4ca110",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/client_transport.rs": {
+        "sha256": "3e054b84830813516cd1e508490882bb31adee1f176ad6641f8f4fb416489e7e",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/lib.rs": {
+        "sha256": "ab6c61cd63761f0ec969569fbb83b1724c60bae7805537e3ceaffcbdeda1be60",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/local_delivery.rs": {
+        "sha256": "2c748b40da3a61f9d9f7672454de08b1785946daa1b5bfd8815311b3b3ae1f4b",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/peerfinding.rs": {
+        "sha256": "1d6a19da7270a6552b06a54202349d65aa84235098a249cc56aa11fe9bd78107",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/peerfinding_runtime_tests.rs": {
+        "sha256": "71fc2b93f477bb2e5d8de86add029ff380f41077725bfbba7e3b9f06586b7de3",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/pending_wants.rs": {
+        "sha256": "0f4c72d4b5472c9329b27235af6a2ac5b50b68f58c1fe4ab9b1bb19214ee6056",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/privacy_roles.rs": {
+        "sha256": "3e4831709ff12c0a94a26182ec6c6fa03e2edb0eb358e2dc420348e22988ba9c",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/provider_behavior.rs": {
+        "sha256": "457cf9071ff9ff134632d91f9b6323687a4ab6c3c294668aeae2ca529ca4ffb9",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/recent_events.rs": {
+        "sha256": "4d69d79e2e23cd6068d3b597836c2396adf59419e68a264c9f13840c62cf1dc3",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/replay_source.rs": {
+        "sha256": "c0c56a537bfe86e31bbe233ada7fef9afcbffc933fd0905315517b582f4f40d6",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/reputation.rs": {
+        "sha256": "55144a80efb93b93f28fb3ddceca61b2629aff04b7201b3160ddee255d6477e8",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/seen_ids.rs": {
+        "sha256": "470f2b518af431c5f3851ff9bbf17dda34e865bb738bbca1dd779dedeebbb0ef",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/seen_ids/tests.rs": {
+        "sha256": "c902bbad9aadef09e586fd28843096609dd4da1e4cc4cfc352cf89f681a2b911",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/stats.rs": {
+        "sha256": "c4caa8e7ea63c106c5c22b047595f8485723f16254904c42dd0209cc9a563e0e",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/stream.rs": {
+        "sha256": "5e86910480ca66f9c0a5ab4f09f4200fc8ae7562f9a723f33e818cd84c7ae54b",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/stream_tcp.rs": {
+        "sha256": "4401d0cff09055dce921ef3e3716806cf2dc9c60d09c74e3db531ed9d99bb8b9",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests.rs": {
+        "sha256": "0244402f1d527aaeed91f0e11bb1726fcecbf99a9911fa4fbc4eb8275c9fc143",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/delivery.rs": {
+        "sha256": "79dcd485f4483b3d1c39543056c03ef65d148fee9eb630f572540b9a7c399a1f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/late_events.rs": {
+        "sha256": "1e580c5c8f5c0f3f0222b9043011172a9d24cbc150661df5b44590dff84c3850",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/managed_reputation.rs": {
+        "sha256": "eeb6f87d571c25a3f9dc7cf4f351368e68b2360ac673a7bc389f3838d1be1592",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/peer_policy.rs": {
+        "sha256": "65b4e859c779aac4f63cc6902aa8b5f153b188753ca30b12a3c92ffeee94b033",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/privacy.rs": {
+        "sha256": "54074b4520f3d339f19bb24c3f3a054f9f8abe3c790c040a061d951f12cdff68",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/replay.rs": {
+        "sha256": "9d09010ee82647c5c20023f2eb78438f2953ea101dc0eec7e31b762fe11d53d3",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/replay_source.rs": {
+        "sha256": "b2b7f820d27318a12732e489111c632024e0691682963e53eaead572d87003bf",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/reputation.rs": {
+        "sha256": "f621f1c8bd4d28f680f81fa7d27668874671734abee6c45d1bdfa2089d78b0c9",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/routed.rs": {
+        "sha256": "67d614dff44da23cb6cace8fb9e459c0aebd8ce82376b6814617e91095047389",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/service_retry.rs": {
+        "sha256": "dc631458712ee2a14f38017f65227e0135705abdfc908054d3a30d6b7c982f4f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/shutdown.rs": {
+        "sha256": "bbc4f5bffcb2897ced823ebc98136580c0bf21dfc5bd329b707cfa5753da5b9c",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/state.rs": {
+        "sha256": "9d4cdd82a27c6f08c49d97b7811353ae3a98909329fabcd9ab9c54f10b805c01",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/turnover.rs": {
+        "sha256": "5d7b75ee543b2558363ac442ab3839083f66000134d98e72fb07e18dbce9e8fc",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/tests/websocket_restart.rs": {
+        "sha256": "10f58749d34b5eae25de0933561dc6b56022d06e9df8bfc9331034bbb991e99d",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/wire_tcp.rs": {
+        "sha256": "3c0aadf501b8de1dcc8c1b89590527967e23426f8555be302af42842e90a2713",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/wire_tcp/inbound.rs": {
+        "sha256": "b4dac901de08f3d9766d542f80528dd856fb4efe3a13d6de7696220f46c61add",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/wire_tcp/ready_output.rs": {
+        "sha256": "ef3a14f13d75be1021f5165d49ebc792c6fe88927ccdf3733a893d590affb902",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/wire_tcp/retry.rs": {
+        "sha256": "bef32b0b69864d99444b08e95c352919642333c930cf103aa18d3664f91b5dcd",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/src/wire_tcp/tests.rs": {
+        "sha256": "11717026ff66129f0c98c06678749e682c39936ae8a1548c6e6364310365301c",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/tests/automatic_discovery.rs": {
+        "sha256": "f7f5a3977eb35e8767932ff06a791fe01d595b1fcb7618a7d0543ed7f65b462e",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/tests/inv_want_stream.rs": {
+        "sha256": "49ab24449603f35ab3ff5cc5ee47d61e005fc90d68e6f5ac753aea84aaa6008f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/tests/inv_want_tcp_driver.rs": {
+        "sha256": "c20ebbd60f078e98ff1a51c76db49b5501df996584d47db81518866e9237bdc7",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/tests/previous-client/Cargo.toml": {
+        "sha256": "ded52175695555a5d04a0dab05881b3e944af0d32b7aa23b7bf668248e039262",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-fips/tests/previous-client/src/main.rs": {
+        "sha256": "d06d60809c5852c65c6e12206be196d1bba3d5646458c81461cd4d64d214f09a",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-reconcile/Cargo.toml": {
+        "sha256": "73a3bdec080fa414985e77dde1e735d923fb00c45204fb2961e1fda040777cae",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-reconcile/LICENSE": {
+        "sha256": "ee58dbb42df63b75e81ec0d4f075d8d3b0275ced71c5bc438a3eae530c2ecb59",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-reconcile/README.md": {
+        "sha256": "8c264ec9c941c1125ff3e590be84a44d47cf684af0f1cd43a5fc85deab7a14fa",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-reconcile/examples/reconcile-stdio.rs": {
+        "sha256": "f934377a7f161cc78e293283818c41ee3ec451b3ff35d6c54b9a6455b2ad94c3",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-reconcile/src/codec.rs": {
+        "sha256": "fd583acd82b1b46198df1846507afd4adb7f254ea862bb770c0bfa9a34e1df4e",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-reconcile/src/engine.rs": {
+        "sha256": "55b71d00178576163ceefe5e679041c71ce8f4fe3e80363edb2121445c7fdbb7",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-reconcile/src/lib.rs": {
+        "sha256": "83ec720c7c11bd929f89637d994df482a916759c0b125eedc68afbaa96b11999",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-reconcile/src/malformed_tests.rs": {
+        "sha256": "ab82000db6d0254c1063a856b9271f45e0314c824561f5d3a07bc723e81f757a",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-reconcile/src/validation.rs": {
+        "sha256": "59f7ed43c7c87b36dfcd72471b51008b0bc5b8fd88893e67081b8d92b4a2c33f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-reconcile/tests/reconcile.rs": {
+        "sha256": "8a2b60c73276104a29e48b6f1ab5cf0b3c8376a07eeb38a48cb7ab3a3c1bb737",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-reconcile/tests/wire.rs": {
+        "sha256": "395ee83e2c011010da2c4aef44f3dbea496505eb8d4f6bea5b5f4334604033fd",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-relay/CHANGELOG.md": {
+        "sha256": "ce8a413bd02c63503a3da8f24c8cd0757e9a8fc33f8bc36820143b8f414cc85b",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-relay/Cargo.toml": {
+        "sha256": "76539309e00c4618d5282842e6348f65a6f8df78efb4e2dc0cfcaf58644b0b49",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-relay/LICENSE": {
+        "sha256": "982ce07ee9bb009354f86905562d0fd7607ebd64c8f31cbd5ff89387c3e9cf5f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-relay/README.md": {
+        "sha256": "80213bac788acea7524f2bbceb9bd9e333861ac088be6dbeb9099d75fc30e1a4",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-relay/src/lib.rs": {
+        "sha256": "d53445bbefa5e40f134c2e5200659267099964f25a236667ced510ae9ff239c4",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-relay/src/live_recovery_tests.rs": {
+        "sha256": "b3b5d6194c59b727aeaf3950f36d2a8c30e581f6a4a8ecd675bc69ed96bdd123",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-relay/src/session.rs": {
+        "sha256": "d11c0227ba82de10e14e448435cfb96ec967375a21449b46108d02e6e8d3f61c",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-relay/src/session/tests.rs": {
+        "sha256": "5e1dde87c954a82d6f905fd00eb7126e313e1c1007c5f62a479bc592d90b8b47",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/Cargo.toml": {
+        "sha256": "c5449b0bc951cb4bd47c2d34ac076baa2ec17b5709b344038dbed30cdcfe29c4",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/README.md": {
+        "sha256": "4760afd9623d09bb81ffec60a0eea337816302c15fc6f216e36bab474b511275",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/cli_tests.rs": {
+        "sha256": "d1094474cd6bbdcfd15bd3156380c2035cbd69309317006d48ad18b92f8d57de",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/clock.rs": {
+        "sha256": "09dbd5b6f0458d20c63379b5e2fb47b29310efc318e6b8c7c0aae01464bfa13e",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/incentive_gates.rs": {
+        "sha256": "b3378c66ceba1896d63255bb358e1c2e94acec7f4f0532ba2e67ae07809085b7",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/incentive_output.rs": {
+        "sha256": "96677e407dca8d170c158dfa92fb2897349346e3147961dbdb17fb0a7c87cf90",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/incentives.rs": {
+        "sha256": "0c7b4f0c9d9d4ca18f78f43c280667ac08b8f34cbcb4f36a9fa2e710418801a4",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/incentives/accepted_batch.rs": {
+        "sha256": "4d655927de5872bd5a56f93230eed721948006dd1e30e7164bc304a9a3b5b7ab",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/incentives/exposure.rs": {
+        "sha256": "1db2de02b9d60e7479e749c4782bbb0746191a455288316a358ab2112f61b27c",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/incentives/streaming.rs": {
+        "sha256": "f1ebe858a32ff88e845a686a53f5f40f94983c9959940af54e80333b222b8fec",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/incentives/tests.rs": {
+        "sha256": "643e7e90100247e9d5f649a3513e4f9bd5a0f99c7b0ed32cc978c934c7f8472a",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/lib.rs": {
+        "sha256": "d2d0544dd34518d9910f3328d647347b0f15acd119413224315aa5494d80ad5b",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/machine_wot_output.rs": {
+        "sha256": "8e60d1230de56d2deca3da23e4f14f70d2ad953e10aec8531bc97345bb73e657",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/main.rs": {
+        "sha256": "135bb57418504075cbe55df0d46b988dc9ab5cdecdf7c295b2b509ddab138c64",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/metrics.rs": {
+        "sha256": "efa5e324b66ddf2d54ae92d83d75612d0b53f346aecabb15fe7d1efc53e1d266",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/rediscovery_output.rs": {
+        "sha256": "cd767668d38083de6c57edef566f6a7c2f00b0b4f022dfcd2c5b2f1751ea0901",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/admission.rs": {
+        "sha256": "263b7e17c4c9121f05a4dd5cd6146ddefbcb57ac432d0ead7111a0a8e9871de2",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/control_transport.rs": {
+        "sha256": "9521fece4f002e26065139436e28eef054c88cb449510fe36d4d02335b3cae7f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/delivery.rs": {
+        "sha256": "f0774d17238b243c43635439a5d7b55274f2876da6d60110d7718fa203f8e781",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/engine.rs": {
+        "sha256": "26ccd49941aef668ab8e8bf1c5f31ec7b24615f31508ae5167b6c6f58cc736da",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/error.rs": {
+        "sha256": "1c66c25ca21c9b292ce9cc39c20f8d40fe227e0234b9e9caaf7f83b949d1c9b8",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/lifecycle.rs": {
+        "sha256": "980cc1d3775405c48a257abec3aa219ddd75532909a7ae10f86ab244e724aeb6",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/machine_wot.rs": {
+        "sha256": "71836133db0991c24a4df31f456ea3a31e7259083a12519b5e867d48db4b1060",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/mod.rs": {
+        "sha256": "0046f8d4183bfa5e9f0112d492cc5bc867d0c073e14ecf227a363b6ff4d94bb1",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/mode.rs": {
+        "sha256": "3adeeb8ef6956e6b7664434aed23822718a4d5ce46f76ec6430e335649047cf1",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/network.rs": {
+        "sha256": "12de6f250fc090dfeb75963943a575853121ec608dee5f426cf508519d942ef1",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/rating_subscriptions.rs": {
+        "sha256": "421bbdcfae3f38ca1f4824e36dc4f029fbcbf8a8b2237f3f868795a2c461fce7",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/rediscovery.rs": {
+        "sha256": "1601f6db543682ee9fc235c8747fb16deeba22e0818bd2e485aba08f31b4f86f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/report.rs": {
+        "sha256": "50fa6a8adcbd46af376365b78adfa9f1614eb1e7f53a8cc015cfbe336319b9ad",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/report_types.rs": {
+        "sha256": "4cae25ae9668023b478398556ffec542b10beec1afa91831c6ab56404ae4d5b5",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/reputation_flow.rs": {
+        "sha256": "3a47f5d28e6fae2b0f4956f814fbc8ea7571b73fd9564dfd6c542214fb7ba8a7",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/reputation_flow/test_support.rs": {
+        "sha256": "2ac408bde5663723d294bd94530f84210a14cfddcd5d1d3c18ab192cea32d20a",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/reputation_probes.rs": {
+        "sha256": "763c58b4424904634b651fb2d67924c68b1d311423f172ecbf1b4f85e7e799f6",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/resources.rs": {
+        "sha256": "0ef416aef144ae66ecccce369568f2992dad8f352efb862afb06cd967f24e3b9",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/setup.rs": {
+        "sha256": "82e59628b5e397b76bc252822bd6271c54ebceb618885008ac0e3092dbdb7445",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/setup/config.rs": {
+        "sha256": "a41c80ae8507e711f8bc7368635839b1bdac1d0af44420d72db1ee22feb4a17e",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/setup/network.rs": {
+        "sha256": "223468766cadf25cfaa8d083ff8603a0ab556801e38ea68941350bf10e3e3e37",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/setup/nodes.rs": {
+        "sha256": "54c419d98e514e5b51c7dbf464b06a2f1930b8d4943494b2f3c13e206ff63cdc",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/setup/subscriptions.rs": {
+        "sha256": "214f505783def102c638138fab0c056820c04d9c9dc6ce6a27ef83859d8f8ac2",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/setup/tests.rs": {
+        "sha256": "30943880245ef748edc8c3be32a9917a8bb6e436428a915d7ff5e89addd1b5ab",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/simulation/setup/workloads.rs": {
+        "sha256": "302c54d2be2bf2ce6c3b1c625fed3f8066309941553a59639cedb97a71141529",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/topology.rs": {
+        "sha256": "293fa52a5492fe411cc7175848f69f8f7e5fa0c51340d138701d4bbc24112640",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/topology_tests.rs": {
+        "sha256": "13bc1337c01466be42f032715bc169dd3671f80c5555c951652ca52a11649b54",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/src/workload.rs": {
+        "sha256": "a8cc4b614488b2061a334451a67c9edb57f242d7b66248ef0495399efc362806",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/tests/cashu_integration.rs": {
+        "sha256": "4cfa59f88c11d2b5dfa4a0cbda673c5a3649eadad1cb6c244bd89d1d25df5635",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/tests/incentives.rs": {
+        "sha256": "574624a0b773c4683e94893d8c1cfa165d1a5a86703d2fe1587b113da118a2f9",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/tests/machine_lifecycle.rs": {
+        "sha256": "853bd70e0f5df76c56a9cf700180fae938b1ec81de62355f1b8e76adf434496a",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/tests/machine_wot.rs": {
+        "sha256": "5c4bfcb607502162fa109b8a07a83ffd2307f37f58bdc9712284b5c89982d7de",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/tests/release_gate.rs": {
+        "sha256": "7e2f9e28a8240a0da968afdf7a077284c73d5dea01617b7d7d42be413592ff9f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/tests/release_gate/delivery_trails.rs": {
+        "sha256": "baae0bf61ff9bd9d516b9764db69f59af5eef4c991ba7e4ac0ca3de8a0d5f066",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/tests/release_gate/machine_reputation.rs": {
+        "sha256": "f8f7bf3e0b6c7aba5637de2eb7b9a0cf85233dedd244f26353c1c258c6f07fd5",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/tests/release_gate/service_accounting.rs": {
+        "sha256": "76833b2a4f9855457639f389b0f7c232b981919c5b18f4aa9327fe72f722ccb2",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-sim/tests/source_size.rs": {
+        "sha256": "f880aea4bcf6691967eae73a27fe1f5c75af8a6420708e2d40541a9761fb7211",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-social-graph/Cargo.toml": {
+        "sha256": "e46cd338d112e93b68c318665b89f0aa9e7c2a270bbd9db84bcfa5c06ad218ce",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-social-graph/LICENSE": {
+        "sha256": "982ce07ee9bb009354f86905562d0fd7607ebd64c8f31cbd5ff89387c3e9cf5f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-social-graph/README.md": {
+        "sha256": "e130e8cc29ebaf7397c6623b66cb65108c1678bc76ee0434608332e57dc3bb54",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-social-graph/src/lib.rs": {
+        "sha256": "56c4529a6efcb7640c6e0997f3c2b2569b5b721fb8d5d3615e1cbe79fe3bc195",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-social-graph/src/reputation.rs": {
+        "sha256": "b895cd5ac10dc1db9565f53a284e597c3835ba34d81e29e89e3fa135e2b15c7c",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-social-graph/src/reputation_tests.rs": {
+        "sha256": "2cbe23ccf551c85a04dee203eb505d8d4fe880e8d1c42bb1deb8dc520172ed9c",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-social-graph/src/reputation_tests/authority.rs": {
+        "sha256": "65252134ff3d3e8e8b0c25af3b2d3af15369fd7ceb05ef1baeb1a712d3145bd6",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub-social-graph/tests/social_graph_policy.rs": {
+        "sha256": "2dd6dc711ee6621a69da4c4a2b66c3066a2e78d265b0e8ed679fcf6fd6c53baa",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/CHANGELOG.md": {
+        "sha256": "fc3bd0c538f94d10ccdbdce937ce149ae69fddaf750b68b24bc08daf60a12588",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/Cargo.toml": {
+        "sha256": "fff4b5e7fd2e86d63219e52597c64c20c1fdfa3b7ad8bc04c683bd5dc7c7a4cc",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/LICENSE": {
+        "sha256": "982ce07ee9bb009354f86905562d0fd7607ebd64c8f31cbd5ff89387c3e9cf5f",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/README.md": {
+        "sha256": "197e3748006d798b2b1308cfe006a55cb01ef97bb22f281e0f3fccf875a1d4c2",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/file_store.rs": {
+        "sha256": "8b22e4dcdab15860754ed5841bf271ba6eb6e69c296b56785ba55edff5e17df2",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/inv_want.rs": {
+        "sha256": "5fdf21b9c81f53a78028b9498208c8b7cbf3bc0470c630de48b30d1c44b7b1c7",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/lib.rs": {
+        "sha256": "c3db3ecd1597e47076c2c8bd6acb22313894b4bfdd28565519bf6792854254c3",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/live_routes.rs": {
+        "sha256": "563e27aeb798eb15d2841ca6c4780dcb76d90e454359711ba10b2b47c5fdbc6e",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/memory.rs": {
+        "sha256": "f8bdd9b8fe380fba0be3faaaaaa8a7eb10f79bd52f048a6f6fa6cfc91c6c7ba2",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/mesh.rs": {
+        "sha256": "56c38a63dfacb7266801073472a4dc63d9bd41a820245a3a73912ee87be18c6a",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/mesh_resources.rs": {
+        "sha256": "edc57602d8503f14dba42a63f3075cd27388668a3cca69d9ff4e7434db8d04da",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/mesh_verified.rs": {
+        "sha256": "9c39c09e50c224ffd1babcc41285723bc43a3945f00dbd7c8cdf018e309c3614",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/pagination.rs": {
+        "sha256": "647bbc1c212d566f671b78d8e1e94af6ef4870db9ca88e00a66cabf0c0604ff8",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/retained.rs": {
+        "sha256": "380b4fe2ddd8c6073a8620f95c7e9e98913e3bafd2283a3bd13a2b3a9878c079",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/router.rs": {
+        "sha256": "090e9d28224badecc585ef0f874dd035cdfc2e20261614120f354af089c7336a",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/routes.rs": {
+        "sha256": "8d1886d9f8118a34d951a30ecea1b414bb165558666be58197fd3a833166dac2",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/subscriptions.rs": {
+        "sha256": "454e701605cfec2511fbf0880dfd325da3c5d0ff749bad3ab00df4ab163c6ac8",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/src/wire.rs": {
+        "sha256": "c66bb78bc3ba3a0feaf5e2ca35e65cd4e929d1d19329a08b1793f53a50a6021c",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/tests/data/interop-vectors.json": {
+        "sha256": "a1091e74b559a333e00f6aa7ff30fb6bd7b411ac5f8874f9a375233a7fb02c5d",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/tests/inv_want_mesh.rs": {
+        "sha256": "709d0b64d592ed392db328e8a257272071b09f294d5ee6aa641bbb9d262c5d45",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/tests/inv_want_resources.rs": {
+        "sha256": "2c4568fd124d0f50747bbe7e6e338409391d46b434f6d991d652b8ad1d7d47b0",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/tests/live_routes.rs": {
+        "sha256": "cf2e19c9d574430655f8f355ed7bbb2ee223951cfae009db6c249c9e9baedc08",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/tests/mesh_peer_selection.rs": {
+        "sha256": "b3d4403ade83f7f7686129fb7059dd24932c1d4488d55e9c5e51803627cfa54b",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/tests/pagination.rs": {
+        "sha256": "7cddd9908da26f0ac94cf89b7ef6c0f192d018cfd4a438cb4111140c9833bc52",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/tests/retained_restart.rs": {
+        "sha256": "728b2eb38460653386e59e8ec46b128d2e67ffbbc45d62e7352ea676dd28b7e1",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/tests/routed_query.rs": {
+        "sha256": "216d679aa69af4ec5da4c772042bd74c892634cf143a7845ff02e0184ebe5a43",
+        "mode": "100644"
+      },
+      "crates/nostr-pubsub/tests/typescript_interop.rs": {
+        "sha256": "781d477efcd47adc3b174106c4b060eb851a96cef4865c5e93ed3878fa18f111",
+        "mode": "100644"
+      },
+      "docs/inv-want-wire.md": {
+        "sha256": "ffd923769e8e8dfd36d111ef2808f4ec2a8a52476b58b588500ce00a0ec53f36",
+        "mode": "100644"
+      },
+      "docs/mesh-audit-2026-09-09-fanout.csv": {
+        "sha256": "e81215ad89bc2901064a7a616446bc314d6ca392fd8edf322582f4e8530bd68c",
+        "mode": "100644"
+      },
+      "docs/mesh-audit-2026-09-09.md": {
+        "sha256": "67674eacc7b3217be6d6658fbb04ed71cb214438ced7adaab593bc099a3423c3",
+        "mode": "100644"
+      },
+      "docs/mesh-followup-2026-09-10.md": {
+        "sha256": "ce94e473c721fa5cbef294389d03a7f48e1144664391ccc5240b028909483aba",
+        "mode": "100644"
+      },
+      "scripts/release-library.py": {
+        "sha256": "98cb83146d8013fb76a79e87d0e0deedcbdccee9eba525d5dcbb6d15e58b6dec",
+        "mode": "100644"
+      },
+      "ts/package.json": {
+        "sha256": "978619e4ffbc9f906b39181dca1a48e3b26a0de214c69944f8cc72d7b13fb7cd",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/.gitignore": {
+        "sha256": "fe56da5f27d174b011ca65d2c1c9be83ca19ce1428e1594f8ed3ca037e8814ed",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/LICENSE": {
+        "sha256": "ee58dbb42df63b75e81ec0d4f075d8d3b0275ced71c5bc438a3eae530c2ecb59",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/README.md": {
+        "sha256": "ddcb4efcf83c03ed63636a1d153fa344a69ad6eda65e2c738cdc97cf43d12e35",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/package.json": {
+        "sha256": "231a31a95cb3d768fac92dacf0af4b174ff501ecbbdeba91b14d799adfe7c6b6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/src/encoding.ts": {
+        "sha256": "63fd483a2332823e0638bb786696224e3f20520552e638082c34ecaa56892c49",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/src/index.ts": {
+        "sha256": "563b742f2d286db9d8e0d8b4760d42e5c19536a6ce61c802ee2010c940a0080d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/src/storage.ts": {
+        "sha256": "2c89274854da71d5f8cfa4fdeaa5eee61a380e02e8ed7820c059d80c5da27d76",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/src/validation.ts": {
+        "sha256": "8c155f2cf08ddacc1cf4a18f45f3d00d94f2bdc23f35d5d351a8c994b72ee7b1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/tests/interop.test.ts": {
+        "sha256": "209a7687bc850176c11262feb110a405e497de30f6463415acc09e8c05e0bd6b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/tsconfig.json": {
+        "sha256": "f47a709df28c07bb5fc513401b928deb7a3b11a6518d970d3c73f31505ce058e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/CHANGELOG.md": {
+        "sha256": "e19f54f93ee3f22eed68238f6ae48f550dc0800a2e856899f83526ded83cdeb8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/LICENSE": {
+        "sha256": "982ce07ee9bb009354f86905562d0fd7607ebd64c8f31cbd5ff89387c3e9cf5f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/README.md": {
+        "sha256": "9dcb2f31e62f477d3bef5ca8a7189e893e2cd979c729b8805c816f98345100ae",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/bench/index.html": {
+        "sha256": "36a52bdc70950709294bc058be81e881fd551431b43f1c2fbcb8abd29075384f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/bench/negotiated.ts": {
+        "sha256": "01909ba44905f93b55e31a17c0cc22f168ee181223fdf18943bf7681dd197d86",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/bench/run-webrtc.mjs": {
+        "sha256": "d56cae7d0f8928cc83cd8abe5c360186d9956922962a285205ff8e7ba8eb0971",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/bench/webrtc.ts": {
+        "sha256": "bec706f5a282f0a524a1956f21095d9949bea9d089af6218797145b7c01c3670",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-fips.d.ts": {
+        "sha256": "f88612dbd97c15d2b7b45626b787e05174bce429e62f6f20b8c002c1868eaa91",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-fips.d.ts.map": {
+        "sha256": "26e2b8ca7322c3f0819d8404294d07dca3e7cad7fe76384733145fff9d108240",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-fips.js": {
+        "sha256": "127455272b419cad6d0b631a1a6bcf7c0f5dbb9504f1b978a9ae635c706c9bb8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-fips.js.map": {
+        "sha256": "b7d5139d548f7aad5d717d22649c17e1c47f76a6e71000f1bce0016c7c27bd38",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-relay-discovery.d.ts": {
+        "sha256": "c60f3b35cab4d4c37f10eeb25c030d51a61ec3ff6214fad27935003e8514cc0f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-relay-discovery.d.ts.map": {
+        "sha256": "bd1a10bacef1cb29b0318f758e4f3cb9a06944221067ab8b701938635e7a204f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-relay-discovery.js": {
+        "sha256": "7ce604cd8c5b229728ac4a8474db4c3065198373595e78e89180011b59b6f83f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-relay-discovery.js.map": {
+        "sha256": "7698175f3ceff1dafe5be0cd55a437457f765af9fe4c049b0643be536764dc64",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/delivery.d.ts": {
+        "sha256": "dd2ace9a0d6eef31ea02219862988b316d383ea54b4df43706df9318c2820db4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/delivery.d.ts.map": {
+        "sha256": "8fcb64eb2b07396b46ad18648c7b067d3468a48d8d4ae703f8399f7fce19085c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/delivery.js": {
+        "sha256": "5afcbad19a91df2b5f602a927e189009809b559670938ba1b224bcf7d480ad47",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/delivery.js.map": {
+        "sha256": "9aa2c4ad911c6556980896675764881f88de07347adbd643e2274f2773937295",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/event-bus.d.ts": {
+        "sha256": "c632f42b3ce4262017466247ff493002d44caa885af721d2b5fe309e748a865d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/event-bus.d.ts.map": {
+        "sha256": "599f538755db200fdc8184509d1301b443dbd5598fa1f85a50fea59dd066cb76",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/event-bus.js": {
+        "sha256": "35024c385109fb392e031ea7d7f6375fb46811720a1499f604f88c2a92d5199b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/event-bus.js.map": {
+        "sha256": "382d1f2e42040f9f4ad07087891481b4228cb7a54c5b1d3af1ac1295aabf86db",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/filter.d.ts": {
+        "sha256": "be575f3f8883adec8e4b4d6e330e83d47c90ff195b9969d39c2707476dddc7a3",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/filter.d.ts.map": {
+        "sha256": "e4366911f9259db3838ca0806bde21eeae4dc04b115139c30ce88b8cb114d343",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/filter.js": {
+        "sha256": "5dd242db2bfc13d8912c7321ed45bd92c4820f44198126941832171e71a2deb6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/filter.js.map": {
+        "sha256": "fd76674f5df4dd286d2905dd2024793b1be2fcfa3e148ce44f7fda4185e7c138",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-subscriptions.d.ts": {
+        "sha256": "e1c08cadfabd4c5e00c58eb46e006b77a9c1ac5c35d5da082d555a0e8849e965",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-subscriptions.d.ts.map": {
+        "sha256": "2c718b1a279f2f8c494071b354031e379f96dae8f292329929aba337700e52b1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-subscriptions.js": {
+        "sha256": "094424ae6fa42d351ed0499409db32c829b4fc408e2444909d9f758007af1cc1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-subscriptions.js.map": {
+        "sha256": "023ea22dec5efae2f8283438b575647fb3b05086dd47103f068c55f45abc5449",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-sync.d.ts": {
+        "sha256": "a815f674947b9f13d5974f5f9c2d89e8e36cb25a0f8fd8ba063f19180f4540a2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-sync.d.ts.map": {
+        "sha256": "09cf77e82c9eba9ef2ee36319dd1fa7f7380cadb73523f50893b578587b17d10",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-sync.js": {
+        "sha256": "cfce0d622a07ff030e66b320a7c85bba0de3b148ebbe6779ac5d78a90ad7443d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-sync.js.map": {
+        "sha256": "6eb1047f45cefce4724475155de691961a73ee13a754f46e3e6270c5cc222570",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-record.d.ts": {
+        "sha256": "2361f7abb9651120692ffb5440ac7cb1404955aa92b66a40cd8c6744771bb7ad",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-record.d.ts.map": {
+        "sha256": "dc064c3c57d08665d46fd8de9627b401b1c4b7a787cd1c19ef2da502f7d61dd1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-record.js": {
+        "sha256": "31f9c3707ad29afc11081253188bc35810f7842b117352a9015d3d6bcf17f921",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-record.js.map": {
+        "sha256": "abd4ebf798f733417d95aa2974bbfa206b7d33ca0ff5fe04680da5141ccf5999",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-stream.d.ts": {
+        "sha256": "630080395e8d4aef61079aee2bdb40d7673d1ada846166f88c48d9a64af543ae",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-stream.d.ts.map": {
+        "sha256": "11fbe95880061ad98c0e907c1fb0bf4ab7652e4ebec55763a1e3b0ecc1a73af6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-stream.js": {
+        "sha256": "e3e268f4a2110b69e61c4ada38bab127ecd78400428d9bc2c6c153f194ffb596",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-stream.js.map": {
+        "sha256": "dbdf57faf36b4b49981b8c794d16bf645e38a42b98998aa52e81feb5a7f2ecf6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-driver.d.ts": {
+        "sha256": "ba3ad43dd35a499e6cf3d298a28f1864fb64378c81c9e6e7b0da40f53d94e9d9",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-driver.d.ts.map": {
+        "sha256": "dbe2f42e9a202b3e8f3cad79bd0d2843e01cc40f35e0015cc406d94666d4812e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-driver.js": {
+        "sha256": "26011799a5b6795f0efcff42bda996163b08e9d842e497d2b4de30413a9fe71f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-driver.js.map": {
+        "sha256": "56c082cc923ca5f4eababcf8cbdc1aa447bd6ef5d8b204c801416144f34267a9",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-queue.d.ts": {
+        "sha256": "2daa34a611cc40bf6014ca2407924c660f94910ca035bde195cbd022cae7fde4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-queue.d.ts.map": {
+        "sha256": "b261786a2e59492197b5bb10e4cea3e2a52da880a99af2cbfde283e5474850b2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-queue.js": {
+        "sha256": "bceb20a1a1a66dc5f28e9cf090e2156e4f86c0e2b3339af0eb11bade3221ff7a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-queue.js.map": {
+        "sha256": "c0d1175e9d8f994109d988ccf0e68fd7ad3d2cef16dcab9d1e46472b37597fc6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-types.d.ts": {
+        "sha256": "51de87e8c2052133c26be0243bf0d96707f3cba604dbb23caad6e8991cd1cf52",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-types.d.ts.map": {
+        "sha256": "d32c833d207413bbf7d7c4213da873ca0d660769df7073cf135692b327ff888e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-types.js": {
+        "sha256": "41ec973a0fb4be91f145ee205d4259e2c0331fddb09065ea0e71504f44870040",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-types.js.map": {
+        "sha256": "ba1cfe9fd97678b84c4357e01610163fe9b8d8394ad3ef412c341d25e950a668",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-privacy-role.d.ts": {
+        "sha256": "b96b760eb70d4f1a744263b8d251b5b594ab29e894f3123f7e30269af12184df",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-privacy-role.d.ts.map": {
+        "sha256": "a9636a5904b059da0a7c5a7c791eb7b69cb472e8c4ea59fb081093a1c5afbdbf",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-privacy-role.js": {
+        "sha256": "3676c0c2dc647c0bf68169fa1f3dc351b0f1034ddf266dd22bc9ca68ba02ab14",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-privacy-role.js.map": {
+        "sha256": "8504442066cb3c45cdfed13cbf75098f965de829a50354f28fb262b99a2ccad0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-publication-receipts.d.ts": {
+        "sha256": "02b7417903f783f0e13295a83d4f5c1f1816d30e7c7f4824e296651615eba4ea",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-publication-receipts.d.ts.map": {
+        "sha256": "ea476351a598251f99da8bfac5f4ecce07f846dc9b6cb76c034349d0d7cf7220",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-publication-receipts.js": {
+        "sha256": "c0639c7b822f3e53926712c33173309e75aaff1bc9dd0a3a12b48b95099bbffc",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-publication-receipts.js.map": {
+        "sha256": "6b88059702229680f238de55d6f69cdbb4358787479285eceafc319957a74b15",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-protocol.d.ts": {
+        "sha256": "c2dd397563582b43b2acab658bf12898b4b7f79a410cce6639eb7d8f2bb87ef8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-protocol.d.ts.map": {
+        "sha256": "e9f44486f1191575ba3ee05b95fb7de982da47932bb8c32f9b0d0435dd2978f0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-protocol.js": {
+        "sha256": "a49d5bbf95417eae12dcc9555c89c2e27311990b14e1ecee12323fe03bf44b83",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-protocol.js.map": {
+        "sha256": "9e50d7f4991edbd05d4437be31fdfb92fe9c2a4a0086156eedba3843fc6bd782",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-support.d.ts": {
+        "sha256": "e83b896377ee72a088a1c018174a25d72941b0d8c98afaba0b7eb229be46960a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-support.d.ts.map": {
+        "sha256": "9fe1048c98e5321afcff39f30030d7096cb5be868b9c6173fe10eacd6081e0ad",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-support.js": {
+        "sha256": "0acf5d3be305c12c7764769b00c9a48dfed3e97e634a218da008cc90832e3459",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-support.js.map": {
+        "sha256": "5a62eb3fdea6111c062730ce488478c0ce6ab54009bd073f89c1b6798b385993",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-types.d.ts": {
+        "sha256": "49e4325fda3d202ad0ee5c8029b157f7c5c745ddfa45a9218097e6c3863d1cfd",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-types.d.ts.map": {
+        "sha256": "a2fd2f8a41e9e03b998ee2235d3be97e05d6c90cb7f1adeedb967a2b45a82fd2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-types.js": {
+        "sha256": "211d8f10bef740e42471ee31d853b8d157b499d2d732bb0a18ff945577e5b044",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-types.js.map": {
+        "sha256": "85f41c268c18d224313157697d3ee252a8859d5edf9d4e0d05df8dc3329a99a2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client.d.ts": {
+        "sha256": "8f813b4466d70a1742fc186e36d38c076e66c12a935eae6b34f8771cf8a0715f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client.d.ts.map": {
+        "sha256": "12e7aa16856957e6c8c3a6a80f908ed62702c925a4713fd95569c14170db5176",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client.js": {
+        "sha256": "1f957cf3a127115ba55b3cee4142d866f8a7d7b10724005cf49dd1703a310c7a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client.js.map": {
+        "sha256": "db79746a36d2730275af98cc239a89695af5ecfaf3264b0def78627598550662",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-event-source.d.ts": {
+        "sha256": "8cfa7736d92edf02a3073cde5c59a9785d61841066790af5eb43aae23b00830c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-event-source.d.ts.map": {
+        "sha256": "27fb1c2bd39353ea79195c4ca5a73c63b06fb2845327609095d0aaf9d31718b9",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-event-source.js": {
+        "sha256": "d5bf04a95b5e0aa774595e223534edfbecec96e7f2fddf5458d0896aeac26153",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-event-source.js.map": {
+        "sha256": "dbea3ad7b67101edfb50f6cfc4c1a412d1b2603f527e49d812e190630d9e8b9a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-invwant.d.ts": {
+        "sha256": "15ac6679c6a7660c8d2ac2949180114debd5404325a3fb4e0fefed41f09c1505",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-invwant.d.ts.map": {
+        "sha256": "9f17a83c8af98228a5c3122e2ed94e63eae6dad4695261286b514f4389b71d59",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-invwant.js": {
+        "sha256": "4befbbf47e178c12b10adbbb4cd57943b7c23f253cd6ed20658011e4fafe292b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-invwant.js.map": {
+        "sha256": "b18d8adfadce04191098aac7df11f7e3f06717235e698f0c9ab8124a8378e133",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-retained.d.ts": {
+        "sha256": "25e50ad3a9d50ed7b64400a427cd2c17dc9b8b07126deae59ba6a07030f68baa",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-retained.d.ts.map": {
+        "sha256": "bb2032e7584c15a5f75faa7ae1f66b0d4a1b8a6c7b95892a21b16aa9a1582de2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-retained.js": {
+        "sha256": "d6760aada8526fada6c11d2aa078d1a7e8d9b1053cff8fc06acd10d0d199c16e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-retained.js.map": {
+        "sha256": "f51d1b20fb91c1d16c56ade39c4b419a568a8245a4d3db621bff150efa7d7211",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-source-subscriptions.d.ts": {
+        "sha256": "c6ac32b9aad0bffb88c6716d7234c99a2c1c922653fa5ae156f3f3d9a935742f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-source-subscriptions.d.ts.map": {
+        "sha256": "93f0eaf1311d4654d45280027720cb8cc2892bbed373e356757895e187abfd7a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-source-subscriptions.js": {
+        "sha256": "3f30417e090863f79495d6cf92dcc6f07d5a721eb29fa45b04819db3ffd0da41",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-source-subscriptions.js.map": {
+        "sha256": "cb82db25ee4300964e033575ec68ba7553c18c660757583a48c803c4a86994b9",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-tcp-transport.d.ts": {
+        "sha256": "ed138cf148e60826ca9f83f6eebf78c549baa74ba5428a087b3b9ba13e5b6755",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-tcp-transport.d.ts.map": {
+        "sha256": "e619711ca2068a7015df9caf89d0abc32224c95190a41328f5c4c212c90c0d7c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-tcp-transport.js": {
+        "sha256": "5e98ce1d8f5b15e5bcb89af2cd9951b336d78d140a7dc8ec2834433bcb6e5bf5",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-tcp-transport.js.map": {
+        "sha256": "bc05ed52792458faf3fc165db432fa82a05439531d95ad8a68673aa413e86a1d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-tcp-cleanup.d.ts": {
+        "sha256": "f24ca8fa4f62aeff84a4fe6878d60d3b9d88642a1a5edd39156d1012256a1d06",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-tcp-cleanup.d.ts.map": {
+        "sha256": "f3403a7ba61fa81d29165cd991a18ba1ccf9b7a931eed13fbc2a0687ae86f1ac",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-tcp-cleanup.js": {
+        "sha256": "4ed243eae18ed8a9f2624707ccc2785a78a567e4cf8d39ea3c11afe8c5f7eb35",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-tcp-cleanup.js.map": {
+        "sha256": "c96ec3bb7c7b936ed62e89db8c442c89991854061b51a88bce6e98daf783e7c2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/index.d.ts": {
+        "sha256": "a960f47a4df0695b2c975cd638a46679f69836429fe8354102109303114f8eaa",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/index.d.ts.map": {
+        "sha256": "e2a7589bb913b7fbc892801b0b263c3e5ae25fd6159501b8f52fb30fe6e97880",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/index.js": {
+        "sha256": "61c6de6095b088ce366b260da82f2c3e9eac4cae16c11a3405929d6e89772aed",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/index.js.map": {
+        "sha256": "0de05a14a6eeaa004f43a96c0e6d9a2cfba30e94e5574cd98c4820d9410eeb29",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/indexed-db-event-bus.d.ts": {
+        "sha256": "167c87def5e29f79545ab59507613c25337d0f56f9e505efcd8dbc972f6d4402",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/indexed-db-event-bus.d.ts.map": {
+        "sha256": "173fbe5ea504b3b87ab157c95e58847ec164e63e2d5db375268afd645b9920b0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/indexed-db-event-bus.js": {
+        "sha256": "993a980557cc97dad2a7806b85a23d8c99ea9eb91002408e8c495c33a048d8a9",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/indexed-db-event-bus.js.map": {
+        "sha256": "f0a59d7693a3b4b7e25e0c741077b7529c264b47dfd6d963bc33869689d8d869",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/invwant.d.ts": {
+        "sha256": "e2fabd415ca7313ec4378e13497213e9b9f278922757353a089ff4f4f04eb6d3",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/invwant.d.ts.map": {
+        "sha256": "1e99ff5808fc4ad5fcafd18eaebe08bd98e970ae4a56a4b2df8d1f369221ca52",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/invwant.js": {
+        "sha256": "05e20b93718d2460e7e0b5e5cc0bd9447f60f8fc694d20e739869a1aa1969b19",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/invwant.js.map": {
+        "sha256": "f63ff4d733c09fe6a4b13c7aefc9db37691c2f7010c3e6c644fbcd874f500eed",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/live-routing.d.ts": {
+        "sha256": "577e63a4c54aa4676d865b6d11affcc170411f9386f98b42389cc2929971b3b0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/live-routing.d.ts.map": {
+        "sha256": "f19aa997c4ced64b093824c3a17720845fa18831ad749cb185fdb855f7d94d15",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/live-routing.js": {
+        "sha256": "759945fc23fc367f71769c5c782609c73d7f51f7f4853293bc90913309399907",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/live-routing.js.map": {
+        "sha256": "3e943fd0eea0fb7281e7ced493a4b68bb987f43935b5140525cd8236fe8f327c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-behavior.d.ts": {
+        "sha256": "06a5712dc382bc6d54d9e3d32e8a2de2797eab8334195df5352208e66edd3224",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-behavior.d.ts.map": {
+        "sha256": "34bd91b1f167811350c04671187f61b21697eed11a4eadff7296ce22ae37f585",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-behavior.js": {
+        "sha256": "06960ad732592adabd55670f6920e069f940faa0dd450fd11487e0f036d51cee",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-behavior.js.map": {
+        "sha256": "e2b7f6500558bf3bbb410df438a67e527f99b2071b4118d3e0ede5ab88e9277a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-codec.d.ts": {
+        "sha256": "07cbafc7778150f4cf24c48e56ce3c18fa191c85142c16fa78d5022d0a4b994d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-codec.d.ts.map": {
+        "sha256": "b7aa6b80409a40bcd2dfff73f3ff6c6b5bc042e6c1d519db7faf15348c84dee4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-codec.js": {
+        "sha256": "86bc11dc7fd8b0e3deeb2617ade531c95548dc3c0b618270fa346825c130a6c1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-codec.js.map": {
+        "sha256": "de58b532a9dc35320c2e2713b0b95fb472b97bb3bd3add8de7d82feffe79e307",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-peer.d.ts": {
+        "sha256": "27a1bdd922b9551626c15bb3161b94f5524d0af929a84de6dfde3702285c4de0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-peer.d.ts.map": {
+        "sha256": "472bebb7e9056fbc699cd4521abebc32d2d240b4fce7f7c4907a35185ea5d380",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-peer.js": {
+        "sha256": "205f971d2e2f4dcf9c217543e68b77b405a14b1f77f7d6846fd3705ebdbc9d6a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-peer.js.map": {
+        "sha256": "aa22494c33af895ed897f34c9ee4a7829e5355628ebf2ceca0f12e2df7687fea",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-resources.d.ts": {
+        "sha256": "6020ae0cfcc03ee449f7f7ccea18e325be9553b91b5bfdb20679ee276acc34dc",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-resources.d.ts.map": {
+        "sha256": "c1eea0c75dd8a130340e8d1f969d1cea32856185770ce00f9df931858233dad0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-resources.js": {
+        "sha256": "33c8ae144b5d1caec144c63c97fa04451c87be774a31ab896ee599349e0fc192",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-resources.js.map": {
+        "sha256": "4b88c2e207f4330470432cb046a2c8e22c8e2927ac36e33407161a7a4e54eebf",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-state.d.ts": {
+        "sha256": "f9c9638fd084d705d2cf37f813b629b094cb24aac174c926049b5637d49f84e5",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-state.d.ts.map": {
+        "sha256": "9bf834bf8d527c7b36478d94f7014aef2c910349728b405cacb6deb1b5731315",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-state.js": {
+        "sha256": "ac845874ac30d58a2baa6261ccfe1777780a0c98f64f58d7e71311f6a9b21bbf",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-state.js.map": {
+        "sha256": "f7bbf0438b6cb4f915836b1a67022744bb70f5ebe58be1f9b6368ccc4fcfa3eb",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-types.d.ts": {
+        "sha256": "a4e7a1977e820ba74614957823a69265fda74d9f0d3829b6681090d9dc26d526",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-types.d.ts.map": {
+        "sha256": "5f7fb1359414f766eba70b97704cae78070de3c87dcf2f476bae1772ca50a105",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-types.js": {
+        "sha256": "96fcc691d834ae38e018adb1d4be0f7544677ab35a718ce224f1f1703829231e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-types.js.map": {
+        "sha256": "18b349757477d28309d6387c8fabd85ad7123fa8bf86b27b60865672a827a955",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh.d.ts": {
+        "sha256": "060fc6836f2fa131654526f9f9ac99c8ec2757e0da6084c2317d89663e41fe87",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh.d.ts.map": {
+        "sha256": "2cda47b4f6666a2ba83fb88a24aed68f20911d69cb2fd678e787f7bd90f75fb0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh.js": {
+        "sha256": "463e8de8ea54715c1302da6df123982bcd8056656d9be16617c54e60c9f8492b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh.js.map": {
+        "sha256": "4ddcbf6f4ab97500a73dd442660a72f8cf7422330461dea0764f82e2cb44ec07",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/pagination.d.ts": {
+        "sha256": "0e2b4195317f18551e1b5aff2b7e0a4476d9b237ce695e1e7dd5b579629e70b7",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/pagination.d.ts.map": {
+        "sha256": "b9f0fc0fb8127087b929e92b208d542f442a702d9d64e0e9c853ae401c13dc5e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/pagination.js": {
+        "sha256": "73ccbcf5dd3454fc500c239839ea83ea0261c5469b774dc045777c9dca208ec5",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/pagination.js.map": {
+        "sha256": "3f613056994acef9d842d6f3d8a069672a9dde8f7234bc38627f74498a800316",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/policy.d.ts": {
+        "sha256": "f5125e313de02619822062e616373f2cd7fa15e697717865825e13e27226cf90",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/policy.d.ts.map": {
+        "sha256": "c4c87b491b79d3800ac49d1137e630503f6f4015cca6f2ad141832bb6e062bf5",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/policy.js": {
+        "sha256": "2da7cb3b7b9ca6f7007fe3b6f8729748f2a653a4649c771c00a5f426861dcdea",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/policy.js.map": {
+        "sha256": "9c1a3d539fb92c85a7b504833aa471ee74569e2d7dc63e232bed52e131ac71f0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relay-publisher.d.ts": {
+        "sha256": "ca2b99c896bc11f11683ce43f7dd30eb882a111cc1ea0eae798b48e8f04835da",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relay-publisher.d.ts.map": {
+        "sha256": "59bada8f44e91a10aa0eb9e53e43ec680bcf424125e1b0da945adf5af0b2f854",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relay-publisher.js": {
+        "sha256": "853c023e5a00ea14c39eb5f6b0e11af290d7d657269746662f357e61ada5383d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relay-publisher.js.map": {
+        "sha256": "d656c3418b3c8bd7661ab3777738a821aa3a2315323b12c1947cbb4049c9a203",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relays.d.ts": {
+        "sha256": "bf6fe05d364a4910d9f7992efef908d4fdb95e5b3393691381f2b153d06d2c8b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relays.d.ts.map": {
+        "sha256": "20549734e5d512a1aaf12e31d71240bf1fbf73fc47c5509a9336b5068878b318",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relays.js": {
+        "sha256": "5469368af4ea5944c2b4e78cb8165fb636f74b0ceb243ede6bf8c3104dacfb62",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relays.js.map": {
+        "sha256": "ec7e7e27ee73ba0f2cd8fe22b2f41077e4041ff73b6a5a061f1f8e0542f38fdf",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/public-peer-source.d.ts": {
+        "sha256": "1156455e240abd5cde0d94a8cc20a5f639dc8634fbbcb93e226a4d3dc423c24b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/public-peer-source.d.ts.map": {
+        "sha256": "834b0e93637d23e7280e7969e004453a18277ff343f1cd95ec148ed6524f4c50",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/public-peer-source.js": {
+        "sha256": "8576b50b1ca1824724bd13b2e9ecd586a71331abcbeb2ab2df9a691523734781",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/public-peer-source.js.map": {
+        "sha256": "31ff39d50cbb057f0e67ea0cbb66c2f3ff6fc752452252113b7dd1bef04f0b04",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/relay-event-source.d.ts": {
+        "sha256": "909a3d71b7fe283fb499e4c976ed191a26549736d64abe743f8a8926c11d7406",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/relay-event-source.d.ts.map": {
+        "sha256": "922903ebfacffaa8b53936655c5e9e7e66f3f5d4275cea69187441250f03c2cd",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/relay-event-source.js": {
+        "sha256": "8676686d7c67b1e66c238ef46edeca2568bb327d832c8e08515e175689a920b4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/relay-event-source.js.map": {
+        "sha256": "77f0a2983a75e626df3ac57954b458276323653237176be5cc4f0f36780d6cae",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-events.d.ts": {
+        "sha256": "b9aa07e858b4bfc7ed2cd39b7797fb724eca13ef26dd1c808fefc4f5833ba5f2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-events.d.ts.map": {
+        "sha256": "0d4475020e38ab84c860a900bee72ad7aa6adee3ed1fd82892a368217bfb0c99",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-events.js": {
+        "sha256": "96b443efd989a064c309db6dad32284db2b181c57e45118ef83a39004b73b932",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-events.js.map": {
+        "sha256": "78f1082e45f437c37300ca7778bae72fd1f4b71a0b41d53b7e042460f53248de",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-peer-discovery.d.ts": {
+        "sha256": "95cbdb1154794799d14189dff275924af0f3084d530ba4ad54c27c95e8ddd526",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-peer-discovery.d.ts.map": {
+        "sha256": "4dfaf0173d9bc8022e48f8ccc213678f099c44b6fc52a9d6c3a13da8d025542e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-peer-discovery.js": {
+        "sha256": "7af331ca2c5806a369f6baacdd3ebe97a4f9dbb61de97ddd178a3697b070530f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-peer-discovery.js.map": {
+        "sha256": "6c5d66518dfb006c14334137e3c3376005547232be281eea1fea575202b2baf8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/router.d.ts": {
+        "sha256": "20275ba2d3abedd0764bafc5efbe535a30838e9b2225468b595b59e6d738ec69",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/router.d.ts.map": {
+        "sha256": "db4f05acc4cabdcf4c390bc7f49c35df70aecc078dc60dbc9d341c3b6e4c9ebd",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/router.js": {
+        "sha256": "954a6f5ae9c1c11698f512d9b8f55fea079c66b18e409fa4a40eab566cafa537",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/router.js.map": {
+        "sha256": "166eff5a760b6e12f8ea82ba175d0444dd0330ff0a7abe19d08018040f921c8d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/routing.d.ts": {
+        "sha256": "fc57a5d8b5af48b53f6a4a259b2b8c5e5f1cf1d82ed5fbdc034505006cd51a02",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/routing.d.ts.map": {
+        "sha256": "5935f8ba099162c973ac99f57e2a5f14a265e705f6d6d17f6a1f1ee597dcb701",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/routing.js": {
+        "sha256": "6ba46e79709271d21cb08d54941d6b42b672aa159588fbe419532ab19f5e4e66",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/routing.js.map": {
+        "sha256": "085d0e9ef370b015621d0b2bf9c765351a423b6310dc760b35e4cc5abd599938",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-interests.d.ts": {
+        "sha256": "e31f15365c91ab42e47ea5cafa16933695582d4e9af54bdd5063b355497279c1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-interests.d.ts.map": {
+        "sha256": "b8ac1f7ba1c06d2d7ea59d18fc0aca18ca1e9015f3dc5fbc5f1298fb9f53804f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-interests.js": {
+        "sha256": "0b60e6bc76fe8b29a0d24774d4fcbe2ecb25a5dff41716c248bdbcc73bd8b347",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-interests.js.map": {
+        "sha256": "607664ba41271efdeece94fd282eecda508b5014c5988f1096061c18f95ad775",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-reconciliation.d.ts": {
+        "sha256": "e262dee360cbf244d4044bf159fd40bdf4e65cf2dc673a878ac4fa71aa85b70c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-reconciliation.d.ts.map": {
+        "sha256": "be0a44231d178788e3b8039e7959105dda4b93fbe74242a69c2bd0277607e7ee",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-reconciliation.js": {
+        "sha256": "b2d60e0953853129709537aab949390d1572322d5f372817302490c7fbea3036",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-reconciliation.js.map": {
+        "sha256": "1952a64428ac299ca45a3db6d3d8dd625f3f798f08b1954caa3dc6c8460fdf1a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relay-capabilities.d.ts": {
+        "sha256": "c910c5e635b1691ed2f546fd14adeb74764ddd82a9538f437816b40404f55220",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relay-capabilities.d.ts.map": {
+        "sha256": "01e44f0f15711064a5ec941b2deeacf86da451bf6a171efa66ef404274041b6a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relay-capabilities.js": {
+        "sha256": "0e142cd35b8c14606b80d856c7bc3f636a3d4359cffec0fe8c8c6d9e4048b78c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relay-capabilities.js.map": {
+        "sha256": "71dd1c4bafc724a5b222e445c0b3c1bbee075f28bdd526ec724404f8d6509152",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relays.d.ts": {
+        "sha256": "c90a5318f176fb3e1cf2b52c71b9e2e87a3c0e749035ff2945a017cefbe49b94",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relays.d.ts.map": {
+        "sha256": "792cb6501f329d595201c05b1fef82765ace849d8a227f767eafb70f1e051a40",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relays.js": {
+        "sha256": "cafeb2dfc65a6b3ae61d9c42935d381a25ee5b9b7cce31fd6731fa0b0af3aeab",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relays.js.map": {
+        "sha256": "2510fa884d1bf2828855dd2d6e863d8e184d2d4440a3e751b8de7cdd928b285c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-store.d.ts": {
+        "sha256": "96d000b4cc51f41a3bc88f034fea35b9c0862272c83a2f2c7564270051245662",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-store.d.ts.map": {
+        "sha256": "f61300aa6814ba3f42f2c9d138e36ea216b7467179e0adb5f20db7a592b9a858",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-store.js": {
+        "sha256": "916f3fe2c85106109942638e647be7557a8665c97adc4a96cb435759a730e379",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-store.js.map": {
+        "sha256": "b869ae4d9d3bc05b34dc79d175ad1b66f54cc4e15f6cb35ac6d784b26c2758b6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-types.d.ts": {
+        "sha256": "ce2b3c1c8bad32a4684e9377f1ce3d3ab0917244491d4513b82e4fbfd9317e26",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-types.d.ts.map": {
+        "sha256": "e4acde99d66b7100bd394d045f6554633d8c32b102896b5ab043c251cd9ebb66",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-types.js": {
+        "sha256": "381a4eb6da1ef4914a59593130d8fc9314d3896df3ba686af54c34cd61bcaec7",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-types.js.map": {
+        "sha256": "af0191fa817d1d8221c6838944271cd65fe05538896d343bde244f1b272c77ef",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime.d.ts": {
+        "sha256": "57247b532d43c312141c133259d39bca56f0f987c3683379903e1a52dbcc7c83",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime.d.ts.map": {
+        "sha256": "559dd3f3b2919f86159f755028fcb5c2fd56201c86aff322b7b831216c05fc07",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime.js": {
+        "sha256": "2152f591089c8a83135e356e47fc870f0e7cfb5caa5bafcd8cb451d202eb892e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime.js.map": {
+        "sha256": "74e3367c2a47d44502a8d57f9556a930d70d04265e8709b5e3364287161b0420",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/scoped-fips-source.d.ts": {
+        "sha256": "96d23ed75a337d5cd7926f584471aba62a81c11174a8b3758528c52c368909ce",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/scoped-fips-source.d.ts.map": {
+        "sha256": "fa25a503cf16f2b8948948ad1666fc4d81e8593baba07ff4fb93c53bbaf78de1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/scoped-fips-source.js": {
+        "sha256": "096d400a9c123b13e7b9abccdcf214be207078f149bf996b7768229271a8dea6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/scoped-fips-source.js.map": {
+        "sha256": "db29479e565c9e1585c09cedc746dd3872f405556f5604d978b4dbe43a77a4c7",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/simple-pool-relay-transport.d.ts": {
+        "sha256": "eb2aaec3d7f399c946927e6f13205c8aa5c5edb64567367d407a31a0f728d186",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/simple-pool-relay-transport.d.ts.map": {
+        "sha256": "31d05c1a8c628983b6a4d0c84e65ab219e9f51418a818e6fcf99aed046db30fa",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/simple-pool-relay-transport.js": {
+        "sha256": "b7f831d3d8998d6bc631b6fe86af85440d0db3ee14d35b394972556e32ee4248",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/simple-pool-relay-transport.js.map": {
+        "sha256": "d23738eddf4867b9b1de740674923ab95a888823f78a56cefaa884c5c0e242ab",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/source.d.ts": {
+        "sha256": "8ec68cdd5f0c8097b7b32af70e584d22e2f75fa9be4625581f6c9296bccd2e0a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/source.d.ts.map": {
+        "sha256": "05163fd73f3dc0ea971e576d0d813f1fbcd132c475197b2d328b3724612bf7fd",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/source.js": {
+        "sha256": "d5977df0fcf7efcb6b1648b64646bf8f990068a2cfad1938de96a1b8282a0993",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/source.js.map": {
+        "sha256": "c1b4f702dddbf4c5cabaafa1a3c03772a1ddee4c88fbd455598ed26ca1ac94c6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/subscription.d.ts": {
+        "sha256": "24e171c7b5f430fbe46560ce0b080e6527a4e283b7f39e1c2136f320445cc177",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/subscription.d.ts.map": {
+        "sha256": "a0378bc76bf906d2ad8185156d9268b3291a48ee52efa7e35135eb488294f940",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/subscription.js": {
+        "sha256": "ed244fb9edf8d2df7a2455a88a177ab7550daaa84b004ca3aa9bc73fdd01abbb",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/subscription.js.map": {
+        "sha256": "3b3567a9e5e5e86a180f98f6afc11f3e5b14774c26f5856bc6ac422232a4a941",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/types.d.ts": {
+        "sha256": "c6834e66d5e96f32f60e752cffc6366054c1519887c672ce6a3cfd9267c798be",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/types.d.ts.map": {
+        "sha256": "53425b8712252e3610b1b5ffe7bbf3c5457c0edcdd1b1969183c3d1c8ea9e249",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/types.js": {
+        "sha256": "ffaac6155a8b995fbe53d08847935499a8cef28afd96bcd46b523dc04549c983",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/types.js.map": {
+        "sha256": "e4876f3a850b19b94864d3581600b8a394f8598a75d90e8416d9ff5e97625106",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/wire.d.ts": {
+        "sha256": "372c4dccce7ef3ba1c5d591b5dcee8bde9afcd7da7699e4d1f3bfb29bfdd8a5d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/wire.d.ts.map": {
+        "sha256": "1c08ea8f42bcbd0d6480fd49728de7bc4aa8706d8162bb1df06322b2c5c8ec89",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/wire.js": {
+        "sha256": "3fbbb81e721e9348fcb727591980366938b9a016a5606bae8f6351bd327259b0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/wire.js.map": {
+        "sha256": "a35b38cf1656f425fabaf763629e16e21dda5698790ada476f2586cb9b4ffd9c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/package.json": {
+        "sha256": "5f6e14f3ce815204284298e73166a31ad29f295aa5dd6e7cd5832f80b35eadb4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/anonymous-fips.ts": {
+        "sha256": "cc7cec720c36730382ceb9255cf50d817079a9afed68d91ed110424680775975",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/anonymous-relay-discovery.ts": {
+        "sha256": "9907dfa3e9c2fd708ad8a5324e34cfa46155db2879186a32dc881a4d3b291bd4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/delivery.ts": {
+        "sha256": "de421e2bfccb657ad219fccdfe0ccd4b010abacca33577e403c8005c326e3876",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/event-bus.ts": {
+        "sha256": "91f5347bfee5ae9784fda9ea944d2726a3ae3e74724ca27620a8ad2901a4d5d8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/filter.ts": {
+        "sha256": "59690faa1dd49389b41cf559ed4b39269aff1c16f0d72a0056b69a142a4213eb",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-feed-subscriptions.ts": {
+        "sha256": "2eabfec4e35f0d4d5958bad1c0606de4dd13e5e79fc7a646bc0472f523fcbca2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-feed-sync.ts": {
+        "sha256": "0d25d58bebb226d58deaafb657e6d55f8ca6d89318ce6be4208dd9beeb928253",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-invwant-record.ts": {
+        "sha256": "fec9d79c3130bb15774d89ae8fd3b3cb73033018029a4fdde6cf89dc377124aa",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-invwant-stream.ts": {
+        "sha256": "7413e8ac80428634659cd3867c78c00eef83537efc2e61ca733c9174c7b88d13",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-invwant-tcp-driver.ts": {
+        "sha256": "164cb6f3787187ce08606e439a8500cc624b5b70f79db7ab97df77552f363516",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-invwant-tcp-queue.ts": {
+        "sha256": "523179275d72511911f7872ade5483ed87b2064da4f11cc717e86b8bf3749e2a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-invwant-tcp-types.ts": {
+        "sha256": "ce82156885212154ae7bf0bfd32439db00982fb642eac6d5be16abdd803eef77",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-privacy-role.ts": {
+        "sha256": "bde1f46d0ff33afc2d676fcb6f95e7468344be7c7402d7b03b4000fd4294f50e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-publication-receipts.ts": {
+        "sha256": "cf78992495415f71295be81eb8627c4f3de0ffea7a4deafd2ffe67d093c5c6cb",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-client-protocol.ts": {
+        "sha256": "22353cb2884a86e7c4ebf9799e7272621ffcf35c3a01b670a72ae40d3d34355b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-client-support.ts": {
+        "sha256": "12a9652c0fe327980525098107c6805f094645e036eef8b3a14729dcb6912531",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-client-types.ts": {
+        "sha256": "74551dcc5ce649ffab2167c8eee0e7971f51b9f3a23d6cba3280086803a5609c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-client.ts": {
+        "sha256": "ff23214a01809bb158fa31767a1bde6f700de37e2e0330ae0f051d1943c45c4d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-event-source.ts": {
+        "sha256": "a6a9352057a3322c893b0f44427b0f76735a444e84e3e1b1daf53954c9f73814",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-invwant.ts": {
+        "sha256": "920df85cec5b8165ac0a16bee96c913fc7ed76a8a6e3078901aa53aacc5bb327",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-retained.ts": {
+        "sha256": "e343719d14d157cc43f5689e2cb4ecca3e378e6970dd05756720e4d577a89436",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-source-subscriptions.ts": {
+        "sha256": "58d005b22bfa16054ee2ccfd478c10d2f922a0d65889abd09af721fd2e101fae",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-tcp-transport.ts": {
+        "sha256": "6269941bed3121f413e0255226ba5a41a0dcd58f02386c6ad58371041b09527e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-tcp-cleanup.ts": {
+        "sha256": "f2ce509faa9ba99be35c5224785c3d7a40d19ea7255b71ef0129b385266b1c0b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/index.ts": {
+        "sha256": "e7565249f1d7b91e99028e10a7ff8147e57e8afe6b748c89d8e9b5a165879c00",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/indexed-db-event-bus.ts": {
+        "sha256": "559275d65eb1591b25a521f8451d7f3236cf80aa88c7aa55fd62fbefc3a02d5f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/invwant.ts": {
+        "sha256": "e012e4ff8481ff284ed27695d478263482a7652612360a907d0a6f776f515af4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/live-routing.ts": {
+        "sha256": "afd0a10cf8807c1e1945d46115d3a9b51c05d7c1133666b9d1e03d2218e48259",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-behavior.ts": {
+        "sha256": "fbda5225ebbd5d7c247cc567fc1172239ba53a23fb7bea5c1d8632951c900471",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-codec.ts": {
+        "sha256": "9d8495b58f510568e1d9fd98e100a3f3b98e4e5e66a37d0386ae21c9cdb03c29",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-peer.ts": {
+        "sha256": "9b5d8d70d71edde2f8a2755fe70e7d8d2bd0634bba6e0e729ee4ac59aee98ab8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-resources.ts": {
+        "sha256": "41e2d42a44e10383b526f01c3f6bd57e609867f6db7261e02c5c56eeff8d00d1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-state.ts": {
+        "sha256": "4e1dbcc06c1684012814a9d8974dcc8da0d4d934fdb3019f873facaba45ffef1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-types.ts": {
+        "sha256": "4be03b93bcb7e338bf99aafc3b370cd25a276986984b6bfb444922063337d5a6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh.ts": {
+        "sha256": "ed83e98cee131620260ee2e44fff5d9e3c30494a0af5e4c4f2abf6f2a4b22f96",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/pagination.ts": {
+        "sha256": "7bdcbb38158915262f8fd01b99b1b935bb39c93c62517ffe2737fd676748cf51",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/policy.ts": {
+        "sha256": "129c0307d147ec461b4f1fc1fc43929b552e6dc8c23f0426b4d29f30dc35ef24",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/private-relay-publisher.ts": {
+        "sha256": "2b5b1af0cc3651d041db97dff0a890e63c105fbb7ad23b1c3f2c3954647e1c52",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/private-relays.ts": {
+        "sha256": "2c423bf320390d76864879557196ccf6da5ee0179010d95b1e1eef07e82a1c4c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/public-peer-source.ts": {
+        "sha256": "9d0aea33df75b3accb854bbc0f86dd67228ef8d8c9b9ac2bca14b6374f280e97",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/relay-event-source.ts": {
+        "sha256": "30e84b900935f27fa4287f97d9268f622f23d637f01b3851a4329e3f7ca44c6c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/retained-events.ts": {
+        "sha256": "5b1a7cf2a02490b4e19dfc58cc0b4e19aaa5eb9fa17c8bf8b5da4d64a1b01348",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/retained-peer-discovery.ts": {
+        "sha256": "b5ff5c1fcd12809b51d6acf91d5edaeb479ac8ed1348be6f773ad712adbf625e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/router.ts": {
+        "sha256": "bab965095c3b01679ea64c230029276e70f5c1451f47afe7a614789a5c221c6d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/routing.ts": {
+        "sha256": "2b5740076e95617e945617684060bd954a26b990684a08c069a96642ede6f59e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-interests.ts": {
+        "sha256": "b93470205d4131994ee683bd89473af433da821ed92e413b61990e3e1b0eeb43",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-reconciliation.ts": {
+        "sha256": "9ea807609f8c223dd8283db742c780e14e48f5c24268eb49cfa148061813b0fc",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-relay-capabilities.ts": {
+        "sha256": "24f69ae3fc526f1ce0fbb450dca60805df6b709489a020f8c78eaaa56af9df68",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-relays.ts": {
+        "sha256": "4483000fc9dbc7cdfa8386bcdd65185f9a4bd2644e1770a222b9a950f78ae6be",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-store.ts": {
+        "sha256": "56ff1a502fc8d730172a8dfc9ababcf1f7e7a5dfdb318ff58e940899153521e3",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-types.ts": {
+        "sha256": "4f1cb16d5666f3c1dc0d40de1199486acbc73353927c0ee9b7c50d992ab829b6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime.ts": {
+        "sha256": "f93e77102ca39454aae3d2af817601ae05a11628f25da1ad52c1db14d7f45b62",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/scoped-fips-source.ts": {
+        "sha256": "c9791b7b65ed11632e79639184be8ed7f9854781d3eb6e26783704006aa89116",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/simple-pool-relay-transport.ts": {
+        "sha256": "468280227dd495058dab60b8ca99b9d6ab72857ce4cbe32ddddec647cca9696e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/source.ts": {
+        "sha256": "038389cba1da2a6bcc18a1faea35663920482fecd063eff4def548052d23e905",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/subscription.ts": {
+        "sha256": "956725ee5c1b711593946f36e3340af15623da73f3ba35a8cfec4100843ecb81",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/types.ts": {
+        "sha256": "195dafb24bb3bedc8303db178a69855b233fe0c83aefdf02b4165f8d2e27b47c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/wire.ts": {
+        "sha256": "f334822d88ce17674df536fbb9e34e0cb8fb8ee5dbdd625d65f3e68d878e7777",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/anonymous-fips.test.ts": {
+        "sha256": "a13b8742717cb55572a9787707bbd77258f4d8d25d0145cc1cc427d553f494af",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/external-verification.test.ts": {
+        "sha256": "a7a525fc7bd6a4733b7787c8852220c600fde42074496668d6bae30f133c2d3f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-feed-sync.test.ts": {
+        "sha256": "25e97de0764bb20634454ae536d3c2c8bf8b1d48383ba074ca8b118e65d51d42",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-invwant-rust-interop.test.ts": {
+        "sha256": "50bcbe47e99b4b68e9ea530e98d257784da01324694bd212127ac50fb8e6ab1d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-invwant-stream.test.ts": {
+        "sha256": "1f80c369e2ba3de3306636d886760ab262fb54ab1d58e7976305f7b42387e3fa",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-invwant-tcp-driver.test.ts": {
+        "sha256": "b6e9442f0b8dbe240e12e017ce3b7392eb4f3748304a4fc38db17d0dd0445787",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-pubsub-admission.test.ts": {
+        "sha256": "47e5cd8be13fb6702e4ce518501004c928fce279ba5afb4cfbe2fa110d450b90",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-pubsub-client.test.ts": {
+        "sha256": "68fd49b715582635cef03576e09c58f5bc3b5b56c26d91ee39d16b35c7bc7266",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-pubsub-invwant.test.ts": {
+        "sha256": "1a9f9b923a8a6fbda627c3a809ba9d77ee8d05800c16807e206f50566b83900b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-tcp-cleanup.test.ts": {
+        "sha256": "d02665f892a267edc697db805b039746c46ad0079a586b723dfed8d75a83a3d6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/helpers/memory-fips.ts": {
+        "sha256": "5294fbb5b82b2034303b425bfb525bfa48cabc60fc5f41db3c7f3bb20dd369de",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/interop-vectors.test.ts": {
+        "sha256": "5d5434149f6b41e7ceed7d26dffe73a5c4ded8d2b0c9872c8fecb44b6b677f22",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/live-routing.test.ts": {
+        "sha256": "f41ae9aebbae22c86621a2026e9d5ce667e2688ffbeb0a2192c7816f53c3632a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/mesh-transport-disruption.test.ts": {
+        "sha256": "a3c40abd31cad6c931eeabbfe8e9543e033764766253b74d162533be40bda7cc",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/mesh.test.ts": {
+        "sha256": "d05a9633947bace3bda5e17477527e30eaf37829868b3c3f54afe44badcb635c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/pagination.test.ts": {
+        "sha256": "273f7e08f9f3ef8a50038940f285687237a404558c084509e26b7d04906ec9ef",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/private-relay-publisher.test.ts": {
+        "sha256": "200ec6911d49c481e1ca7109a148224c27f2786cc1a2c2b42e77f7d6e79c110a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/public-peer-source.test.ts": {
+        "sha256": "931bf060678a634454b40643f6c704ded69b79248afbd93a677a33e203adea5a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/relay-event-source.test.ts": {
+        "sha256": "67bd112b1c4a2fcd22d4cf79128aba6e09493ea4ceac7e74e153c7af2f6be15e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/retained-events.test.ts": {
+        "sha256": "d77b7a46efc57cce09cd8a6a12e5f8cf3d0729e476d9463420b50d8d8983eef4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/retained-peer-discovery.test.ts": {
+        "sha256": "a7078beb97c0a78a8f90e99ac699a6218b0da63f39d419f8400a4a5e812a1760",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/routing.test.ts": {
+        "sha256": "2528c6365c1a8be949a4720cfbd687f45f9a14dd0fced09ad6ba633b40203048",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/runtime-reconciliation-fixture.ts": {
+        "sha256": "692f3685640508abce6ffb05d009fb6fdb33b5f887bdfc8a92aaa8b29687190e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/runtime-reconciliation.test.ts": {
+        "sha256": "adb080d979b570957c00d4f94ca76d2d3291d9288e178d5ae3e849cabec3c766",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/runtime-relay-fixture.ts": {
+        "sha256": "8016b6ea83e6f1e4a6fe40d149ba8c04150f958f74f9f2860589dc708da0526c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/runtime-source-receipts.test.ts": {
+        "sha256": "720050be693fdc2e937fd6a164aaaf1333fe1d8ba56be7dcd6ba70cc876492bb",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/runtime.test.ts": {
+        "sha256": "eb61c1934c353ced9337c6a3ee153e9f8eda090be125ce995f50ea2782ca312b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/scoped-fips-source.test.ts": {
+        "sha256": "23084b843b0b2255c36bb9284184ea33390a522f11c8c7200353a4953722f818",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/simple-pool-relay-transport.test.ts": {
+        "sha256": "b6e976cd400f6d8446f54637e7305e2e1725048478b0f23236c623f59dddfdda",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tsconfig.json": {
+        "sha256": "ca91125a0d953ac02a0518765c809fa5c21e2818b8d391f1f0d213f4f3d8e1fc",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/vitest.config.ts": {
+        "sha256": "f4e42eae9f1250749cc97d23b78cbec16def81821532c14536fb0edb37bb41dd",
+        "mode": "100644"
+      },
+      "ts/pnpm-lock.yaml": {
+        "sha256": "c978221fe808774a8d25d800f72ae50f5ff577eb55ea1eb95cf1d89a6eed2e20",
+        "mode": "100644"
+      },
+      "ts/pnpm-workspace.yaml": {
+        "sha256": "0fb360452b0231d114d0b0ad6cc76bb48fe528382f55827cf93739bf64ec79e1",
+        "mode": "100644"
+      },
+      "ts/scripts/check-source-size.mjs": {
+        "sha256": "fea46bd1e4bcdde4784117b3d770e7983248b2f892b3247f2ece44a6936e3dd0",
+        "mode": "100644"
+      }
+    },
+    "rustToolchainDeclaredInSource": false,
+    "cargoLockPackages": 498,
+    "cargoLockGitSources": 0,
+    "workspaceExternalGraphPathUnused": true,
+    "cargoCommand": [
+      "cargo",
+      "run",
+      "--quiet",
+      "--package",
+      "nostr-pubsub-fips",
+      "--example",
+      "fips-pubsub-wire-stdio"
+    ],
+    "binaryTarget": "fips-pubsub-wire-stdio",
+    "nativePackageVersion": "0.5.47",
+    "lockedTransportVersions": {
+      "nvpn-fips-core": "0.4.115",
+      "nvpn-fips-tcp": "0.2.6",
+      "nvpn-fips-tcp-endpoint": "0.2.50"
+    },
+    "archive": "native-baseline-source.tar.gz"
+  },
+  "greenSource": {
+    "commit": "9e5a7f52009044765f9dc59973f941e951f2e26d",
+    "parent": "d6cefb96c6476f12d70247f577ee5597420b0920",
+    "tree": "692cd651dba3365804b136c8421403e47386032d",
+    "tsTree": "ce04387aad83c94b9439d0069b658af81ab4ab8b",
+    "archive": "green-source.tar.gz",
+    "archiveSha256": "5d293a634d52f4a3bda41a98c5f8fd72fbd787297123ba1e5f007ed0ae0c0a20",
+    "archiveBytes": 358875,
+    "files": {
+      "ts/package.json": {
+        "sha256": "978619e4ffbc9f906b39181dca1a48e3b26a0de214c69944f8cc72d7b13fb7cd",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/.gitignore": {
+        "sha256": "fe56da5f27d174b011ca65d2c1c9be83ca19ce1428e1594f8ed3ca037e8814ed",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/LICENSE": {
+        "sha256": "ee58dbb42df63b75e81ec0d4f075d8d3b0275ced71c5bc438a3eae530c2ecb59",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/README.md": {
+        "sha256": "ddcb4efcf83c03ed63636a1d153fa344a69ad6eda65e2c738cdc97cf43d12e35",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/package.json": {
+        "sha256": "231a31a95cb3d768fac92dacf0af4b174ff501ecbbdeba91b14d799adfe7c6b6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/src/encoding.ts": {
+        "sha256": "63fd483a2332823e0638bb786696224e3f20520552e638082c34ecaa56892c49",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/src/index.ts": {
+        "sha256": "563b742f2d286db9d8e0d8b4760d42e5c19536a6ce61c802ee2010c940a0080d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/src/storage.ts": {
+        "sha256": "2c89274854da71d5f8cfa4fdeaa5eee61a380e02e8ed7820c059d80c5da27d76",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/src/validation.ts": {
+        "sha256": "8c155f2cf08ddacc1cf4a18f45f3d00d94f2bdc23f35d5d351a8c994b72ee7b1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/tests/interop.test.ts": {
+        "sha256": "209a7687bc850176c11262feb110a405e497de30f6463415acc09e8c05e0bd6b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub-reconcile/tsconfig.json": {
+        "sha256": "f47a709df28c07bb5fc513401b928deb7a3b11a6518d970d3c73f31505ce058e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/CHANGELOG.md": {
+        "sha256": "e19f54f93ee3f22eed68238f6ae48f550dc0800a2e856899f83526ded83cdeb8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/LICENSE": {
+        "sha256": "982ce07ee9bb009354f86905562d0fd7607ebd64c8f31cbd5ff89387c3e9cf5f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/README.md": {
+        "sha256": "9dcb2f31e62f477d3bef5ca8a7189e893e2cd979c729b8805c816f98345100ae",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/bench/index.html": {
+        "sha256": "36a52bdc70950709294bc058be81e881fd551431b43f1c2fbcb8abd29075384f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/bench/negotiated.ts": {
+        "sha256": "01909ba44905f93b55e31a17c0cc22f168ee181223fdf18943bf7681dd197d86",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/bench/run-webrtc.mjs": {
+        "sha256": "d56cae7d0f8928cc83cd8abe5c360186d9956922962a285205ff8e7ba8eb0971",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/bench/webrtc.ts": {
+        "sha256": "bec706f5a282f0a524a1956f21095d9949bea9d089af6218797145b7c01c3670",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-fips.d.ts": {
+        "sha256": "f88612dbd97c15d2b7b45626b787e05174bce429e62f6f20b8c002c1868eaa91",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-fips.d.ts.map": {
+        "sha256": "26e2b8ca7322c3f0819d8404294d07dca3e7cad7fe76384733145fff9d108240",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-fips.js": {
+        "sha256": "127455272b419cad6d0b631a1a6bcf7c0f5dbb9504f1b978a9ae635c706c9bb8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-fips.js.map": {
+        "sha256": "b7d5139d548f7aad5d717d22649c17e1c47f76a6e71000f1bce0016c7c27bd38",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-relay-discovery.d.ts": {
+        "sha256": "c60f3b35cab4d4c37f10eeb25c030d51a61ec3ff6214fad27935003e8514cc0f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-relay-discovery.d.ts.map": {
+        "sha256": "bd1a10bacef1cb29b0318f758e4f3cb9a06944221067ab8b701938635e7a204f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-relay-discovery.js": {
+        "sha256": "7ce604cd8c5b229728ac4a8474db4c3065198373595e78e89180011b59b6f83f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/anonymous-relay-discovery.js.map": {
+        "sha256": "7698175f3ceff1dafe5be0cd55a437457f765af9fe4c049b0643be536764dc64",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/delivery.d.ts": {
+        "sha256": "dd2ace9a0d6eef31ea02219862988b316d383ea54b4df43706df9318c2820db4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/delivery.d.ts.map": {
+        "sha256": "8fcb64eb2b07396b46ad18648c7b067d3468a48d8d4ae703f8399f7fce19085c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/delivery.js": {
+        "sha256": "5afcbad19a91df2b5f602a927e189009809b559670938ba1b224bcf7d480ad47",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/delivery.js.map": {
+        "sha256": "9aa2c4ad911c6556980896675764881f88de07347adbd643e2274f2773937295",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/event-bus.d.ts": {
+        "sha256": "c632f42b3ce4262017466247ff493002d44caa885af721d2b5fe309e748a865d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/event-bus.d.ts.map": {
+        "sha256": "599f538755db200fdc8184509d1301b443dbd5598fa1f85a50fea59dd066cb76",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/event-bus.js": {
+        "sha256": "35024c385109fb392e031ea7d7f6375fb46811720a1499f604f88c2a92d5199b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/event-bus.js.map": {
+        "sha256": "382d1f2e42040f9f4ad07087891481b4228cb7a54c5b1d3af1ac1295aabf86db",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/filter.d.ts": {
+        "sha256": "be575f3f8883adec8e4b4d6e330e83d47c90ff195b9969d39c2707476dddc7a3",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/filter.d.ts.map": {
+        "sha256": "e4366911f9259db3838ca0806bde21eeae4dc04b115139c30ce88b8cb114d343",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/filter.js": {
+        "sha256": "5dd242db2bfc13d8912c7321ed45bd92c4820f44198126941832171e71a2deb6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/filter.js.map": {
+        "sha256": "fd76674f5df4dd286d2905dd2024793b1be2fcfa3e148ce44f7fda4185e7c138",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-subscriptions.d.ts": {
+        "sha256": "e1c08cadfabd4c5e00c58eb46e006b77a9c1ac5c35d5da082d555a0e8849e965",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-subscriptions.d.ts.map": {
+        "sha256": "2c718b1a279f2f8c494071b354031e379f96dae8f292329929aba337700e52b1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-subscriptions.js": {
+        "sha256": "094424ae6fa42d351ed0499409db32c829b4fc408e2444909d9f758007af1cc1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-subscriptions.js.map": {
+        "sha256": "023ea22dec5efae2f8283438b575647fb3b05086dd47103f068c55f45abc5449",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-sync.d.ts": {
+        "sha256": "a815f674947b9f13d5974f5f9c2d89e8e36cb25a0f8fd8ba063f19180f4540a2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-sync.d.ts.map": {
+        "sha256": "09cf77e82c9eba9ef2ee36319dd1fa7f7380cadb73523f50893b578587b17d10",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-sync.js": {
+        "sha256": "cfce0d622a07ff030e66b320a7c85bba0de3b148ebbe6779ac5d78a90ad7443d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-feed-sync.js.map": {
+        "sha256": "6eb1047f45cefce4724475155de691961a73ee13a754f46e3e6270c5cc222570",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-record.d.ts": {
+        "sha256": "2361f7abb9651120692ffb5440ac7cb1404955aa92b66a40cd8c6744771bb7ad",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-record.d.ts.map": {
+        "sha256": "dc064c3c57d08665d46fd8de9627b401b1c4b7a787cd1c19ef2da502f7d61dd1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-record.js": {
+        "sha256": "31f9c3707ad29afc11081253188bc35810f7842b117352a9015d3d6bcf17f921",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-record.js.map": {
+        "sha256": "abd4ebf798f733417d95aa2974bbfa206b7d33ca0ff5fe04680da5141ccf5999",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-stream.d.ts": {
+        "sha256": "630080395e8d4aef61079aee2bdb40d7673d1ada846166f88c48d9a64af543ae",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-stream.d.ts.map": {
+        "sha256": "11fbe95880061ad98c0e907c1fb0bf4ab7652e4ebec55763a1e3b0ecc1a73af6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-stream.js": {
+        "sha256": "e3e268f4a2110b69e61c4ada38bab127ecd78400428d9bc2c6c153f194ffb596",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-stream.js.map": {
+        "sha256": "dbdf57faf36b4b49981b8c794d16bf645e38a42b98998aa52e81feb5a7f2ecf6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-driver.d.ts": {
+        "sha256": "ba3ad43dd35a499e6cf3d298a28f1864fb64378c81c9e6e7b0da40f53d94e9d9",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-driver.d.ts.map": {
+        "sha256": "dbe2f42e9a202b3e8f3cad79bd0d2843e01cc40f35e0015cc406d94666d4812e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-driver.js": {
+        "sha256": "26011799a5b6795f0efcff42bda996163b08e9d842e497d2b4de30413a9fe71f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-driver.js.map": {
+        "sha256": "56c082cc923ca5f4eababcf8cbdc1aa447bd6ef5d8b204c801416144f34267a9",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-queue.d.ts": {
+        "sha256": "2daa34a611cc40bf6014ca2407924c660f94910ca035bde195cbd022cae7fde4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-queue.d.ts.map": {
+        "sha256": "b261786a2e59492197b5bb10e4cea3e2a52da880a99af2cbfde283e5474850b2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-queue.js": {
+        "sha256": "bceb20a1a1a66dc5f28e9cf090e2156e4f86c0e2b3339af0eb11bade3221ff7a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-queue.js.map": {
+        "sha256": "c0d1175e9d8f994109d988ccf0e68fd7ad3d2cef16dcab9d1e46472b37597fc6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-types.d.ts": {
+        "sha256": "51de87e8c2052133c26be0243bf0d96707f3cba604dbb23caad6e8991cd1cf52",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-types.d.ts.map": {
+        "sha256": "d32c833d207413bbf7d7c4213da873ca0d660769df7073cf135692b327ff888e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-types.js": {
+        "sha256": "41ec973a0fb4be91f145ee205d4259e2c0331fddb09065ea0e71504f44870040",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-invwant-tcp-types.js.map": {
+        "sha256": "ba1cfe9fd97678b84c4357e01610163fe9b8d8394ad3ef412c341d25e950a668",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-privacy-role.d.ts": {
+        "sha256": "b96b760eb70d4f1a744263b8d251b5b594ab29e894f3123f7e30269af12184df",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-privacy-role.d.ts.map": {
+        "sha256": "a9636a5904b059da0a7c5a7c791eb7b69cb472e8c4ea59fb081093a1c5afbdbf",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-privacy-role.js": {
+        "sha256": "3676c0c2dc647c0bf68169fa1f3dc351b0f1034ddf266dd22bc9ca68ba02ab14",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-privacy-role.js.map": {
+        "sha256": "8504442066cb3c45cdfed13cbf75098f965de829a50354f28fb262b99a2ccad0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-publication-receipts.d.ts": {
+        "sha256": "02b7417903f783f0e13295a83d4f5c1f1816d30e7c7f4824e296651615eba4ea",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-publication-receipts.d.ts.map": {
+        "sha256": "ea476351a598251f99da8bfac5f4ecce07f846dc9b6cb76c034349d0d7cf7220",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-publication-receipts.js": {
+        "sha256": "c0639c7b822f3e53926712c33173309e75aaff1bc9dd0a3a12b48b95099bbffc",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-publication-receipts.js.map": {
+        "sha256": "6b88059702229680f238de55d6f69cdbb4358787479285eceafc319957a74b15",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-protocol.d.ts": {
+        "sha256": "c2dd397563582b43b2acab658bf12898b4b7f79a410cce6639eb7d8f2bb87ef8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-protocol.d.ts.map": {
+        "sha256": "e9f44486f1191575ba3ee05b95fb7de982da47932bb8c32f9b0d0435dd2978f0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-protocol.js": {
+        "sha256": "a49d5bbf95417eae12dcc9555c89c2e27311990b14e1ecee12323fe03bf44b83",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-protocol.js.map": {
+        "sha256": "9e50d7f4991edbd05d4437be31fdfb92fe9c2a4a0086156eedba3843fc6bd782",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-support.d.ts": {
+        "sha256": "e83b896377ee72a088a1c018174a25d72941b0d8c98afaba0b7eb229be46960a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-support.d.ts.map": {
+        "sha256": "9fe1048c98e5321afcff39f30030d7096cb5be868b9c6173fe10eacd6081e0ad",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-support.js": {
+        "sha256": "0acf5d3be305c12c7764769b00c9a48dfed3e97e634a218da008cc90832e3459",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-support.js.map": {
+        "sha256": "5a62eb3fdea6111c062730ce488478c0ce6ab54009bd073f89c1b6798b385993",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-types.d.ts": {
+        "sha256": "49e4325fda3d202ad0ee5c8029b157f7c5c745ddfa45a9218097e6c3863d1cfd",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-types.d.ts.map": {
+        "sha256": "a2fd2f8a41e9e03b998ee2235d3be97e05d6c90cb7f1adeedb967a2b45a82fd2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-types.js": {
+        "sha256": "211d8f10bef740e42471ee31d853b8d157b499d2d732bb0a18ff945577e5b044",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client-types.js.map": {
+        "sha256": "85f41c268c18d224313157697d3ee252a8859d5edf9d4e0d05df8dc3329a99a2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client.d.ts": {
+        "sha256": "8f813b4466d70a1742fc186e36d38c076e66c12a935eae6b34f8771cf8a0715f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client.d.ts.map": {
+        "sha256": "12e7aa16856957e6c8c3a6a80f908ed62702c925a4713fd95569c14170db5176",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client.js": {
+        "sha256": "1f957cf3a127115ba55b3cee4142d866f8a7d7b10724005cf49dd1703a310c7a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-client.js.map": {
+        "sha256": "db79746a36d2730275af98cc239a89695af5ecfaf3264b0def78627598550662",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-event-source.d.ts": {
+        "sha256": "8cfa7736d92edf02a3073cde5c59a9785d61841066790af5eb43aae23b00830c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-event-source.d.ts.map": {
+        "sha256": "27fb1c2bd39353ea79195c4ca5a73c63b06fb2845327609095d0aaf9d31718b9",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-event-source.js": {
+        "sha256": "d5bf04a95b5e0aa774595e223534edfbecec96e7f2fddf5458d0896aeac26153",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-event-source.js.map": {
+        "sha256": "dbea3ad7b67101edfb50f6cfc4c1a412d1b2603f527e49d812e190630d9e8b9a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-invwant.d.ts": {
+        "sha256": "15ac6679c6a7660c8d2ac2949180114debd5404325a3fb4e0fefed41f09c1505",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-invwant.d.ts.map": {
+        "sha256": "9f17a83c8af98228a5c3122e2ed94e63eae6dad4695261286b514f4389b71d59",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-invwant.js": {
+        "sha256": "4befbbf47e178c12b10adbbb4cd57943b7c23f253cd6ed20658011e4fafe292b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-invwant.js.map": {
+        "sha256": "b18d8adfadce04191098aac7df11f7e3f06717235e698f0c9ab8124a8378e133",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-retained.d.ts": {
+        "sha256": "25e50ad3a9d50ed7b64400a427cd2c17dc9b8b07126deae59ba6a07030f68baa",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-retained.d.ts.map": {
+        "sha256": "bb2032e7584c15a5f75faa7ae1f66b0d4a1b8a6c7b95892a21b16aa9a1582de2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-retained.js": {
+        "sha256": "d6760aada8526fada6c11d2aa078d1a7e8d9b1053cff8fc06acd10d0d199c16e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-retained.js.map": {
+        "sha256": "f51d1b20fb91c1d16c56ade39c4b419a568a8245a4d3db621bff150efa7d7211",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-source-subscriptions.d.ts": {
+        "sha256": "c6ac32b9aad0bffb88c6716d7234c99a2c1c922653fa5ae156f3f3d9a935742f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-source-subscriptions.d.ts.map": {
+        "sha256": "93f0eaf1311d4654d45280027720cb8cc2892bbed373e356757895e187abfd7a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-source-subscriptions.js": {
+        "sha256": "3f30417e090863f79495d6cf92dcc6f07d5a721eb29fa45b04819db3ffd0da41",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-source-subscriptions.js.map": {
+        "sha256": "cb82db25ee4300964e033575ec68ba7553c18c660757583a48c803c4a86994b9",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-tcp-transport.d.ts": {
+        "sha256": "ed138cf148e60826ca9f83f6eebf78c549baa74ba5428a087b3b9ba13e5b6755",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-tcp-transport.d.ts.map": {
+        "sha256": "e619711ca2068a7015df9caf89d0abc32224c95190a41328f5c4c212c90c0d7c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-tcp-transport.js": {
+        "sha256": "5e98ce1d8f5b15e5bcb89af2cd9951b336d78d140a7dc8ec2834433bcb6e5bf5",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-pubsub-tcp-transport.js.map": {
+        "sha256": "bc05ed52792458faf3fc165db432fa82a05439531d95ad8a68673aa413e86a1d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-tcp-cleanup.d.ts": {
+        "sha256": "f24ca8fa4f62aeff84a4fe6878d60d3b9d88642a1a5edd39156d1012256a1d06",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-tcp-cleanup.d.ts.map": {
+        "sha256": "f3403a7ba61fa81d29165cd991a18ba1ccf9b7a931eed13fbc2a0687ae86f1ac",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-tcp-cleanup.js": {
+        "sha256": "4ed243eae18ed8a9f2624707ccc2785a78a567e4cf8d39ea3c11afe8c5f7eb35",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/fips-tcp-cleanup.js.map": {
+        "sha256": "c96ec3bb7c7b936ed62e89db8c442c89991854061b51a88bce6e98daf783e7c2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/index.d.ts": {
+        "sha256": "a960f47a4df0695b2c975cd638a46679f69836429fe8354102109303114f8eaa",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/index.d.ts.map": {
+        "sha256": "e2a7589bb913b7fbc892801b0b263c3e5ae25fd6159501b8f52fb30fe6e97880",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/index.js": {
+        "sha256": "61c6de6095b088ce366b260da82f2c3e9eac4cae16c11a3405929d6e89772aed",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/index.js.map": {
+        "sha256": "0de05a14a6eeaa004f43a96c0e6d9a2cfba30e94e5574cd98c4820d9410eeb29",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/indexed-db-event-bus.d.ts": {
+        "sha256": "167c87def5e29f79545ab59507613c25337d0f56f9e505efcd8dbc972f6d4402",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/indexed-db-event-bus.d.ts.map": {
+        "sha256": "173fbe5ea504b3b87ab157c95e58847ec164e63e2d5db375268afd645b9920b0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/indexed-db-event-bus.js": {
+        "sha256": "993a980557cc97dad2a7806b85a23d8c99ea9eb91002408e8c495c33a048d8a9",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/indexed-db-event-bus.js.map": {
+        "sha256": "f0a59d7693a3b4b7e25e0c741077b7529c264b47dfd6d963bc33869689d8d869",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/invwant.d.ts": {
+        "sha256": "e2fabd415ca7313ec4378e13497213e9b9f278922757353a089ff4f4f04eb6d3",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/invwant.d.ts.map": {
+        "sha256": "1e99ff5808fc4ad5fcafd18eaebe08bd98e970ae4a56a4b2df8d1f369221ca52",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/invwant.js": {
+        "sha256": "05e20b93718d2460e7e0b5e5cc0bd9447f60f8fc694d20e739869a1aa1969b19",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/invwant.js.map": {
+        "sha256": "f63ff4d733c09fe6a4b13c7aefc9db37691c2f7010c3e6c644fbcd874f500eed",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/live-routing.d.ts": {
+        "sha256": "577e63a4c54aa4676d865b6d11affcc170411f9386f98b42389cc2929971b3b0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/live-routing.d.ts.map": {
+        "sha256": "f19aa997c4ced64b093824c3a17720845fa18831ad749cb185fdb855f7d94d15",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/live-routing.js": {
+        "sha256": "759945fc23fc367f71769c5c782609c73d7f51f7f4853293bc90913309399907",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/live-routing.js.map": {
+        "sha256": "3e943fd0eea0fb7281e7ced493a4b68bb987f43935b5140525cd8236fe8f327c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-behavior.d.ts": {
+        "sha256": "06a5712dc382bc6d54d9e3d32e8a2de2797eab8334195df5352208e66edd3224",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-behavior.d.ts.map": {
+        "sha256": "34bd91b1f167811350c04671187f61b21697eed11a4eadff7296ce22ae37f585",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-behavior.js": {
+        "sha256": "06960ad732592adabd55670f6920e069f940faa0dd450fd11487e0f036d51cee",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-behavior.js.map": {
+        "sha256": "e2b7f6500558bf3bbb410df438a67e527f99b2071b4118d3e0ede5ab88e9277a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-codec.d.ts": {
+        "sha256": "07cbafc7778150f4cf24c48e56ce3c18fa191c85142c16fa78d5022d0a4b994d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-codec.d.ts.map": {
+        "sha256": "b7aa6b80409a40bcd2dfff73f3ff6c6b5bc042e6c1d519db7faf15348c84dee4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-codec.js": {
+        "sha256": "86bc11dc7fd8b0e3deeb2617ade531c95548dc3c0b618270fa346825c130a6c1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-codec.js.map": {
+        "sha256": "de58b532a9dc35320c2e2713b0b95fb472b97bb3bd3add8de7d82feffe79e307",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-peer.d.ts": {
+        "sha256": "27a1bdd922b9551626c15bb3161b94f5524d0af929a84de6dfde3702285c4de0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-peer.d.ts.map": {
+        "sha256": "472bebb7e9056fbc699cd4521abebc32d2d240b4fce7f7c4907a35185ea5d380",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-peer.js": {
+        "sha256": "205f971d2e2f4dcf9c217543e68b77b405a14b1f77f7d6846fd3705ebdbc9d6a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-peer.js.map": {
+        "sha256": "aa22494c33af895ed897f34c9ee4a7829e5355628ebf2ceca0f12e2df7687fea",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-resources.d.ts": {
+        "sha256": "6020ae0cfcc03ee449f7f7ccea18e325be9553b91b5bfdb20679ee276acc34dc",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-resources.d.ts.map": {
+        "sha256": "c1eea0c75dd8a130340e8d1f969d1cea32856185770ce00f9df931858233dad0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-resources.js": {
+        "sha256": "33c8ae144b5d1caec144c63c97fa04451c87be774a31ab896ee599349e0fc192",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-resources.js.map": {
+        "sha256": "4b88c2e207f4330470432cb046a2c8e22c8e2927ac36e33407161a7a4e54eebf",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-state.d.ts": {
+        "sha256": "f9c9638fd084d705d2cf37f813b629b094cb24aac174c926049b5637d49f84e5",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-state.d.ts.map": {
+        "sha256": "9bf834bf8d527c7b36478d94f7014aef2c910349728b405cacb6deb1b5731315",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-state.js": {
+        "sha256": "ac845874ac30d58a2baa6261ccfe1777780a0c98f64f58d7e71311f6a9b21bbf",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-state.js.map": {
+        "sha256": "f7bbf0438b6cb4f915836b1a67022744bb70f5ebe58be1f9b6368ccc4fcfa3eb",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-types.d.ts": {
+        "sha256": "a4e7a1977e820ba74614957823a69265fda74d9f0d3829b6681090d9dc26d526",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-types.d.ts.map": {
+        "sha256": "5f7fb1359414f766eba70b97704cae78070de3c87dcf2f476bae1772ca50a105",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-types.js": {
+        "sha256": "96fcc691d834ae38e018adb1d4be0f7544677ab35a718ce224f1f1703829231e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh-types.js.map": {
+        "sha256": "18b349757477d28309d6387c8fabd85ad7123fa8bf86b27b60865672a827a955",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh.d.ts": {
+        "sha256": "060fc6836f2fa131654526f9f9ac99c8ec2757e0da6084c2317d89663e41fe87",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh.d.ts.map": {
+        "sha256": "2cda47b4f6666a2ba83fb88a24aed68f20911d69cb2fd678e787f7bd90f75fb0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh.js": {
+        "sha256": "463e8de8ea54715c1302da6df123982bcd8056656d9be16617c54e60c9f8492b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/mesh.js.map": {
+        "sha256": "4ddcbf6f4ab97500a73dd442660a72f8cf7422330461dea0764f82e2cb44ec07",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/pagination.d.ts": {
+        "sha256": "0e2b4195317f18551e1b5aff2b7e0a4476d9b237ce695e1e7dd5b579629e70b7",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/pagination.d.ts.map": {
+        "sha256": "b9f0fc0fb8127087b929e92b208d542f442a702d9d64e0e9c853ae401c13dc5e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/pagination.js": {
+        "sha256": "73ccbcf5dd3454fc500c239839ea83ea0261c5469b774dc045777c9dca208ec5",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/pagination.js.map": {
+        "sha256": "3f613056994acef9d842d6f3d8a069672a9dde8f7234bc38627f74498a800316",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/policy.d.ts": {
+        "sha256": "f5125e313de02619822062e616373f2cd7fa15e697717865825e13e27226cf90",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/policy.d.ts.map": {
+        "sha256": "c4c87b491b79d3800ac49d1137e630503f6f4015cca6f2ad141832bb6e062bf5",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/policy.js": {
+        "sha256": "2da7cb3b7b9ca6f7007fe3b6f8729748f2a653a4649c771c00a5f426861dcdea",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/policy.js.map": {
+        "sha256": "9c1a3d539fb92c85a7b504833aa471ee74569e2d7dc63e232bed52e131ac71f0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relay-publisher.d.ts": {
+        "sha256": "ca2b99c896bc11f11683ce43f7dd30eb882a111cc1ea0eae798b48e8f04835da",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relay-publisher.d.ts.map": {
+        "sha256": "59bada8f44e91a10aa0eb9e53e43ec680bcf424125e1b0da945adf5af0b2f854",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relay-publisher.js": {
+        "sha256": "853c023e5a00ea14c39eb5f6b0e11af290d7d657269746662f357e61ada5383d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relay-publisher.js.map": {
+        "sha256": "d656c3418b3c8bd7661ab3777738a821aa3a2315323b12c1947cbb4049c9a203",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relays.d.ts": {
+        "sha256": "bf6fe05d364a4910d9f7992efef908d4fdb95e5b3393691381f2b153d06d2c8b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relays.d.ts.map": {
+        "sha256": "20549734e5d512a1aaf12e31d71240bf1fbf73fc47c5509a9336b5068878b318",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relays.js": {
+        "sha256": "5469368af4ea5944c2b4e78cb8165fb636f74b0ceb243ede6bf8c3104dacfb62",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/private-relays.js.map": {
+        "sha256": "ec7e7e27ee73ba0f2cd8fe22b2f41077e4041ff73b6a5a061f1f8e0542f38fdf",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/public-peer-source.d.ts": {
+        "sha256": "1156455e240abd5cde0d94a8cc20a5f639dc8634fbbcb93e226a4d3dc423c24b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/public-peer-source.d.ts.map": {
+        "sha256": "834b0e93637d23e7280e7969e004453a18277ff343f1cd95ec148ed6524f4c50",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/public-peer-source.js": {
+        "sha256": "8576b50b1ca1824724bd13b2e9ecd586a71331abcbeb2ab2df9a691523734781",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/public-peer-source.js.map": {
+        "sha256": "31ff39d50cbb057f0e67ea0cbb66c2f3ff6fc752452252113b7dd1bef04f0b04",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/relay-event-source.d.ts": {
+        "sha256": "909a3d71b7fe283fb499e4c976ed191a26549736d64abe743f8a8926c11d7406",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/relay-event-source.d.ts.map": {
+        "sha256": "922903ebfacffaa8b53936655c5e9e7e66f3f5d4275cea69187441250f03c2cd",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/relay-event-source.js": {
+        "sha256": "8676686d7c67b1e66c238ef46edeca2568bb327d832c8e08515e175689a920b4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/relay-event-source.js.map": {
+        "sha256": "77f0a2983a75e626df3ac57954b458276323653237176be5cc4f0f36780d6cae",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-events.d.ts": {
+        "sha256": "b9aa07e858b4bfc7ed2cd39b7797fb724eca13ef26dd1c808fefc4f5833ba5f2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-events.d.ts.map": {
+        "sha256": "0d4475020e38ab84c860a900bee72ad7aa6adee3ed1fd82892a368217bfb0c99",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-events.js": {
+        "sha256": "96b443efd989a064c309db6dad32284db2b181c57e45118ef83a39004b73b932",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-events.js.map": {
+        "sha256": "78f1082e45f437c37300ca7778bae72fd1f4b71a0b41d53b7e042460f53248de",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-peer-discovery.d.ts": {
+        "sha256": "95cbdb1154794799d14189dff275924af0f3084d530ba4ad54c27c95e8ddd526",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-peer-discovery.d.ts.map": {
+        "sha256": "4dfaf0173d9bc8022e48f8ccc213678f099c44b6fc52a9d6c3a13da8d025542e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-peer-discovery.js": {
+        "sha256": "7af331ca2c5806a369f6baacdd3ebe97a4f9dbb61de97ddd178a3697b070530f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/retained-peer-discovery.js.map": {
+        "sha256": "6c5d66518dfb006c14334137e3c3376005547232be281eea1fea575202b2baf8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/router.d.ts": {
+        "sha256": "20275ba2d3abedd0764bafc5efbe535a30838e9b2225468b595b59e6d738ec69",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/router.d.ts.map": {
+        "sha256": "db4f05acc4cabdcf4c390bc7f49c35df70aecc078dc60dbc9d341c3b6e4c9ebd",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/router.js": {
+        "sha256": "954a6f5ae9c1c11698f512d9b8f55fea079c66b18e409fa4a40eab566cafa537",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/router.js.map": {
+        "sha256": "166eff5a760b6e12f8ea82ba175d0444dd0330ff0a7abe19d08018040f921c8d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/routing.d.ts": {
+        "sha256": "fc57a5d8b5af48b53f6a4a259b2b8c5e5f1cf1d82ed5fbdc034505006cd51a02",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/routing.d.ts.map": {
+        "sha256": "5935f8ba099162c973ac99f57e2a5f14a265e705f6d6d17f6a1f1ee597dcb701",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/routing.js": {
+        "sha256": "6ba46e79709271d21cb08d54941d6b42b672aa159588fbe419532ab19f5e4e66",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/routing.js.map": {
+        "sha256": "085d0e9ef370b015621d0b2bf9c765351a423b6310dc760b35e4cc5abd599938",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-interests.d.ts": {
+        "sha256": "e31f15365c91ab42e47ea5cafa16933695582d4e9af54bdd5063b355497279c1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-interests.d.ts.map": {
+        "sha256": "b8ac1f7ba1c06d2d7ea59d18fc0aca18ca1e9015f3dc5fbc5f1298fb9f53804f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-interests.js": {
+        "sha256": "0b60e6bc76fe8b29a0d24774d4fcbe2ecb25a5dff41716c248bdbcc73bd8b347",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-interests.js.map": {
+        "sha256": "607664ba41271efdeece94fd282eecda508b5014c5988f1096061c18f95ad775",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-reconciliation.d.ts": {
+        "sha256": "e262dee360cbf244d4044bf159fd40bdf4e65cf2dc673a878ac4fa71aa85b70c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-reconciliation.d.ts.map": {
+        "sha256": "be0a44231d178788e3b8039e7959105dda4b93fbe74242a69c2bd0277607e7ee",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-reconciliation.js": {
+        "sha256": "b2d60e0953853129709537aab949390d1572322d5f372817302490c7fbea3036",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-reconciliation.js.map": {
+        "sha256": "1952a64428ac299ca45a3db6d3d8dd625f3f798f08b1954caa3dc6c8460fdf1a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relay-capabilities.d.ts": {
+        "sha256": "c910c5e635b1691ed2f546fd14adeb74764ddd82a9538f437816b40404f55220",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relay-capabilities.d.ts.map": {
+        "sha256": "01e44f0f15711064a5ec941b2deeacf86da451bf6a171efa66ef404274041b6a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relay-capabilities.js": {
+        "sha256": "0e142cd35b8c14606b80d856c7bc3f636a3d4359cffec0fe8c8c6d9e4048b78c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relay-capabilities.js.map": {
+        "sha256": "71dd1c4bafc724a5b222e445c0b3c1bbee075f28bdd526ec724404f8d6509152",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relays.d.ts": {
+        "sha256": "c90a5318f176fb3e1cf2b52c71b9e2e87a3c0e749035ff2945a017cefbe49b94",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relays.d.ts.map": {
+        "sha256": "792cb6501f329d595201c05b1fef82765ace849d8a227f767eafb70f1e051a40",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relays.js": {
+        "sha256": "cafeb2dfc65a6b3ae61d9c42935d381a25ee5b9b7cce31fd6731fa0b0af3aeab",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-relays.js.map": {
+        "sha256": "2510fa884d1bf2828855dd2d6e863d8e184d2d4440a3e751b8de7cdd928b285c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-store.d.ts": {
+        "sha256": "96d000b4cc51f41a3bc88f034fea35b9c0862272c83a2f2c7564270051245662",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-store.d.ts.map": {
+        "sha256": "f61300aa6814ba3f42f2c9d138e36ea216b7467179e0adb5f20db7a592b9a858",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-store.js": {
+        "sha256": "916f3fe2c85106109942638e647be7557a8665c97adc4a96cb435759a730e379",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-store.js.map": {
+        "sha256": "b869ae4d9d3bc05b34dc79d175ad1b66f54cc4e15f6cb35ac6d784b26c2758b6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-types.d.ts": {
+        "sha256": "ce2b3c1c8bad32a4684e9377f1ce3d3ab0917244491d4513b82e4fbfd9317e26",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-types.d.ts.map": {
+        "sha256": "e4acde99d66b7100bd394d045f6554633d8c32b102896b5ab043c251cd9ebb66",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-types.js": {
+        "sha256": "381a4eb6da1ef4914a59593130d8fc9314d3896df3ba686af54c34cd61bcaec7",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime-types.js.map": {
+        "sha256": "af0191fa817d1d8221c6838944271cd65fe05538896d343bde244f1b272c77ef",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime.d.ts": {
+        "sha256": "57247b532d43c312141c133259d39bca56f0f987c3683379903e1a52dbcc7c83",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime.d.ts.map": {
+        "sha256": "559dd3f3b2919f86159f755028fcb5c2fd56201c86aff322b7b831216c05fc07",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime.js": {
+        "sha256": "2152f591089c8a83135e356e47fc870f0e7cfb5caa5bafcd8cb451d202eb892e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/runtime.js.map": {
+        "sha256": "74e3367c2a47d44502a8d57f9556a930d70d04265e8709b5e3364287161b0420",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/scoped-fips-source.d.ts": {
+        "sha256": "96d23ed75a337d5cd7926f584471aba62a81c11174a8b3758528c52c368909ce",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/scoped-fips-source.d.ts.map": {
+        "sha256": "fa25a503cf16f2b8948948ad1666fc4d81e8593baba07ff4fb93c53bbaf78de1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/scoped-fips-source.js": {
+        "sha256": "096d400a9c123b13e7b9abccdcf214be207078f149bf996b7768229271a8dea6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/scoped-fips-source.js.map": {
+        "sha256": "db29479e565c9e1585c09cedc746dd3872f405556f5604d978b4dbe43a77a4c7",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/simple-pool-relay-transport.d.ts": {
+        "sha256": "eb2aaec3d7f399c946927e6f13205c8aa5c5edb64567367d407a31a0f728d186",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/simple-pool-relay-transport.d.ts.map": {
+        "sha256": "31d05c1a8c628983b6a4d0c84e65ab219e9f51418a818e6fcf99aed046db30fa",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/simple-pool-relay-transport.js": {
+        "sha256": "b7f831d3d8998d6bc631b6fe86af85440d0db3ee14d35b394972556e32ee4248",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/simple-pool-relay-transport.js.map": {
+        "sha256": "d23738eddf4867b9b1de740674923ab95a888823f78a56cefaa884c5c0e242ab",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/source.d.ts": {
+        "sha256": "8ec68cdd5f0c8097b7b32af70e584d22e2f75fa9be4625581f6c9296bccd2e0a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/source.d.ts.map": {
+        "sha256": "05163fd73f3dc0ea971e576d0d813f1fbcd132c475197b2d328b3724612bf7fd",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/source.js": {
+        "sha256": "d5977df0fcf7efcb6b1648b64646bf8f990068a2cfad1938de96a1b8282a0993",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/source.js.map": {
+        "sha256": "c1b4f702dddbf4c5cabaafa1a3c03772a1ddee4c88fbd455598ed26ca1ac94c6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/subscription.d.ts": {
+        "sha256": "24e171c7b5f430fbe46560ce0b080e6527a4e283b7f39e1c2136f320445cc177",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/subscription.d.ts.map": {
+        "sha256": "a0378bc76bf906d2ad8185156d9268b3291a48ee52efa7e35135eb488294f940",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/subscription.js": {
+        "sha256": "ed244fb9edf8d2df7a2455a88a177ab7550daaa84b004ca3aa9bc73fdd01abbb",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/subscription.js.map": {
+        "sha256": "3b3567a9e5e5e86a180f98f6afc11f3e5b14774c26f5856bc6ac422232a4a941",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/types.d.ts": {
+        "sha256": "c6834e66d5e96f32f60e752cffc6366054c1519887c672ce6a3cfd9267c798be",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/types.d.ts.map": {
+        "sha256": "53425b8712252e3610b1b5ffe7bbf3c5457c0edcdd1b1969183c3d1c8ea9e249",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/types.js": {
+        "sha256": "ffaac6155a8b995fbe53d08847935499a8cef28afd96bcd46b523dc04549c983",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/types.js.map": {
+        "sha256": "e4876f3a850b19b94864d3581600b8a394f8598a75d90e8416d9ff5e97625106",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/wire.d.ts": {
+        "sha256": "372c4dccce7ef3ba1c5d591b5dcee8bde9afcd7da7699e4d1f3bfb29bfdd8a5d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/wire.d.ts.map": {
+        "sha256": "1c08ea8f42bcbd0d6480fd49728de7bc4aa8706d8162bb1df06322b2c5c8ec89",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/wire.js": {
+        "sha256": "3fbbb81e721e9348fcb727591980366938b9a016a5606bae8f6351bd327259b0",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/dist/wire.js.map": {
+        "sha256": "a35b38cf1656f425fabaf763629e16e21dda5698790ada476f2586cb9b4ffd9c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/package.json": {
+        "sha256": "5f6e14f3ce815204284298e73166a31ad29f295aa5dd6e7cd5832f80b35eadb4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/anonymous-fips.ts": {
+        "sha256": "cc7cec720c36730382ceb9255cf50d817079a9afed68d91ed110424680775975",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/anonymous-relay-discovery.ts": {
+        "sha256": "9907dfa3e9c2fd708ad8a5324e34cfa46155db2879186a32dc881a4d3b291bd4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/delivery.ts": {
+        "sha256": "de421e2bfccb657ad219fccdfe0ccd4b010abacca33577e403c8005c326e3876",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/event-bus.ts": {
+        "sha256": "91f5347bfee5ae9784fda9ea944d2726a3ae3e74724ca27620a8ad2901a4d5d8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/filter.ts": {
+        "sha256": "59690faa1dd49389b41cf559ed4b39269aff1c16f0d72a0056b69a142a4213eb",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-feed-subscriptions.ts": {
+        "sha256": "2eabfec4e35f0d4d5958bad1c0606de4dd13e5e79fc7a646bc0472f523fcbca2",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-feed-sync.ts": {
+        "sha256": "0d25d58bebb226d58deaafb657e6d55f8ca6d89318ce6be4208dd9beeb928253",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-invwant-record.ts": {
+        "sha256": "fec9d79c3130bb15774d89ae8fd3b3cb73033018029a4fdde6cf89dc377124aa",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-invwant-stream.ts": {
+        "sha256": "7413e8ac80428634659cd3867c78c00eef83537efc2e61ca733c9174c7b88d13",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-invwant-tcp-driver.ts": {
+        "sha256": "164cb6f3787187ce08606e439a8500cc624b5b70f79db7ab97df77552f363516",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-invwant-tcp-queue.ts": {
+        "sha256": "523179275d72511911f7872ade5483ed87b2064da4f11cc717e86b8bf3749e2a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-invwant-tcp-types.ts": {
+        "sha256": "ce82156885212154ae7bf0bfd32439db00982fb642eac6d5be16abdd803eef77",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-privacy-role.ts": {
+        "sha256": "bde1f46d0ff33afc2d676fcb6f95e7468344be7c7402d7b03b4000fd4294f50e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-publication-receipts.ts": {
+        "sha256": "cf78992495415f71295be81eb8627c4f3de0ffea7a4deafd2ffe67d093c5c6cb",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-client-protocol.ts": {
+        "sha256": "22353cb2884a86e7c4ebf9799e7272621ffcf35c3a01b670a72ae40d3d34355b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-client-support.ts": {
+        "sha256": "12a9652c0fe327980525098107c6805f094645e036eef8b3a14729dcb6912531",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-client-types.ts": {
+        "sha256": "74551dcc5ce649ffab2167c8eee0e7971f51b9f3a23d6cba3280086803a5609c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-client.ts": {
+        "sha256": "ff23214a01809bb158fa31767a1bde6f700de37e2e0330ae0f051d1943c45c4d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-event-source.ts": {
+        "sha256": "a6a9352057a3322c893b0f44427b0f76735a444e84e3e1b1daf53954c9f73814",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-invwant.ts": {
+        "sha256": "920df85cec5b8165ac0a16bee96c913fc7ed76a8a6e3078901aa53aacc5bb327",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-retained.ts": {
+        "sha256": "e343719d14d157cc43f5689e2cb4ecca3e378e6970dd05756720e4d577a89436",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-source-subscriptions.ts": {
+        "sha256": "58d005b22bfa16054ee2ccfd478c10d2f922a0d65889abd09af721fd2e101fae",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-pubsub-tcp-transport.ts": {
+        "sha256": "6269941bed3121f413e0255226ba5a41a0dcd58f02386c6ad58371041b09527e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/fips-tcp-cleanup.ts": {
+        "sha256": "f2ce509faa9ba99be35c5224785c3d7a40d19ea7255b71ef0129b385266b1c0b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/index.ts": {
+        "sha256": "e7565249f1d7b91e99028e10a7ff8147e57e8afe6b748c89d8e9b5a165879c00",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/indexed-db-event-bus.ts": {
+        "sha256": "559275d65eb1591b25a521f8451d7f3236cf80aa88c7aa55fd62fbefc3a02d5f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/invwant.ts": {
+        "sha256": "e012e4ff8481ff284ed27695d478263482a7652612360a907d0a6f776f515af4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/live-routing.ts": {
+        "sha256": "afd0a10cf8807c1e1945d46115d3a9b51c05d7c1133666b9d1e03d2218e48259",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-behavior.ts": {
+        "sha256": "fbda5225ebbd5d7c247cc567fc1172239ba53a23fb7bea5c1d8632951c900471",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-codec.ts": {
+        "sha256": "9d8495b58f510568e1d9fd98e100a3f3b98e4e5e66a37d0386ae21c9cdb03c29",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-peer.ts": {
+        "sha256": "9b5d8d70d71edde2f8a2755fe70e7d8d2bd0634bba6e0e729ee4ac59aee98ab8",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-resources.ts": {
+        "sha256": "41e2d42a44e10383b526f01c3f6bd57e609867f6db7261e02c5c56eeff8d00d1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-state.ts": {
+        "sha256": "4e1dbcc06c1684012814a9d8974dcc8da0d4d934fdb3019f873facaba45ffef1",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh-types.ts": {
+        "sha256": "4be03b93bcb7e338bf99aafc3b370cd25a276986984b6bfb444922063337d5a6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/mesh.ts": {
+        "sha256": "ed83e98cee131620260ee2e44fff5d9e3c30494a0af5e4c4f2abf6f2a4b22f96",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/pagination.ts": {
+        "sha256": "7bdcbb38158915262f8fd01b99b1b935bb39c93c62517ffe2737fd676748cf51",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/policy.ts": {
+        "sha256": "129c0307d147ec461b4f1fc1fc43929b552e6dc8c23f0426b4d29f30dc35ef24",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/private-relay-publisher.ts": {
+        "sha256": "58569043b2f618302775358cfad5090f133b7cf2cb7e7f794ed6f28333e05f64",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/private-relays.ts": {
+        "sha256": "2c423bf320390d76864879557196ccf6da5ee0179010d95b1e1eef07e82a1c4c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/public-peer-source.ts": {
+        "sha256": "9d0aea33df75b3accb854bbc0f86dd67228ef8d8c9b9ac2bca14b6374f280e97",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/relay-event-source.ts": {
+        "sha256": "30e84b900935f27fa4287f97d9268f622f23d637f01b3851a4329e3f7ca44c6c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/retained-events.ts": {
+        "sha256": "5b1a7cf2a02490b4e19dfc58cc0b4e19aaa5eb9fa17c8bf8b5da4d64a1b01348",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/retained-peer-discovery.ts": {
+        "sha256": "b5ff5c1fcd12809b51d6acf91d5edaeb479ac8ed1348be6f773ad712adbf625e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/router.ts": {
+        "sha256": "bab965095c3b01679ea64c230029276e70f5c1451f47afe7a614789a5c221c6d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/routing.ts": {
+        "sha256": "2b5740076e95617e945617684060bd954a26b990684a08c069a96642ede6f59e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-interests.ts": {
+        "sha256": "b93470205d4131994ee683bd89473af433da821ed92e413b61990e3e1b0eeb43",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-reconciliation.ts": {
+        "sha256": "9ea807609f8c223dd8283db742c780e14e48f5c24268eb49cfa148061813b0fc",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-relay-capabilities.ts": {
+        "sha256": "24f69ae3fc526f1ce0fbb450dca60805df6b709489a020f8c78eaaa56af9df68",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-relays.ts": {
+        "sha256": "4483000fc9dbc7cdfa8386bcdd65185f9a4bd2644e1770a222b9a950f78ae6be",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-store.ts": {
+        "sha256": "56ff1a502fc8d730172a8dfc9ababcf1f7e7a5dfdb318ff58e940899153521e3",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime-types.ts": {
+        "sha256": "4f1cb16d5666f3c1dc0d40de1199486acbc73353927c0ee9b7c50d992ab829b6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/runtime.ts": {
+        "sha256": "f93e77102ca39454aae3d2af817601ae05a11628f25da1ad52c1db14d7f45b62",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/scoped-fips-source.ts": {
+        "sha256": "c9791b7b65ed11632e79639184be8ed7f9854781d3eb6e26783704006aa89116",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/simple-pool-relay-transport.ts": {
+        "sha256": "468280227dd495058dab60b8ca99b9d6ab72857ce4cbe32ddddec647cca9696e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/source.ts": {
+        "sha256": "038389cba1da2a6bcc18a1faea35663920482fecd063eff4def548052d23e905",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/subscription.ts": {
+        "sha256": "956725ee5c1b711593946f36e3340af15623da73f3ba35a8cfec4100843ecb81",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/types.ts": {
+        "sha256": "195dafb24bb3bedc8303db178a69855b233fe0c83aefdf02b4165f8d2e27b47c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/src/wire.ts": {
+        "sha256": "f334822d88ce17674df536fbb9e34e0cb8fb8ee5dbdd625d65f3e68d878e7777",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/anonymous-fips.test.ts": {
+        "sha256": "a13b8742717cb55572a9787707bbd77258f4d8d25d0145cc1cc427d553f494af",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/external-verification.test.ts": {
+        "sha256": "a7a525fc7bd6a4733b7787c8852220c600fde42074496668d6bae30f133c2d3f",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-feed-sync.test.ts": {
+        "sha256": "25e97de0764bb20634454ae536d3c2c8bf8b1d48383ba074ca8b118e65d51d42",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-invwant-rust-interop.test.ts": {
+        "sha256": "50bcbe47e99b4b68e9ea530e98d257784da01324694bd212127ac50fb8e6ab1d",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-invwant-stream.test.ts": {
+        "sha256": "1f80c369e2ba3de3306636d886760ab262fb54ab1d58e7976305f7b42387e3fa",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-invwant-tcp-driver.test.ts": {
+        "sha256": "b6e9442f0b8dbe240e12e017ce3b7392eb4f3748304a4fc38db17d0dd0445787",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-pubsub-admission.test.ts": {
+        "sha256": "47e5cd8be13fb6702e4ce518501004c928fce279ba5afb4cfbe2fa110d450b90",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-pubsub-client.test.ts": {
+        "sha256": "68fd49b715582635cef03576e09c58f5bc3b5b56c26d91ee39d16b35c7bc7266",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-pubsub-invwant.test.ts": {
+        "sha256": "1a9f9b923a8a6fbda627c3a809ba9d77ee8d05800c16807e206f50566b83900b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/fips-tcp-cleanup.test.ts": {
+        "sha256": "d02665f892a267edc697db805b039746c46ad0079a586b723dfed8d75a83a3d6",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/helpers/memory-fips.ts": {
+        "sha256": "5294fbb5b82b2034303b425bfb525bfa48cabc60fc5f41db3c7f3bb20dd369de",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/interop-vectors.test.ts": {
+        "sha256": "5d5434149f6b41e7ceed7d26dffe73a5c4ded8d2b0c9872c8fecb44b6b677f22",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/live-routing.test.ts": {
+        "sha256": "f41ae9aebbae22c86621a2026e9d5ce667e2688ffbeb0a2192c7816f53c3632a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/mesh-transport-disruption.test.ts": {
+        "sha256": "a3c40abd31cad6c931eeabbfe8e9543e033764766253b74d162533be40bda7cc",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/mesh.test.ts": {
+        "sha256": "d05a9633947bace3bda5e17477527e30eaf37829868b3c3f54afe44badcb635c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/pagination.test.ts": {
+        "sha256": "273f7e08f9f3ef8a50038940f285687237a404558c084509e26b7d04906ec9ef",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/private-relay-publisher.test.ts": {
+        "sha256": "5ea1a7864f42ee472f916ec6120bf5f39986f7d2fff5d1aa6c769d9f6ba526ed",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/public-peer-source.test.ts": {
+        "sha256": "931bf060678a634454b40643f6c704ded69b79248afbd93a677a33e203adea5a",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/relay-event-source.test.ts": {
+        "sha256": "67bd112b1c4a2fcd22d4cf79128aba6e09493ea4ceac7e74e153c7af2f6be15e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/retained-events.test.ts": {
+        "sha256": "d77b7a46efc57cce09cd8a6a12e5f8cf3d0729e476d9463420b50d8d8983eef4",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/retained-peer-discovery.test.ts": {
+        "sha256": "a7078beb97c0a78a8f90e99ac699a6218b0da63f39d419f8400a4a5e812a1760",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/routing.test.ts": {
+        "sha256": "2528c6365c1a8be949a4720cfbd687f45f9a14dd0fced09ad6ba633b40203048",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/runtime-reconciliation-fixture.ts": {
+        "sha256": "692f3685640508abce6ffb05d009fb6fdb33b5f887bdfc8a92aaa8b29687190e",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/runtime-reconciliation.test.ts": {
+        "sha256": "adb080d979b570957c00d4f94ca76d2d3291d9288e178d5ae3e849cabec3c766",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/runtime-relay-fixture.ts": {
+        "sha256": "8016b6ea83e6f1e4a6fe40d149ba8c04150f958f74f9f2860589dc708da0526c",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/runtime-source-receipts.test.ts": {
+        "sha256": "720050be693fdc2e937fd6a164aaaf1333fe1d8ba56be7dcd6ba70cc876492bb",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/runtime.test.ts": {
+        "sha256": "eb61c1934c353ced9337c6a3ee153e9f8eda090be125ce995f50ea2782ca312b",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/scoped-fips-source.test.ts": {
+        "sha256": "23084b843b0b2255c36bb9284184ea33390a522f11c8c7200353a4953722f818",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tests/simple-pool-relay-transport.test.ts": {
+        "sha256": "b6e976cd400f6d8446f54637e7305e2e1725048478b0f23236c623f59dddfdda",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/tsconfig.json": {
+        "sha256": "ca91125a0d953ac02a0518765c809fa5c21e2818b8d391f1f0d213f4f3d8e1fc",
+        "mode": "100644"
+      },
+      "ts/packages/nostr-pubsub/vitest.config.ts": {
+        "sha256": "f4e42eae9f1250749cc97d23b78cbec16def81821532c14536fb0edb37bb41dd",
+        "mode": "100644"
+      },
+      "ts/pnpm-lock.yaml": {
+        "sha256": "c978221fe808774a8d25d800f72ae50f5ff577eb55ea1eb95cf1d89a6eed2e20",
+        "mode": "100644"
+      },
+      "ts/pnpm-workspace.yaml": {
+        "sha256": "0fb360452b0231d114d0b0ad6cc76bb48fe528382f55827cf93739bf64ec79e1",
+        "mode": "100644"
+      },
+      "ts/scripts/check-source-size.mjs": {
+        "sha256": "fea46bd1e4bcdde4784117b3d770e7983248b2f892b3247f2ece44a6936e3dd0",
+        "mode": "100644"
+      }
+    },
+    "changedPaths": [
+      "ts/packages/nostr-pubsub/src/private-relay-publisher.ts"
+    ]
+  },
+  "pnpm": {
+    "url": "https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz",
+    "sha256": "deafa7ec98a1218b6a047289b92fbe2395c1e22d3495bb711653013218ee15ee",
+    "integrity": "sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==",
+    "bytes": 4590455,
+    "version": "11.7.0",
+    "engines": {
+      "node": ">=22.13"
+    }
+  },
+  "node": {
+    "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
+    "imageId": "sha256:fc1610b07935476ac20219b7911f6bbe47ac861523635845ba0bc7cc5f0277c4"
+  },
+  "rust": {
+    "image": "docker.io/library/rust@sha256:b36c246742b4d323472588f789601be34eb4af053255e2af53969078ee8dcec7",
+    "imageId": "sha256:19059486ff9ddb4c6895cbc02a186f00274c257adcc6f79611ca29f55d36cdda",
+    "imageIndexDigest": "sha256:114c7a4425406451c2866b6aafe69fe29b1b298832db1277d411ac73c82d04d6",
+    "manifestSha256": "b36c246742b4d323472588f789601be34eb4af053255e2af53969078ee8dcec7",
+    "imageConfigSha256": "19059486ff9ddb4c6895cbc02a186f00274c257adcc6f79611ca29f55d36cdda",
+    "rustcVersion": "rustc 1.99.0 (b940084d7 2026-09-28)\nbinary: rustc\ncommit-hash: b940084d7eb6a299eb4bfeb8e34901bc051e7ac4\ncommit-date: 2026-09-28\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\nLLVM version: 23.1.1\n",
+    "cargoVersion": "cargo 1.99.0 (5f94df478 2026-08-27)"
+  },
+  "priorGreen": {
+    "run": 42617675092,
+    "carrier": "0754f192ccb5a625c1f2f6b43127fd1a98bc7777",
+    "manifestSha256": "a1efcebd30d7f712f97cce24e8bd316a68c6aa7dffc202e7ec1b17d7283787a7",
+    "reportSha256": "9b8ee9b3e08c00e68808a7b67128b1840cfeec83776b868ccdb736b355bba883",
+    "installed": {
+      "packages": {
+        "@fips/tcp": {
+          "version": "0.2.3",
+          "manifestSha256": "c87d85ebc6fff5884c41d1e8d88ebfb07e062cb5913186f9ecb9ea4f621af3e1"
+        },
+        "nostr-pubsub-reconcile": {
+          "version": "0.1.1",
+          "manifestSha256": "231a31a95cb3d768fac92dacf0af4b174ff501ecbbdeba91b14d799adfe7c6b6"
+        },
+        "nostr-tools": {
+          "version": "2.23.3",
+          "manifestSha256": "533d1e694356ee060f33dc4de079df58d68356ff1ed1abd758267556f7fb8db5"
+        },
+        "typescript": {
+          "version": "5.9.3",
+          "manifestSha256": "822ef7ca6452205657b6288b066481ecf508bfbf43455d715cf7d3ec457561e6"
+        },
+        "vitest": {
+          "version": "4.1.9",
+          "manifestSha256": "e12762a5b629bea6cbb2b0540a8a15c50f3098bb3193d3e319293b58b64c4ed9"
+        },
+        "ws": {
+          "version": "8.22.0",
+          "manifestSha256": "c1ef91ca04eb4754c011c5f0e7638b5078ff71104fada400c44ac761cf93e0b1"
+        },
+        "@types/node": {
+          "version": "24.13.2",
+          "manifestSha256": "de241e8cdbb736fdd4927a1519aba5a55c7fd2170c5dcdd4e4876aec346f632c"
+        },
+        "@types/ws": {
+          "version": "8.18.1",
+          "manifestSha256": "92f0a87117b71231a0864f7bb7c6a84b7fc91dbdd7d33379fc23d655980ad083"
+        }
+      },
+      "sourceLockSha256": "c978221fe808774a8d25d800f72ae50f5ff577eb55ea1eb95cf1d89a6eed2e20",
+      "installedLockSha256": "c978221fe808774a8d25d800f72ae50f5ff577eb55ea1eb95cf1d89a6eed2e20",
+      "osRelease": "PRETTY_NAME=\"Ubuntu 24.04.4 LTS\"\nNAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nVERSION=\"24.04.4 LTS (Noble Numbat)\"\nVERSION_CODENAME=noble\nID=ubuntu\nID_LIKE=debian\nHOME_URL=\"https://www.ubuntu.com/\"\nSUPPORT_URL=\"https://help.ubuntu.com/\"\nBUG_REPORT_URL=\"https://bugs.launchpad.net/ubuntu/\"\nPRIVACY_POLICY_URL=\"https://www.ubuntu.com/legal/terms-and-policies/privacy-policy\"\nUBUNTU_CODENAME=noble\nLOGO=ubuntu-logo\n"
+    },
+    "toolchain": {
+      "node": "v24.14.1",
+      "nodeSha256": "bf9112eb83a827dc9f9c8d19bb7bddcbf00f7b2fedae18fdcaee05406981f20a",
+      "pnpm": "11.7.0",
+      "platform": "linux",
+      "arch": "x64"
+    },
+    "steps": [
+      {
+        "name": "green-check",
+        "args": [
+          "pnpm",
+          "check"
+        ],
+        "exitCode": 0,
+        "elapsedSeconds": 3.9386607640000193,
+        "logSha256": "7433326d9cd74e8ae6afbdd8c96ad19cddfd028426d0dddec1f9455e5aaefcdd"
+      },
+      {
+        "name": "green-build",
+        "args": [
+          "pnpm",
+          "build"
+        ],
+        "exitCode": 0,
+        "elapsedSeconds": 3.226326126999993,
+        "logSha256": "e4eec3774a26712e44d7a72bcc3d78931cf4a9d2ba5d1f5420163dbb32f7ba0e"
+      }
+    ],
+    "counts": {
+      "passed": 172,
+      "failed": 1,
+      "skipped": 1
+    }
+  },
+  "newRegressions": [
+    "private publication connection boundary keeps peer and relay receipts independent for one envelope (peer-first)",
+    "private publication connection boundary keeps peer and relay receipts independent for one envelope (relay-first)",
+    "private publication connection boundary does not coalesce different 'acknowledgment policy' options and retires settled attempts",
+    "private publication connection boundary does not coalesce different 'queue policy' options and retires settled attempts",
+    "private publication connection boundary does not coalesce different 'local echo policy' options and retires settled attempts",
+    "private publication connection boundary does not coalesce different 'source destination' options and retires settled attempts",
+    "private publication connection boundary opens independent authenticated connections for different explicit relay scopes"
+  ],
+  "legacyConditionalSkip": {
+    "file": "ts/packages/nostr-pubsub/tests/fips-feed-sync.test.ts",
+    "sourceSha256": "25e97de0764bb20634454ae536d3c2c8bf8b1d48383ba074ca8b118e65d51d42",
+    "fullName": "serves legacy unmarked feeds and rejoins a genuine legacy provider with ordinary inventory",
+    "condition": "!process.env.NOSTR_PUBSUB_LEGACY_MODULE",
+    "reason": "Established external legacy-provider fixture not supplied; exact original conditional skip only",
+    "legacyCoverageClaimed": false
+  },
+  "case": {
+    "file": "ts/packages/nostr-pubsub/tests/fips-pubsub-client.test.ts",
+    "fullName": "FipsNostrPubsubClient roundtrips the exact boundary and signed messages through a Rust process",
+    "sourceSha256": "68fd49b715582635cef03576e09c58f5bc3b5b56c26d91ee39d16b35c7bc7266",
+    "originalTimeoutMs": 60000
+  },
+  "originalCargoArgv": [
+    "run",
+    "--quiet",
+    "--package",
+    "nostr-pubsub-fips",
+    "--example",
+    "fips-pubsub-wire-stdio"
+  ],
+  "launcherCwd": "/stage/workspace",
+  "fixtureBuildCommand": [
+    "cargo",
+    "build",
+    "--locked",
+    "--offline",
+    "--package",
+    "nostr-pubsub-fips",
+    "--example",
+    "fips-pubsub-wire-stdio",
+    "--message-format=json"
+  ],
+  "buildProfile": {
+    "name": "dev",
+    "defaultFeatures": true,
+    "explicitFeatures": [],
+    "jobs": 1,
+    "incremental": 0,
+    "debug": 0
+  },
+  "resources": {
+    "cpus": 2,
+    "memoryBytes": 4294967296,
+    "pids": 512,
+    "entryFreeBytes": 32212254720,
+    "minimumFreeBytes": 21474836480,
+    "buildLimitSeconds": 1200,
+    "workflowLimitMinutes": 50
+  },
+  "qualificationOnly": true,
+  "releaseAccepted": false,
+  "fixtureSubstitution": "Original exact cargo invocation launches SHA-verified binary from original Rust example; source/test/assertions are unchanged",
+  "noSourcePackageOrConsumerPublication": true
+}
