@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "video",
-      "commit": "3757e9bfc9a629e8d53cf6de4e7f3d6b61f828cd",
+      "commit": "2d2ae2ae2af205b2340472f634186fe799b192cb",
       "archive": "archives/video-source.tar.gz",
-      "archiveSha256": "52cc9e5ca6d37faf3ec192b7f00fde43eb02886703ded7670c3421d26436d373",
-      "archiveBytes": 48303752,
+      "archiveSha256": "b273aeddd69a57c900d7cb4740a52cf603ca202af7288deaf966d5ae166247ba",
+      "archiveBytes": 48303792,
       "lockSha256": "ed40a6c10a272cf7dc5ab6614f121dd23d73f482ee29f24eb1e5fbb2464ad9ca",
       "packageSha256": "356610956fa218829f8179b0b942ae711413c3df3bca9c4856e64cf38ad64df0",
       "distDir": "dist-video",
@@ -37,7 +37,7 @@
         "e2e/blossom-fallback.spec.ts": "7d514e84781c070293d2f5c1cf7b08d191fa8e4ad2c1792d6162f935decf733c",
         "e2e/blossom-push.spec.ts": "258b65496ffd3075646abbc4a1317a5ddf37dfab95c31776bdd392d26259106a",
         "e2e/chunk-boundary-video.spec.ts": "d09370661b83526ffd9eefdc8d8894a5e89f7217889cfae80e9b862922506441",
-        "e2e/fips-discovery.spec.ts": "f0ea2dc481b929353cc36c2b6b6c6e38f7902fa623b2f5b6e4fc956510249e95",
+        "e2e/fips-discovery.spec.ts": "599ca09fb003e0228cca3ca24447f7d72d0f3d8f4b7ff49470f62d29b66e82d5",
         "e2e/fips-provider-bridge.spec.ts": "759d449bc1a47501e996d6b88cfa1e7870aa86cc208a483028be2fee9a975988",
         "e2e/fixtures.ts": "0e014bf47d4daffc80cce0f79df339a7273e40dadc8c0e5438ca3d58a67d1ebb",
         "e2e/fixtures/localFipsWebSocketSeed.ts": "9ab30a2f14107808705b45fc3bc3bcecd4470c2c56c113ee516cc6daabbcf07d",
@@ -91,7 +91,7 @@
         "e2e/fips-discovery.spec.ts"
       ],
       "requiredPermissionContexts": 1,
-      "sourceTree": "6a20fbfbeafb3ab2f0eea4f82ed44e1eea9acca7",
+      "sourceTree": "1ed8a0b1321be9b2f51ea81a18507746f71a2dab",
       "version": "0.1.12",
       "configSha256": "78acbe216fa472e0b153df37988331dce41a6202152498fcec03dfd921a97a5b",
       "expectedBrowserReports": 1,
