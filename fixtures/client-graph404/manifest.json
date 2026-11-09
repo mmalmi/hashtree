@@ -14,9 +14,9 @@
   "apps": [
     {
       "id": "client",
-      "commit": "00183414f7c3dee7cc08c1b54ae6f8430473e41a",
+      "commit": "55b40858563ec7a67fe7ca6808358893eba208ae",
       "archive": "archives/client-source.bundle",
-      "archiveSha256": "4f7fb8d88626ce1eb295e6127537cbf9587a8ee46363215f35411990834f48f2",
+      "archiveSha256": "c8403fdff04b2ac61e77f1ea91c38e19cf524458952584ce575cac8f0110d441",
       "requiredMaster": "12bcd8a190e8eb9d92d48d723ff582eff0ce6787",
       "observedPublicMaster": "995499dd29b569b39db4917c6690d4885ec60e89",
       "publicRemote": "https://github.com/irislib/iris-client.git",
@@ -28,8 +28,8 @@
       "distDir": "dist",
       "packageManager": "pnpm@9.15.0",
       "playwright": "1.61.1",
-      "sourceArchiveSha256": "8116052c08f4c74f476f117d5a0501ca6988f46eb292de12e326ee06d8e33c0f",
-      "sourceArchiveBytes": 47414833,
+      "sourceArchiveSha256": "531cfef04181980bb64ee62a9a0c518a69a6190478d3a71a745b8dfc09e6035a",
+      "sourceArchiveBytes": 47414889,
       "version": "2.5.62",
       "buildFromSource": true,
       "installedRuntimeExpectations": [
@@ -118,9 +118,10 @@
       },
       "acceptedSourceReceiptSha256": "5cfe86537b337d16d84504e1c94b0b993b4d5ba0150fe65120ded446eee2fdda",
       "testFiles": {
-        "tests/peer-files.spec.ts": "8bcae23349b2d9c1d38c29ade4706814cb4cb42cc985f3e0f0193feca5281c3f"
+        "tests/peer-files.spec.ts": "5f7031538f90fccfdca7369b453586b5723625c471d6be965e031af535989620"
       },
-      "archiveBytes": 56313965
+      "archiveBytes": 56314301,
+      "testOnlySourceParent": "00183414f7c3dee7cc08c1b54ae6f8430473e41a"
     }
   ]
 }
