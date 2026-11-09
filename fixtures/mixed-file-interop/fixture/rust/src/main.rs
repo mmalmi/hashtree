@@ -32,17 +32,24 @@ fn files(root: &Path, size: usize, salt: u8, source: bool) -> Result<Vec<Transfe
         Ok(TransferFile { filename, size_bytes: bytes.len() as u64, sha256: hash(&bytes), path })
     }).collect()
 }
-fn verify(root: &Path, size: usize, salt: u8) -> Result<Value> {
+fn verify(root: &Path, id: &str, size: usize, salt: u8) -> Result<Value> {
+    if !["ts-to-rust-complete", "ts-to-rust-restart"].contains(&id) { return Err("fixture transfer id".into()); }
+    let outputs = root.join("received");
+    let directory = outputs.join(format!("Received files {id}"));
+    if fs::read_dir(&outputs)?.count() != 1 || !fs::symlink_metadata(&directory)?.file_type().is_dir() {
+        return Err("unexpected receiver output directory".into());
+    }
     let mut expected = vec![];
-    for (name, bytes) in contents(size, salt) {
-        let path = root.join("received").join(&name);
+    for (index, (name, bytes)) in contents(size, salt).into_iter().enumerate() {
+        let path = directory.join(format!("{}-{name}", index + 1));
+        if !fs::symlink_metadata(&path)?.file_type().is_file() { return Err("receiver output is not a regular file".into()); }
         let actual = fs::read(&path)?;
         if actual != bytes { return Err("receiver bytes differ".into()); }
         let meta = path.metadata()?;
         expected.push(json!({"filename":name,"bytes":actual.len(),"sha256":hash(&actual),
             "modifiedNs":meta.modified()?.duration_since(std::time::UNIX_EPOCH)?.as_nanos().to_string()}));
     }
-    if fs::read_dir(root.join("received"))?.count() != expected.len() { return Err("extra receiver output".into()); }
+    if fs::read_dir(&directory)?.count() != expected.len() { return Err("extra receiver output".into()); }
     Ok(json!(expected))
 }
 fn event(value: TransferEvent) -> Value {
@@ -126,7 +133,7 @@ fn execute(command: &Value, root: &Path, sender: &TransferSender) -> Result<Valu
     match text(command,"op")? {
         "snapshots"=>Ok(json!(sender.snapshots().into_iter().map(|s|json!({"id":s.id,"status":s.status,
             "sender":s.is_sender,"bytes":s.transferred_bytes,"total":s.total_bytes})).collect::<Vec<_>>())),
-        "verify"=>verify(root,command["size"].as_u64().ok_or("size")? as usize,command["salt"].as_u64().ok_or("salt")? as u8),
+        "verify"=>verify(root,text(command,"id")?,command["size"].as_u64().ok_or("size")? as usize,command["salt"].as_u64().ok_or("salt")? as u8),
         op @ ("offer"|"receive")=>{
             let peer=PeerIdentity::from_npub(text(command,"peerNpub")?)?;
             let files=files(root,command["size"].as_u64().ok_or("size")? as usize,command["salt"].as_u64().ok_or("salt")? as u8,op=="offer")?;
