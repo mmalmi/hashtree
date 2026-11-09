@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "calendar",
-      "commit": "1d5b6e1fb35a996d2100a6ad0edd4056914389ea",
+      "commit": "a87ff3814d9f344515bfbf30329ddb433b7e4aad",
       "archive": "archives/calendar-source.tar.gz",
-      "archiveSha256": "684c2ffb7d234bc375cf535af6c38050f88132faf7fecd2bff9cb4eba7c5a92e",
-      "archiveBytes": 1573834,
+      "archiveSha256": "0655e5c52942051d9eff3cf8e152539078ae90c930cb96560e1f77d5335de491",
+      "archiveBytes": 1573844,
       "lockSha256": "055b9f72569fc5510959feec71fd588e9e52070e48780724ea06476a16762bfd",
       "packageSha256": "0a2d192da6569d0c9c439f0f6261fb235e31ff89ba7cd981673a6fe3de9c8d84",
       "distDir": "dist-calendar",
@@ -36,7 +36,7 @@
         "e2e/calendar-booking.spec.ts": "23af15a848d024756accde779a32d2fec22bee6d1dc17b58085e0dacf7872c39",
         "e2e/calendar-events.spec.ts": "185e402c81d290247c1e21e9a6e6d952eac0c6aed4e3ec701ff312f1e1e23bf2",
         "e2e/calendar-layout.spec.ts": "0023001a1f5fb7277eba4dc9818eed6ebcde69ba99740cd7d04381211031220e",
-        "e2e/fips-discovery.spec.ts": "79c0f62d8540664f667cd87c7fcbfcb1008a4e8b397630cbbc8a6631f493e93c",
+        "e2e/fips-discovery.spec.ts": "ee41c12d3ea7a4840c3fddeeea52f47a9324586024883c09cab7c9cc2e81987d",
         "e2e/fips-provider-bridge.spec.ts": "1bf81ac5cd6724f1bf0424c00e1298cff2950f104650d7fda08481f1db688d8c",
         "e2e/fixtures.ts": "1806469eba3151164bb05fe4649b9233b1c30b7d62311e849cbf7228d27c73fa",
         "e2e/fixtures/localFipsWebSocketSeed.ts": "9ab30a2f14107808705b45fc3bc3bcecd4470c2c56c113ee516cc6daabbcf07d",
@@ -55,7 +55,7 @@
         "e2e/fips-discovery.spec.ts"
       ],
       "requiredPermissionContexts": 1,
-      "sourceTree": "8bb715696aa14f13630d24c7940006016ea14a94",
+      "sourceTree": "f0093f2f5d82dc4f1121c11c2c35c8e4abb5a9db",
       "version": "0.1.18",
       "configSha256": "cadd472832b210d4ae6976634c00b99265de95ced9867907a79f4174faa10bf8",
       "expectedBrowserReports": 2,
