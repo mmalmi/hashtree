@@ -153,5 +153,12 @@
     "measuredOriginalBinaryBytes": 4998352,
     "sourceEquivalenceToOriginalFixtureClaimed": false
   },
-  "publicScope": "Test fixture only; no source/library/consumer publication, no native pin changes, no browser/mobile proof"
+  "publicScope": "Test fixture only; no source/library/consumer publication, no native pin changes, no browser/mobile proof",
+  "networkProof": {
+    "sourceCarrier": "bffab74520687bd84f24af4470b4fc26cb48d7c2",
+    "sourcePath": "fixtures/ts-file-transfer-shutdown/network-proof.py",
+    "sha256": "ad53bbfab4f7089b6981ed0e30b7544437bff6ba94dd04245d74b2acc2f7612f",
+    "FIPS_DUMMY": "0",
+    "scope": "Loopback TCP/UDP positives, parent and child external IPv4/IPv6 TCP/UDP denial, interfaces/routes/capabilities"
+  }
 }

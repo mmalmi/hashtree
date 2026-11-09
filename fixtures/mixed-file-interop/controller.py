@@ -105,7 +105,7 @@ def prepare():
  with urllib.request.urlopen(M['pnpm']['url'],timeout=60) as response:data=response.read(16*1024**2)
  assert hashlib.sha256(data).hexdigest()==M['pnpm']['sha256'];(STAGE/'pnpm.tgz').write_bytes(data)
  with tarfile.open(STAGE/'pnpm.tgz') as tar:tar.extractall(STAGE/'tools/pnpm',filter='data')
- (STAGE/'tools/bin/pnpm').write_text('#!/bin/sh\nexec /stage/tools/bin/node /stage/tools/pnpm/package/bin/pnpm.mjs "$@"\n');(STAGE/'tools/bin/pnpm').chmod(0o755)
+ (STAGE/'tools/bin/pnpm').write_text('#!/bin/sh\nexec /stage/tools/bin/node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');(STAGE/'tools/bin/pnpm').chmod(0o755)
  for label in ['node','rust']:run(['docker','pull',M[label]['image']],label+'-image-pull.log',300)
  docker('mixed-node-extract',['/usr/local/bin/node','/stage/procedure/node-proof.mjs','extract'],seconds=30)
  docker('mixed-rust-base-proof',['sh','/stage/procedure/rust-proof.sh','base'],rust=True,seconds=30)
