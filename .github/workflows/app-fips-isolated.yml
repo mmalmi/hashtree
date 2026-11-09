@@ -1,12 +1,13 @@
-name: Fresh Chat shutdown repair complete release qualification
+name: Chat same-build consent peer continuation
 on:
   workflow_dispatch:
 permissions:
   contents: read
+  actions: read
 jobs:
   fips:
     runs-on: ubuntu-24.04
-    timeout-minutes: 95
+    timeout-minutes: 45
     env:
       FIPS_APPS: chat
     steps:
@@ -16,9 +17,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Prepare pinned inputs before isolation
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: timeout --signal=TERM --kill-after=15s 1200s python3 fixtures/app-fips-isolated/controller.py prepare
       - name: Test exact apps after unsigned transport and denial controls
-        run: timeout --signal=TERM --kill-after=15s 4050s python3 fixtures/app-fips-isolated/controller.py test
+        run: timeout --signal=TERM --kill-after=15s 1050s python3 fixtures/app-fips-isolated/controller.py test
       - name: Preserve evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

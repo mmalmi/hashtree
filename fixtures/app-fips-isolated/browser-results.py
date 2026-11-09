@@ -57,7 +57,12 @@ def recovery(rows,app):
                     else:assert value['identityPreserved'] is True
                     if app=='client':assert value['receiverCacheMiss'] is True and value['bytes']==32000 and value['webrtcBytesReceived']>=32000
                     if app=='git':assert value['receiverPath']=='targeted-p2p-provider' and value['bytes']==32000
-                    if app=='chat':assert value['transport']=='routed-fips'
+                    if app=='chat':
+                        assert value['transport']=='routed-fips'
+                        assert all(value[k] is True for k in ('explicitConsent','interruptedTransferResumed','sameTransferAfterReload'))
+                        assert 2*1024**2 < value['durablePrefixBytes'] < value['originalTransferBytes']
+                        assert 0 < value['resumedWireBytes'] < value['originalTransferBytes']
+                        assert value['reloadRole']==('sender' if value['endpoint']==0 else 'receiver')
                     evidence.append(value)
     assert len(evidence)==2 and {e['endpoint'] for e in evidence}=={0,1}
     assert len({e['freshHash'] for e in evidence})==2

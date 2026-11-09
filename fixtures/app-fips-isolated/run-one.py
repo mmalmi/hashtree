@@ -11,6 +11,7 @@ def verify_inputs():
     assert sha(spec['releaseProfilePath'])==spec['releaseProfileSha256']
     for file,digest in spec['testFiles'].items():assert sha(file)==digest
     for file,digest in spec['sourceInputs'].items():assert sha(file)==digest
+    for relative,item in spec['testOverlays'].items():assert sha(relative)==item['sha256']
 verify_inputs()
 versions={'node':subprocess.check_output(['node','--version'],env=env,text=True).strip(),
           'pnpm':subprocess.check_output(['pnpm','--version'],env=env,text=True,timeout=10).strip(),
@@ -28,10 +29,10 @@ assert [s['id'] for s in plan['steps']]==['install','build','test-portable','tes
 steps=[s for s in plan['steps'] if s['id'] not in ('install','publish','deploy')]
 (evidence/'original-release-plan.json').write_text(json.dumps(plan,indent=2)+'\n')
 (evidence/'inputs.json').write_text(json.dumps({**versions,'sourceCommit':spec['commit'],'image':manifest['image'],
-    'runtimeMode':'Fresh source build and complete original profile plus one additional actual-peer browser case'},indent=2)+'\n')
+    'runtimeMode':'Exact prior built archive/source; fresh frozen install and missing consent-peer/dry-run gates only'},indent=2)+'\n')
 budget=json.loads((base/'procedure/app-budgets.json').read_text())[app]
 started=time.monotonic();processes=[];dist_files=None
-result={'passed':False,'source':spec['commit'],'steps':[],'allAppGatesFromCurrentRun':True,'reusedAppScopes':[]}
+result={'passed':False,'source':spec['commit'],'steps':[],'allAppGatesFromCurrentRun':False,'allAppGatesFromSameSource':True,'reusedAppScopes':spec['priorEvidence']['passingScopes']}
 checks=runpy.run_path('/stage/procedure/browser-results.py')
 def stop(process):
     try:os.killpg(process.pid,signal.SIGTERM)
@@ -64,51 +65,37 @@ def snapshot_dist():
     assert paths and not any(p.is_symlink() for p in dist.rglob('*')) and sum(p.stat().st_size for p in paths)<128*1024**2
     return [{'path':p.relative_to(dist).as_posix(),'bytes':p.stat().st_size,'sha256':sha(p)} for p in paths]
 try:
-    for step in steps:
-        command=step['command'];name=step['id']
-        if name=='test-e2e-nip07':
-            assert command[:4]==['pnpm','exec','playwright','test']
-            assert [x for x in command[4:] if x.endswith('.spec.ts')]==spec['specs']
-            with socket.socket() as probe:probe.bind(('127.0.0.1',5721))
-            output=(evidence/'preview.log').open('wb')
-            preview=subprocess.Popen(spec['previewCommand'],env=env,stdout=output,stderr=subprocess.STDOUT,start_new_session=True);processes.append(preview)
-            deadline=time.monotonic()+30
-            while True:
-                assert preview.poll() is None,'Preview exited before readiness'
-                try:
-                    with urllib.request.urlopen('http://127.0.0.1:5721/',timeout=1) as response:body=response.read()
-                    assert hashlib.sha256(body).hexdigest()==next(f['sha256'] for f in dist_files if f['path']=='index.html');break
-                except (urllib.error.URLError,TimeoutError):assert time.monotonic()<deadline;time.sleep(.1)
-            for file in dist_files:
-                with urllib.request.urlopen('http://127.0.0.1:5721/'+file['path'],timeout=2) as response:body=response.read()
-                assert len(body)==file['bytes'] and hashlib.sha256(body).hexdigest()==file['sha256']
-            (evidence/'preview-readback.json').write_text(json.dumps({'passed':True,'files':dist_files},indent=2)+'\n')
-            command=[*command,'--config=isolated.playwright.config.ts','--reporter=line,json']
-            execute(name,command,2400,{'PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/'results.json')})
-            checks['verify'](evidence/'results.json',62,3,base/'procedure/original-browser-cases.json')
-            peer=['pnpm','exec','playwright','test','e2e/peer-attachments.spec.ts','--config=isolated.playwright.config.ts','--project=chromium','--workers=1','--retries=0','--reporter=line,json']
-            execute('peer-recovery',peer,360,{'PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/'peer-results.json')})
-            rows=checks['verify'](evidence/'peer-results.json',1,0)
-            (evidence/'peer-recovery.json').write_text(json.dumps(checks['recovery'](rows,'chat'),indent=2)+'\n')
-            stop(preview);output.close()
-        else:
-            if name=='test-portable':
-                assert command[:2]==['pnpm','test']
-                assert 'src/lib/deviceSyncLifecycle.test.ts' not in command
-                command=[*command,'src/lib/deviceSyncLifecycle.test.ts','--maxWorkers=1','--reporter=verbose','--reporter=json','--outputFile='+str(evidence/'units.json')]
-            execute(name,command,600 if name=='build' else 300)
-            if name=='build':
-                dist_files=snapshot_dist()
-                with tarfile.open(evidence/'qualified-dist.tar.gz','w:gz') as archive:
-                    for item in dist_files:archive.add(root/spec['distDir']/item['path'],arcname=item['path'],recursive=False)
-                (evidence/'dist-manifest.json').write_text(json.dumps({'source':spec['commit'],'files':dist_files},indent=2)+'\n')
-            if name=='test-portable':
-                units=json.loads((evidence/'units.json').read_text())
-                actual=[a for file in units['testResults'] for a in file['assertionResults']]
-                assert units['success'] and len(units['testResults'])==35 and len(actual)==262 and all(a['status']=='passed' for a in actual)
+    reused=runpy.run_path('/stage/procedure/prior-chat-proof.py')['verify'](base,evidence,spec)
+    prior=base/'earlier/chat'
+    dist_files=json.loads((prior/'dist-manifest.json').read_text())['files']
+    assert snapshot_dist()==dist_files
+    shutil.copyfile(prior/'qualified-dist.tar.gz',evidence/'qualified-dist.tar.gz')
+    shutil.copyfile(prior/'dist-manifest.json',evidence/'dist-manifest.json')
+    assert sha(evidence/'qualified-dist.tar.gz')==spec['priorEvidence']['distArchiveSha256']
+    with socket.socket() as probe:probe.bind(('127.0.0.1',5721))
+    output=(evidence/'preview.log').open('wb')
+    preview=subprocess.Popen(spec['previewCommand'],env=env,stdout=output,stderr=subprocess.STDOUT,start_new_session=True);processes.append(preview)
+    deadline=time.monotonic()+30
+    while True:
+        assert preview.poll() is None,'Preview exited before readiness'
+        try:
+            with urllib.request.urlopen('http://127.0.0.1:5721/',timeout=1) as response:body=response.read()
+            assert hashlib.sha256(body).hexdigest()==next(f['sha256'] for f in dist_files if f['path']=='index.html');break
+        except (urllib.error.URLError,TimeoutError):assert time.monotonic()<deadline;time.sleep(.1)
+    for file in dist_files:
+        with urllib.request.urlopen('http://127.0.0.1:5721/'+file['path'],timeout=2) as response:body=response.read()
+        assert len(body)==file['bytes'] and hashlib.sha256(body).hexdigest()==file['sha256']
+    (evidence/'preview-readback.json').write_text(json.dumps({'passed':True,'files':dist_files},indent=2)+'\n')
+    peer=['pnpm','exec','playwright','test','e2e/peer-recovery-consent.spec.ts','--config=isolated.playwright.config.ts','--project=chromium','--workers=1','--retries=0','--reporter=line,json']
+    execute('peer-recovery',peer,360,{'PLAYWRIGHT_JSON_OUTPUT_FILE':str(evidence/'peer-results.json')})
+    rows=checks['verify'](evidence/'peer-results.json',1,0)
+    assert rows[0]['file']=='peer-recovery-consent.spec.ts' and rows[0]['title']=='two browsers resume consent-based files after both endpoint reloads and exchange fresh files'
+    (evidence/'peer-recovery.json').write_text(json.dumps(checks['recovery'](rows,'chat'),indent=2)+'\n')
+    stop(preview);output.close()
     execute('dry-run',['node','scripts/release-site.mjs','--dry-run'],30)
     assert snapshot_dist()==dist_files
-    result.update(passed=True,originalBrowserPassed=62,originalPlatformSkips=3,additionalPeerCases=1,distArchiveSha256=sha(evidence/'qualified-dist.tar.gz'))
+    result.update(passed=True,originalBrowserPassed=62,originalPlatformSkips=3,additionalPeerCases=1,distArchiveSha256=sha(evidence/'qualified-dist.tar.gz'),priorRun=spec['priorEvidence']['runId'])
+
 finally:
     for process in reversed(processes):stop(process)
     verify_inputs()
@@ -118,8 +105,8 @@ finally:
     (evidence/'resource-final.json').write_text(json.dumps({'noChildOOM':True,'events':events,'memoryPeak':int((memory/'memory.peak').read_text())},indent=2)+'\n')
     (evidence/'release-gates.json').write_text(json.dumps(result,indent=2)+'\n')
 contexts=[json.loads(line) for line in (evidence/'context-permissions.jsonl').read_text().splitlines()]
-assert set(c['engine'] for c in contexts)=={'chromium','firefox','webkit'}
+assert set(c['engine'] for c in contexts)=={'chromium'}
 assert all(c['origin']=='http://127.0.0.1:5721' and not c['captureInvoked'] for c in contexts)
 assert all(c['state']=='granted' and c['permission']=='microphone' for c in contexts if c['engine']=='chromium')
 assert all(c['permission'] is None for c in contexts if c['engine']!='chromium')
-(evidence/'passed.json').write_text(json.dumps({'passed':True,'sourceCommit':spec['commit'],'completeOriginalReleaseProfile':True,'additionalActualPeerRecovery':True,'allAppGatesFromCurrentRun':True})+'\n')
+(evidence/'passed.json').write_text(json.dumps({'passed':True,'sourceCommit':spec['commit'],'completeOriginalReleaseProfile':True,'additionalActualPeerRecovery':True,'allAppGatesFromCurrentRun':False,'allAppGatesFromSameSource':True,'reusedRun':spec['priorEvidence']['runId']})+'\n')

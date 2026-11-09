@@ -1,0 +1,367 @@
+[
+  {
+    "path": "barriers/iris-fips-test-chat.ready",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "chat/artifacts/peer-recovery/test-results/peer-attachments-three-bro-57a1d-de-with-Blossom-unavailable-chromium/error-context.md",
+    "bytes": 12288,
+    "sha256": "197a81555257ebee96dfbc041c777dfc18915fb3fce1d026e4f96f1dbaa4ede7"
+  },
+  {
+    "path": "chat/artifacts/peer-recovery/test-results/peer-attachments-three-bro-57a1d-de-with-Blossom-unavailable-chromium/test-failed-1.png",
+    "bytes": 49782,
+    "sha256": "d5a50798bf8440c8d0a426eb504dcc2fa3d4c8fbacb84351fa3f6fbca6f5df34"
+  },
+  {
+    "path": "chat/artifacts/peer-recovery/test-results/.last-run.json",
+    "bytes": 96,
+    "sha256": "7bc0f2e9f4bb297f1489fea512d08f8c454ea94ee84fb6f6c6b3060b50686fe4"
+  },
+  {
+    "path": "chat/artifacts/peer-recovery/test-results/peer-attachments-three-bro-57a1d-de-with-Blossom-unavailable-chromium/test-failed-2.png",
+    "bytes": 34337,
+    "sha256": "717c5fadaa3a4ccd87ebaea971e6bdc7ed84bfe2a7796c334b4a79b5bc40ccb3"
+  },
+  {
+    "path": "chat/artifacts/peer-recovery/test-results/peer-attachments-three-bro-57a1d-de-with-Blossom-unavailable-chromium/test-failed-3.png",
+    "bytes": 132787,
+    "sha256": "802a9991b5a717a3a19dfb320da8a3d204b2bf7c8d65680f8ddb24ccd9fc5b37"
+  },
+  {
+    "path": "chat/artifacts/peer-recovery/test-results/peer-attachments-three-bro-57a1d-de-with-Blossom-unavailable-chromium/trace.zip",
+    "bytes": 5922542,
+    "sha256": "284f70f35f793776e1aefff574c5364121bc9959602a283578c3fbfdf91ff412"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/.last-run.json",
+    "bytes": 45,
+    "sha256": "91d1c43004802cd49950d78eb11c8fa7d05da8ffffe219a8b13b2f561bc00903"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/contact-memory-favorite-st-3d402-out-changing-public-follows-chromium/favorite-desktop.png",
+    "bytes": 32157,
+    "sha256": "5ec9a6a253bf3820868d0dcf55b6c79ee4d250844ec934791e61d3545598581f"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/contact-memory-favorite-st-3d402-out-changing-public-follows-chromium/favorite-mobile.png",
+    "bytes": 18518,
+    "sha256": "3298f427db415b39ff4ebcd594d33cda5702e3454d8996cb33ff7f364544ab1f"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/contact-memory-favorite-st-3d402-out-changing-public-follows-chromium/not-favorite-mobile.png",
+    "bytes": 18244,
+    "sha256": "1d54d043b6ae6a5e7e14a90373b62681ea26c296e511d9c6c5794a4dee35f313"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/direct-file-first-first-files-use-chosen-destination-chromium/received.png",
+    "bytes": 34566,
+    "sha256": "c750237257eac4bdecd38775ff9bf490b6eabd2492b762d0f3039b5317e0a613"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/direct-file-first-first-files-use-downloads-after-restart-chromium/paused.png",
+    "bytes": 35614,
+    "sha256": "14217c609905d171f8ea11d356cd0269a86ef7ff6a287bd3af4dc593cc6c7761"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/direct-file-first-first-files-use-downloads-after-restart-chromium/received.png",
+    "bytes": 32597,
+    "sha256": "4087037cc5fb02744e000b85af6abd85a7b066dd0c6054ff9b28bd5b8066c6d6"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/direct-file-first-first-files-use-downloads-after-restart-firefox-files/paused.png",
+    "bytes": 55958,
+    "sha256": "497e07d5f0f10e3284ffa0fb68fced764c8df876102211ed23424858586eccc2"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/direct-file-first-first-files-use-downloads-after-restart-firefox-files/received.png",
+    "bytes": 49700,
+    "sha256": "c98dd513173a9bf44c1c397a1564fa58eb147f95ca7663a6c41e4849fd21530e"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/direct-file-first-first-files-use-downloads-after-restart-webkit-files/paused.png",
+    "bytes": 89800,
+    "sha256": "3f7d5232abc768f42580534e52b1f601a9423f8499633da98d027ff38a784058"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/direct-file-first-first-files-use-downloads-after-restart-webkit-files/received.png",
+    "bytes": 74062,
+    "sha256": "f25e9ceb169daa2017c194c4441dd2413655ea394609d4c58c3ef07a5fc9c29a"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/private-key-login-existing-562cc-th-nsec-and-survives-reload-chromium/existing-account.png",
+    "bytes": 29534,
+    "sha256": "4f2b11179c15a5ba4637bcf2bfed5aeaf3dfd8e5f39473423b8560bb3bfcc296"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/private-key-login-existing-562cc-th-nsec-and-survives-reload-chromium/secret-key.png",
+    "bytes": 29593,
+    "sha256": "64e5a2b4ac20bbfbdc175791f7cadbb75294b604ce75887f72dbdab4aaf6d9dc"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/private-key-login-existing-562cc-th-nsec-and-survives-reload-chromium/welcome.png",
+    "bytes": 26917,
+    "sha256": "03c1f944de7f5e057b3b6a3971827edeb2173b3e785d4346ab81dbe9c42b18dc"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/private-key-login-existing-81abe-ith-hex-and-survives-reload-chromium/existing-account.png",
+    "bytes": 26408,
+    "sha256": "bf4b199176f20383344a4515939b3ced791a3637217a0a45c7345c8d2c030458"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/private-key-login-existing-81abe-ith-hex-and-survives-reload-chromium/secret-key.png",
+    "bytes": 26424,
+    "sha256": "1ae51afaaa52bf4d699b2c5cd51a059fe06161d793f430cff6ced8b4b8c8425d"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/private-key-login-existing-81abe-ith-hex-and-survives-reload-chromium/welcome.png",
+    "bytes": 23969,
+    "sha256": "c1aea70832c08b5e2e5c58c7759086610821f4cf5390c0be277160b04c94bbbc"
+  },
+  {
+    "path": "chat/artifacts/test-e2e-nip07/test-results/sw-push-handler-SW-push-ha-48e15-kind-specific-notifications-chromium/worker-diagnostics.json",
+    "bytes": 4835,
+    "sha256": "20ae585d6ae2590ad28bf1c702c37ba44dd6f4494b0301909e639ba1b801cc72"
+  },
+  {
+    "path": "chat/artifacts/test-graph/test-results/iris-chat-portable-smoke.png",
+    "bytes": 34704,
+    "sha256": "089b177791a3961f4cee0f34f246ba6e896d542bb59a386a0d9dab85d97f641f"
+  },
+  {
+    "path": "chat/artifacts/test-relay-policy/test-results/iris-chat-portable-smoke.png",
+    "bytes": 34704,
+    "sha256": "089b177791a3961f4cee0f34f246ba6e896d542bb59a386a0d9dab85d97f641f"
+  },
+  {
+    "path": "chat/artifacts/test-smoke/test-results/iris-chat-portable-smoke.png",
+    "bytes": 34704,
+    "sha256": "089b177791a3961f4cee0f34f246ba6e896d542bb59a386a0d9dab85d97f641f"
+  },
+  {
+    "path": "chat/browser.json",
+    "bytes": 12132,
+    "sha256": "09f9bcd047728ec896cba67a6aea1bdabf9027646c3186acf02bbb35652339cf"
+  },
+  {
+    "path": "chat/build.log",
+    "bytes": 19947,
+    "sha256": "6d21534045516b748e5ac54f8480998e11142a8e13b22a67c17221147398ffe1"
+  },
+  {
+    "path": "chat/context-permissions.jsonl",
+    "bytes": 16725,
+    "sha256": "de662bc0cfb83ce29bf6b3c1876fd2a184c1328ac84b103522821945e941ca37"
+  },
+  {
+    "path": "chat/dist-manifest.json",
+    "bytes": 5023,
+    "sha256": "5887244e8463a04a6d73897ca2b39f607d374893abab9c5a733281ef1397ff3e"
+  },
+  {
+    "path": "chat/inputs.json",
+    "bytes": 426,
+    "sha256": "696991659ee29c2bc719594fbaf343e93d6283811f7bc7b03fbfde0a1cc3baaf"
+  },
+  {
+    "path": "chat/installed-runtime.json",
+    "bytes": 2494,
+    "sha256": "463b1e2dd6cacde6d677c4a5b6872a48019db461c39ef3bb3d781361526f78c6"
+  },
+  {
+    "path": "chat/network-after-attempt.json",
+    "bytes": 1460,
+    "sha256": "5015aa6282bcb1ad4e19c1b8889398c7d18cd9e5ee9590eb0d508ca4b754f020"
+  },
+  {
+    "path": "chat/network.json",
+    "bytes": 1458,
+    "sha256": "a0e93a7fcf2944fe5656826fee7f16b5b9d42c259047b7add0d801538de1e0c2"
+  },
+  {
+    "path": "chat/peer-recovery.log",
+    "bytes": 4906,
+    "sha256": "bd5fcbb4079e2689bb682c85d8a27533628ed7d6f0d15aa6bc6ca74353cb9ab5"
+  },
+  {
+    "path": "chat/peer-results.json",
+    "bytes": 17490,
+    "sha256": "d41ce3ad94dd20f0f3afb4d1ce04ae96f1037d9d32e9137ecb5e349f1a6882de"
+  },
+  {
+    "path": "chat/original-release-plan.json",
+    "bytes": 4337,
+    "sha256": "f0d53cd65f8a36bf65f314824845b021679790690251f6ff2b2f3a52650366cc"
+  },
+  {
+    "path": "chat/preview-readback.json",
+    "bytes": 4985,
+    "sha256": "94fa2ba85f29adb5204d246a1e1a558ed085f28789da45ac25a7bc36d44273b6"
+  },
+  {
+    "path": "chat/qualified-dist.tar.gz",
+    "bytes": 2481537,
+    "sha256": "2e678e28f636d33b9758f83d0103390054623e41fdcb1c3a72d491eb7f70f03c"
+  },
+  {
+    "path": "chat/preview.log",
+    "bytes": 213,
+    "sha256": "a4be28f4daa5e1d996107458d198525cb2c9034cfa2f7e182ca00ea003f43c27"
+  },
+  {
+    "path": "chat/test-e2e-nip07.log",
+    "bytes": 8670,
+    "sha256": "575530186cd36b77b569442a5b9961e6b66ae3b6265c296c8f406e107871cab1"
+  },
+  {
+    "path": "chat/release-gates.json",
+    "bytes": 11374,
+    "sha256": "9fd9c655d67320c1d4f9f31117523535734ec64f26b045fe809b36d12e0a5815"
+  },
+  {
+    "path": "chat/resource-final.json",
+    "bytes": 211,
+    "sha256": "584495d23d090113ef7f10062cf988d80621d4265b4a9ccc26bd00f26f1b655a"
+  },
+  {
+    "path": "chat/results.json",
+    "bytes": 130459,
+    "sha256": "94a331f4eea7f9e1e45c8a500cc77240ec5c86e15ff2f3d29a4a1a378803de29"
+  },
+  {
+    "path": "chat/test-graph.log",
+    "bytes": 681,
+    "sha256": "9b43d187c61d8785039d4176e8fe045315b222213462f9a28cb87b70fe9eb984"
+  },
+  {
+    "path": "chat/test-portable.log",
+    "bytes": 66569,
+    "sha256": "4e6e43a2627ad13d3635eaf8aa4bf0eea4b7b10073ef151ddb2b076dfb6ac3fd"
+  },
+  {
+    "path": "chat/test-relay-policy.log",
+    "bytes": 170,
+    "sha256": "13636052a29b40d47ababe0d00edaa3b1b9cdd3aedb132f8315b9d9f11c47d0e"
+  },
+  {
+    "path": "chat/test-smoke.log",
+    "bytes": 217,
+    "sha256": "c8e9e2d482a08450441d6f93445e9533590765b171a4302a8f46ba0df9740bf1"
+  },
+  {
+    "path": "chat/units.json",
+    "bytes": 86592,
+    "sha256": "e245aaa686e817c1b4fdb0038feef82a1f9d253069e498f3b128867af84e2b20"
+  },
+  {
+    "path": "disk-prepare.json",
+    "bytes": 228,
+    "sha256": "1397063d1d6ce2ffdfe26269d57bf08f046652964fd3ac33f5caff207c5cc084"
+  },
+  {
+    "path": "disk-test.json",
+    "bytes": 228,
+    "sha256": "e09fc801aa5ae0db917a316ba3c56d52f8ed6f4cd15bfd2028c7790fb3c22740"
+  },
+  {
+    "path": "image-pull.log",
+    "bytes": 1282,
+    "sha256": "893177770884ce6634fb8abe3680dcbf26c2e4a2b81fcec57375e49a3089e8ef"
+  },
+  {
+    "path": "image-toolchain.json",
+    "bytes": 99,
+    "sha256": "be160d140e864be88d9910dd668453240a693b7fbdb82ce625b76af8d0c59e68"
+  },
+  {
+    "path": "iris-fips-image-proof-create.log",
+    "bytes": 65,
+    "sha256": "bb06cf48c5eb8b6aea6cc3508ed82467aeaed9c0d4a1a6bdb48b6996cb4e677d"
+  },
+  {
+    "path": "iris-fips-image-proof-container.json",
+    "bytes": 3859,
+    "sha256": "9877af755ff09b71f0fba23ec64fbd2e72240388468ba4378ed930ff279cab15"
+  },
+  {
+    "path": "iris-fips-image-proof-terminal.json",
+    "bytes": 269,
+    "sha256": "1431713d69701c9a3f01214637bf4fd0fb9ade03b604fe04571c66fb8046938a"
+  },
+  {
+    "path": "iris-fips-image-proof.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "iris-fips-install-chat-container.json",
+    "bytes": 3730,
+    "sha256": "738ba5d807ca63aa5b0ef4529ad5473c1b22171f3070795d6eac12d0255a351a"
+  },
+  {
+    "path": "iris-fips-install-chat-create.log",
+    "bytes": 65,
+    "sha256": "a9cc4708032a21ab319df91722b24ab196f07b57d92eb8a4ff70f99f339e9d25"
+  },
+  {
+    "path": "iris-fips-install-chat-terminal.json",
+    "bytes": 269,
+    "sha256": "23101dc647b578ef1df9fe829dbcc496dec3b9e341560f3e3e937af2036931ac"
+  },
+  {
+    "path": "iris-fips-install-chat.log",
+    "bytes": 2227,
+    "sha256": "dd3a2bbb8b429ca4c41ad163c54b2a129fa70d4bac1b4380f570d57a68a99d85"
+  },
+  {
+    "path": "iris-fips-test-chat-container.json",
+    "bytes": 3752,
+    "sha256": "7a6f426dd02198526a2a8066f0d82d61fb14f83e7146c5f3468817067813792c"
+  },
+  {
+    "path": "iris-fips-test-chat-create.log",
+    "bytes": 65,
+    "sha256": "f6941d861a0da2c3f4d38f0cc0138c74df99ce2f2bc7397108291ed8aa3b0050"
+  },
+  {
+    "path": "iris-fips-test-chat-namespace.json",
+    "bytes": 6615,
+    "sha256": "7912024c9c6c0181899af4bb8d23710c7298ea9625a60cb954543c9011633d97"
+  },
+  {
+    "path": "iris-fips-test-chat-start.log",
+    "bytes": 20,
+    "sha256": "eaba47eb0b64377e2a13e749ac6c86b8f54285a9c9abc0fd01268768b704f729"
+  },
+  {
+    "path": "iris-fips-test-chat-terminal.json",
+    "bytes": 269,
+    "sha256": "d78e0812519cfb625caa5c0e4c338b1966bebdd5e9d1a956ad888890b27cf696"
+  },
+  {
+    "path": "iris-fips-test-chat.log",
+    "bytes": 647,
+    "sha256": "d09e46b9686ff9fa6b4d8a1699ca9c136a96d07638817c358f6fabca174c451a"
+  },
+  {
+    "path": "overlay-chat.json",
+    "bytes": 2546,
+    "sha256": "82e95de40a209e13528af31dbc003b962b454107ea8811517feb23224e4b024f"
+  },
+  {
+    "path": "overlay-chat.log",
+    "bytes": 0,
+    "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "path": "passed.json",
+    "bytes": 262,
+    "sha256": "c80168ab4765b97a823d1fbd3e78b5f52fd3802e104f410aa3f8d6241c3a8e8b"
+  },
+  {
+    "path": "prepared.json",
+    "bytes": 298,
+    "sha256": "89e1cbe731124cf5dfdcf5d5c50ac97f6ccf038750c9725e2751ee21362b5ef0"
+  }
+]

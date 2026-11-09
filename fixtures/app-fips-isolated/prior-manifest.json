@@ -1,0 +1,338 @@
+{
+  "schema": 1,
+  "purpose": "Fresh complete original chat release profile and both actual browser endpoints recovering on accepted runtime61",
+  "image": "mcr.microsoft.com/playwright@sha256:ee15712262f017b8157421b212b12099146645f44b1bc5c0514cbbe6a229b1d0",
+  "imageTagForProvenance": "v1.64.1-noble",
+  "imageIndexSha256": "2f05f8a734509a7b3f26a912639488ee08f58a7b292d14d62271bcff9038768f",
+  "pnpm": {
+    "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.24.0.tgz",
+    "sha256": "196f4bd174ebcbd99786b33452f144cb2dc32ef4e7138ed44491e9d43d702d75"
+  },
+  "apps": [
+    {
+      "id": "chat",
+      "commit": "2c1a58c69e56ec405bbf33d615b75645d3922b2a",
+      "archive": "archives/chat-source.tar.gz",
+      "archiveSha256": "45512cec7f8e3aef284d0451f963fc60fbddf472c138ae574b476c649e1472cc",
+      "lockSha256": "1bf965d46c80b53b04d4643028b1bd96796d09aa0a4e8ba9faad17aacf66a4bb",
+      "distDir": "dist",
+      "specs": [
+        "e2e/private-key-login.spec.ts",
+        "e2e/nip07.spec.ts",
+        "e2e/contact-memory.spec.ts",
+        "e2e/private-contact-sync.spec.ts",
+        "e2e/web-join.spec.ts",
+        "e2e/direct-file-first.spec.ts",
+        "e2e/message-mutations.spec.ts",
+        "e2e/link-device.spec.ts",
+        "e2e/invite-roleplay.spec.ts",
+        "e2e/composer-identity.spec.ts",
+        "e2e/composer-completions.spec.ts",
+        "e2e/timed-mute.spec.ts",
+        "e2e/notification-navigation.spec.ts",
+        "e2e/sw-push-handler.spec.ts",
+        "e2e/device-removal.spec.ts"
+      ],
+      "testFiles": {
+        "e2e/composer-completions.spec.ts": "cc7310e7b1821183142db0bc924e4d518bdb25e739e10145a803b47a1c4f95dd",
+        "e2e/composer-identity.spec.ts": "f9b4c677521e954dd5c79261bc7903322bd4a69b5311da1edce7fcc92f28c7b8",
+        "e2e/contact-memory.spec.ts": "bf07300af026d998741fa01dfda519b07fccc26be09971441d9a8c668f12b6fc",
+        "e2e/device-removal.spec.ts": "0c8a038a208275c7341469409333e566b7de6fcc06dacc5aa0db62b50983ac97",
+        "e2e/direct-file-first.spec.ts": "416ad602769f6dfa9af9c53c321b2d6d262d962a0f7452579c7f97dd661605e6",
+        "e2e/invite-roleplay.spec.ts": "114049e5d8524b90d23056a6a0c386d0e8497ef44262bc84abd887c9a098eee0",
+        "e2e/link-device.spec.ts": "af149b7b07b412a87a5ecf2f17bb8050f761b0437e88170d8657e9088f60b957",
+        "e2e/message-mutations.spec.ts": "99004fa4408da55357f11f676d87a297dbe5428b2c22ed07ef5987f9a10dc533",
+        "e2e/nip07.spec.ts": "25851697b2cc364fa6912e230ca774ecdd00764407f1ae8efdab8334650eaca7",
+        "e2e/notification-navigation.spec.ts": "047ec5007e79bca1f267d447995e5cd152445944041dd0f3e3ef9ebfaa0599f1",
+        "e2e/peer-attachments.spec.ts": "a9cb45fa5d13bd5eb94f9ee1c0c3795442bb3c31d05ea2c681e4e0481cc9e71b",
+        "e2e/private-contact-sync.spec.ts": "6fc63c7aba9a84029f594c0d1c0dc36284dfc5e15e63c62924a7816e321c875b",
+        "e2e/private-key-login.spec.ts": "ca3f53ef51bcda1f65f340962466db009406853dfedd3ecb728c7ff8f7f5a78c",
+        "e2e/sw-push-handler.spec.ts": "b7278299f36655c5c64e0e669af4901f166956a8e4c01964d2cd443a0efcf312",
+        "e2e/timed-mute.spec.ts": "30a0480a591e7787397a1b16c4a00435aea6296a28255bd6db895515f9d6fb97",
+        "e2e/web-join.spec.ts": "3d2a60e0c39a5f854ef71f37a6ef34fbab7c134f08aa62d2b76a99a14a27aa59",
+        "src/lib/deviceSyncLifecycle.test.ts": "36c61f05035786836a4ff906f7c0f4f20e3e4e8f8d2708701753dbee466bc7b4"
+      },
+      "fixtureSha256": "7c411f44a1630a461485bb08338d508fe253433f562e7bbecee38af345e47404",
+      "configSha256": "dff2d67de101409c41bd52eeb932a600e16d73d7e5ba3f0741b7b1777cffed4d",
+      "env": {
+        "PW_WORKERS": "2",
+        "PLAYWRIGHT_PORT": "5721",
+        "PLAYWRIGHT_REUSE_EXISTING_SERVER": "1"
+      },
+      "previewCommand": [
+        "pnpm",
+        "run",
+        "preview",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "5721",
+        "--strictPort"
+      ],
+      "playwright": "1.64.1",
+      "packageManager": "pnpm@10.24.0",
+      "expectedProjects": [
+        "chromium",
+        "webkit-files",
+        "firefox-files",
+        "webkit-composer",
+        "webkit-notifications"
+      ],
+      "packageSha256": "1030d4ac5be2a06cf9828f5d58fb9a801dab54ee85a757f09c5614f7ac085695",
+      "sourceArchiveSha256": "45512cec7f8e3aef284d0451f963fc60fbddf472c138ae574b476c649e1472cc",
+      "sourceArchiveBytes": 1257912,
+      "version": "2.6.63",
+      "buildFromSource": true,
+      "installedRuntimeExpectations": [
+        {
+          "package": "@fips/core",
+          "version": "0.0.56",
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-core-0.0.56.tgz",
+          "integrity": "sha512-vXfPsXWlXIEZFFl6K+x9YCwOhRPQr4gjw+GfWOfuyI1RW1O1tcdKQBcDbIszByNWVCt/Rs8UOAzv+k+iXNlIOQ==",
+          "sha256": "0b044cb417a01a7d495a1675dc4e650af2fec19224c89fe9beb8ccb56d6fc0a0",
+          "manifestSha256": "1be5a1c96bbca8a8df37d2e5248eb736b1e1a6c69c12c35aa23367b602fda308"
+        },
+        {
+          "package": "@fips/transport-webrtc",
+          "version": "0.0.60",
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-webrtc-0.0.60.tgz",
+          "integrity": "sha512-te9hazkbDXnV4hBYX4pIX594WDY5XVClh9tZCVAm5GzE8bHyoFEAhIpyWiUpbciawaYdRLubkcar3D8A7bViYA==",
+          "sha256": "646d05f2b89336a8a9d38f1d5155d3374ecef27a0bdcb28690c17c04e9a75b12",
+          "manifestSha256": "b655179fecdf3a6ae2806589648145d9f601d5580ad787de3b7d5ab5c46e570d"
+        },
+        {
+          "package": "@fips/transport-websocket",
+          "version": "0.0.14",
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-websocket-0.0.14.tgz",
+          "integrity": "sha512-B+CUOBXuMwfDzLCnr+QfLf/MuA4wcV+36mqwH+RS0DNRYFcoGgM60MZiwcjFVCb6xzl0ZTUYe9Sla+VJ2MJBnQ==",
+          "sha256": "dd1abad3b581b7326c4506ce6d66902fd05b6bb030b248d259f9e6a479637fb7",
+          "manifestSha256": "48a827d454cf0f79e526a2ac730213e6e0e37d76d77e9003026ffbe01e923f60"
+        },
+        {
+          "package": "@fips/file-transfer",
+          "version": "0.1.1",
+          "manifestSha256": "ed13780d352e7f079e75485994da84a6cbf8494adf81e8814cdf59268777a28d",
+          "url": "file:vendor/fips-file-transfer-0.1.0.tgz",
+          "integrity": "sha512-M4+KerF8mCx8MjAjnCyJKt1kq0d5Dvq/Ac20TJd0uRgyc3mxriBMYH37HOqnBQ5ehGqiGd9bY7wzrCdqOq8LTw=="
+        }
+      ],
+      "acceptedDependencyRelease": {
+        "source": "d1f7dba4bfbfc6742ee2f597db0432866c1cf3ce",
+        "tree": "46febbe3ca4b3cd24abe0a68bba5c534558499e4",
+        "tag": "runtime-v0.0.61",
+        "receiptSha256": "cf8f626a11c5d1f7f82ae81afcd3f00cb065330fc1fc8cfff3d4718105ceba0c",
+        "metadataSha256": "1959a5d61b96b3f2d42905f4db6c9c466dd5971e552c179a171250692bf006c7",
+        "libraryGatesReused": true,
+        "packages": [
+          {
+            "package": "@fips/core",
+            "version": "0.0.56",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-core-0.0.56.tgz",
+            "integrity": "sha512-vXfPsXWlXIEZFFl6K+x9YCwOhRPQr4gjw+GfWOfuyI1RW1O1tcdKQBcDbIszByNWVCt/Rs8UOAzv+k+iXNlIOQ==",
+            "sha256": "0b044cb417a01a7d495a1675dc4e650af2fec19224c89fe9beb8ccb56d6fc0a0",
+            "bytes": 208695
+          },
+          {
+            "package": "@fips/browser",
+            "version": "0.0.21",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-browser-0.0.21.tgz",
+            "integrity": "sha512-2kg5ffZ2QFufI8Zq9il8DpZYtVHkIVvl4e262hC7Nsqq5prxeIBjMi7lfuyANjiftX0D3Cre75JhlxjO0jmXIg==",
+            "sha256": "3ea2f7e33857e65bf379fd9896a9df8867292cfc31c23567e598abc02c096208",
+            "bytes": 6647
+          },
+          {
+            "package": "@fips/transport-ethernet",
+            "version": "0.0.38",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-ethernet-0.0.38.tgz",
+            "integrity": "sha512-7JRTv4PeRPyJV7ZIdkXwFPlWmxfU7CcissrQ8mZYzi3kM6AQ9H4F43nOA7Roy3bWP0y/lUgpRZMBv0ovBQ7UWw==",
+            "sha256": "28423a6e75b249cfd3d1c28a30abad4b1fb44a7a61878be8fe8753e9a21598fa",
+            "bytes": 11453
+          },
+          {
+            "package": "@fips/transport-memory",
+            "version": "0.0.16",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-memory-0.0.16.tgz",
+            "integrity": "sha512-Yk68SecjBFCgffhN7qyfgEdkB3C86sUhU57dUrx7knyGtzEUTFw12K3qGY8F6wkrQ9wVlZ2PHBkPV0fY86QOdQ==",
+            "sha256": "fd160c62ba8edb2ec2032af966e7d6b24b6ca991d32fd72eb00a626fff8216ef",
+            "bytes": 4215
+          },
+          {
+            "package": "@fips/transport-webrtc",
+            "version": "0.0.60",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-webrtc-0.0.60.tgz",
+            "integrity": "sha512-te9hazkbDXnV4hBYX4pIX594WDY5XVClh9tZCVAm5GzE8bHyoFEAhIpyWiUpbciawaYdRLubkcar3D8A7bViYA==",
+            "sha256": "646d05f2b89336a8a9d38f1d5155d3374ecef27a0bdcb28690c17c04e9a75b12",
+            "bytes": 59924
+          },
+          {
+            "package": "@fips/transport-websocket",
+            "version": "0.0.14",
+            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-websocket-0.0.14.tgz",
+            "integrity": "sha512-B+CUOBXuMwfDzLCnr+QfLf/MuA4wcV+36mqwH+RS0DNRYFcoGgM60MZiwcjFVCb6xzl0ZTUYe9Sla+VJ2MJBnQ==",
+            "sha256": "dd1abad3b581b7326c4506ce6d66902fd05b6bb030b248d259f9e6a479637fb7",
+            "bytes": 17462
+          }
+        ]
+      },
+      "acceptedSourceReceiptSha256": "39aa446d658890a7a1c35cbc04b0cbf024ed6511c051893d65e38d4596436720",
+      "releaseProfilePath": "scripts/release-site.mjs",
+      "releaseProfileSha256": "ec293b2ff127a3a9c310bf48885cf544d6faf47b6dc27883930f50e6ded427ca",
+      "archiveBytes": 1257912,
+      "derivedFromRuntime61Source": "4b34b199d8ed1ee3a174c54b30466129b0e060f6",
+      "sourceInputs": {
+        "src/App.svelte": "14e49bc1262857e22fa339dac508580e0a32eec8f15a511c8b8624a0c2d10bea",
+        "src/lib/deviceSyncLifecycle.ts": "169a3ab56e09807819a5c77f0107c82a0eac83cda3362f01f7e3bb35fc85dd27",
+        "scripts/verify-dependency-lock.mjs": "6c07f2ab7884304fcc562c5081748ab2784d6e05c44f80316382a9362f4b03f4",
+        "vendor/fips-file-transfer-0.1.0.tgz": "fd40ec68ea586d2adf460859ce86794c33b39af5b8f44cfec7d03d851bafc9ef"
+      },
+      "additionalLifecycleUnitCases": 4,
+      "originalPortableUnitFiles": 34,
+      "originalPortableUnitCases": 258,
+      "fileTransferRelease": {
+        "source": "8c7290e63bce040a318c941ff8e1a1dc9a1409e3",
+        "version": "0.1.1",
+        "vendorPath": "vendor/fips-file-transfer-0.1.0.tgz",
+        "archiveSha256": "fd40ec68ea586d2adf460859ce86794c33b39af5b8f44cfec7d03d851bafc9ef",
+        "integrity": "sha512-M4+KerF8mCx8MjAjnCyJKt1kq0d5Dvq/Ac20TJd0uRgyc3mxriBMYH37HOqnBQ5ehGqiGd9bY7wzrCdqOq8LTw==",
+        "members": [
+          {
+            "path": "package/LICENSE",
+            "bytes": 1102,
+            "sha256": "f87d2b9e05dde538dbbfa5adfb22fb1d45904ea3c8350c5f91f6ece35135fd7f"
+          },
+          {
+            "path": "package/dist/files.js",
+            "bytes": 6454,
+            "sha256": "eb97a6b67ec0a72960f31d54e33e3dd4f8780c4dfdc0a8c75683eaab8c4284c2"
+          },
+          {
+            "path": "package/dist/index.js",
+            "bytes": 19015,
+            "sha256": "fd9276f6ee1988d618b4da0264d6647c1fd4723901df3eb03c8e94adcbe6f9c1"
+          },
+          {
+            "path": "package/dist/protocol.js",
+            "bytes": 11304,
+            "sha256": "88302ea63f0bf37a09721732cc948c0b254e37fdfe4388051364303a31c2ded6"
+          },
+          {
+            "path": "package/dist/state.js",
+            "bytes": 1504,
+            "sha256": "c509c6728f74c13dc80f734dc3fcb188efc5a2ff90a70f167ad80bb9477f012a"
+          },
+          {
+            "path": "package/dist/types.js",
+            "bytes": 11,
+            "sha256": "8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881"
+          },
+          {
+            "path": "package/dist/wire.js",
+            "bytes": 7067,
+            "sha256": "ad1042652ea772a0917613b00f2f8c20d2ebf93d2431d801e498667b70939916"
+          },
+          {
+            "path": "package/dist/work.js",
+            "bytes": 1027,
+            "sha256": "cbe6155c60d4e4de58e370434c8f79ca61bb8cfe303b570ecbfc631e4603d9d1"
+          },
+          {
+            "path": "package/package.json",
+            "bytes": 1003,
+            "sha256": "ed13780d352e7f079e75485994da84a6cbf8494adf81e8814cdf59268777a28d"
+          },
+          {
+            "path": "package/README.md",
+            "bytes": 1094,
+            "sha256": "c2520141d72a014d714f846a85e7bddbdcb59d3daed85751496a8db6a612f9b5"
+          },
+          {
+            "path": "package/dist/files.d.ts",
+            "bytes": 1182,
+            "sha256": "9fb2ffb7fa73fb029e852c445f5b5005712aec4cbac364261f804aef98d0d6ac"
+          },
+          {
+            "path": "package/src/files.ts",
+            "bytes": 5929,
+            "sha256": "2ebc46e1af1afa37f4bd4ec9e9e329e622f5bd4033581face2f4f9563837050e"
+          },
+          {
+            "path": "package/dist/index.d.ts",
+            "bytes": 1499,
+            "sha256": "f7222e112eff7dcf2bd49916fa94b13a5d03160181b22aca1e6e018e38d8d929"
+          },
+          {
+            "path": "package/src/index.ts",
+            "bytes": 16919,
+            "sha256": "c5c7610f00041673801ddb1fb11bc06da19d8e8c07130f6f658f6f896d355cf6"
+          },
+          {
+            "path": "package/dist/protocol.d.ts",
+            "bytes": 345,
+            "sha256": "32df51833b78ea230ab8de8d19019a7ecb3a3bd7185196b7388aed6ffa7d8beb"
+          },
+          {
+            "path": "package/src/protocol.ts",
+            "bytes": 10426,
+            "sha256": "521ff35d99d76f0a5513d7713fbdb43caf88b4c278f341c335bc803210b73c04"
+          },
+          {
+            "path": "package/dist/state.d.ts",
+            "bytes": 2080,
+            "sha256": "f57590c7c85a3f8ed52797fbac1a40ce426fe5f946252aa2aeaae0ae06e49fdf"
+          },
+          {
+            "path": "package/src/state.ts",
+            "bytes": 2918,
+            "sha256": "6257ce25caf21156b5eb972c51da3e58d2228dd82d73139119e503561d573810"
+          },
+          {
+            "path": "package/dist/types.d.ts",
+            "bytes": 2303,
+            "sha256": "a7f8689d22489d7ab12823ca2d53c9f75f99da29977dbfc467c03f3183415b34"
+          },
+          {
+            "path": "package/src/types.ts",
+            "bytes": 2220,
+            "sha256": "681083f51c7f3db36ca81821fd2703dd5a656f9065eabfad7ee8976941b7696a"
+          },
+          {
+            "path": "package/dist/wire.d.ts",
+            "bytes": 1998,
+            "sha256": "a496da578601f99e56e194640b10603e7ef1876b566a1b1d954dde4a83aea07b"
+          },
+          {
+            "path": "package/src/wire.ts",
+            "bytes": 7775,
+            "sha256": "a6108bba200cac564860a0500a7d717af5d5666f7ca45d78e5d686313fb8431b"
+          },
+          {
+            "path": "package/dist/work.d.ts",
+            "bytes": 725,
+            "sha256": "5516dc2b659b75096eecc0a29fe5750567028b83e28351b54961e323fc0f8571"
+          },
+          {
+            "path": "package/src/work.ts",
+            "bytes": 1423,
+            "sha256": "3ee1bd98bc7083702aa9f7767a867f6ece35b149e7de2c2bb8ce220f80c34f46"
+          }
+        ],
+        "typescriptRunId": 42641791677,
+        "rootScopedAcceptanceSha256": "0238c4d5cce94d0f4bdc6ba626b6015de95069134eafaa83fb245121bb5fabd9",
+        "packageProvenanceSha256": "72e39510b4c9918e3b3350f891e81b12bcf463f1a649a6ca0de5c78177aec6e8",
+        "liveInteropPending": true,
+        "publicSourceClosurePending": true,
+        "fullReleaseAccepted": false
+      }
+    }
+  ],
+  "acceptedImageProof": {
+    "path": "accepted-image-proof.json",
+    "sha256": "7c20abd24c0db92b8c16e511a61e8e9616471bd519427681f3d8316ec4f8f368"
+  },
+  "hostedDiskPolicy": {
+    "entryBytes": 21474836480,
+    "floorBytes": 8589934592,
+    "commandSampleSeconds": 0.5
+  },
+  "node": "v26.13.0"
+}

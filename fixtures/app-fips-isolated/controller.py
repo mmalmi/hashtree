@@ -1,3 +1,4 @@
+import zipfile,stat
 """Task-only, hash-pinned browser qualification. Never builds native code."""
 import hashlib,json,os,pathlib,shutil,signal,subprocess,sys,tarfile,time,urllib.request
 HERE=pathlib.Path(__file__).resolve().parent
@@ -41,13 +42,14 @@ def cleanup():
 def interrupted(signum,frame):
     cleanup();raise SystemExit(128+signum)
 for signum in (signal.SIGTERM,signal.SIGINT):signal.signal(signum,interrupted)
-def run(args,log,timeout=300,allow_failure=False):
+def run(args,log,timeout=300,allow_failure=False,extra_env=None):
     global PROCESS
     assert time.monotonic()-START<4200,'Overall deadline'
     disk_guard()
     p=EVIDENCE/log;assert not p.exists(),'Preserve prior evidence'
     with p.open('wb') as output:
-        PROCESS=subprocess.Popen(args,env=SAFE_ENV,stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
+        assert extra_env is None or set(extra_env)=={'GH_TOKEN'}
+        PROCESS=subprocess.Popen(args,env=SAFE_ENV|(extra_env or {}),stdout=output,stderr=subprocess.STDOUT,start_new_session=True)
         process=PROCESS;deadline=time.monotonic()+timeout
         try:
             while True:
@@ -110,6 +112,30 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
         return code
     finally:cleanup()
 
+def prior_artifact(app):
+    binding=app['priorEvidence'];assert binding['source']==app['commit']
+    assert binding['artifactBytes']<512*1024**2 and binding['uncompressedBytes']<2*1024**3
+    run(['gh','api',f"repos/mmalmi/hashtree/actions/artifacts/{binding['artifactId']}/zip"],
+        'prior-artifact.zip',180,extra_env={'GH_TOKEN':os.environ['GH_TOKEN']})
+    archive=EVIDENCE/'prior-artifact.zip'
+    assert archive.stat().st_size==binding['artifactBytes'] and sha(archive)==binding['artifactSha256']
+    assert sha(HERE/'prior-members.json')==binding['membersSha256']
+    expected={r['path']:r for r in json.loads((HERE/'prior-members.json').read_text())}
+    prior=STAGE/'earlier';assert not prior.exists();prior.mkdir()
+    with zipfile.ZipFile(archive) as zipped:
+        infos=zipped.infolist();names=[i.filename for i in infos];assert len(names)==len(set(names))
+        assert sum(i.file_size for i in infos)==binding['uncompressedBytes']
+        assert {i.filename for i in infos if not i.is_dir()}==set(expected)
+        for info in infos:
+            name=pathlib.PurePosixPath(info.filename)
+            assert not name.is_absolute() and '..' not in name.parts and not stat.S_ISLNK(info.external_attr>>16)
+            if info.is_dir():continue
+            data=zipped.read(info);row=expected[info.filename]
+            assert len(data)==row['bytes'] and hashlib.sha256(data).hexdigest()==row['sha256']
+            target=prior/info.filename;target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(data)
+    assert sha(prior/'chat/qualified-dist.tar.gz')==binding['distArchiveSha256']
+    return prior
+
 def prepare():
     assert not STAGE.exists(),'Use one empty task stage'
     disk_guard(entry=True)
@@ -124,14 +150,21 @@ def prepare():
     for app in APPS:
         archive=HERE/app['archive'];assert sha(archive)==app['archiveSha256']
         target=STAGE/'apps'/app['id'];extract(archive,target)
+        prior=prior_artifact(app)
+        assert not (target/'dist').exists()
+        extract(prior/'chat/qualified-dist.tar.gz',target/'dist')
         assert sha(target/'pnpm-lock.yaml')==app['lockSha256']
         assert json.loads((target/'package.json').read_text())['packageManager']==app['packageManager']
         for file,digest in app['testFiles'].items():assert sha(target/file)==digest
         for file,digest in app['sourceInputs'].items():assert sha(target/file)==digest
+        for relative,item in app['testOverlays'].items():
+            assert sha(HERE/item['file'])==item['sha256']
+            destination=target/relative;assert not destination.exists()
+            destination.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(HERE/item['file'],destination)
         assert sha(target/'package.json')==app['packageSha256']
         run(['python3',str(HERE/'apply-app-overlay.py'),app['id'],str(STAGE)],'overlay-'+app['id']+'.log',10)
         docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
-    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'buildFromExactSource':True},indent=2)+'\n')
+    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'buildFromExactSource':False,'reusedExactBuiltArchive':True},indent=2)+'\n')
 
 def test():
     assert json.loads((EVIDENCE/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json')

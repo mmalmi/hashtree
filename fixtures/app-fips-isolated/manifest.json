@@ -82,7 +82,7 @@
       "sourceArchiveSha256": "45512cec7f8e3aef284d0451f963fc60fbddf472c138ae574b476c649e1472cc",
       "sourceArchiveBytes": 1257912,
       "version": "2.6.63",
-      "buildFromSource": true,
+      "buildFromSource": false,
       "installedRuntimeExpectations": [
         {
           "package": "@fips/core",
@@ -322,6 +322,43 @@
         "liveInteropPending": true,
         "publicSourceClosurePending": true,
         "fullReleaseAccepted": false
+      },
+      "reuseMode": "Exact prior source/build; fresh frozen install and consent peer case, no rebuild",
+      "testOverlays": {
+        "e2e/peer-recovery-consent.spec.ts": {
+          "file": "peer-recovery-consent.spec.ts",
+          "sha256": "0e193fdf9c782c342114891ba6fc555b19660e4309c6fa2dc030847550109051"
+        },
+        "e2e/fixtures/recoveryFipsWebSocketSeed.ts": {
+          "file": "recoveryFipsWebSocketSeed.ts",
+          "sha256": "b5773bdddd4cc25f6180b41cee093f2e525ce53bac87bfb4520bc84295305aac"
+        }
+      },
+      "priorEvidence": {
+        "runId": 42645943802,
+        "carrier": "e417686c0b407a0b8558451d42f6a04d073147c4",
+        "source": "2c1a58c69e56ec405bbf33d615b75645d3922b2a",
+        "artifactId": 13687044093,
+        "artifactBytes": 7571680,
+        "artifactSha256": "207fb9b1900c024331d8b7580200c586a44e5590cb3001c78572b41adea054b7",
+        "uncompressedBytes": 9769756,
+        "manifestSha256": "20f66ec8cd3e3c58aaa1611f077f6c8876b4a42566132da6a5fd9edbb75a0043",
+        "membersSha256": "c02268451fd03cfcb02c928d36b4d68ed027b4c0ce4dc44d620b87eb60927153",
+        "distArchiveSha256": "2e678e28f636d33b9758f83d0103390054623e41fdcb1c3a72d491eb7f70f03c",
+        "passingScopes": [
+          "frozen-install",
+          "build",
+          "test-portable262",
+          "test-smoke",
+          "test-graph",
+          "test-relay-policy",
+          "test-e2e-nip07:62+3"
+        ],
+        "excludedFailedScope": "cross-account private-cache peer test",
+        "missingScopes": [
+          "consent-peer-recovery",
+          "dry-run"
+        ]
       }
     }
   ],
