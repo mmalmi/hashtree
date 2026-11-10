@@ -2,6 +2,48 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-10 - Streamed Encrypted Files and Directory Adds
+
+Question: after the core moved to versioned encryption and one range reader,
+which of the earlier read-path and `htree add` changes still pay for
+themselves?
+
+Each row compares the parent revision with this change on an Apple silicon
+Mac, three runs each, default release profile. Other builds were running on
+the host. The library rows use `MemoryStore` and a deterministic pseudo-random
+buffer; the `htree add --local` rows are wall time of the command with a fresh
+data directory per run and include the first, cold run.
+
+| Operation | Before | After |
+| --- | ---: | ---: |
+| Encrypted 64 MiB file served as 256 KiB pieces | 315-323 ms | 40-41 ms |
+| Encrypted 256 MiB whole-file `get`, fanout 16 | 167-211 ms | 171-193 ms |
+| `put_stream` of 4,000 encrypted 3 KiB files | 21-22 ms | 21-23 ms |
+| `htree add --local`, 300 files of 1 MiB | 803-1,932 ms | 257-536 ms |
+| `htree add --local`, 4,000 files of 3 KiB | 450-950 ms | 441-678 ms |
+
+1. Serving an encrypted file by CID did one range read from the root per
+   256 KiB piece, decrypting the whole leaf chunk each time. The stream now
+   keeps the current decrypted leaf (`HashTree::read_file_chunk_at`) and
+   slices pieces from it. The first row drives both loops against the library;
+   the HTTP path adds store I/O to both, so the server-level ratio is smaller.
+2. Directory adds hash and encrypt files of 32 KiB and larger on up to four
+   threads. Small files stay sequential: their cost is the serialized store
+   commit, and the 3 KiB row shows no gain.
+3. Whole-file reads append into one buffer instead of concatenating per tree
+   level, and `put_stream` reads into the chunk buffer instead of a zeroed
+   chunk-size scratch buffer. Neither is measurable here. An earlier
+   measurement of the same two changes on a 2-vCPU x86-64 Linux VM, against
+   the pre-versioned-encryption core, showed roughly 510 to 300 ms and 290 to
+   45 ms; that was not repeated on this base.
+
+The same change set moves the CID range stream's and the logical-file route's
+tree reads from async workers to the bounded blocking pool, and reuses one
+runtime for synchronous S3 calls. Neither was measured.
+
+Not measured: the HTTP server end to end, disk or network stores, S3, Linux
+and Windows on this base.
+
 ## 2026-11-10 - Git Repo Tree Build Writes
 
 Question: where does `git-remote-htree` spend time turning imported git

@@ -7,10 +7,33 @@
 - `git-remote-htree` writes a repo tree to the local store in batches instead
   of one transaction per blob, and no longer copies every imported object
   while building it.
+- Encrypted file responses decrypt each chunk once. The CID range stream keeps
+  the current decrypted chunk and slices response pieces from it, instead of
+  re-reading the root and decrypting the whole chunk for every 256 KiB piece.
+- CID range streaming and the logical-file route run their store reads on the
+  bounded blocking pool rather than on async workers.
+- `htree add` on a directory hashes and encrypts files of 32 KiB and larger on
+  up to four threads and builds directory nodes in time linear in the
+  directory count.
+- Whole-file reads assemble into one buffer, and `put_stream` no longer
+  allocates a chunk-size scratch buffer per file.
+- Synchronous S3 calls share one runtime, so the S3 client keeps its
+  connections between calls.
+
+### Fixed
+
+- Range requests for plaintext files large enough to nest interior nodes
+  returned node bytes on the logical-file route; chunk metadata now lists the
+  data chunks.
+- `htree add --only-hash` on an empty directory returns an empty root.
 
 ### Changed
 
 - `git-remote-htree`: remove the unused `GitStorage::hashtree` accessor.
+- `hashtree-core`: add `HashTree::read_file_chunk_at`. `TreeBuilder`,
+  `StreamBuilder` and `TreeReader` are deprecated in favour of `HashTree`.
+- `hashtree-cli`: add `UploadOptions`, `HashtreeStore::upload_file_with` and
+  `upload_dir_with`. The `upload_*_with_chunk_size*` variants are deprecated.
 
 ## 0.2.157 - 2026-10-22
 
