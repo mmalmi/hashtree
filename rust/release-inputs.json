@@ -761,12 +761,12 @@
         "sha256": "891c32ea77b750dccc7fb0ea98e3feb9db3d29fe0cfea5907d002f270c59cf58"
       },
       "sdk": {
-        "xcode_app": "/Applications/Xcode_15.4.app",
-        "xcode_version": "15.4",
-        "xcode_build": "15F31d",
-        "sdk_version": "14.5",
-        "macos_version": "14.8.9",
-        "macos_build": "23J631"
+        "xcode_app": "/Applications/Xcode_16.4.app",
+        "xcode_version": "16.4",
+        "xcode_build": "16F6",
+        "sdk_version": "15.5",
+        "macos_version": "15.8.2",
+        "macos_build": "24H232"
       },
       "target_std": {
         "aarch64-apple-darwin": {
@@ -781,12 +781,12 @@
         "sha256": "c9748cc86107734a2a024069908a895de7caa2d37062fb641eef9f756938ace2"
       },
       "sdk": {
-        "xcode_app": "/Applications/Xcode_15.4.app",
-        "xcode_version": "15.4",
-        "xcode_build": "15F31d",
-        "sdk_version": "14.5",
-        "macos_version": "14.8.9",
-        "macos_build": "23J631"
+        "xcode_app": "/Applications/Xcode_16.4.app",
+        "xcode_version": "16.4",
+        "xcode_build": "16F6",
+        "sdk_version": "15.5",
+        "macos_version": "15.8.2",
+        "macos_build": "24H232"
       },
       "target_std": {
         "x86_64-apple-darwin": {
