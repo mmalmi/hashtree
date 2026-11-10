@@ -399,6 +399,177 @@ async fn test_encrypted_range_reads_do_not_require_unrelated_nested_subtrees() {
 }
 
 #[tokio::test]
+async fn test_public_range_reads_skip_unrelated_nested_subtrees() {
+    let store = Arc::new(CountingStore::default());
+    let tree = HashTree::new(
+        HashTreeConfig::new(store.clone())
+            .public()
+            .with_chunk_size(100)
+            .with_max_links(2),
+    );
+
+    let data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
+    let (cid, _) = tree.put(&data).await.unwrap();
+    let root = tree.get_node(&cid).await.unwrap().unwrap();
+    assert_eq!(root.links.len(), 2, "expected a nested file tree");
+
+    // The tail of the file lives under the second root link; the first
+    // subtree must not be needed, or even read.
+    tree.get_store().delete(&root.links[0].hash).await.unwrap();
+    store.reset_reads();
+
+    let range = tree
+        .read_file_range(&cid.hash, 450, None)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(range, data[450..].to_vec());
+    // Root plus the interior nodes on the path to the last chunk.
+    assert!(store.get_calls.load(Ordering::Relaxed) <= 3);
+    assert_eq!(store.get_range_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(store.get_range_bytes.load(Ordering::Relaxed), 50);
+}
+
+#[tokio::test]
+async fn test_range_and_stream_reads_match_full_read_on_nested_trees() {
+    use futures::StreamExt;
+
+    let data: Vec<u8> = (0..97u32).map(|i| (i * 7 % 251) as u8).collect();
+    for encrypted in [false, true] {
+        let store = Arc::new(MemoryStore::new());
+        let mut config = HashTreeConfig::new(store)
+            .with_chunk_size(7)
+            .with_max_links(3);
+        if !encrypted {
+            config = config.public();
+        }
+        let tree = HashTree::new(config);
+        let (cid, size) = tree.put(&data).await.unwrap();
+        assert_eq!(size, data.len() as u64);
+        assert_eq!(cid.key.is_some(), encrypted);
+
+        assert_eq!(tree.get(&cid, None).await.unwrap(), Some(data.clone()));
+
+        let mut streamed = Vec::new();
+        let mut stream = tree.get_stream(&cid);
+        while let Some(chunk) = stream.next().await {
+            streamed.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(streamed, data);
+
+        for start in 0..=data.len() + 1 {
+            for end in start..=data.len() + 2 {
+                let expected = data
+                    .get(start.min(data.len())..end.min(data.len()))
+                    .unwrap()
+                    .to_vec();
+                let got = tree
+                    .read_file_range_cid(&cid, start as u64, Some(end as u64))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(got, expected, "encrypted={encrypted} range {start}..{end}");
+            }
+            let tail = tree
+                .read_file_range_cid(&cid, start as u64, None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(tail, data[start.min(data.len())..].to_vec());
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_read_file_chunk_at_walks_a_file_leaf_by_leaf() {
+    let data: Vec<u8> = (0..97u32).map(|i| (i * 7 % 251) as u8).collect();
+    for encrypted in [false, true] {
+        let store = Arc::new(CountingStore::default());
+        let mut config = HashTreeConfig::new(store.clone())
+            .with_chunk_size(7)
+            .with_max_links(3);
+        if !encrypted {
+            config = config.public();
+        }
+        let tree = HashTree::new(config);
+        let (cid, _) = tree.put(&data).await.unwrap();
+
+        let mut offset = 0u64;
+        let mut rebuilt = Vec::new();
+        loop {
+            let (start, chunk) = tree
+                .read_file_chunk_at(&cid, offset)
+                .await
+                .unwrap()
+                .unwrap();
+            if chunk.is_empty() {
+                assert_eq!(start, data.len() as u64);
+                break;
+            }
+            assert_eq!(start, offset, "chunks are returned from their first byte");
+            assert!(chunk.len() <= 7);
+            offset += chunk.len() as u64;
+            rebuilt.extend_from_slice(&chunk);
+        }
+        assert_eq!(rebuilt, data);
+
+        // An offset inside a chunk returns that chunk and where it starts.
+        let (start, chunk) = tree.read_file_chunk_at(&cid, 31).await.unwrap().unwrap();
+        assert_eq!(start, 28);
+        assert_eq!(chunk, data[28..35].to_vec());
+
+        // One leaf costs the root plus the nodes on its path, never the file.
+        store.reset_reads();
+        tree.read_file_chunk_at(&cid, 90).await.unwrap().unwrap();
+        assert!(store.get_calls.load(Ordering::Relaxed) <= 5);
+    }
+
+    // A single-blob file is its own only chunk; a missing root is None.
+    let tree = HashTree::new(HashTreeConfig::new(Arc::new(MemoryStore::new())));
+    let (cid, _) = tree.put(b"small").await.unwrap();
+    assert_eq!(
+        tree.read_file_chunk_at(&cid, 3).await.unwrap(),
+        Some((0, b"small".to_vec()))
+    );
+    let missing = Cid::public([9u8; 32]);
+    assert_eq!(tree.read_file_chunk_at(&missing, 0).await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn test_put_stream_matches_put_for_short_reads() {
+    // A reader that hands out a few bytes at a time must still produce
+    // full-size chunks, identical to an in-memory put.
+    struct Trickle(Vec<u8>, usize);
+    impl futures::io::AsyncRead for Trickle {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            buf: &mut [u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let remaining = self.0.len() - self.1;
+            let n = remaining.min(buf.len()).min(3);
+            let at = self.1;
+            buf[..n].copy_from_slice(&self.0[at..at + n]);
+            self.1 += n;
+            std::task::Poll::Ready(Ok(n))
+        }
+    }
+
+    let data: Vec<u8> = (0..1000u32).map(|i| (i % 253) as u8).collect();
+    for encrypted in [false, true] {
+        let mut config = HashTreeConfig::new(Arc::new(MemoryStore::new())).with_chunk_size(64);
+        if !encrypted {
+            config = config.public();
+        }
+        let tree = HashTree::new(config);
+        let (expected, _) = tree.put(&data).await.unwrap();
+        let (streamed, size) = tree.put_stream(Trickle(data.clone(), 0)).await.unwrap();
+        assert_eq!(size, data.len() as u64);
+        assert_eq!(streamed, expected);
+    }
+}
+
+#[tokio::test]
 async fn test_cid_deterministic() {
     let store = Arc::new(MemoryStore::new());
     let tree = HashTree::new(HashTreeConfig::new(store));
