@@ -15,6 +15,7 @@
  * Format: [12-byte IV][ciphertext][16-byte auth tag]
  */
 
+import { cryptoInput } from './cryptoInput.js';
 import { sha256 } from './hash.js';
 
 /** 32-byte encryption key (256 bits) */
@@ -49,12 +50,9 @@ export function generateKey(): EncryptionKey {
  * Import raw key bytes as CryptoKey for AES-GCM
  */
 async function importKey(key: EncryptionKey): Promise<CryptoKey> {
-  // Copy to ensure we have a clean ArrayBuffer (not SharedArrayBuffer)
-  const keyBuffer = new ArrayBuffer(key.length);
-  new Uint8Array(keyBuffer).set(key);
   return crypto.subtle.importKey(
     'raw',
-    keyBuffer,
+    cryptoInput(key),
     { name: 'AES-GCM', length: 256 },
     false,
     ['encrypt', 'decrypt']
@@ -68,12 +66,9 @@ async function importKey(key: EncryptionKey): Promise<CryptoKey> {
  */
 async function deriveKey(contentHash: EncryptionKey): Promise<CryptoKey> {
   // Import content hash as HKDF key material
-  const keyBuffer = new ArrayBuffer(contentHash.length);
-  new Uint8Array(keyBuffer).set(contentHash);
-
   const hkdfKey = await crypto.subtle.importKey(
     'raw',
-    keyBuffer,
+    cryptoInput(contentHash),
     { name: 'HKDF' },
     false,
     ['deriveKey']
@@ -126,15 +121,11 @@ export async function encryptChk(plaintext: Uint8Array): Promise<{ ciphertext: U
   // 3. Zero nonce - safe because same key = same content with CHK
   const zeroNonce = new Uint8Array(IV_SIZE);
 
-  // 4. Copy plaintext to clean ArrayBuffer for WebCrypto
-  const plaintextBuffer = new ArrayBuffer(plaintext.length);
-  new Uint8Array(plaintextBuffer).set(plaintext);
-
-  // 5. Encrypt
+  // 4. Encrypt
   const ciphertext = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv: zeroNonce },
     cryptoKey,
-    plaintextBuffer
+    cryptoInput(plaintext)
   );
 
   return {
@@ -165,14 +156,10 @@ export async function decryptChk(ciphertext: Uint8Array, key: EncryptionKey): Pr
   // Zero nonce
   const zeroNonce = new Uint8Array(IV_SIZE);
 
-  // Copy ciphertext to clean ArrayBuffer for WebCrypto
-  const ciphertextBuffer = new ArrayBuffer(ciphertext.length);
-  new Uint8Array(ciphertextBuffer).set(ciphertext);
-
   const plaintext = await crypto.subtle.decrypt(
     { name: 'AES-GCM', iv: zeroNonce },
     cryptoKey,
-    ciphertextBuffer
+    cryptoInput(ciphertext)
   );
 
   const bytes = new Uint8Array(plaintext);
@@ -206,14 +193,10 @@ export async function encrypt(plaintext: Uint8Array, key: EncryptionKey): Promis
 
   const cryptoKey = await importKey(key);
 
-  // Copy plaintext to clean ArrayBuffer for WebCrypto
-  const plaintextBuffer = new ArrayBuffer(plaintext.length);
-  new Uint8Array(plaintextBuffer).set(plaintext);
-
   const ciphertext = await crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
     cryptoKey,
-    plaintextBuffer
+    cryptoInput(plaintext)
   );
 
   // Prepend IV to ciphertext
