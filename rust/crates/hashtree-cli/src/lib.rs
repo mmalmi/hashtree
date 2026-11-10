@@ -39,6 +39,7 @@ pub use hashtree_resolver::{
 pub use server::HashtreeServer;
 pub use storage::{
     AddProgress, AddProgressSnapshot, CachedRoot, HashtreeStore, StorageByPriority, TreeMeta,
-    LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, PRIORITY_FOLLOWED, PRIORITY_OTHER, PRIORITY_OWN,
+    UploadOptions, LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, PRIORITY_FOLLOWED, PRIORITY_OTHER,
+    PRIORITY_OWN,
 };
 pub use sync::{BackgroundSync, SyncConfig, SyncPriority, SyncStatus, SyncTask};

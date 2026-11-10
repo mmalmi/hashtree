@@ -36,7 +36,9 @@ mod nested_file_tests;
 #[cfg(all(test, feature = "s3"))]
 mod s3_sync_tests;
 mod upload;
-pub use upload::{AddProgress, AddProgressSnapshot};
+#[cfg(test)]
+mod upload_tests;
+pub use upload::{add_directory_to_tree, AddProgress, AddProgressSnapshot, UploadOptions};
 
 mod maintenance;
 mod quota;

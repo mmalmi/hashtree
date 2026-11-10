@@ -2,10 +2,11 @@ use anyhow::{Context, Result};
 use hashtree_cli::config::ensure_keys_string;
 use hashtree_cli::{
     AddProgress, AddProgressSnapshot, Config, HashtreeStore, NostrKeys, NostrResolverConfig,
-    NostrRootResolver, NostrToBech32, RootResolver, LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, PRIORITY_OWN,
+    NostrRootResolver, NostrToBech32, RootResolver, UploadOptions,
+    LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME, PRIORITY_OWN,
 };
 use hashtree_core::{
-    from_hex, nhash_encode, nhash_encode_full, Cid, HashTree, HashTreeConfig, NHashData, ObjectKey,
+    from_hex, nhash_encode_full, Cid, HashTree, HashTreeConfig, NHashData, ObjectKey,
 };
 use std::ffi::OsString;
 use std::io::{IsTerminal, Write};
@@ -125,7 +126,6 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
         local,
         cache,
     } = options;
-    let _local_add_env = local.then(|| apply_local_add_env(&data_dir));
     let is_dir = path.is_dir();
     anyhow::ensure!(cache.is_none() || is_dir, "add cache requires a directory");
     let show_progress = add_progress_enabled();
@@ -199,91 +199,49 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
             if show_progress {
                 discover_add_input(&path, !no_ignore, progress.as_ref())?;
             }
-            if let Some(cache) = cache.as_deref() {
+            let upload_options = if unencrypted {
+                UploadOptions::public()
+            } else {
+                UploadOptions::encrypted()
+            }
+            .with_chunk_size(chunk_size)
+            .with_respect_gitignore(!no_ignore)
+            .with_progress(progress.as_ref());
+            let cid_str = if let Some(cache) = cache.as_deref() {
                 #[cfg(not(unix))]
                 {
                     let _ = cache;
                     anyhow::bail!("directory add caching requires Unix file identity metadata");
                 }
                 #[cfg(unix)]
-                {
-                    let cid = hashtree_core::Cid::parse(&store.upload_dir_cached_with_progress(
-                        &path,
-                        !no_ignore,
-                        chunk_size,
-                        !unencrypted,
-                        progress.as_ref(),
-                        cache,
-                    )?)?;
-                    let hash_hex = hashtree_core::to_hex(&cid.hash);
-                    let key_hex = cid.key.map(|key| hashtree_core::to_hex(&key));
-                    let nhash = nhash_encode_full(&NHashData {
-                        hash: cid.hash,
-                        decrypt_key: cid.key,
-                    })?;
-                    Ok((cid.to_string(), hash_hex, key_hex, nhash))
-                }
-            } else if unencrypted {
-                let hash_hex = if is_dir {
-                    store
-                        .upload_dir_with_options_and_chunk_size_and_progress(
-                            &path,
-                            !no_ignore,
-                            chunk_size,
-                            progress.as_ref(),
-                        )
-                        .context("Failed to add directory")?
-                } else {
-                    store
-                        .upload_file_with_chunk_size_and_progress(
-                            &path,
-                            chunk_size,
-                            progress.as_ref(),
-                        )
-                        .context("Failed to add file")?
-                };
-                let hash = from_hex(&hash_hex).context("Invalid hash")?;
-                let nhash = nhash_encode(&hash)
-                    .map_err(|e| anyhow::anyhow!("Failed to encode nhash: {}", e))?;
-                Ok((hash_hex.clone(), hash_hex, None, nhash))
+                store.upload_dir_cached_with_progress(
+                    &path,
+                    !no_ignore,
+                    chunk_size,
+                    !unencrypted,
+                    progress.as_ref(),
+                    cache,
+                )?
+            } else if is_dir {
+                store
+                    .upload_dir_with(&path, upload_options)
+                    .context("Failed to add directory")?
             } else {
-                let cid_str = if is_dir {
-                    store
-                        .upload_dir_encrypted_with_options_and_chunk_size_and_progress(
-                            &path,
-                            !no_ignore,
-                            chunk_size,
-                            progress.as_ref(),
-                        )
-                        .context("Failed to add directory")?
-                } else {
-                    store
-                        .upload_file_encrypted_with_chunk_size_and_progress(
-                            &path,
-                            chunk_size,
-                            progress.as_ref(),
-                        )
-                        .context("Failed to add file")?
-                };
-                let (hash_hex, key_hex) = if let Some((h, k)) = cid_str.split_once(':') {
-                    (h.to_string(), Some(k.to_string()))
-                } else {
-                    (cid_str.clone(), None)
-                };
-                let hash = from_hex(&hash_hex).context("Invalid hash")?;
-                let key = key_hex
-                    .as_ref()
-                    .map(|k| ObjectKey::from_hex(k))
-                    .transpose()
-                    .map_err(|e| anyhow::anyhow!("Invalid key: {}", e))?;
-                let nhash_data = NHashData {
-                    hash,
-                    decrypt_key: key,
-                };
-                let nhash = nhash_encode_full(&nhash_data)
-                    .map_err(|e| anyhow::anyhow!("Failed to encode nhash: {}", e))?;
-                Ok((cid_str, hash_hex, key_hex, nhash))
-            }
+                store
+                    .upload_file_with(&path, upload_options)
+                    .context("Failed to add file")?
+            };
+            // Every path returns the CID as "hash" or "hash:key".
+            let cid = hashtree_core::Cid::parse(&cid_str)
+                .map_err(|e| anyhow::anyhow!("Invalid CID from add: {}", e))?;
+            let hash_hex = hashtree_core::to_hex(&cid.hash);
+            let key_hex = cid.key.map(|key| hashtree_core::to_hex(&key));
+            let nhash = nhash_encode_full(&NHashData {
+                hash: cid.hash,
+                decrypt_key: cid.key,
+            })
+            .map_err(|e| anyhow::anyhow!("Failed to encode nhash: {}", e))?;
+            Ok((cid_str, hash_hex, key_hex, nhash))
         })?;
 
     let path_display = path.display().to_string();
@@ -407,70 +365,41 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
     Ok(())
 }
 
-struct EnvVarGuard {
-    name: &'static str,
-    previous: Option<OsString>,
-}
-
-impl EnvVarGuard {
-    fn set(name: &'static str, value: impl Into<OsString>) -> Self {
-        let previous = std::env::var_os(name);
-        let value = value.into();
-        std::env::set_var(name, value);
-        Self { name, previous }
-    }
-
-    fn set_if_missing(name: &'static str, value: impl Into<OsString>) -> Option<Self> {
-        if std::env::var_os(name).is_some() {
-            None
-        } else {
-            Some(Self::set(name, value))
+/// Tune the local store for a one-shot `add --local`: no fsync per commit and
+/// large blobs kept as external pack files. The settings are read by the
+/// storage layer from the environment, so this must run before any other
+/// thread exists; the caller is `run()`, ahead of the tokio runtime. Values
+/// the user already set for the tunable ones are left alone.
+pub(crate) fn apply_local_add_env(data_dir: &Path) {
+    let set = |name: &str, value: OsString| std::env::set_var(name, value);
+    let set_if_missing = |name: &str, value: OsString| {
+        if std::env::var_os(name).is_none() {
+            std::env::set_var(name, value);
         }
-    }
-}
+    };
 
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        if let Some(value) = self.previous.as_ref() {
-            std::env::set_var(self.name, value);
-        } else {
-            std::env::remove_var(self.name);
-        }
-    }
-}
-
-fn apply_local_add_env(data_dir: &Path) -> Vec<EnvVarGuard> {
-    let mut guards = vec![
-        EnvVarGuard::set(LMDB_NO_READ_AHEAD_ENV, "1"),
-        EnvVarGuard::set(LMDB_NO_SYNC_ENV, "1"),
-        EnvVarGuard::set(LMDB_NO_META_SYNC_ENV, "1"),
-        EnvVarGuard::set(LMDB_EXTERNAL_BLOB_SYNC_ENV, "0"),
-        EnvVarGuard::set(
-            STREAM_PUT_BATCH_TARGET_BYTES_ENV,
-            LOCAL_ADD_STREAM_BATCH_TARGET_BYTES,
-        ),
-    ];
-    if let Some(guard) = EnvVarGuard::set_if_missing(
+    set(LMDB_NO_READ_AHEAD_ENV, "1".into());
+    set(LMDB_NO_SYNC_ENV, "1".into());
+    set(LMDB_NO_META_SYNC_ENV, "1".into());
+    set(LMDB_EXTERNAL_BLOB_SYNC_ENV, "0".into());
+    set(
+        STREAM_PUT_BATCH_TARGET_BYTES_ENV,
+        LOCAL_ADD_STREAM_BATCH_TARGET_BYTES.into(),
+    );
+    set_if_missing(
         LMDB_EXTERNAL_BLOB_MIN_BYTES_ENV,
-        LOCAL_ADD_EXTERNAL_BLOB_MIN_BYTES,
-    ) {
-        guards.push(guard);
-    }
-    if let Some(guard) = EnvVarGuard::set_if_missing(
+        LOCAL_ADD_EXTERNAL_BLOB_MIN_BYTES.into(),
+    );
+    set_if_missing(
         LMDB_EXTERNAL_BLOB_DIR_ENV,
         data_dir
             .join(LOCAL_ADD_EXTERNAL_BLOB_DIR_NAME)
             .into_os_string(),
-    ) {
-        guards.push(guard);
-    }
-    if let Some(guard) = EnvVarGuard::set_if_missing(
+    );
+    set_if_missing(
         LMDB_EXTERNAL_BLOB_PACK_TARGET_BYTES_ENV,
-        LOCAL_ADD_STREAM_BATCH_TARGET_BYTES,
-    ) {
-        guards.push(guard);
-    }
-    guards
+        LOCAL_ADD_STREAM_BATCH_TARGET_BYTES.into(),
+    );
 }
 
 fn add_progress_enabled() -> bool {

@@ -1,4 +1,4 @@
-use hashtree_cli::{AddProgress, HashtreeStore};
+use hashtree_cli::{AddProgress, HashtreeStore, UploadOptions};
 use hashtree_core::{from_hex, is_tree_node, Cid};
 
 #[test]
@@ -59,7 +59,10 @@ fn upload_file_with_large_chunk_size_stores_single_blob() {
     std::fs::write(&source_path, &source).expect("write source");
 
     let hash_hex = store
-        .upload_file_with_chunk_size(&source_path, Some(8 * 1024 * 1024))
+        .upload_file_with(
+            &source_path,
+            UploadOptions::public().with_chunk_size(Some(8 * 1024 * 1024)),
+        )
         .expect("upload public with large chunk size");
     let hash = from_hex(&hash_hex).expect("hash");
     let stored = store
@@ -85,7 +88,12 @@ fn upload_file_progress_records_bytes_and_file_count() {
 
     let progress = AddProgress::new();
     store
-        .upload_file_with_chunk_size_and_progress(&source_path, Some(64 * 1024), &progress)
+        .upload_file_with(
+            &source_path,
+            UploadOptions::public()
+                .with_chunk_size(Some(64 * 1024))
+                .with_progress(&progress),
+        )
         .expect("upload with progress");
 
     let snapshot = progress.snapshot();
@@ -107,7 +115,12 @@ fn upload_directory_progress_records_nested_files_and_bytes() {
 
     let progress = AddProgress::new();
     let root_hex = store
-        .upload_dir_with_options_and_chunk_size_and_progress(&dir, true, Some(64), &progress)
+        .upload_dir_with(
+            &dir,
+            UploadOptions::public()
+                .with_chunk_size(Some(64))
+                .with_progress(&progress),
+        )
         .expect("upload dir with progress");
 
     let snapshot = progress.snapshot();
