@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+## @hashtree/core 0.4.1 - 2026-11-10
+
+- Hashing and encryption no longer copy each chunk before the WebCrypto
+  call.
+
 ## TypeScript runtime 0.5.21 - 2026-10-08
 
 - FIPS transport 0.4.22 uses TCP/FIPS 0.2.3, avoiding unnecessary retransmission

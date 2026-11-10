@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use std::sync::Arc;
 
 use futures::io::Cursor;

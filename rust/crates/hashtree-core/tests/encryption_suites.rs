@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use hashtree_core::encryption::{decrypt_object, encrypt_object, EncryptionMode, ObjectKey};
 use hashtree_core::{crypto, sha256};
 

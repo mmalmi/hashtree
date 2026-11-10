@@ -45,7 +45,7 @@ fn collect_source_files(dir: &Path) -> Vec<(String, Vec<u8>)> {
     files
 }
 
-fn run_benchmark(backend: &str, files: &[(String, Vec<u8>)]) -> (u128, u128, u128, u64) {
+fn run_benchmark(backend: &str, files: &[(String, Vec<u8>)]) -> (u128, u128, u128, u128, u64) {
     let temp = TempDir::new().unwrap();
     let storage_dir = temp.path().join("storage");
     std::fs::create_dir_all(&storage_dir).unwrap();
@@ -76,6 +76,8 @@ backend = "{}"
         oids.push(oid);
     }
 
+    let compress_time = start.elapsed().as_millis();
+
     // Build the merkle tree
     let _root = storage.build_tree().unwrap();
     let write_time = start.elapsed().as_millis();
@@ -92,7 +94,13 @@ backend = "{}"
     // Get storage size
     let storage_size = dir_size(&storage_dir);
 
-    (open_time, write_time, read_time, storage_size)
+    (
+        open_time,
+        compress_time,
+        write_time,
+        read_time,
+        storage_size,
+    )
 }
 
 fn dir_size(path: &Path) -> u64 {
@@ -130,8 +138,13 @@ fn main() {
 
     // Run FS benchmark
     println!("--- Filesystem Backend ---");
-    let (fs_open, fs_write, fs_read, fs_size) = run_benchmark("fs", &files);
+    let (fs_open, fs_compress, fs_write, fs_read, fs_size) = run_benchmark("fs", &files);
     println!("  Open:  {}", format_duration(fs_open));
+    println!(
+        "  Compress objects: {}, build tree: {}",
+        format_duration(fs_compress),
+        format_duration(fs_write - fs_compress)
+    );
     println!(
         "  Write: {} ({:.1} MB/s)",
         format_duration(fs_write),
@@ -146,8 +159,14 @@ fn main() {
 
     // Run LMDB benchmark
     println!("\n--- LMDB Backend ---");
-    let (lmdb_open, lmdb_write, lmdb_read, lmdb_size) = run_benchmark("lmdb", &files);
+    let (lmdb_open, lmdb_compress, lmdb_write, lmdb_read, lmdb_size) =
+        run_benchmark("lmdb", &files);
     println!("  Open:  {}", format_duration(lmdb_open));
+    println!(
+        "  Compress objects: {}, build tree: {}",
+        format_duration(lmdb_compress),
+        format_duration(lmdb_write - lmdb_compress)
+    );
     println!(
         "  Write: {} ({:.1} MB/s)",
         format_duration(lmdb_write),

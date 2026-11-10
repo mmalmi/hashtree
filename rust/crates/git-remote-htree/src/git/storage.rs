@@ -15,7 +15,7 @@ use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
 use flate2::Compression;
 use hashtree_config::{Config, StorageBackend};
-use hashtree_core::store::{Store, StoreError, StoreStats};
+use hashtree_core::store::{BufferedStore, Store, StoreError, StoreStats};
 use hashtree_core::types::Hash;
 use hashtree_core::{Cid, DirEntry, HashTree, HashTreeConfig, LinkType};
 use hashtree_fs::FsBlobStore;
@@ -37,6 +37,9 @@ use super::{Error, Result};
 /// Box type for async recursion
 type BoxFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output = T> + Send + 'a>>;
 pub(crate) const GIT_TREE_CHUNK_SIZE: usize = 64 * 1024;
+/// Tree-build writes are committed to the local store in batches of about
+/// this many bytes, so a transactional backend commits per batch, not per blob.
+const TREE_WRITE_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
 struct BaseObjectSources<'a, S: Store> {
     objects: &'a HashMap<String, Vec<u8>>,
@@ -221,6 +224,17 @@ impl Store for LocalStore {
         }
     }
 
+    async fn put_many(
+        &self,
+        items: Vec<(Hash, Vec<u8>)>,
+    ) -> std::result::Result<usize, StoreError> {
+        match self {
+            LocalStore::Fs(store) => store.put_many(items).await,
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(store) => store.put_many(items).await,
+        }
+    }
+
     async fn get(&self, hash: &Hash) -> std::result::Result<Option<Vec<u8>>, StoreError> {
         match self {
             LocalStore::Fs(store) => store.get(hash).await,
@@ -318,7 +332,9 @@ impl Store for LocalStore {
 /// Git storage backed by HashTree with configurable persistence
 pub struct GitStorage {
     store: Arc<LocalStore>,
-    tree: HashTree<LocalStore>,
+    /// Pending tree-build writes; flushed to `store` before a build returns.
+    write_buffer: Arc<BufferedStore<LocalStore>>,
+    tree: HashTree<BufferedStore<LocalStore>>,
     runtime: RuntimeExecutor,
     /// In-memory state for the current session
     objects: std::sync::RwLock<HashMap<String, Vec<u8>>>,
@@ -367,11 +383,21 @@ impl GitStorage {
         );
 
         // Use encrypted mode (default) - blossom servers require encrypted data
-        let tree =
-            HashTree::new(HashTreeConfig::new(store.clone()).with_chunk_size(GIT_TREE_CHUNK_SIZE));
+        // A batch as large as the store's byte limit is kept whole by the
+        // store, so keep batches well under a configured limit.
+        let write_batch_bytes = match usize::try_from(max_size_bytes / 4) {
+            Ok(quarter_limit) if quarter_limit > 0 => TREE_WRITE_BATCH_BYTES.min(quarter_limit),
+            _ => TREE_WRITE_BATCH_BYTES,
+        };
+        let write_buffer =
+            Arc::new(BufferedStore::new(store.clone()).with_flush_threshold(write_batch_bytes));
+        let tree = HashTree::new(
+            HashTreeConfig::new(write_buffer.clone()).with_chunk_size(GIT_TREE_CHUNK_SIZE),
+        );
 
         Ok(Self {
             store,
+            write_buffer,
             tree,
             runtime,
             objects: std::sync::RwLock::new(HashMap::new()),
@@ -1003,20 +1029,25 @@ impl GitStorage {
             .runtime
             .block_on(self.tree.resolve_path(root_cid, ".git/objects"))
             .map_err(|e| Error::StorageError(format!("resolve .git/objects: {}", e)))?;
-        if objects_dir.is_none() {
+        let Some(objects_dir) = objects_dir else {
             return Err(Error::StorageError(
                 "built root is missing .git/objects".to_string(),
             ));
-        }
+        };
 
-        let pack_checkpoint_available = self.root_has_git_pack_checkpoint(root_cid)?;
+        // A pack checkpoint may hold any tip, so loose lookups decide nothing.
+        if self.root_has_git_pack_checkpoint(root_cid)? {
+            return Ok(());
+        }
         for oid in direct_refs {
-            let object_path = format!(".git/objects/{}/{}", &oid[..2], &oid[2..]);
+            let object_path = format!("{}/{}", &oid[..2], &oid[2..]);
             let object_cid = self
                 .runtime
-                .block_on(self.tree.resolve_path(root_cid, &object_path))
-                .map_err(|e| Error::StorageError(format!("resolve {}: {}", object_path, e)))?;
-            if object_cid.is_none() && !pack_checkpoint_available {
+                .block_on(self.tree.resolve_path(&objects_dir, &object_path))
+                .map_err(|e| {
+                    Error::StorageError(format!("resolve .git/objects/{}: {}", object_path, e))
+                })?;
+            if object_cid.is_none() {
                 return Err(Error::ObjectNotFound(oid));
             }
         }
@@ -1069,6 +1100,34 @@ impl GitStorage {
             debug!("pre-build eviction skipped: {}", err);
         }
 
+        let built = self.build_tree_unflushed(base_tree, base_root, base_tree_sha, progress);
+        // Commit buffered blobs even when the build failed: a retry reuses them.
+        let flushed = self
+            .runtime
+            .block_on(self.write_buffer.flush())
+            .map_err(|e| Error::StorageError(format!("flush tree writes: {}", e)));
+        let root_cid = built?;
+        flushed?;
+
+        // Cache the root CID
+        if let Ok(mut root) = self.root_cid.write() {
+            *root = Some(root_cid.clone());
+        }
+        if let Some(progress) = progress {
+            progress.mark_done();
+        }
+
+        Ok(root_cid)
+    }
+
+    /// Build the tree through the write buffer. The caller flushes it.
+    fn build_tree_unflushed<S: Store>(
+        &self,
+        base_tree: Option<&HashTree<S>>,
+        base_root: Option<&Cid>,
+        base_tree_sha: Option<&str>,
+        progress: Option<&RepoTreeBuildProgress>,
+    ) -> Result<Cid> {
         let objects = self
             .objects
             .read()
@@ -1103,8 +1162,17 @@ impl GitStorage {
             .as_ref()
             .and_then(|sha| self.get_commit_tree(sha, &objects));
 
-        // Clone objects for async block
-        let mut objects_clone = objects.clone();
+        // Objects seeded from the base root go into a private copy, made only
+        // when the first one is needed.
+        let mut seeded_objects: Option<HashMap<String, Vec<u8>>> = None;
+        let pack_files = self
+            .pack_files
+            .read()
+            .map_err(|e| Error::StorageError(format!("lock: {}", e)))?;
+        let packed_object_ids = self
+            .packed_object_ids
+            .read()
+            .map_err(|e| Error::StorageError(format!("lock: {}", e)))?;
 
         let base_objects_cid = if let (Some(base_tree), Some(base_root)) = (base_tree, base_root) {
             self.runtime
@@ -1127,11 +1195,15 @@ impl GitStorage {
         };
 
         let root_cid = loop {
+            let objects_clone: &HashMap<String, Vec<u8>> =
+                seeded_objects.as_ref().unwrap_or(&objects);
             let build_result = self.runtime.block_on(async {
                 // Build objects directory
                 let objects_cid = self
                     .build_objects_dir_with_base(
-                        &objects_clone,
+                        objects_clone,
+                        &pack_files,
+                        &packed_object_ids,
                         base_tree,
                         base_objects_cid.as_ref(),
                         progress,
@@ -1148,7 +1220,7 @@ impl GitStorage {
                 if let Some(progress) = progress {
                     progress.start_phase(RepoTreeBuildPhase::Info, Some(1));
                 }
-                let info_cid = self.build_info_dir(&refs, &objects_clone).await?;
+                let info_cid = self.build_info_dir(&refs, objects_clone).await?;
                 if let Some(progress) = progress {
                     progress.increment_processed();
                 }
@@ -1198,7 +1270,7 @@ impl GitStorage {
                         (base_tree, base_objects_cid.as_ref(), base_tree_sha.as_deref())
                     {
                         let sources = BaseObjectSources {
-                            objects: &objects_clone,
+                            objects: objects_clone,
                             tree: base_tree,
                             objects_cid: base_objects_cid,
                             progress,
@@ -1211,7 +1283,7 @@ impl GitStorage {
                         )
                         .await
                     } else {
-                        self.build_index_file(tree_oid, &objects_clone, progress)
+                        self.build_index_file(tree_oid, objects_clone, progress)
                     };
                     match index_result {
                         Ok(index_data) => {
@@ -1248,7 +1320,7 @@ impl GitStorage {
                         (base_tree, base_objects_cid.as_ref(), base_tree_sha.as_deref())
                     {
                         let sources = BaseObjectSources {
-                            objects: &objects_clone,
+                            objects: objects_clone,
                             tree: base_tree,
                             objects_cid: base_objects_cid,
                             progress,
@@ -1261,7 +1333,7 @@ impl GitStorage {
                         )
                         .await?
                     } else {
-                        self.build_working_tree_entries(tree_oid, &objects_clone, progress).await?
+                        self.build_working_tree_entries(tree_oid, objects_clone, progress).await?
                     };
                     root_entries.extend(working_tree_entries);
                     info!("Added {} working tree entries to root", root_entries.len() - 1);
@@ -1296,7 +1368,7 @@ impl GitStorage {
                         self.runtime
                             .block_on(self.seed_missing_object_from_base_boxed(
                                 &oid,
-                                &mut objects_clone,
+                                seeded_objects.get_or_insert_with(|| objects.clone()),
                                 base_tree.expect("checked is_some"),
                                 base_objects_cid.as_ref().expect("checked is_some"),
                             ))?;
@@ -1308,14 +1380,6 @@ impl GitStorage {
                 Err(err) => return Err(err),
             }
         };
-
-        // Cache the root CID
-        if let Ok(mut root) = self.root_cid.write() {
-            *root = Some(root_cid.clone());
-        }
-        if let Some(progress) = progress {
-            progress.mark_done();
-        }
 
         Ok(root_cid)
     }
@@ -1374,6 +1438,7 @@ impl GitStorage {
                     let (cid, size) = self.tree.put(&blob_content).await.map_err(|e| {
                         Error::StorageError(format!("put blob {}: {}", entry.name, e))
                     })?;
+                    self.flush_tree_writes_if_needed().await?;
 
                     // Use from_cid to preserve encryption key
                     entries.push(DirEntry::from_cid(&entry.name, &cid).with_size(size));
@@ -1571,6 +1636,7 @@ impl GitStorage {
                     self.tree.put(&blob_content).await.map_err(|e| {
                         Error::StorageError(format!("put blob {}: {}", entry.name, e))
                     })?;
+                self.flush_tree_writes_if_needed().await?;
                 entries.push(DirEntry::from_cid(&entry.name, &cid).with_size(size));
                 if let Some(progress) = sources.progress {
                     progress.record_working_file(false);
@@ -1606,11 +1672,20 @@ impl GitStorage {
         .await
     }
 
+    /// Commit buffered tree writes once a batch has accumulated.
+    async fn flush_tree_writes_if_needed(&self) -> Result<()> {
+        self.write_buffer
+            .flush_pending_if_needed()
+            .await
+            .map(|_| ())
+            .map_err(|e| Error::StorageError(format!("flush tree writes: {}", e)))
+    }
+
     async fn build_objects_prefix_dir(
         &self,
         prefix: &str,
         old_entries: Option<Vec<hashtree_core::TreeEntry>>,
-        new_objects: &[(String, Vec<u8>)],
+        new_objects: &[(&str, &[u8])],
         progress: Option<&RepoTreeBuildProgress>,
     ) -> Result<Cid> {
         let mut sub_entries: BTreeMap<String, DirEntry> = old_entries
@@ -1619,12 +1694,12 @@ impl GitStorage {
             .map(|entry| (entry.name.clone(), Self::tree_entry_to_dir_entry(&entry)))
             .collect();
 
-        for (suffix, data) in new_objects {
+        for &(suffix, data) in new_objects {
             let (cid, size) = self.tree.put(data).await.map_err(|e| {
                 Error::StorageError(format!("put object {}{}: {}", prefix, suffix, e))
             })?;
             sub_entries.insert(
-                suffix.clone(),
+                suffix.to_string(),
                 DirEntry::from_cid(suffix, &cid).with_size(size),
             );
             if let Some(progress) = progress {
@@ -1637,6 +1712,7 @@ impl GitStorage {
             .put_directory(sub_entries.into_values().collect())
             .await
             .map_err(|e| Error::StorageError(format!("put objects/{}: {}", prefix, e)))?;
+        self.flush_tree_writes_if_needed().await?;
         if let Some(progress) = progress {
             progress.record_object_prefix();
         }
@@ -1648,6 +1724,8 @@ impl GitStorage {
     async fn build_objects_dir_with_base<S: Store>(
         &self,
         objects: &HashMap<String, Vec<u8>>,
+        pack_files: &BTreeMap<String, Vec<u8>>,
+        packed_object_ids: &HashSet<String>,
         base_tree: Option<&HashTree<S>>,
         base_objects_cid: Option<&Cid>,
         progress: Option<&RepoTreeBuildProgress>,
@@ -1656,35 +1734,22 @@ impl GitStorage {
             progress.start_phase(RepoTreeBuildPhase::Objects, Some(objects.len()));
         }
 
-        let pack_files = self
-            .pack_files
-            .read()
-            .map_err(|e| Error::StorageError(format!("lock: {}", e)))?
-            .clone();
-        let packed_object_ids = self
-            .packed_object_ids
-            .read()
-            .map_err(|e| Error::StorageError(format!("lock: {}", e)))?
-            .clone();
         let packs_replace_loose_objects =
             !packed_object_ids.is_empty() && (!pack_files.is_empty() || base_objects_cid.is_some());
-        let mut buckets: BTreeMap<String, Vec<(String, Vec<u8>)>> = BTreeMap::new();
+        let mut buckets: BTreeMap<&str, Vec<(&str, &[u8])>> = BTreeMap::new();
         for (oid, data) in objects {
             if packs_replace_loose_objects && packed_object_ids.contains(oid) {
                 continue;
             }
-            let prefix = &oid[..2];
-            let suffix = &oid[2..];
             buckets
-                .entry(prefix.to_string())
+                .entry(&oid[..2])
                 .or_default()
-                .push((suffix.to_string(), data.clone()));
+                .push((&oid[2..], data.as_slice()));
         }
 
         let mut top_entries: BTreeMap<String, DirEntry> = BTreeMap::new();
         let mut merged_prefixes = std::collections::HashSet::new();
         let mut inherited_pack_entries: BTreeMap<String, DirEntry> = BTreeMap::new();
-        let empty_objects: Vec<(String, Vec<u8>)> = Vec::new();
 
         if let (Some(base_tree), Some(base_objects_cid)) = (base_tree, base_objects_cid) {
             for entry in base_tree
@@ -1715,7 +1780,7 @@ impl GitStorage {
                     continue;
                 }
 
-                let Some(delta_objects) = buckets.get(&entry.name) else {
+                let Some(delta_objects) = buckets.get(entry.name.as_str()) else {
                     if !packs_replace_loose_objects {
                         top_entries
                             .insert(entry.name.clone(), Self::tree_entry_to_dir_entry(&entry));
@@ -1755,7 +1820,7 @@ impl GitStorage {
                         .build_objects_prefix_dir(
                             &entry.name,
                             Some(old_prefix_entries),
-                            &empty_objects,
+                            &[],
                             progress,
                         )
                         .await?;
@@ -1801,7 +1866,7 @@ impl GitStorage {
             }
         }
 
-        for (prefix, objs) in &buckets {
+        for (&prefix, objs) in &buckets {
             if merged_prefixes.contains(prefix) {
                 continue;
             }
@@ -1809,7 +1874,7 @@ impl GitStorage {
                 .build_objects_prefix_dir(prefix, None, objs, progress)
                 .await?;
             top_entries.insert(
-                prefix.clone(),
+                prefix.to_string(),
                 DirEntry::from_cid(prefix, &sub_cid).with_link_type(LinkType::Dir),
             );
         }
@@ -1817,13 +1882,12 @@ impl GitStorage {
         if !pack_files.is_empty() {
             let mut pack_entries_by_name = inherited_pack_entries;
             for (name, data) in pack_files {
-                let (cid, size) = self.tree.put(&data).await.map_err(|e| {
+                let (cid, size) = self.tree.put(data).await.map_err(|e| {
                     Error::StorageError(format!("put objects/pack/{}: {}", name, e))
                 })?;
-                pack_entries_by_name.insert(
-                    name.clone(),
-                    DirEntry::from_cid(&name, &cid).with_size(size),
-                );
+                self.flush_tree_writes_if_needed().await?;
+                pack_entries_by_name
+                    .insert(name.clone(), DirEntry::from_cid(name, &cid).with_size(size));
             }
             let mut pack_names_for_info_packs = pack_entries_by_name
                 .keys()
@@ -2324,12 +2388,6 @@ impl GitStorage {
     /// Get the underlying store
     pub fn store(&self) -> &Arc<LocalStore> {
         &self.store
-    }
-
-    /// Get the HashTree for direct access
-    #[allow(dead_code)]
-    pub fn hashtree(&self) -> &HashTree<LocalStore> {
-        &self.tree
     }
 
     /// Push all blobs to file servers
@@ -2888,6 +2946,51 @@ mod tests {
             snapshot.format_for_label("Building repo tree"),
             "  Building repo tree: done (3 object blobs, 1 files, 0 dirs, 0 reused)"
         );
+    }
+
+    #[test]
+    fn build_tree_commits_every_blob_to_the_backing_store() {
+        let mut backends = vec![StorageBackend::Fs];
+        #[cfg(feature = "lmdb")]
+        backends.push(StorageBackend::Lmdb);
+
+        for backend in backends {
+            let temp_dir = TempDir::new().unwrap();
+            let storage =
+                GitStorage::open_with_backend_and_max_bytes(temp_dir.path(), backend, 0).unwrap();
+            let commit_oid = write_test_commit(&storage);
+            for index in 0..64 {
+                storage
+                    .write_raw_object(ObjectType::Blob, format!("extra {index}\n").as_bytes())
+                    .unwrap();
+            }
+            storage
+                .write_ref("refs/heads/main", &Ref::Direct(commit_oid))
+                .unwrap();
+            storage
+                .write_ref("HEAD", &Ref::Symbolic("refs/heads/main".to_string()))
+                .unwrap();
+
+            let root = storage.build_tree().unwrap();
+
+            // Read through the backing store alone: nothing may remain buffered.
+            let direct = HashTree::new(
+                HashTreeConfig::new(storage.store().clone()).with_chunk_size(GIT_TREE_CHUNK_SIZE),
+            );
+            let export = TempDir::new().unwrap();
+            export_tree_to_fs(&storage.runtime, &direct, &root, export.path());
+            assert_eq!(
+                std::fs::read(export.path().join("README.md")).unwrap(),
+                b"hello from hashtree\n"
+            );
+            let loose_objects = std::fs::read_dir(export.path().join(".git/objects"))
+                .unwrap()
+                .flatten()
+                .filter(|entry| entry.file_name().len() == 2)
+                .map(|entry| std::fs::read_dir(entry.path()).unwrap().count())
+                .sum::<usize>();
+            assert_eq!(loose_objects, 3 + 64);
+        }
     }
 
     #[test]

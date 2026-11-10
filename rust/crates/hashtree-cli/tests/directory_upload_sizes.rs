@@ -1,4 +1,4 @@
-use hashtree_cli::{AddProgress, HashtreeStore};
+use hashtree_cli::{AddProgress, HashtreeStore, UploadOptions};
 use hashtree_config::StorageBackend;
 use hashtree_core::Cid;
 use std::path::Path;
@@ -57,19 +57,18 @@ fn roundtrip(encrypted: bool, cached: bool) {
             }
             #[cfg(not(unix))]
             unreachable!("cached uploads are Unix-only")
-        } else if encrypted {
-            store.upload_dir_encrypted_with_options_and_chunk_size_and_progress(
-                &source,
-                false,
-                Some(64),
-                &progress,
-            )
         } else {
-            store.upload_dir_with_options_and_chunk_size_and_progress(
+            let options = if encrypted {
+                UploadOptions::encrypted()
+            } else {
+                UploadOptions::public()
+            };
+            store.upload_dir_with(
                 &source,
-                false,
-                Some(64),
-                &progress,
+                options
+                    .with_respect_gitignore(false)
+                    .with_chunk_size(Some(64))
+                    .with_progress(&progress),
             )
         }
         .unwrap();

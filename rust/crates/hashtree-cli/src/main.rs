@@ -37,6 +37,10 @@ fn env_usize(name: &str) -> Option<usize> {
 }
 
 fn main() -> Result<()> {
+    // Parse arguments and apply process-wide settings first, while this is
+    // still the only thread: some commands adjust environment variables.
+    let command = app::run()?;
+
     let mut runtime = tokio::runtime::Builder::new_multi_thread();
     runtime.enable_all();
 
@@ -47,5 +51,5 @@ fn main() -> Result<()> {
         hashtree_cli::runtime_config::runtime_capacity().max_blocking_threads,
     );
 
-    runtime.build()?.block_on(app::run()?)
+    runtime.build()?.block_on(command)
 }

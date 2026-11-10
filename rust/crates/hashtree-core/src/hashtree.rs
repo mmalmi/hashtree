@@ -23,6 +23,9 @@ use crate::encryption::{decrypt_object, ObjectKey};
 const DEFAULT_STREAM_PUT_BATCH_TARGET_BYTES: usize = 64 * 1024 * 1024;
 const STREAM_PUT_BATCH_TARGET_BYTES_ENV: &str = "HTREE_STREAM_PUT_BATCH_TARGET_BYTES";
 const STREAM_PUT_BATCH_MAX_ITEMS: usize = 128;
+const STREAM_PUT_INITIAL_CHUNK_CAPACITY: usize = 64 * 1024;
+/// Upper bound on how much an in-memory read reserves from declared link sizes.
+const ASSEMBLE_MAX_RESERVE_BYTES: u64 = 256 * 1024 * 1024;
 
 #[path = "hashtree/stream.rs"]
 mod read_stream;
@@ -255,33 +258,30 @@ impl<S: Store> HashTree<S> {
         R: AsyncRead + Unpin,
         F: FnMut(u64),
     {
-        let mut buffer = vec![0u8; self.chunk_size];
         let mut links = Vec::new();
         let mut total_size: u64 = 0;
         let mut consistent_key: Option<ObjectKey> = None;
         let mut pending_store_items = Vec::new();
         let mut pending_store_bytes = 0usize;
         let batch_target_bytes = stream_put_batch_target_bytes();
+        let mut chunk_capacity = self.chunk_size.min(STREAM_PUT_INITIAL_CHUNK_CAPACITY);
 
         loop {
-            let mut chunk = Vec::new();
-            let mut bytes_read = 0;
-
-            // Read until we have a full chunk or EOF
-            while bytes_read < self.chunk_size {
-                let n = reader
-                    .read(&mut buffer[..self.chunk_size - bytes_read])
-                    .await
-                    .map_err(|e| HashTreeError::Store(format!("read error: {}", e)))?;
-                if n == 0 {
-                    break; // EOF
-                }
-                chunk.extend_from_slice(&buffer[..n]);
-                bytes_read += n;
-            }
+            // Read one chunk straight into its own buffer. The buffer grows with
+            // the data, so a small file costs a small allocation, not chunk_size.
+            let mut chunk = Vec::with_capacity(chunk_capacity);
+            (&mut reader)
+                .take(self.chunk_size as u64)
+                .read_to_end(&mut chunk)
+                .await
+                .map_err(|e| HashTreeError::Store(format!("read error: {}", e)))?;
 
             if chunk.is_empty() {
                 break; // No more data
+            }
+            if chunk.len() == self.chunk_size {
+                // More full chunks are likely; skip the growth steps for them.
+                chunk_capacity = self.chunk_size;
             }
 
             let chunk_len = chunk.len() as u64;
@@ -932,6 +932,51 @@ impl<S: Store> HashTree<S> {
         Ok(Some(result))
     }
 
+    /// Return the whole leaf chunk that holds byte `offset`, together with the
+    /// offset at which that chunk starts.
+    ///
+    /// Sequential readers can serve many small reads from one fetched (and,
+    /// for encrypted files, once-decrypted) chunk instead of paying for the
+    /// chunk on every read. An offset at or past the end yields an empty chunk
+    /// positioned at the file size. `None` means the root is not in the store.
+    pub async fn read_file_chunk_at(
+        &self,
+        cid: &Cid,
+        offset: u64,
+    ) -> Result<Option<(u64, Vec<u8>)>, HashTreeError> {
+        let Some(data) = self.get_cid_root_bytes(cid).await? else {
+            return Ok(None);
+        };
+        if !is_tree_node(&data) {
+            return Ok(Some((0, data)));
+        }
+
+        let mut node = decode_tree_node(&data)?;
+        let mut base_offset = 0u64;
+        'descend: loop {
+            let mut child_start = base_offset;
+            for link in &node.links {
+                let child_end = child_start.saturating_add(link.size);
+                if offset >= child_end {
+                    child_start = child_end;
+                    continue;
+                }
+
+                let child_data = self.read_link_bytes(link).await?;
+                match Self::decode_linked_file_node(link, &child_data)? {
+                    Some(child_node) => {
+                        node = child_node;
+                        base_offset = child_start;
+                        continue 'descend;
+                    }
+                    None => return Ok(Some((child_start, child_data))),
+                }
+            }
+            // Past the last link: nothing left at this offset.
+            return Ok(Some((child_start, Vec::new())));
+        }
+    }
+
     async fn append_range(
         &self,
         node: &TreeNode,
@@ -994,15 +1039,27 @@ impl<S: Store> HashTree<S> {
         Ok(())
     }
 
-    /// Recursively assemble chunks from tree
+    /// Assemble the file under `node` into one buffer.
     async fn assemble_chunks_limited(
         &self,
         node: &TreeNode,
         max_size: Option<u64>,
         bytes_read: &mut u64,
     ) -> Result<Vec<u8>, HashTreeError> {
-        let mut parts: Vec<Vec<u8>> = Vec::new();
+        let mut out = Vec::new();
+        self.assemble_chunks_into(node, max_size, bytes_read, &mut out)
+            .await?;
+        Ok(out)
+    }
 
+    /// Append the file under `node` to `out`, depth first.
+    async fn assemble_chunks_into(
+        &self,
+        node: &TreeNode,
+        max_size: Option<u64>,
+        bytes_read: &mut u64,
+        out: &mut Vec<u8>,
+    ) -> Result<(), HashTreeError> {
         for link in &node.links {
             let projected = (*bytes_read).saturating_add(link.size);
             Self::ensure_size_limit(max_size, projected)?;
@@ -1010,26 +1067,26 @@ impl<S: Store> HashTree<S> {
             let child_data = self.read_link_bytes(link).await?;
 
             if let Some(child_node) = Self::decode_linked_file_node(link, &child_data)? {
-                parts.push(
-                    Box::pin(self.assemble_chunks_limited(&child_node, max_size, bytes_read))
-                        .await?,
-                );
+                Box::pin(self.assemble_chunks_into(&child_node, max_size, bytes_read, out)).await?;
             } else {
                 let projected = (*bytes_read).saturating_add(child_data.len() as u64);
                 Self::ensure_size_limit(max_size, projected)?;
                 *bytes_read = projected;
-                parts.push(child_data);
+                if out.is_empty() {
+                    // First leaf: reuse its allocation and reserve the declared
+                    // remainder, bounded so a bogus size cannot over-allocate.
+                    let declared: u64 = node.links.iter().map(|l| l.size).sum();
+                    let extra = declared
+                        .saturating_sub(child_data.len() as u64)
+                        .min(ASSEMBLE_MAX_RESERVE_BYTES);
+                    *out = child_data;
+                    out.reserve(extra as usize);
+                } else {
+                    out.extend_from_slice(&child_data);
+                }
             }
         }
-
-        // Concatenate all parts
-        let total_length: usize = parts.iter().map(|p| p.len()).sum();
-        let mut result = Vec::with_capacity(total_length);
-        for part in parts {
-            result.extend_from_slice(&part);
-        }
-
-        Ok(result)
+        Ok(())
     }
 
     /// Read file chunks as Vec (non-streaming version)

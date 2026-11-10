@@ -374,6 +374,12 @@ pub(crate) fn run() -> Result<futures::future::LocalBoxFuture<'static, Result<()
         super::update::spawn_detached_bg_check(&data_dir);
     }
 
+    // `add --local` tunes the store through environment variables. Set them
+    // here, before the runtime starts any other thread.
+    if let Commands::Add { local: true, .. } = &cli.command {
+        super::add::apply_local_add_env(&data_dir);
+    }
+
     // Parse before constructing the selected command future to keep those stack
     // frames separate.
     Ok(run_command(cli, data_dir))

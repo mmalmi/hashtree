@@ -7,6 +7,10 @@ on:
         description: Publish new versions directly to npm (false previews archives only)
         type: boolean
         default: false
+      prepared_worker_0425:
+        description: Publish the exact previously qualified worker 0.4.25 archive
+        type: boolean
+        default: false
       packages:
         description: Comma-separated package names, or all (local dependencies included)
         type: string
@@ -21,7 +25,7 @@ concurrency:
 
 jobs:
   verify:
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/master' && !inputs.prepared_worker_0425
     runs-on: ubuntu-latest
     timeout-minutes: 45
     defaults:
@@ -71,7 +75,7 @@ jobs:
 
   publish:
     needs: verify
-    if: inputs.publish && github.ref == 'refs/heads/master'
+    if: inputs.publish && github.ref == 'refs/heads/master' && !inputs.prepared_worker_0425
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: npm
@@ -97,3 +101,51 @@ jobs:
           NPM_CONFIG_LOGLEVEL: verbose
           NPM_PACKAGES: ${{ inputs.packages }}
         run: node scripts/publish-npm.mjs --prepared --packages="$NPM_PACKAGES"
+
+  publish-qualified-worker:
+    if: inputs.publish && inputs.prepared_worker_0425 && inputs.packages == '@hashtree/worker' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: npm
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Install the exact qualified packing and publishing tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(df -Pk . | awk 'NR==2 {print $4}')" -gt 23068672
+          curl --fail --location --connect-timeout 10 --max-time 180 --output "$RUNNER_TEMP/node.tar.xz" https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz
+          echo "48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75  $RUNNER_TEMP/node.tar.xz" | sha256sum --check --strict
+          tar -xJf "$RUNNER_TEMP/node.tar.xz" -C "$RUNNER_TEMP"
+          curl --fail --location --connect-timeout 10 --max-time 180 --output "$RUNNER_TEMP/npm.tgz" https://registry.npmjs.org/npm/-/npm-12.0.2.tgz
+          echo "5dbb86c71d07a1957f2e90734092dd6a58bdcd9ebc2d8d41ca1c6e6a21d364e1  $RUNNER_TEMP/npm.tgz" | sha256sum --check --strict
+          mkdir "$RUNNER_TEMP/qualified-npm"
+          tar -xzf "$RUNNER_TEMP/npm.tgz" -C "$RUNNER_TEMP/qualified-npm"
+          echo "$RUNNER_TEMP/node-v24.22.2-linux-x64/bin" >> "$GITHUB_PATH"
+      - name: Verify the exact artifact, carried isolated checks, and public source closure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/verify-prepared-worker.py --directory "$RUNNER_TEMP/worker-release" --download
+      - name: Publish the verified archive using the established OIDC identity
+        env:
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/worker-publish.npmrc
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/worker-npm-cache
+          NPM_CONFIG_FETCH_TIMEOUT: '120000'
+          NPM_CONFIG_FETCH_RETRIES: '1'
+        run: |
+          set -euo pipefail
+          test "$(node --version)" = v24.22.2
+          touch "$NPM_CONFIG_USERCONFIG"
+          node "$RUNNER_TEMP/qualified-npm/package/bin/npm-cli.js" publish "$RUNNER_TEMP/worker-release/hashtree-worker-0.4.25.tgz" --access public --registry https://registry.npmjs.org --provenance --ignore-scripts
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: worker-0425-publication-evidence
+          path: ${{ runner.temp }}/worker-release/verification.json
+          if-no-files-found: warn

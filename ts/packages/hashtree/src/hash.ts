@@ -2,6 +2,7 @@
  * Hashing utilities using Web Crypto API (browser-only)
  */
 
+import { cryptoInput } from './cryptoInput.js';
 import { Hash } from './types.js';
 
 /**
@@ -9,9 +10,7 @@ import { Hash } from './types.js';
  * Uses Web Crypto API - browser environments only
  */
 export async function sha256(data: Uint8Array): Promise<Hash> {
-  const buffer = new ArrayBuffer(data.length);
-  new Uint8Array(buffer).set(data);
-  const hashBuffer = await crypto.subtle.digest('SHA-256', buffer);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', cryptoInput(data));
   return new Uint8Array(hashBuffer);
 }
 

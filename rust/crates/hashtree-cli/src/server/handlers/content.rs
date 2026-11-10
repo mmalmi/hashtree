@@ -3,6 +3,7 @@ use crate::fips_transport::{read_daemon_blob, DaemonBlobResolver};
 use crate::server::blob_read::{
     run_blob_metadata_read, run_blob_read, run_blob_write, BlobIoTaskError, BLOB_READ_BUSY,
 };
+use crate::server::pooled_store::PooledReadStore;
 use hashtree_core::{Link, TreeNode};
 use serde::{Deserialize, Serialize};
 
@@ -1004,55 +1005,180 @@ fn link_to_cid(link: &Link) -> Cid {
     }
 }
 
+/// Like [`read_file_range_cid_with_fetch`], but returns the whole leaf chunk
+/// holding `start` and the offset where that chunk begins.
+async fn read_file_chunk_at_with_fetch<S: Store>(
+    state: &AppState,
+    tree: &HashTree<S>,
+    cid: &Cid,
+    start: u64,
+    prefetch_end: u64,
+) -> Result<Option<(u64, Vec<u8>)>, String> {
+    let mut seen_missing = HashSet::new();
+
+    loop {
+        if !ensure_blob_available(state, &cid.hash).await? {
+            return Ok(None);
+        }
+
+        if let Err(err) =
+            prefetch_file_range_chunks_with_fetch(state, tree, cid, start, Some(prefetch_end)).await
+        {
+            tracing::debug!("file range chunk prefetch skipped: {}", err);
+        }
+
+        match tree.read_file_chunk_at(cid, start).await {
+            Ok(chunk) => return Ok(chunk),
+            Err(HashTreeError::MissingChunk(missing)) => {
+                if !fetch_missing_chunk(state, &mut seen_missing, &missing).await? {
+                    return Ok(None);
+                }
+            }
+            Err(err) => return Err(err.to_string()),
+        }
+    }
+}
+
+/// Position in a CID byte-range response body.
+struct CidRangeCursor {
+    state: AppState,
+    tree: HashTree<PooledReadStore>,
+    cid: Cid,
+    offset: u64,
+    end_inclusive: u64,
+    /// The decrypted leaf chunk being served, with the file offset of its
+    /// first byte. An encrypted chunk can only be decrypted whole, so it is
+    /// decrypted once here and sliced into response pieces.
+    leaf: Option<(u64, Bytes)>,
+}
+
+impl CidRangeCursor {
+    async fn next_piece(&mut self) -> Result<Bytes, String> {
+        const NO_DATA: &str = "CID range returned no data";
+        let piece_end_exclusive = self
+            .offset
+            .saturating_add(CID_RANGE_STREAM_CHUNK_SIZE)
+            .min(self.end_inclusive.saturating_add(1));
+
+        if self.cid.key.is_none() {
+            // Plaintext leaves support ranged store reads: read just this piece.
+            let data = read_file_range_cid_with_fetch(
+                &self.state,
+                &self.tree,
+                &self.cid,
+                self.offset,
+                Some(piece_end_exclusive),
+            )
+            .await?
+            .filter(|data| !data.is_empty())
+            .ok_or(NO_DATA)?;
+            self.offset = self.offset.saturating_add(data.len() as u64);
+            return Ok(Bytes::from(data));
+        }
+
+        let holds_offset = |leaf: &(u64, Bytes), offset: u64| {
+            offset >= leaf.0 && offset - leaf.0 < leaf.1.len() as u64
+        };
+        if !self
+            .leaf
+            .as_ref()
+            .is_some_and(|leaf| holds_offset(leaf, self.offset))
+        {
+            let (leaf_start, data) = read_file_chunk_at_with_fetch(
+                &self.state,
+                &self.tree,
+                &self.cid,
+                self.offset,
+                piece_end_exclusive,
+            )
+            .await?
+            .ok_or(NO_DATA)?;
+            let leaf = (leaf_start, Bytes::from(data));
+            if !holds_offset(&leaf, self.offset) {
+                return Err(NO_DATA.to_string());
+            }
+            self.leaf = Some(leaf);
+        }
+
+        let (leaf_start, bytes) = self.leaf.as_ref().ok_or(NO_DATA)?;
+        let from = (self.offset - leaf_start) as usize;
+        let to = usize::try_from(piece_end_exclusive - leaf_start)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let piece = bytes.slice(from..to);
+        self.offset = self.offset.saturating_add(piece.len() as u64);
+        Ok(piece)
+    }
+}
+
 pub(super) fn stream_file_range_cid_with_fetch(
     state: AppState,
     cid: Cid,
     start: u64,
     end_inclusive: u64,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
-    stream::unfold(
-        (state, cid, start, end_inclusive, false),
-        |(state, cid, offset, end_inclusive, finished)| async move {
-            if finished || offset > end_inclusive {
-                return None;
-            }
+    let tree = HashTree::new(
+        HashTreeConfig::new(Arc::new(PooledReadStore::new(state.store.store_arc()))).public(),
+    );
+    let cursor = CidRangeCursor {
+        state,
+        tree,
+        cid,
+        offset: start,
+        end_inclusive,
+        leaf: None,
+    };
+    stream::unfold(Some(cursor), |cursor| async move {
+        let mut cursor = cursor?;
+        if cursor.offset > cursor.end_inclusive {
+            return None;
+        }
+        match cursor.next_piece().await {
+            Ok(piece) => Some((Ok(piece), Some(cursor))),
+            Err(err) => Some((Err(std::io::Error::other(err)), None)),
+        }
+    })
+}
 
-            let chunk_end_inclusive = offset
-                .saturating_add(CID_RANGE_STREAM_CHUNK_SIZE - 1)
-                .min(end_inclusive);
-            let chunk_end_exclusive = chunk_end_inclusive.saturating_add(1);
-            let tree = HashTree::new(HashTreeConfig::new(state.store.store_arc()).public());
+/// Run a synchronous store read on the bounded blocking pool.
+pub(super) async fn run_store_read<T, F>(context: &str, task: F) -> Result<T, String>
+where
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    match run_blob_read(task).await {
+        Ok(result) => result.map_err(|error| error.to_string()),
+        Err(error) => Err(format_blob_read_error(context, error)),
+    }
+}
 
-            match read_file_range_cid_with_fetch(
-                &state,
-                &tree,
-                &cid,
-                offset,
-                Some(chunk_end_exclusive),
-            )
-            .await
-            {
-                Ok(Some(data)) if !data.is_empty() => Some((
-                    Ok(Bytes::from(data)),
-                    (
-                        state,
-                        cid,
-                        chunk_end_inclusive.saturating_add(1),
-                        end_inclusive,
-                        false,
-                    ),
-                )),
-                Ok(Some(_)) | Ok(None) => Some((
-                    Err(std::io::Error::other("CID range returned no data")),
-                    (state, cid, end_inclusive, end_inclusive, true),
-                )),
-                Err(err) => Some((
-                    Err(std::io::Error::other(err)),
-                    (state, cid, end_inclusive, end_inclusive, true),
-                )),
+/// Turn the store's blocking chunk iterator into a body stream whose reads
+/// run on the bounded blocking pool, one chunk at a time.
+pub(super) fn file_chunks_body_stream(
+    chunks: crate::storage::FileRangeChunksOwned,
+) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
+    stream::unfold(Some(chunks), |chunks| async move {
+        let mut chunks = chunks?;
+        let read = run_blob_read(move || {
+            let next = chunks.next();
+            (next, chunks)
+        })
+        .await;
+        match read {
+            Ok((Some(Ok(chunk)), chunks)) => Some((Ok(Bytes::from(chunk)), Some(chunks))),
+            Ok((Some(Err(error)), _)) => {
+                Some((Err(std::io::Error::other(error.to_string())), None))
             }
-        },
-    )
+            Ok((None, _)) => None,
+            Err(error) => Some((
+                Err(std::io::Error::other(format_blob_read_error(
+                    "file chunk read",
+                    error,
+                ))),
+                None,
+            )),
+        }
+    })
 }
 
 pub(super) async fn get_size_cid_with_fetch<S: Store>(

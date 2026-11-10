@@ -5,6 +5,9 @@
 //! - Supports streaming appends
 //! - Encryption enabled by default (CHK - Content Hash Key)
 
+// The deprecated types below still implement and test themselves.
+#![allow(deprecated)]
+
 use std::sync::Arc;
 
 use crate::codec::encode_and_hash;
@@ -25,6 +28,10 @@ pub const BEP52_CHUNK_SIZE: usize = 16 * 1024;
 pub const DEFAULT_MAX_LINKS: usize = 174;
 
 /// Builder configuration
+#[deprecated(
+    since = "0.3.1",
+    note = "use `HashTree`, which covers the same operations"
+)]
 #[derive(Clone)]
 pub struct BuilderConfig<S: Store> {
     pub store: Arc<S>,
@@ -68,6 +75,10 @@ impl<S: Store> BuilderConfig<S> {
 }
 
 /// TreeBuilder - builds content-addressed merkle trees
+#[deprecated(
+    since = "0.3.1",
+    note = "use `HashTree`, which covers the same operations"
+)]
 pub struct TreeBuilder<S: Store> {
     store: Arc<S>,
     chunk_size: usize,
@@ -365,6 +376,10 @@ impl<S: Store> TreeBuilder<S> {
 }
 
 /// StreamBuilder - supports incremental appends
+#[deprecated(
+    since = "0.3.1",
+    note = "use `HashTree`, which covers the same operations"
+)]
 pub struct StreamBuilder<S: Store> {
     store: Arc<S>,
     chunk_size: usize,

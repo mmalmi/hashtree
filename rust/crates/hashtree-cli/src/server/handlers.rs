@@ -1562,7 +1562,9 @@ async fn serve_content_internal(
     is_immutable: bool,
     is_localhost: bool,
 ) -> Response<Body> {
-    let store = &state.store;
+    // Store reads are synchronous; each one below runs on the bounded blocking
+    // pool so a slow disk cannot stall the async workers.
+    let hash = *hash;
 
     // Always return raw bytes - no conversion to JSON/HTML
     // This is required for Blossom protocol compatibility
@@ -1575,7 +1577,12 @@ async fn serve_content_internal(
         // Content type - hashtree doesn't store filenames, so default to octet-stream
         let content_type = "application/octet-stream";
 
-        match store.get_file_chunk_metadata(hash) {
+        let store = state.store.clone();
+        let metadata = run_store_read("file metadata read", move || {
+            store.get_file_chunk_metadata(&hash)
+        })
+        .await;
+        match metadata {
             Ok(Some(metadata)) => {
                 let total_size = metadata.total_size;
                 if let Some(parsed_range) = parse_byte_range(range_str, total_size) {
@@ -1599,14 +1606,14 @@ async fn serve_content_internal(
                     let content_range = format!("bytes {}-{}/{}", start, end_actual, total_size);
 
                     if metadata.is_chunked {
-                        match state
-                            .store
-                            .clone()
-                            .stream_file_range_chunks_owned(hash, start, end_actual)
-                        {
+                        let store = state.store.clone();
+                        let chunks = run_store_read("file range read", move || {
+                            store.stream_file_range_chunks_owned(&hash, start, end_actual)
+                        })
+                        .await;
+                        match chunks {
                             Ok(Some(chunks_iter)) => {
-                                let stream =
-                                    stream::iter(chunks_iter).map(|result| result.map(Bytes::from));
+                                let stream = file_chunks_body_stream(chunks_iter);
 
                                 let mut builder = Response::builder()
                                     .status(StatusCode::PARTIAL_CONTENT)
@@ -1645,7 +1652,12 @@ async fn serve_content_internal(
                             }
                         }
                     } else {
-                        match store.get_file_range(hash, start, Some(end_actual)) {
+                        let store = state.store.clone();
+                        let range = run_store_read("file range read", move || {
+                            store.get_file_range(&hash, start, Some(end_actual))
+                        })
+                        .await;
+                        match range {
                             Ok(Some((range_content, _))) => {
                                 let mut builder = Response::builder()
                                     .status(StatusCode::PARTIAL_CONTENT)
@@ -1706,7 +1718,8 @@ async fn serve_content_internal(
     }
 
     // Fall back to full file
-    match store.get_file(hash) {
+    let store = state.store.clone();
+    match run_store_read("file read", move || store.get_file(&hash)).await {
         Ok(Some(content)) => {
             // Content type - hashtree doesn't store filenames, so default to octet-stream
             let content_type = "application/octet-stream";

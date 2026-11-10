@@ -2,6 +2,9 @@
 //!
 //! Read files and directories from content-addressed storage
 
+// The deprecated types below still implement and test themselves.
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -40,6 +43,10 @@ pub struct WalkEntry {
 }
 
 /// TreeReader - reads and traverses merkle trees
+#[deprecated(
+    since = "0.3.1",
+    note = "use `HashTree`, which covers the same operations"
+)]
 pub struct TreeReader<S: Store> {
     store: Arc<S>,
 }
