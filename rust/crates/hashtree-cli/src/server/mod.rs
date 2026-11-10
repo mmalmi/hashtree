@@ -9,6 +9,7 @@ mod nostr_query;
 mod peer_status;
 #[cfg(all(test, feature = "lmdb"))]
 mod pin_tree_tests;
+mod pooled_store;
 mod request_paths;
 mod status_metrics;
 mod ui;

@@ -30,6 +30,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};
 use tower::ServiceExt;
 
+mod cid_range_stream;
 mod daemon_status_access;
 
 macro_rules! event_builder {

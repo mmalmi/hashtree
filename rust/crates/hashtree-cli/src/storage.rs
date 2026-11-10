@@ -31,6 +31,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(unix)]
 mod add_cache;
+#[cfg(test)]
+mod nested_file_tests;
+#[cfg(all(test, feature = "s3"))]
+mod s3_sync_tests;
 mod upload;
 pub use upload::{AddProgress, AddProgressSnapshot};
 
@@ -1569,6 +1573,29 @@ impl StorageRouter {
         ))
     }
 
+    /// One long-lived runtime for synchronous S3 calls. Reusing it keeps the
+    /// S3 client's pooled connections alive between calls; a runtime per call
+    /// would tear them down and pay a new TLS handshake each time.
+    #[cfg(feature = "s3")]
+    fn s3_sync_runtime() -> Result<&'static tokio::runtime::Runtime, StoreError> {
+        static RUNTIME: std::sync::OnceLock<Result<tokio::runtime::Runtime, String>> =
+            std::sync::OnceLock::new();
+        RUNTIME
+            .get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_name("storage-s3-sync")
+                    .enable_all()
+                    .build()
+                    .map_err(|err| err.to_string())
+            })
+            .as_ref()
+            .map_err(|err| StoreError::Other(format!("build storage s3 sync runtime: {err}")))
+    }
+
+    /// Run an S3 future to completion from synchronous code. The future runs
+    /// on the shared S3 runtime while the caller waits on a channel, so this
+    /// is safe to call from inside another runtime's blocking thread.
     #[cfg(feature = "s3")]
     fn run_s3_future_sync<F, T>(future: F) -> Result<T, StoreError>
     where
@@ -1576,36 +1603,17 @@ impl StorageRouter {
         T: Send + 'static,
     {
         let timeout = Self::s3_sync_timeout();
-        if tokio::runtime::Handle::try_current().is_ok() {
-            return std::thread::Builder::new()
-                .name("storage-s3-sync".to_string())
-                .spawn(move || {
-                    let runtime = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(|err| {
-                            StoreError::Other(format!("build storage s3 sync runtime: {err}"))
-                        })?;
-                    runtime.block_on(async move {
-                        tokio::time::timeout(timeout, future)
-                            .await
-                            .map_err(|_| Self::s3_sync_timeout_error(timeout))
-                    })
-                })
-                .map_err(|err| StoreError::Other(format!("spawn S3 sync helper thread: {err}")))?
-                .join()
-                .map_err(|_| StoreError::Other("S3 sync helper thread panicked".to_string()))?;
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        Self::s3_sync_runtime()?.spawn(async move {
+            let _ = result_tx.send(tokio::time::timeout(timeout, future).await);
+        });
+        match result_rx.recv() {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(_)) => Err(Self::s3_sync_timeout_error(timeout)),
+            Err(_) => Err(StoreError::Other(
+                "S3 sync helper task panicked".to_string(),
+            )),
         }
-
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|err| StoreError::Other(format!("build storage s3 sync runtime: {err}")))?;
-        runtime.block_on(async move {
-            tokio::time::timeout(timeout, future)
-                .await
-                .map_err(|_| Self::s3_sync_timeout_error(timeout))
-        })
     }
 
     /// Create router with local storage only
@@ -3464,9 +3472,28 @@ impl HashtreeStore {
                 return Ok(None); // Not a file
             }
 
-            // Extract chunk info from links
-            let chunk_hashes: Vec<Hash> = node.links.iter().map(|l| l.hash).collect();
-            let chunk_sizes: Vec<u64> = node.links.iter().map(|l| l.size).collect();
+            // Extract leaf chunk info. A file with more chunks than one node
+            // holds nests interior file nodes under the root; descend through
+            // them so every entry is a data chunk, in file order.
+            let mut chunk_hashes: Vec<Hash> = Vec::with_capacity(node.links.len());
+            let mut chunk_sizes: Vec<u64> = Vec::with_capacity(node.links.len());
+            let mut pending: Vec<hashtree_core::Link> = node.links.into_iter().rev().collect();
+            while let Some(link) = pending.pop() {
+                if link.link_type == hashtree_core::LinkType::File {
+                    let child = tree
+                        .get_tree_node(&link.hash)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to get file node: {}", e))?;
+                    if let Some(child) =
+                        child.filter(|child| child.node_type == hashtree_core::LinkType::File)
+                    {
+                        pending.extend(child.links.into_iter().rev());
+                        continue;
+                    }
+                }
+                chunk_hashes.push(link.hash);
+                chunk_sizes.push(link.size);
+            }
 
             Ok(Some(FileChunkMetadata::new(
                 total_size,
@@ -4848,7 +4875,7 @@ mod tests {
             &StorageBackend::Fs,
         )?);
 
-        let outcome = std::panic::catch_unwind(|| {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             sync_block_on(async {
                 let aws_config = aws_config::from_env()
                     .region(aws_sdk_s3::config::Region::new("auto"))
@@ -4873,7 +4900,7 @@ mod tests {
                 let _ = Store::has(&router, &hash).await;
                 let _ = Store::get(&router, &hash).await;
             });
-        });
+        }));
 
         assert!(
             outcome.is_ok(),
