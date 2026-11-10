@@ -2,6 +2,51 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-10 - Git Repo Tree Build Writes
+
+Question: where does `git-remote-htree` spend time turning imported git
+objects into a repo tree, and does zlib compression dominate?
+
+`benches/git_storage.rs` now times object compression and the tree build
+separately. It writes the 671 source files under `rust/` (11.4 MB) as blob
+objects and builds the tree, once per backend. Each figure below is the range
+of three runs of the release bench binary on an Apple silicon Mac, parent
+revision versus this change. Other builds were running on the host, so treat
+small differences as noise.
+
+| Phase | Before | After |
+| --- | ---: | ---: |
+| Compress 671 objects (zlib, default level) | 140-217 ms | 139-148 ms |
+| Build tree, LMDB backend (the default) | 3.36-4.15 s | 11-59 ms |
+| Build tree, filesystem backend | 181-305 ms | 173-211 ms, one run 912 ms |
+
+Compression was not the cost. The LMDB build was: `GitStorage` wrote every
+blob and directory node with its own `put`, and the LMDB store commits one
+transaction per `put`, a few milliseconds each on this machine. `LocalStore` also did
+not forward `put_many`, so a batch would still have been written one
+transaction at a time.
+
+Tree builds now write through `BufferedStore` and flush to the local store in
+batches of about 16 MiB, and once more before a build returns (also when it
+fails, so a retry finds the blobs already stored). `LocalStore` forwards
+`put_many` to its backend.
+
+The same change removes copies the build made of everything it held: the whole
+compressed-object map was cloned for every build, each object was cloned again
+into its prefix bucket, and pack files and packed object ids were cloned. The
+map is now copied only if an object has to be seeded from the base root, and
+the rest is borrowed. That effect on peak memory was not measured.
+`validate_root_contains_direct_refs` resolves `.git/objects` once instead of
+once per ref, and skips the per-ref lookups when a pack checkpoint makes them
+irrelevant.
+
+Not changed: the zlib level. A different level changes the bytes of every
+loose object, so already-published repos would stop deduplicating.
+
+Not measured: a real push or clone end to end, Linux (where a commit costs
+less than macOS `F_FULLFSYNC`, so the ratio will be smaller), repos large
+enough to cross the 16 MiB batch boundary, and peak memory.
+
 ## 2026-10-06 - Automatic ARM Crypto Acceleration
 
 The core's previous SHA2 0.10 and AES-GCM 0.10 dependencies selected software

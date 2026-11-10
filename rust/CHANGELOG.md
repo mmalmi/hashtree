@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Performance
+
+- `git-remote-htree` writes a repo tree to the local store in batches instead
+  of one transaction per blob, and no longer copies every imported object
+  while building it.
+
+### Changed
+
+- `git-remote-htree`: remove the unused `GitStorage::hashtree` accessor.
+
 ## 0.2.157 - 2026-10-22
 
 - Add optional BitTorrent v1, v2 and hybrid import, range reads, magnets and
