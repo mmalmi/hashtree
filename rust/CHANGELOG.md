@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.4 - 2026-11-10
+
+No changes to the tools themselves; this release repairs the release path so
+binaries can be published again.
+
+- macOS release binaries are built on macOS 15 with Xcode 16.4. The macOS 14
+  build image the release workflow pinned was retired by its host.
+- The release receipt check accepts the Hashtree source that the pinned
+  integration lab certifies, and the hosted Rust release gate installs
+  `rustfmt`.
+
 ## 0.4.3 - 2026-11-10
 
 ### Performance
