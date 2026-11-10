@@ -3362,7 +3362,7 @@ dependencies = [
 
 [[package]]
 name = "git-remote-htree"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3714,7 +3714,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3835,7 +3835,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-core"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "aes-gcm 0.11.1",
  "async-trait",
