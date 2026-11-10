@@ -39,7 +39,7 @@ permissions:
 
 jobs:
   downloads:
-    runs-on: ${{ inputs.mac_cold_install && 'macos-14' || 'ubuntu-24.04' }}
+    runs-on: ${{ inputs.mac_cold_install && 'macos-15' || 'ubuntu-24.04' }}
     timeout-minutes: ${{ (inputs.cold_install || inputs.mac_cold_install) && 50 || (inputs.source || inputs.live_probe) && 35 || 15 }}
     env:
       CARGO_BUILD_JOBS: 2
