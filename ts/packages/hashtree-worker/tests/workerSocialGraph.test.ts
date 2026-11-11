@@ -236,3 +236,27 @@ it('does not restart graph reconciliation after close invalidates a pending rela
     await Dexie.delete(store); await Dexie.delete(`${store}-nostr-index`);
   }
 });
+
+it('answers followed-by-friends with only the followers the viewer follows', async () => {
+  const db = new Dexie('hashtree-social-graph'); db.version(1).stores({ socialGraph: '&id' });
+  await db.table('socialGraph').clear(); db.close();
+  const friendKey = new Uint8Array(32).fill(43), strangerKey = new Uint8Array(32).fill(45);
+  const stranger = getPublicKey(strangerKey), target = getPublicKey(new Uint8Array(32).fill(46));
+  const store = `graph-followed-by-${crypto.randomUUID()}`;
+  try {
+    await init(store);
+    await request({ type: 'handleSocialGraphEvents', events: [
+      finalizeEvent({ kind: 3, created_at: 1000, content: '', tags: [['p', friend]] }, key),
+      finalizeEvent({ kind: 3, created_at: 1000, content: '', tags: [['p', stranger], ['p', target]] }, friendKey),
+      finalizeEvent({ kind: 3, created_at: 1000, content: '', tags: [['p', target]] }, strangerKey),
+    ] });
+    const followers = await request({ type: 'getFollowers', pubkey: target }) as { pubkeys: string[] };
+    expect([...followers.pubkeys].sort()).toEqual([friend, stranger].sort());
+    const friends = await request({ type: 'getFollowedByFriends', pubkey: target });
+    expect(friends).toMatchObject({ type: 'pubkeyList', pubkeys: [friend] });
+    expect(friends).not.toHaveProperty('error');
+  } finally {
+    await request({ type: 'close' });
+    await Dexie.delete(store); await Dexie.delete(`${store}-nostr-index`);
+  }
+});

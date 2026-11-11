@@ -1660,7 +1660,7 @@ function handleGetFollowers(id: string, pubkey: string) {
 
 function handleGetFollowedByFriends(id: string, pubkey: string) {
   try {
-    const friendsFollowing = socialGraph.getFollowedByFriends(pubkey);
+    const friendsFollowing = socialGraph.followedByFriends(pubkey);
     respond({ type: 'pubkeyList', id, pubkeys: Array.from(friendsFollowing) });
   } catch (err) {
     respond({ type: 'pubkeyList', id, pubkeys: [], error: getErrorMessage(err) });
