@@ -2,18 +2,20 @@
 
 ## Unreleased
 
-- Worker: follow distances are recomputed one second after follow-list
-  changes stop arriving, followed by a `socialGraphVersion` message. Until now
+## TypeScript runtime 0.5.44 - 2026-11-11
+
+- Worker 0.4.28 recomputes follow distances one second after follow-list
+  changes stop arriving and then sends a `socialGraphVersion` message. Until now
   a change moved only the followed account itself, so accounts reached through
   it kept their old distance (or stayed reachable after an unfollow) until the
   graph was reloaded.
-- Worker: `getSocialGraphSize` and `initSocialGraph` answer with the number of
+- Worker 0.4.28 answers `getSocialGraphSize` and `initSocialGraph` with the number of
   known users, as the protocol declares. They sent the graph library's size
   object, which pages comparing sizes always saw as changed.
-- Worker protocol types: adds the `fetchUserFollows` and `fetchUserFollowers`
+- Worker 0.4.28 protocol types add the `fetchUserFollows` and `fetchUserFollowers`
   requests, the `ack` response and the `prefix` of `republishTrees`, all of
   which the worker already handled.
-- Worker: `relay/worker.ts` is type-checked against the graph library's own
+- Worker 0.4.28: `relay/worker.ts` is type-checked against the graph library's own
   types; the `any` stand-in for `nostr-social-graph` is gone.
 
 ## TypeScript runtime 0.5.43 - 2026-11-11
