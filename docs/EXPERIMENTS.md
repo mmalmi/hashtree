@@ -2,6 +2,81 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-11 - Browser Cold Loads: Chunk Reads, Shared Blob Reads, Root Event Bursts
+
+Question: a cold repository load in a browser app spent most of its time in
+three shared TypeScript paths. How much does each cost, and what removes it?
+
+A browser profile of a cold load against a public blob server showed 64 KiB
+chunks of one range arriving strictly one at a time at about 30 ms each (a
+2 MiB range took about 1.3 s; the same chunks requested together took about
+0.3 s), the same small blob downloaded up to 11 times in parallel with 26 of
+about 180 downloads being duplicates, and about 630 tree-root events for an
+owner with about 150 trees taking 1.3-1.5 s to reach the page while the worker
+was about 40% idle. The rows below reproduce each cause in Node on an Apple
+silicon Mac, three runs each, parent revision against this change. Other
+builds were running on the host (load average 15-50), so treat the absolute
+values as upper bounds; the two in-memory rows report process CPU time for
+that reason.
+
+| Operation | Before | After |
+| --- | ---: | ---: |
+| 2 MiB range of a plain file, 64 KiB chunks, 30 ms per store read | 1,030-1,045 ms | 92-101 ms |
+| 8 MiB whole plain file, same store | 4,012-4,421 ms | 285-293 ms |
+| 2 MiB range of an encrypted file, same store | 1,144-1,262 ms | 100-181 ms |
+| 8 MiB whole encrypted file, same store | 4,544-5,162 ms | 380-400 ms |
+| 5,000 whole reads of a 100-chunk file from memory, CPU time | 857-961 ms | 910-934 ms |
+| 2,000 ranges of 4 KiB from a 64 MiB file in memory, CPU time | 349-394 ms | 359-395 ms |
+| Downloads for 11 concurrent relay-worker reads of one blob | 11 | 1 |
+| Peer requests for 6 concurrent identical worker reads | 6 | 1 |
+| 630 root events, 150 trees: median time to forward an event | 1,234-1,817 ms | 1-2 ms |
+| Same burst: last event forwarded | 2,253-3,210 ms | 2-3 ms |
+| Same burst: last new root reported | 2,253-3,210 ms | 12-22 ms |
+| Same burst: store write transactions | 808-843 | 1 |
+| Same burst: root update notifications | 178-213 | 150 |
+
+1. `readFileRange` and whole-file reads awaited one `store.get` per chunk.
+   They now read ahead of the reader: at most 16 store reads in flight for one
+   file read, shared across nested nodes, and at most 8 MiB of declared chunk
+   bytes outstanding, so 2 MiB chunks read four at a time. Bytes are still
+   assembled strictly in link order, the first missing chunk in file order is
+   still the one reported, and links of unknown size fall back to on-demand
+   reads. The read rows use a `MemoryStore` behind a 30 ms timer per read;
+   with no store latency the read-ahead costs nothing measurable. The explicit
+   `prefetch` option of `readFileStream` is unchanged.
+2. The relay worker ran one blob-router search, and so one download, per
+   caller. Concurrent reads of a hash now share one search; the other worker
+   entry shares per hash and read options, so a read restricted to some
+   sources never receives bytes found by a broader one. Nothing is kept after
+   a read settles: a miss or an error is shared only with callers that were
+   waiting on that same read. Each caller gets its own copy of the bytes,
+   because several paths transfer their buffer to another thread. The
+   download rows count requests seen by a stubbed blob server and peer
+   provider in the worker test harnesses.
+3. Each tree-root event waited for a signed-event snapshot write and a root
+   record write before it was forwarded, and so did every repeated and
+   superseded delivery. Events are now forwarded first. An event that is older
+   than the cached root, or is the event the cached root came from, is dropped
+   without store work; otherwise the newest event per tree updates the
+   in-memory root and is reported, and snapshot and root records follow in
+   grouped writes (one IndexedDB transaction per round with the Dexie store).
+   The burst rows deliver each tree's current root four times plus one
+   superseded root for every fifth tree, all in one tick, against a store that
+   runs one 2 ms write transaction at a time.
+
+The burst also exposed an ordering fault in the previous code: with
+deliveries overlapping on store writes, a superseded root could be reported
+after the newer one and could be the one left in the store (the 178-213
+notifications above include those). Root updates are now serialized per tree,
+and tests cover out-of-order delivery during a pending write, same-second
+ties, and removal during a pending write.
+
+Not measured here: real IndexedDB transaction cost, and the end-to-end cold
+load in a browser, which belongs to the consuming app after it adopts these
+versions. The worker also moved from nostr-pubsub 0.5.20 to 0.5.28; its
+in-memory event store speedup does not apply to the worker, which stores
+events in hashtree blocks, so no ingestion gain is claimed for that move.
+
 ## 2026-11-10 - Streamed Encrypted Files and Directory Adds
 
 Question: after the core moved to versioned encryption and one range reader,

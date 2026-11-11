@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.42 - 2026-11-11
+
+- Core 0.4.2 reads the chunks of a file concurrently. `readFileRange` and
+  whole-file reads keep up to 16 store reads in flight (at most 8 MiB of
+  declared chunk bytes ahead of the reader) instead of one at a time, and
+  return the same bytes in the same order. The `prefetch` option of
+  `readFileStream` is unchanged.
+- Worker 0.4.26 shares one in-flight read between concurrent requests for the
+  same blob, so a block that several readers need at once is looked up and
+  downloaded once. Every caller receives its own bytes, and a finished read,
+  including a miss or an error, is never replayed to later callers.
+- Worker 0.4.26 forwards relay events to the page before persisting tree
+  roots. Root events that are repeated or older than the cached root no
+  longer touch the store, the newest root per tree is reported once, and
+  snapshot and root records are written in grouped transactions. Concurrent
+  deliveries can no longer report or persist an older root after a newer one.
+  A `treeRootUpdate` now follows the `event` message it came from instead of
+  preceding it.
+- Worker 0.4.26 uses nostr-pubsub 0.5.28 (from 0.5.20).
+- Dexie store 0.1.14 adds `putMany`, which stores several blobs in one
+  transaction.
+
 ## @hashtree/core 0.4.1 - 2026-11-10
 
 - Hashing and encryption no longer copy each chunk before the WebCrypto
