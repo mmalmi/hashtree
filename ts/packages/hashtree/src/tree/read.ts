@@ -6,6 +6,7 @@ import { Store, Hash, TreeNode, LinkType, toHex, CID, cid } from '../types.js';
 import { decodeTreeNode, tryDecodeTreeNode, getNodeType } from '../codec.js';
 import { decryptObject } from '../encryption.js';
 import { loadBlock } from './loadBlock.js';
+import { LinkReadAhead, ReadLimiter, planAllLinks, planRangeLinks } from './readAhead.js';
 import {
   decryptRootNodeOrBlob,
   ensureWithinLimit,
@@ -97,31 +98,42 @@ export async function readFile(
 async function assembleChunks(
   store: Store,
   node: TreeNode,
-  state: ReadState = { bytesRead: 0 }
+  state: ReadState = { bytesRead: 0 },
+  limiter: ReadLimiter = new ReadLimiter()
 ): Promise<Uint8Array> {
   const parts: Uint8Array[] = [];
+  const budget = state.maxBytes === undefined ? undefined : state.maxBytes - state.bytesRead;
+  const readAhead = new LinkReadAhead(store, node.links, planAllLinks(node.links, budget), limiter);
 
-  for (const link of node.links) {
-    ensureWithinLimit(state.maxBytes, state.bytesRead + (link.size ?? 0));
+  try {
+    for (const [index, link] of node.links.entries()) {
+      ensureWithinLimit(state.maxBytes, state.bytesRead + (link.size ?? 0));
 
-    const stored = await store.get(link.hash);
-    if (!stored) {
-      throw new Error(`Missing chunk: ${toHex(link.hash)}`);
+      const stored = await readAhead.get(index);
+      if (!stored) {
+        throw new Error(`Missing chunk: ${toHex(link.hash)}`);
+      }
+      const childData = link.key ? await decryptObject(stored, link.key) : stored;
+
+      if (link.type !== LinkType.Blob) {
+        // Intermediate tree node - decode and recurse
+        const childNode = decodeTreeNode(childData);
+        parts.push(await assembleChunks(store, childNode, state, limiter));
+      } else {
+        // Leaf chunk - raw blob
+        ensureWithinLimit(state.maxBytes, state.bytesRead + childData.length);
+        state.bytesRead += childData.length;
+        parts.push(childData);
+      }
     }
-    const childData = link.key ? await decryptObject(stored, link.key) : stored;
-
-    if (link.type !== LinkType.Blob) {
-      // Intermediate tree node - decode and recurse
-      const childNode = decodeTreeNode(childData);
-      parts.push(await assembleChunks(store, childNode, state));
-    } else {
-      // Leaf chunk - raw blob
-      ensureWithinLimit(state.maxBytes, state.bytesRead + childData.length);
-      state.bytesRead += childData.length;
-      parts.push(childData);
-    }
+  } finally {
+    readAhead.close();
   }
 
+  return concatParts(parts);
+}
+
+function concatParts(parts: Uint8Array[]): Uint8Array {
   const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
   const result = new Uint8Array(totalLength);
   let offset = 0;
@@ -300,76 +312,73 @@ async function readRangeFromNode(
   store: Store,
   node: TreeNode,
   start: number,
-  end?: number
+  end?: number,
+  limiter: ReadLimiter = new ReadLimiter()
 ): Promise<Uint8Array> {
   const parts: Uint8Array[] = [];
   let position = 0;
   let bytesCollected = 0;
   const maxBytes = end !== undefined ? end - start : Infinity;
+  const readAhead = new LinkReadAhead(store, node.links, planRangeLinks(node.links, start, end), limiter);
 
-  for (const link of node.links) {
-    if (bytesCollected >= maxBytes) break;
+  try {
+    for (const [index, link] of node.links.entries()) {
+      if (bytesCollected >= maxBytes) break;
 
-    const linkSize = link.size ?? 0;
+      const linkSize = link.size ?? 0;
 
-    // Skip chunks entirely before start
-    if (linkSize > 0 && position + linkSize <= start) {
-      position += linkSize;
-      continue;
-    }
-
-    const stored = await store.get(link.hash);
-    if (!stored) {
-      throw new Error(`Missing chunk: ${toHex(link.hash)}`);
-    }
-    const childData = link.key ? await decryptObject(stored, link.key) : stored;
-
-    if (link.type !== LinkType.Blob) {
-      // Intermediate tree node - decode and recurse
-      const childNode = decodeTreeNode(childData);
-      const childStart = Math.max(0, start - position);
-      const childEnd = end !== undefined ? end - position : undefined;
-      const childData2 = await readRangeFromNode(store, childNode, childStart, childEnd);
-      if (childData2.length > 0) {
-        const take = Math.min(childData2.length, maxBytes - bytesCollected);
-        parts.push(childData2.slice(0, take));
-        bytesCollected += take;
-      }
-      position += linkSize;
-    } else {
-      // Leaf chunk - raw blob
-      const chunkStart = position;
-      const chunkEnd = position + childData.length;
-      position = chunkEnd;
-
-      if (chunkEnd <= start) {
+      // Skip chunks entirely before start
+      if (linkSize > 0 && position + linkSize <= start) {
+        position += linkSize;
         continue;
       }
 
-      // Calculate slice bounds within this chunk
-      const sliceStart = Math.max(0, start - chunkStart);
-      const sliceEnd = end !== undefined
-        ? Math.min(childData.length, end - chunkStart)
-        : childData.length;
+      const stored = await readAhead.get(index);
+      if (!stored) {
+        throw new Error(`Missing chunk: ${toHex(link.hash)}`);
+      }
+      const childData = link.key ? await decryptObject(stored, link.key) : stored;
 
-      if (sliceStart < sliceEnd) {
-        const take = Math.min(sliceEnd - sliceStart, maxBytes - bytesCollected);
-        parts.push(childData.slice(sliceStart, sliceStart + take));
-        bytesCollected += take;
+      if (link.type !== LinkType.Blob) {
+        // Intermediate tree node - decode and recurse
+        const childNode = decodeTreeNode(childData);
+        const childStart = Math.max(0, start - position);
+        const childEnd = end !== undefined ? end - position : undefined;
+        const childData2 = await readRangeFromNode(store, childNode, childStart, childEnd, limiter);
+        if (childData2.length > 0) {
+          const take = Math.min(childData2.length, maxBytes - bytesCollected);
+          parts.push(childData2.slice(0, take));
+          bytesCollected += take;
+        }
+        position += linkSize;
+      } else {
+        // Leaf chunk - raw blob
+        const chunkStart = position;
+        const chunkEnd = position + childData.length;
+        position = chunkEnd;
+
+        if (chunkEnd <= start) {
+          continue;
+        }
+
+        // Calculate slice bounds within this chunk
+        const sliceStart = Math.max(0, start - chunkStart);
+        const sliceEnd = end !== undefined
+          ? Math.min(childData.length, end - chunkStart)
+          : childData.length;
+
+        if (sliceStart < sliceEnd) {
+          const take = Math.min(sliceEnd - sliceStart, maxBytes - bytesCollected);
+          parts.push(childData.slice(sliceStart, sliceStart + take));
+          bytesCollected += take;
+        }
       }
     }
+  } finally {
+    readAhead.close();
   }
 
-  // Concatenate parts
-  const totalLength = parts.reduce((sum, p) => sum + p.length, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const part of parts) {
-    result.set(part, offset);
-    offset += part.length;
-  }
-
-  return result;
+  return concatParts(parts);
 }
 
 /**
