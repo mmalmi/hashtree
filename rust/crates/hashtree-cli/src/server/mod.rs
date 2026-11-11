@@ -4,6 +4,7 @@ pub(crate) use blob_read::run_blob_read;
 pub mod blossom;
 mod handlers;
 mod ingest_filter;
+mod local_access;
 mod mime;
 mod nostr_query;
 mod peer_status;
@@ -497,7 +498,7 @@ impl HashtreeServer {
             .route(
                 "/:id",
                 get(handlers::serve_content_or_blob)
-                    .head(blossom::head_blob)
+                    .head(blossom::head_blob_with_headers)
                     .delete(blossom::delete_blob)
                     .options(blossom::cors_preflight),
             )
@@ -549,12 +550,8 @@ impl HashtreeServer {
             .route("/health", get(handlers::health_check))
             .route("/api/pins", get(handlers::list_pins))
             .route("/api/stats", get(handlers::storage_stats))
-            .route("/api/status", get(handlers::daemon_status))
+            .merge(local_access::routes(state.socialgraph_snapshot_public))
             .route("/api/socialgraph", get(handlers::socialgraph_stats))
-            .route(
-                "/api/socialgraph/snapshot",
-                get(handlers::socialgraph_snapshot),
-            )
             .route(
                 "/api/socialgraph/distance/:pubkey",
                 get(handlers::follow_distance),
@@ -569,11 +566,6 @@ impl HashtreeServer {
                 get(handlers::resolve_to_hash),
             )
             .route("/api/nostr/profile/:pubkey", get(handlers::nostr_profile))
-            .route(
-                "/api/nostr/events",
-                post(handlers::publish_nostr_event)
-                    .layer(DefaultBodyLimit::max(INTERNAL_JSON_BODY_LIMIT_BYTES)),
-            )
             .route("/api/trees/:pubkey", get(handlers::list_trees))
             .fallback(get(handlers::serve_virtual_host_fallback))
             .with_state(state.clone());
@@ -815,6 +807,7 @@ fn current_unix_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    mod local_access;
     use super::*;
     use crate::nostr_relay::{NostrRelay, NostrRelayConfig};
     use crate::storage::HashtreeStore;

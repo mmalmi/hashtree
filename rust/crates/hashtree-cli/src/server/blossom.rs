@@ -1011,13 +1011,28 @@ pub async fn upload_check(
         .unwrap()
 }
 
-/// HEAD /<sha256> - Check if blob exists
+/// HEAD /<sha256> for callers that do not supply forwarding metadata.
 pub async fn head_blob(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
+    _: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
-    let is_localhost = connect_info.0.ip().is_loopback();
+    head_blob_response(state, id, false).await
+}
+
+/// HEAD /<sha256> - Check if blob exists. Source diagnostics are included
+/// only for a loopback peer with no forwarding markers.
+pub async fn head_blob_with_headers(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    headers: axum::http::HeaderMap,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+) -> impl IntoResponse {
+    let show_source = super::local_access::is_direct_loopback(peer.ip(), &headers);
+    head_blob_response(state, id, show_source).await
+}
+
+async fn head_blob_response(state: AppState, id: String, show_source: bool) -> impl IntoResponse {
     let (hash_part, ext) = parse_hash_and_extension(&id);
 
     if !is_valid_sha256(hash_part) {
@@ -1083,7 +1098,7 @@ pub async fn head_blob(
                 .header(header::ACCEPT_RANGES, "bytes")
                 .header(header::CACHE_CONTROL, IMMUTABLE_CACHE_CONTROL)
                 .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*");
-            if is_localhost {
+            if show_source {
                 builder = builder.header("X-Source", "local");
             }
             builder.body(Body::empty()).unwrap()

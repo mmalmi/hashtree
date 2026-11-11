@@ -1,4 +1,5 @@
 use super::auth::AppState;
+use super::local_access::is_direct_loopback;
 use super::mime::get_mime_type;
 use super::nostr_query::query_events_for_local_request;
 pub(super) use super::peer_status::daemon_status;
@@ -330,6 +331,7 @@ async fn serve_virtual_tree_host_request(
     connect_info: ConnectInfo<std::net::SocketAddr>,
     head_only: bool,
 ) -> Response<Body> {
+    let is_localhost = is_direct_loopback(connect_info.0.ip(), &headers);
     let Some(root) = parse_virtual_tree_root(virtual_root) else {
         return not_found_response("Not found");
     };
@@ -342,7 +344,7 @@ async fn serve_virtual_tree_host_request(
                 requested_path.clone().filter(|path| !path.is_empty()),
                 &params,
                 headers.clone(),
-                connect_info.0.ip().is_loopback(),
+                is_localhost,
                 head_only,
             )
             .await
@@ -356,7 +358,7 @@ async fn serve_virtual_tree_host_request(
                     path: requested_path.clone().filter(|path| !path.is_empty()),
                     params: params.clone(),
                     headers: headers.clone(),
-                    is_localhost: connect_info.0.ip().is_loopback(),
+                    is_localhost,
                     head_only,
                 },
             )
@@ -378,7 +380,7 @@ async fn serve_virtual_tree_host_request(
                 None,
                 &params,
                 headers,
-                connect_info.0.ip().is_loopback(),
+                is_localhost,
                 head_only,
             )
             .await
@@ -392,7 +394,7 @@ async fn serve_virtual_tree_host_request(
                     path: None,
                     params,
                     headers,
-                    is_localhost: connect_info.0.ip().is_loopback(),
+                    is_localhost,
                     head_only,
                 },
             )
@@ -693,16 +695,9 @@ pub struct PublishNostrEventOptions {
 
 pub async fn publish_nostr_event(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
     Query(options): Query<PublishNostrEventOptions>,
     Json(event): Json<nostr::Event>,
 ) -> Response<Body> {
-    if !peer.ip().is_loopback() {
-        return Response::builder()
-            .status(StatusCode::FORBIDDEN)
-            .body(Body::from("Nostr event publication is loopback-only"))
-            .unwrap();
-    }
     if options.transport.is_some() && options.transport != state.nostr_event_transport {
         return Response::builder()
             .status(StatusCode::CONFLICT)
@@ -816,7 +811,7 @@ async fn htree_nhash_impl(
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
     head_only: bool,
 ) -> Response<Body> {
-    let is_localhost = connect_info.0.ip().is_loopback();
+    let is_localhost = is_direct_loopback(connect_info.0.ip(), &headers);
 
     let nhash_data = match nhash_decode(&nhash) {
         Ok(data) => data,
@@ -1042,6 +1037,7 @@ pub async fn htree_npub(
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
+    let is_localhost = is_direct_loopback(connect_info.0.ip(), &headers);
     let parsed = parse_mutable_htree_request_path(uri.path());
     let full = parsed
         .as_ref()
@@ -1059,7 +1055,7 @@ pub async fn htree_npub(
             path: None,
             params,
             headers,
-            is_localhost: connect_info.0.ip().is_loopback(),
+            is_localhost,
             head_only: method == Method::HEAD,
         },
     )
@@ -1075,6 +1071,7 @@ pub async fn htree_npub_path(
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
+    let is_localhost = is_direct_loopback(connect_info.0.ip(), &headers);
     let parsed = parse_mutable_htree_request_path(uri.path());
     let full = parsed
         .as_ref()
@@ -1093,7 +1090,7 @@ pub async fn htree_npub_path(
             path: resolved_path,
             params,
             headers,
-            is_localhost: connect_info.0.ip().is_loopback(),
+            is_localhost,
             head_only: method == Method::HEAD,
         },
     )
@@ -1780,7 +1777,7 @@ pub async fn serve_content_or_blob(
         .into_response();
     }
 
-    let is_localhost = connect_info.0.ip().is_loopback();
+    let is_localhost = is_direct_loopback(connect_info.0.ip(), &headers);
     let _client_ip = headers
         .get("x-forwarded-for")
         .and_then(|v| v.to_str().ok())
@@ -1838,6 +1835,7 @@ pub async fn serve_npub(
     headers: axum::http::HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
+    let is_localhost = is_direct_loopback(connect_info.0.ip(), &headers);
     // Reconstruct full key: "npub1" + rest (e.g., "abc.../mydata")
     let parsed = parse_bare_npub_request_path(uri.path());
     let (npub, treename, path) = if let Some(entry) = parsed {
@@ -1874,7 +1872,7 @@ pub async fn serve_npub(
             path,
             params: query,
             headers,
-            is_localhost: connect_info.0.ip().is_loopback(),
+            is_localhost,
             head_only: method == Method::HEAD,
         },
     )
@@ -2210,17 +2208,7 @@ pub struct SocialGraphSnapshotQuery {
 pub async fn socialgraph_snapshot(
     State(state): State<AppState>,
     Query(params): Query<SocialGraphSnapshotQuery>,
-    connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
-    let ip = connect_info.0.ip();
-    if !state.socialgraph_snapshot_public && !ip.is_loopback() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "localhost only"})),
-        )
-            .into_response();
-    }
-
     let add_public_cors = |builder: axum::http::response::Builder| {
         if state.socialgraph_snapshot_public {
             builder.header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")

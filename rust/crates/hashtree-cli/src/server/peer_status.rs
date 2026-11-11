@@ -31,22 +31,7 @@ pub(super) async fn daemon_status(
     headers: HeaderMap,
     connect_info: axum::extract::ConnectInfo<std::net::SocketAddr>,
 ) -> impl IntoResponse {
-    let ip = connect_info.0.ip();
-    // A local proxy also connects from loopback. Forwarding headers can only
-    // remove access; they must never make a remote peer local.
-    let proxy_marked = [
-        "cf-ray",
-        "cf-connecting-ip",
-        "cf-connecting-ipv6",
-        "forwarded",
-        "x-forwarded-for",
-        "x-forwarded-host",
-        "x-forwarded-proto",
-        "x-real-ip",
-    ]
-    .iter()
-    .any(|name| headers.contains_key(*name));
-    if !ip.is_loopback() || proxy_marked {
+    if !super::local_access::is_direct_loopback(connect_info.0.ip(), &headers) {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "localhost only"})),

@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- Routes meant for local callers no longer trust a loopback peer address
+  alone. A request counts as local only when it comes from loopback and
+  carries no forwarding marker (`Forwarded`, `Via`, `X-Real-IP`, any
+  `X-Forwarded-*`, or the `CF-*` connection headers). A reverse proxy on the
+  same host also connects from loopback, so before this change
+  `/api/socialgraph/snapshot` (unless made public) and
+  `POST /api/nostr/events` were reachable through such a proxy, and the
+  `X-Source` diagnostic header was returned to proxied clients. `/api/status`
+  now shares the same check. The boundary holds only if the proxy in front of
+  the daemon sends one of these headers, so check that yours does: some
+  proxies add `X-Forwarded-For` only when configured to.
+
 ## 0.4.5 - 2026-11-11
 
 Includes `git-remote-htree` 0.4.2.
