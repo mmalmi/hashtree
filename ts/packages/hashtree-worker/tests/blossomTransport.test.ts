@@ -69,7 +69,9 @@ describe('BlossomTransport.fetch', () => {
     const first = transport.fetch(hashHex);
     const second = transport.fetch(hashHex);
 
-    await expect(Promise.all([first, second])).resolves.toEqual([data, data]);
+    const results = await Promise.all([first, second]);
+    expect(results).toEqual([data, data]);
+    expect(results[0]!.buffer).not.toBe(results[1]!.buffer);
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 

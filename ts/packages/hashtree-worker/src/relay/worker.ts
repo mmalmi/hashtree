@@ -10,7 +10,7 @@
  * NIP-07 signing/encryption delegated back to main thread.
  */
 
-import { BLOB_NO_RESULT, HashTree, BlossomStore, blobReplyFromNullable } from '@hashtree/core';
+import { BLOB_NO_RESULT, HashTree, BlossomStore, blobReplyFromNullable, toHex } from '@hashtree/core';
 import { BlobRouter } from '@hashtree/mesh';
 import { DexieStore } from '@hashtree/dexie';
 import type { WorkerRequest, WorkerResponse, WorkerConfig, SignedEvent, BlossomUploadProgress, BlossomServerStatus } from './protocol';
@@ -41,6 +41,7 @@ import {
 import { SocialGraph, type NostrEvent as SocialGraphNostrEvent } from 'nostr-social-graph';
 import { loadGraphBootstrap, startGraphSync } from 'nostr-social-graph/publicGraphSync';
 import { cloneTransferableBytes } from '../transferableBytes';
+import { InFlightReads, copyBlobBytes } from '../inFlightReads';
 import Dexie from 'dexie';
 import { getErrorMessage } from './utils/errorMessage';
 import { DEFAULT_BOOTSTRAP_PUBKEY } from './utils/constants';
@@ -73,6 +74,7 @@ import { P2PPeerRoutes } from '../p2pPeerRoutes';
 let tree: HashTree | null = null;
 let store: DexieStore | null = null;
 let blobRouter: BlobRouter | null = null;
+const sharedBlobReads = new WeakMap<BlobRouter, InFlightReads<Uint8Array | null>>();
 let blossomStore: BlossomStore | null = null;
 const blossomBandwidthTracker = new BlossomBandwidthTracker((stats) => {
   respond({ type: 'blossomBandwidth', stats });
@@ -1042,10 +1044,23 @@ function createBlobRouter(primary: DexieStore): BlobRouter {
   });
 }
 
+/**
+ * Concurrent reads of one hash share a single router search, so a block that
+ * several readers need at once is looked up and downloaded once.
+ */
+function readRoutedBlob(router: BlobRouter, hash: Uint8Array): Promise<Uint8Array | null> {
+  let reads = sharedBlobReads.get(router);
+  if (!reads) {
+    reads = new InFlightReads(copyBlobBytes);
+    sharedBlobReads.set(router, reads);
+  }
+  return reads.read(toHex(hash), () => router.get(hash, ['idb']));
+}
+
 function createRoutedStore(primary: DexieStore, router: BlobRouter) {
   return {
     put: (hash, data) => primary.put(hash, data),
-    get: (hash) => router.get(hash, ['idb']),
+    get: (hash) => readRoutedBlob(router, hash),
     has: (hash) => primary.has(hash),
     delete: (hash) => primary.delete(hash),
   };
@@ -1097,7 +1112,7 @@ async function handleGet(id: string, hash: Uint8Array) {
     return;
   }
 
-  const data = await blobRouter.get(hash, ['idb']);
+  const data = await readRoutedBlob(blobRouter, hash);
 
   if (data) {
     const transferableData = cloneTransferableBytes(data);

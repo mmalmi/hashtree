@@ -11,6 +11,7 @@ import {
   type BlossomBandwidthStats,
   type BlossomBandwidthUpdateHandler,
 } from './blossomBandwidthTracker.js';
+import { InFlightReads, copyBlobBytes } from '../inFlightReads.js';
 
 export const DEFAULT_BLOSSOM_SERVERS: BlossomServerConfig[] = [];
 
@@ -128,7 +129,7 @@ export class BlossomTransport {
   private servers: BlossomServerConfig[];
   private readonly signer: BlossomSigner;
   private readonly bandwidthTracker: BlossomBandwidthTracker;
-  private readonly inflightFetches = new Map<string, Promise<Uint8Array | null>>();
+  private readonly inflightFetches = new InFlightReads(copyBlobBytes);
   private readonly fetchTimeoutMs: number;
   private store: BlossomStore;
 
@@ -197,15 +198,11 @@ export class BlossomTransport {
     await this.store.put(fromHex(hashHex), data, uploadMimeType);
   }
 
-  async fetch(hashHex: string): Promise<Uint8Array | null> {
-    const inflight = this.inflightFetches.get(hashHex);
-    if (inflight) {
-      return inflight;
-    }
-
-    const pending = this.fetchInternal(hashHex, () => this.store.get(fromHex(hashHex)));
-    this.inflightFetches.set(hashHex, pending);
-    return await pending;
+  fetch(hashHex: string): Promise<Uint8Array | null> {
+    return this.inflightFetches.read(
+      hashHex,
+      () => this.fetchInternal(() => this.store.get(fromHex(hashHex))),
+    );
   }
 
   async fetchFromServer(hashHex: string, serverUrl: string): Promise<Uint8Array | null> {
@@ -213,19 +210,14 @@ export class BlossomTransport {
     if (!normalizedServerUrl) {
       return null;
     }
-    const key = `${normalizedServerUrl}::${hashHex}`;
-    const inflight = this.inflightFetches.get(key);
-    if (inflight) {
-      return inflight;
-    }
-
-    const pending = this.fetchInternal(key, () => (
-      this.store as BlossomStore & {
-        getFromServers(hash: ReturnType<typeof fromHex>, serverUrls: readonly string[]): Promise<Uint8Array | null>;
-      }
-    ).getFromServers(fromHex(hashHex), [normalizedServerUrl]));
-    this.inflightFetches.set(key, pending);
-    return await pending;
+    return await this.inflightFetches.read(
+      `${normalizedServerUrl}::${hashHex}`,
+      () => this.fetchInternal(() => (
+        this.store as BlossomStore & {
+          getFromServers(hash: ReturnType<typeof fromHex>, serverUrls: readonly string[]): Promise<Uint8Array | null>;
+        }
+      ).getFromServers(fromHex(hashHex), [normalizedServerUrl])),
+    );
   }
 
   async stat(hashHex: string): Promise<{ size: number | null } | null> {
@@ -249,10 +241,7 @@ export class BlossomTransport {
     return null;
   }
 
-  private fetchInternal(
-    inflightKey: string,
-    loader: () => Promise<Uint8Array | null>,
-  ): Promise<Uint8Array | null> {
+  private fetchInternal(loader: () => Promise<Uint8Array | null>): Promise<Uint8Array | null> {
     return withReadFetchSlot(() => new Promise<Uint8Array | null>((resolve, reject) => {
       let settled = false;
       const timeoutId = setTimeout(() => {
@@ -274,9 +263,6 @@ export class BlossomTransport {
           clearTimeout(timeoutId);
           reject(error);
         });
-    }))
-      .finally(() => {
-        this.inflightFetches.delete(inflightKey);
-      });
+    }));
   }
 }
