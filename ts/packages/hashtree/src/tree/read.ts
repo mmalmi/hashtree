@@ -106,7 +106,8 @@ async function assembleChunks(
   const readAhead = new LinkReadAhead(store, node.links, planAllLinks(node.links, budget), limiter);
 
   try {
-    for (const [index, link] of node.links.entries()) {
+    for (let index = 0; index < node.links.length; index++) {
+      const link = node.links[index];
       ensureWithinLimit(state.maxBytes, state.bytesRead + (link.size ?? 0));
 
       const stored = await readAhead.get(index);
@@ -322,7 +323,8 @@ async function readRangeFromNode(
   const readAhead = new LinkReadAhead(store, node.links, planRangeLinks(node.links, start, end), limiter);
 
   try {
-    for (const [index, link] of node.links.entries()) {
+    for (let index = 0; index < node.links.length; index++) {
+      const link = node.links[index];
       if (bytesCollected >= maxBytes) break;
 
       const linkSize = link.size ?? 0;

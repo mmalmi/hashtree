@@ -196,7 +196,8 @@ export function isRedundantRootEvent(
 ): boolean {
   const order = compareReplaceableEventOrder(updatedAt, eventId, record.updatedAt, record.eventId);
   if (order < 0) return true;
-  return order === 0 && !!eventId && record.eventId === eventId && record.snapshotNhash !== undefined;
+  // Stored records decode a missing snapshot as null, so test for either.
+  return order === 0 && !!eventId && record.eventId === eventId && record.snapshotNhash != null;
 }
 
 /**

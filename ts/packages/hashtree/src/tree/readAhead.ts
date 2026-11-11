@@ -9,6 +9,8 @@ export const READ_CONCURRENCY = 16;
 /** Maximum declared chunk bytes fetched ahead of the reader. */
 export const READ_AHEAD_BYTES = 8 * 1024 * 1024;
 
+function ignoreFailure(): void {}
+
 /**
  * Caps concurrent store reads for one logical read, including nested nodes.
  */
@@ -18,21 +20,36 @@ export class ReadLimiter {
 
   constructor(private readonly limit: number = READ_CONCURRENCY) {}
 
-  async run<T>(task: () => Promise<T>): Promise<T> {
+  run<T>(task: () => Promise<T>): Promise<T> {
     if (this.active < this.limit) {
       this.active++;
-    } else {
-      // The releasing task hands its slot over, so `active` stays unchanged.
-      await new Promise<void>((resolve) => this.waiting.push(resolve));
+      return this.start(task);
     }
-    try {
-      return await task();
-    } finally {
-      const next = this.waiting.shift();
-      if (next) next();
-      else this.active--;
-    }
+    // The releasing task hands its slot over, so `active` stays unchanged.
+    const queued = new Promise<void>((resolve) => this.waiting.push(resolve)).then(() => this.start(task));
+    queued.then(undefined, ignoreFailure);
+    return queued;
   }
+
+  private start<T>(task: () => Promise<T>): Promise<T> {
+    let result: Promise<T>;
+    try {
+      result = task();
+    } catch (error) {
+      result = Promise.reject(error);
+    }
+    // The reader awaits results in link order, so a failure behind the link
+    // that ended the read is never awaited. Releasing on both outcomes also
+    // marks such a failure as handled instead of an unhandled rejection.
+    result.then(this.release, this.release);
+    return result;
+  }
+
+  private readonly release = (): void => {
+    const next = this.waiting.shift();
+    if (next) next();
+    else this.active--;
+  };
 }
 
 /**
@@ -99,11 +116,7 @@ export class LinkReadAhead {
 
   private start(index: number): Promise<Uint8Array | null> {
     const { hash } = this.links[index];
-    const promise = this.limiter.run(() => (this.closed ? Promise.resolve(null) : this.store.get(hash)));
-    // The reader awaits results in order; a later failure must not surface as
-    // an unhandled rejection when an earlier link already ended the read.
-    promise.catch(() => {});
-    return promise;
+    return this.limiter.run(() => (this.closed ? Promise.resolve(null) : this.store.get(hash)));
   }
 
   private release(index: number): void {

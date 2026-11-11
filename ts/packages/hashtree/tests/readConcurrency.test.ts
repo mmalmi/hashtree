@@ -215,6 +215,42 @@ describe('concurrent chunk reads', () => {
     expect(unhandled).toEqual([]);
   });
 
+  it('handles failures of reads that were queued behind the shared limit', async () => {
+    const data = patterned(60 * chunkSize);
+    const subtrees: Link[] = [];
+    const leaves: Link[] = [];
+    for (let group = 0; group < 20; group++) {
+      const links: Link[] = [];
+      for (let i = 0; i < 3; i++) {
+        const offset = (group * 3 + i) * chunkSize;
+        const hash = await tree.putBlob(data.slice(offset, offset + chunkSize));
+        links.push({ hash, size: chunkSize, type: LinkType.Blob });
+      }
+      leaves.push(...links);
+      const encoded = await encodeAndHash({ type: LinkType.File, links });
+      await store.put(encoded.hash, encoded.data);
+      subtrees.push({ hash: encoded.hash, size: 3 * chunkSize, type: LinkType.File });
+    }
+    const root = await encodeAndHash({ type: LinkType.File, links: subtrees });
+    await store.put(root.hash, root.data);
+    for (const leaf of leaves) store.failOn.add(toHex(leaf.hash));
+    // Leaves of the first subtree queue behind the sixteen intermediate reads.
+    store.delayFor = (hash) => (leaves.some((leaf) => toHex(leaf.hash) === toHex(hash)) ? 1 : 15);
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      await expect(tree.readFile({ hash: root.hash })).rejects.toThrow('store unavailable');
+      await expect(tree.readFileRange({ hash: root.hash }, 50, 5_000)).rejects.toThrow('store unavailable');
+      await new Promise((resolve) => setTimeout(resolve, 60));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+    expect(store.maxInFlight).toBeLessThanOrEqual(READ_CONCURRENCY);
+  });
+
   it('does not read ahead past the byte limit of a whole-file read', async () => {
     const data = patterned(40 * chunkSize);
     const subtrees: Link[] = [];
