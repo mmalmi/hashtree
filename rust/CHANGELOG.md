@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+### Compatibility
+
+- `htree add --legacy-keys` and `htree release publish --legacy-keys` write
+  32-byte CHK keys instead of the default suite-prefixed 33-byte keys. A
+  reader built before suite-prefixed keys existed cannot open the default
+  form: a gateway still running one returns ciphertext for every path of such
+  a tree. The ciphertext is the same either way; only the key encoding
+  differs. The release and Homebrew tap scripts now publish with this option
+  so install URLs keep working through such a gateway.
+
+### Fixed
+
+- The post-publish install check reads the Homebrew tap from `rust/README.md`,
+  where the instructions are, instead of the repository root README.
+
 ## 0.4.4 - 2026-11-10
 
 No changes to the tools themselves; this release repairs the release path so

@@ -248,6 +248,10 @@ pub(crate) enum Commands {
         /// Store as raw plaintext blobs without CHK encryption
         #[arg(long = "unencrypted", alias = "public")]
         unencrypted: bool,
+        /// Write 32-byte CHK keys, which readers older than suite-prefixed
+        /// keys can open
+        #[arg(long, conflicts_with_all = ["unencrypted", "cache"])]
+        legacy_keys: bool,
         /// Include files ignored by .gitignore and common OS junk filters
         #[arg(long)]
         no_ignore: bool,
@@ -1623,6 +1627,10 @@ pub(crate) enum ReleaseCommands {
         /// Don't push the updated release root to file servers
         #[arg(long)]
         local: bool,
+        /// Write the release tree with 32-byte CHK keys, which readers older
+        /// than suite-prefixed keys can open
+        #[arg(long)]
+        legacy_keys: bool,
     },
 }
 

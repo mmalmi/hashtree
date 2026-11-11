@@ -106,7 +106,7 @@ packaging/homebrew/create_tap.sh \
   --release-base-url https://upload.iris.to/<npub>/releases%2Fhashtree/v<version>/assets \
   --assets-dir rust/dist/hashtree-v<version> \
   --output-dir dist/homebrew-hashtree.git
-htree add dist/homebrew-hashtree.git --publish homebrew-hashtree.git
+htree add dist/homebrew-hashtree.git --publish homebrew-hashtree.git --legacy-keys
 ```
 
 Use that explicit provisioning step only for a new tap. For later releases use

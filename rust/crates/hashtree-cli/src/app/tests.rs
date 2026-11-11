@@ -1586,8 +1586,10 @@ fn test_cli_parses_release_publish_command() {
                     expected_root,
                     draft,
                     local,
+                    legacy_keys,
                 },
         } => {
+            assert!(!legacy_keys);
             assert_eq!(tree_name, "releases/hashtree");
             assert_eq!(version_path, "releases/v0.2.3");
             assert_eq!(cid, "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh");
@@ -1621,8 +1623,10 @@ fn test_cli_parses_release_publish_draft_flag() {
                     expected_root,
                     draft,
                     local,
+                    legacy_keys,
                 },
         } => {
+            assert!(!legacy_keys);
             assert_eq!(tree_name, "releases/hashtree");
             assert_eq!(version_path, "releases/v0.2.4-rc.1");
             assert_eq!(cid, "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh");
@@ -2190,6 +2194,37 @@ fn test_cli_add_uses_unencrypted_flag_with_public_alias() {
     match cli.command {
         Commands::Add { unencrypted, .. } => assert!(unencrypted),
         _ => panic!("expected add command"),
+    }
+}
+
+#[test]
+fn test_cli_legacy_keys_applies_to_encrypted_add_and_release_publish() {
+    let cli = Cli::parse_from(["htree", "add", "site", "--legacy-keys"]);
+    match cli.command {
+        Commands::Add { legacy_keys, .. } => assert!(legacy_keys),
+        _ => panic!("expected add command"),
+    }
+    // Plaintext has no keys, and the add cache does not record the key form.
+    for conflicting in [vec!["--unencrypted"], vec!["--cache", "cache-dir"]] {
+        let mut args = vec!["htree", "add", "site", "--legacy-keys"];
+        args.extend(conflicting);
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+
+    let cli = Cli::parse_from([
+        "htree",
+        "release",
+        "publish",
+        "releases/test",
+        "v2",
+        "nhash1qqsq9qxpq9qcrsszg2pvxq6rs0zqg3yyc5fc5z0knh0wlh",
+        "--legacy-keys",
+    ]);
+    match cli.command {
+        Commands::Release {
+            command: ReleaseCommands::Publish { legacy_keys, .. },
+        } => assert!(legacy_keys),
+        _ => panic!("expected release publish command"),
     }
 }
 

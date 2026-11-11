@@ -71,7 +71,7 @@ use super::pool_migration_receipt::{
     validate_frozen_source_generation, PoolMigrationSourceTerminalReceiptV3, SourceContentAuditV3,
 };
 use super::pwa::run_export;
-use super::release::publish_release_version;
+use super::release::{publish_release_version, ReleasePublishOptions};
 use super::resolve::{
     parse_published_target, resolve_cid_input, resolve_cid_input_with_opts, ResolveOptions,
     ResolvedCid,
@@ -946,6 +946,7 @@ fn run_command(
             chunk_size,
             local,
             cache,
+            legacy_keys,
         } => command_future!({
             run_add(
                 data_dir.clone(),
@@ -958,6 +959,7 @@ fn run_command(
                     chunk_size,
                     local,
                     cache,
+                    legacy_keys,
                 },
             )
             .await?
@@ -1650,15 +1652,19 @@ fn run_command(
                 expected_root,
                 draft,
                 local,
+                legacy_keys,
             } => {
                 let published = publish_release_version(
                     &data_dir,
                     &tree_name,
                     &version_path,
                     &cid,
-                    local,
-                    draft,
-                    expected_root,
+                    ReleasePublishOptions {
+                        local,
+                        draft,
+                        expected_root,
+                        legacy_keys,
+                    },
                 )
                 .await?;
 

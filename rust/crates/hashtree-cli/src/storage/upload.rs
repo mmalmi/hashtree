@@ -72,6 +72,8 @@ pub struct UploadOptions<'a> {
     pub respect_gitignore: bool,
     /// Receives discovered and processed byte and file counts.
     pub progress: Option<&'a AddProgress>,
+    /// Write 32-byte CHK keys for readers older than suite-prefixed keys.
+    pub legacy_keys: bool,
 }
 
 impl<'a> UploadOptions<'a> {
@@ -109,6 +111,11 @@ impl<'a> UploadOptions<'a> {
 
     pub fn with_progress(mut self, progress: &'a AddProgress) -> Self {
         self.progress = Some(progress);
+        self
+    }
+
+    pub fn with_legacy_keys(mut self, legacy_keys: bool) -> Self {
+        self.legacy_keys = legacy_keys;
         self
     }
 }
@@ -369,6 +376,15 @@ async fn build_directory_tree<S: Store>(
     Err(anyhow::anyhow!("No root directory"))
 }
 
+/// The key encoding new encrypted writes use.
+pub fn key_mode(legacy_keys: bool) -> hashtree_core::EncryptionMode {
+    if legacy_keys {
+        hashtree_core::EncryptionMode::LegacyChk
+    } else {
+        hashtree_core::EncryptionMode::default()
+    }
+}
+
 impl HashtreeStore {
     fn upload_tree(&self, options: &UploadOptions<'_>) -> HashTree<StorageRouter> {
         let mut config = HashTreeConfig::new(self.store_arc());
@@ -378,7 +394,7 @@ impl HashtreeStore {
         if let Some(chunk_size) = options.chunk_size {
             config = config.with_chunk_size(chunk_size);
         }
-        HashTree::new(config)
+        HashTree::new(config).with_encryption_mode(key_mode(options.legacy_keys))
     }
 
     fn pin_upload_root(&self, cid: &Cid) -> Result<()> {

@@ -339,7 +339,9 @@ haps "${HAPS_ARGS[@]}" --publish-source
 
 release_cid="$(
     cd "$REPO_DIR"
-    htree add "$RELEASE_STAGE_DIR" | awk '/^  url:/ {print $2}'
+    # 32-byte keys: the public gateway that serves install URLs cannot read
+    # the suite-prefixed form yet.
+    htree add "$RELEASE_STAGE_DIR" --legacy-keys | awk '/^  url:/ {print $2}'
 )"
 
 if [ -z "$release_cid" ]; then

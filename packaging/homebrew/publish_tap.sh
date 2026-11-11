@@ -274,7 +274,9 @@ if [[ "$PUSH_URL" == htree://* ]]; then
     rm -f -- "${bare_repo}/FETCH_HEAD"
     (
         cd "${REPO_DIR}"
-        htree add "${bare_repo}" --publish "${publish_name}" >/dev/null
+        # 32-byte keys: the gateway Homebrew fetches from cannot read the
+        # suite-prefixed form yet.
+        htree add "${bare_repo}" --publish "${publish_name}" --legacy-keys >/dev/null
     )
     refresh_gateway_tap_root_cache "$publish_name"
 else

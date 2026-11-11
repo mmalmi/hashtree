@@ -254,15 +254,30 @@ async fn publish_release_root<S: Store>(
     Ok(root)
 }
 
+pub(crate) struct ReleasePublishOptions {
+    /// Don't push the updated release root to file servers.
+    pub(crate) local: bool,
+    /// Repoint the sibling draft pointer instead of latest.
+    pub(crate) draft: bool,
+    /// Previous release tree root to build on.
+    pub(crate) expected_root: Option<Cid>,
+    /// Write release tree nodes with 32-byte CHK keys.
+    pub(crate) legacy_keys: bool,
+}
+
 pub(crate) async fn publish_release_version(
     data_dir: &Path,
     tree_name: &str,
     version_path: &str,
     cid_input: &str,
-    local: bool,
-    draft: bool,
-    expected_root: Option<Cid>,
+    options: ReleasePublishOptions,
 ) -> Result<PublishedRelease> {
+    let ReleasePublishOptions {
+        local,
+        draft,
+        expected_root,
+        legacy_keys,
+    } = options;
     if tree_name.trim().is_empty() {
         bail!("Release tree name must not be empty");
     }
@@ -284,7 +299,8 @@ pub(crate) async fn publish_release_version(
         .await
         .context("Failed to fetch release directory root")?;
 
-    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()))
+        .with_encryption_mode(hashtree_cli::storage::key_mode(legacy_keys));
     if !tree
         .is_dir(&release_cid)
         .await

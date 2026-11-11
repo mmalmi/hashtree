@@ -121,7 +121,7 @@ output="$(
 printf '%s\n' "$output" >"$STDOUT_FILE"
 
 grep -F "htree:add " "$LOG_FILE" >/dev/null
-grep -F -- "--publish homebrew-htree-test.git" "$LOG_FILE" >/dev/null
+grep -F -- "--publish homebrew-htree-test.git --legacy-keys" "$LOG_FILE" >/dev/null
 grep -F "curl:-fsSL --max-time 30 https://upload.iris.to/api/resolve/npub1test/homebrew-htree-test.git?refresh=1" "$LOG_FILE" >/dev/null
 grep -F 'htree://self/homebrew-htree-test.git' "$STDOUT_FILE" >/dev/null
 grep -F 'https://upload.iris.to/npub1test/homebrew-htree-test.git' "$STDOUT_FILE" >/dev/null

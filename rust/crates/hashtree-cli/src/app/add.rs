@@ -48,6 +48,7 @@ pub(crate) struct AddOptions {
     pub(crate) chunk_size: Option<usize>,
     pub(crate) local: bool,
     pub(crate) cache: Option<PathBuf>,
+    pub(crate) legacy_keys: bool,
 }
 
 pub(crate) fn render_add_output(
@@ -125,6 +126,7 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
         chunk_size,
         local,
         cache,
+        legacy_keys,
     } = options;
     let is_dir = path.is_dir();
     anyhow::ensure!(cache.is_none() || is_dir, "add cache requires a directory");
@@ -144,7 +146,8 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
         if let Some(chunk_size) = chunk_size {
             config = config.with_chunk_size(chunk_size);
         }
-        let tree = HashTree::new(config);
+        let tree = HashTree::new(config)
+            .with_encryption_mode(hashtree_cli::storage::key_mode(legacy_keys));
         let progress = Arc::new(AddProgress::new());
 
         if is_dir {
@@ -206,6 +209,7 @@ pub(crate) async fn run_add(data_dir: PathBuf, path: PathBuf, options: AddOption
             }
             .with_chunk_size(chunk_size)
             .with_respect_gitignore(!no_ignore)
+            .with_legacy_keys(legacy_keys)
             .with_progress(progress.as_ref());
             let cid_str = if let Some(cache) = cache.as_deref() {
                 #[cfg(not(unix))]

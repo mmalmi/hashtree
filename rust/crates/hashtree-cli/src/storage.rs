@@ -38,7 +38,9 @@ mod s3_sync_tests;
 mod upload;
 #[cfg(test)]
 mod upload_tests;
-pub use upload::{add_directory_to_tree, AddProgress, AddProgressSnapshot, UploadOptions};
+pub use upload::{
+    add_directory_to_tree, key_mode, AddProgress, AddProgressSnapshot, UploadOptions,
+};
 
 mod maintenance;
 mod quota;

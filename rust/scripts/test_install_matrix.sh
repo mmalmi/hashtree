@@ -10,11 +10,11 @@ reach: native host, Docker Linux targets, a running Windows VM, and Homebrew on
 the host when available.
 
 Pass --install-cmd to test a shell bootstrap. Homebrew tap metadata is still
-read from README.md when not overridden. The script prints a per-platform
+read from rust/README.md when not overridden. The script prints a per-platform
 PASS/FAIL/SKIP summary and exits nonzero if any attempted platform fails.
 
 Options:
-  --readme <path>                 README to inspect (default: repo README.md)
+  --readme <path>                 README to inspect (default: rust/README.md)
   --install-cmd <command>         Override the install command to test
   --test-remote <htree-url>       Remote used for git/helper smoke checks
   --platforms <csv>               Subset: host,docker-arm64,docker-amd64,windows,brew
@@ -38,9 +38,8 @@ EOF
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RUST_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-REPO_ROOT="$(cd "${RUST_DIR}/.." && pwd)"
 
-README_PATH="${REPO_ROOT}/README.md"
+README_PATH="${RUST_DIR}/README.md"
 INSTALL_CMD=""
 TEST_REMOTE="htree://npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree"
 PLATFORMS_CSV="host,docker-arm64,docker-amd64,windows,brew"
@@ -596,7 +595,7 @@ run_brew_smoke() {
     fi
 
     if [ -z "$BREW_TAP_NAME" ] || [ -z "$BREW_TAP_URL" ]; then
-        record_result "$label" "FAIL" "could not determine the Homebrew tap from README.md"
+        record_result "$label" "FAIL" "could not determine the Homebrew tap from ${README_PATH}"
         return 0
     fi
 

@@ -40,7 +40,9 @@ else
     latest_path="latest"
 fi
 
-publish_output="$(htree release publish "$tree_name" "$version_path" "$release_cid")"
+# 32-byte keys: the public gateway that serves install URLs cannot read the
+# suite-prefixed form yet.
+publish_output="$(htree release publish "$tree_name" "$version_path" "$release_cid" --legacy-keys)"
 printf '%s\n' "$publish_output"
 release_tree_root="$(printf '%s\n' "$publish_output" | awk -F': ' '/^Release tree root: / {print $2; exit}')"
 if [ -n "$release_tree_root" ]; then

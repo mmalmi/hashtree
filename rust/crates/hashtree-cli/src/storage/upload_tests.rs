@@ -121,6 +121,58 @@ fn options_and_named_uploads_agree() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Key lengths of a stored directory's root and of every link beneath it.
+async fn key_lengths<S: hashtree_core::Store>(tree: &HashTree<S>, cid: &Cid, out: &mut Vec<usize>) {
+    out.push(cid.key.map_or(0, |key| key.as_bytes().len()));
+    if !tree.is_dir(cid).await.unwrap() {
+        return;
+    }
+    for entry in tree.list_directory(cid).await.unwrap() {
+        let child = Cid {
+            hash: entry.hash,
+            key: entry.key,
+        };
+        Box::pin(key_lengths(tree, &child, out)).await;
+    }
+}
+
+#[test]
+fn legacy_keys_writes_only_32_byte_keys_and_the_same_contents() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let store = HashtreeStore::new(temp.path().join("store"))?;
+    let source = temp.path().join("src");
+    write(&source, "install.sh", "echo install");
+    // Large enough to take the threaded path and to span several chunks.
+    write(
+        &source,
+        "assets/archive.bin",
+        &"archive bytes ".repeat(8_000),
+    );
+    let options = || UploadOptions::encrypted().with_chunk_size(Some(16 * 1024));
+
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+    let lengths = |cid: &Cid| {
+        let mut out = Vec::new();
+        futures::executor::block_on(key_lengths(&tree, cid, &mut out));
+        out
+    };
+    let legacy = Cid::parse(&store.upload_dir_with(&source, options().with_legacy_keys(true))?)?;
+    let default = Cid::parse(&store.upload_dir_with(&source, options())?)?;
+    assert_eq!(lengths(&legacy), vec![32; 4]);
+    assert_eq!(lengths(&default), vec![33; 4]);
+
+    for relative in ["install.sh", "assets/archive.bin"] {
+        let read = |root: &Cid| {
+            futures::executor::block_on(async {
+                let file = tree.resolve(root, relative).await?.expect("file exists");
+                tree.get(&file, None).await
+            })
+        };
+        assert_eq!(read(&legacy)?, read(&default)?, "{relative}");
+    }
+    Ok(())
+}
+
 #[test]
 fn directory_add_matches_per_file_cids_for_one_and_many_files() -> anyhow::Result<()> {
     let temp = TempDir::new()?;

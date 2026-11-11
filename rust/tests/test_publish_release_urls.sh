@@ -45,7 +45,7 @@ OUTPUT="$(
         "${REPO_ROOT}/rust/scripts/publish_release.sh" v0.2.3 nhash1example
 )"
 
-grep -F "release publish releases/hashtree v0.2.3 nhash1example" "${TMPDIR}/htree.log" >/dev/null
+grep -F "release publish releases/hashtree v0.2.3 nhash1example --legacy-keys" "${TMPDIR}/htree.log" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "htree://npub1qqqqqqqqqqqqqqqqqqqqq/releases/hashtree/v0.2.3" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "https://upload.iris.to/npub1qqqqqqqqqqqqqqqqqqqqq/releases%2Fhashtree/v0.2.3/" >/dev/null
 printf '%s\n' "$OUTPUT" | grep -F "https://upload.iris.to/npub1qqqqqqqqqqqqqqqqqqqqq/releases%2Fhashtree/latest/" >/dev/null
