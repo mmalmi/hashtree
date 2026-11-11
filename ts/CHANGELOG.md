@@ -2,9 +2,12 @@
 
 ## Unreleased
 
-- Worker: `getFollowedByFriends` answers with the accounts the viewer follows
-  that follow the given account. It called a method the social graph library
-  does not have, so every request failed with an empty list and an error.
+## TypeScript runtime 0.5.43 - 2026-11-11
+
+- Worker 0.4.27 answers `getFollowedByFriends` with the accounts the viewer
+  follows that follow the given account. It called a method the social graph
+  library does not have, so every request failed with an empty list and an
+  error.
 
 ## TypeScript runtime 0.5.42 - 2026-11-11
 
