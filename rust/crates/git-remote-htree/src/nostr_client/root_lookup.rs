@@ -11,7 +11,7 @@ use hashtree_nostr_pubsub::{
 use nostr_pubsub::*;
 use nostr_pubsub_relay::RelayEventBus;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashSet},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -20,7 +20,8 @@ use std::{
 };
 
 const MAX_ROOT_EVENTS: usize = 256;
-const MAX_INDEXES: usize = 8;
+const RELAY_INDEX_LIMIT: usize = 8;
+const INDEX_READ_CONCURRENCY: usize = 8;
 
 #[derive(Default)]
 struct Observation {
@@ -47,6 +48,7 @@ impl PubsubPolicy for VerifiedSources {
 // An unavailable index must not hold up independent index or relay results.
 struct BoundedReader {
     bus: Arc<dyn EventBus>,
+    read_slots: Arc<tokio::sync::Semaphore>,
     window: Duration,
 }
 
@@ -67,9 +69,16 @@ impl EventBus for BoundedReader {
         filters: Vec<Filter>,
         options: QueryOptions,
     ) -> nostr_pubsub::Result<QueryReport> {
-        tokio::time::timeout(self.window, self.bus.query(filters, options))
-            .await
-            .map_err(|_| PubsubError::Storage("repository event index read timed out".into()))?
+        tokio::time::timeout(self.window, async {
+            let _permit = self
+                .read_slots
+                .acquire()
+                .await
+                .map_err(|error| PubsubError::Storage(error.to_string()))?;
+            self.bus.query(filters, options).await
+        })
+        .await
+        .map_err(|_| PubsubError::Storage("repository event index read timed out".into()))?
     }
 }
 
@@ -162,17 +171,24 @@ impl RootLookup {
         window: Duration,
     ) -> Result<Vec<Event>> {
         let mut filters = vec![filter.clone()];
-        filters.extend(index_filters());
+        filters.extend(index_filters(RELAY_INDEX_LIMIT));
+        let mut cached_filters = vec![filter.clone()];
+        cached_filters.extend(index_filters(MAX_ROOT_EVENTS));
+        let read_slots = Arc::new(tokio::sync::Semaphore::new(INDEX_READ_CONCURRENCY));
 
         // Observe relays and read the cache concurrently. EOSE does not close a live observation;
         // late roots and updates remain eligible through the explicit window.
         let (local, live) = tokio::join!(
             async {
                 let (store, cache) = self.cache().await?;
-                let reader = BoundedReader { bus: cache, window };
+                let reader = BoundedReader {
+                    bus: cache,
+                    window,
+                    read_slots: read_slots.clone(),
+                };
                 let result = reader
                     .query(
-                        filters.clone(),
+                        cached_filters,
                         QueryOptions {
                             limit: Some(MAX_ROOT_EVENTS),
                         },
@@ -209,11 +225,11 @@ impl RootLookup {
         match local {
             Ok((store, cache, _)) => {
                 let mut router = NostrPubsubRouter::new(Arc::new(VerifiedSources));
-                let indexes = index_roots(observed.clone());
-                if indexes.len() > MAX_INDEXES {
-                    failures.push("repository index observation budget exceeded".into());
-                }
-                for (name, root) in indexes.into_iter().take(MAX_INDEXES) {
+                let mut queried = HashSet::new();
+                for (name, root) in index_roots(observed.clone()) {
+                    if !queried.insert((root.hash, root.key)) {
+                        continue;
+                    }
                     let bus = Arc::new(HashtreeNostrIndexEventBus::new(
                         store.clone(),
                         Some(root),
@@ -221,7 +237,11 @@ impl RootLookup {
                     ));
                     router = router.with_query_source(RouterQuerySource::new(
                         bus.source_route(format!("index:{name}"))?,
-                        Arc::new(BoundedReader { bus, window }),
+                        Arc::new(BoundedReader {
+                            bus,
+                            window,
+                            read_slots: read_slots.clone(),
+                        }),
                     ));
                 }
                 let report = router
@@ -286,16 +306,16 @@ async fn observe_relays(
     result
 }
 
-fn index_filters() -> Vec<Filter> {
+fn index_filters(limit: usize) -> Vec<Filter> {
     vec![
         Filter::new()
             .kind(Kind::Custom(KIND_HASHTREE_ROOT))
             .identifier("nostr-event-index")
-            .limit(MAX_INDEXES),
+            .limit(limit),
         Filter::new()
             .kind(Kind::Custom(KIND_HASHTREE_ROOT))
             .custom_tag(SingleLetterTag::lowercase(Alphabet::L), "nostr-event-index")
-            .limit(MAX_INDEXES),
+            .limit(limit),
     ]
 }
 

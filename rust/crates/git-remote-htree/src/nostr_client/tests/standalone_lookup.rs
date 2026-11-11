@@ -5,13 +5,12 @@ use hashtree_nostr::{NostrEventStore, VerifiedEvent};
 use std::sync::Arc;
 
 #[tokio::test]
-async fn standalone_root_lookup_reads_offline_index_announcements_and_private_root() {
+async fn standalone_root_lookup_checks_ninth_cached_index_and_allows_a_new_name() {
     let directory = tempfile::tempdir().unwrap();
     let cache = directory.path().join("git-root-events");
     let store = Arc::new(FsBlobStore::new(cache.join("blobs")).unwrap());
     let events = NostrEventStore::new(store);
     let owner = Keys::generate();
-    let indexer = Keys::generate();
     let root_hash = "42".repeat(32);
     let key = [0x73; 32];
     let encrypted = nip44::encrypt(
@@ -40,30 +39,49 @@ async fn standalone_root_lookup_reads_offline_index_announcements_and_private_ro
         .await
         .unwrap()
         .unwrap();
-    // Mirrors advertise only l=hashtree; the index publisher is not the repo owner.
-    let mut tags = vec![
-        Tag::identifier("nostr-event-index"),
-        Tag::parse(["l", "hashtree"]).unwrap(),
-        Tag::parse(["hash", &hex::encode(index_root.hash)]).unwrap(),
-    ];
-    if let Some(key) = index_root.key {
-        tags.push(Tag::parse(["key", &hex::encode(key)]).unwrap());
-    }
-    let advertisement = EventBuilder::new(Kind::Custom(KIND_HASHTREE_ROOT), "")
-        .tags(tags)
-        .sign_with_keys(&indexer)
-        .unwrap();
-    let head = events
-        .build(
-            None,
-            vec![VerifiedEvent::try_from(advertisement)
+    // Only the last publisher in lookup order knows the private repository.
+    let mut publishers: Vec<_> = (0..9).map(|_| Keys::generate()).collect();
+    publishers.sort_by_key(|keys| keys.public_key().to_hex());
+    let mut announcements = Vec::new();
+    for (i, publisher) in publishers.iter().enumerate() {
+        let root = if i == 8 {
+            index_root.clone()
+        } else {
+            let decoy = EventBuilder::text_note(format!("unrelated {i}"))
+                .sign_with_keys(&owner)
+                .unwrap();
+            events
+                .build(
+                    None,
+                    vec![VerifiedEvent::try_from(decoy)
+                        .unwrap()
+                        .to_stored_event()
+                        .into_stored()],
+                )
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        let mut tags = vec![
+            Tag::identifier("nostr-event-index"),
+            Tag::parse(["l", "hashtree"]).unwrap(),
+            Tag::parse(["hash", &hex::encode(root.hash)]).unwrap(),
+        ];
+        if let Some(key) = root.key {
+            tags.push(Tag::parse(["key", &hex::encode(key)]).unwrap());
+        }
+        let event = EventBuilder::new(Kind::Custom(KIND_HASHTREE_ROOT), "")
+            .tags(tags)
+            .sign_with_keys(publisher)
+            .unwrap();
+        announcements.push(
+            VerifiedEvent::try_from(event)
                 .unwrap()
                 .to_stored_event()
-                .into_stored()],
-        )
-        .await
-        .unwrap()
-        .unwrap();
+                .into_stored(),
+        );
+    }
+    let head = events.build(None, announcements).await.unwrap().unwrap();
     std::fs::write(
         cache.join("head.nhash"),
         nhash_encode_full(&NHashData {
@@ -98,6 +116,14 @@ async fn standalone_root_lookup_reads_offline_index_announcements_and_private_ro
     .expect("root exists in native index");
     assert_eq!(resolved.root_hash.as_deref(), Some(root_hash.as_str()));
     assert_eq!(resolved.encryption_key, Some(key.into()));
+    let missing = client
+        .resolve_root_async_with_timeout("new-repository", 3, false)
+        .await
+        .unwrap_err();
+    assert!(
+        missing.downcast_ref::<RootNotObserved>().is_some(),
+        "{missing:#}"
+    );
 }
 
 #[tokio::test]

@@ -36,6 +36,12 @@
   longer delays or loses relay subscriptions. The relay hostname is still used
   for TLS verification and SNI.
 
+## 0.4.6 - 2026-11-11
+
+Includes `git-remote-htree` 0.4.3.
+
+- Ordinary first pushes now work when more than eight public event indexes are observed. The Git helper checks each distinct index with up to eight concurrent reads and can find an existing repository beyond the first eight announcements. An unreadable source still makes an otherwise empty lookup inconclusive.
+
 ## 0.4.5 - 2026-11-11
 
 Includes `git-remote-htree` 0.4.2.

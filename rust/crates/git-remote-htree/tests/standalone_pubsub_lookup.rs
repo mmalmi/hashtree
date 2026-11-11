@@ -470,44 +470,34 @@ async fn exceeded_live_observation_budget_is_reported_as_incomplete() -> Result<
 }
 
 #[tokio::test]
-async fn exceeded_independent_index_budget_is_reported_as_incomplete() -> Result<()> {
+async fn nine_independent_indexes_can_resolve_existing_and_new_repository_names() -> Result<()> {
     let author = Keys::generate();
     let store = Arc::new(MemoryStore::new());
-    let root = git_root(store.clone(), &"99".repeat(20)).await?;
-    let unrelated = root_event(&author, "another-repository", &root, 100)?;
-    let index = index_root(store.clone(), &[unrelated]).await?;
+    let commit = "99".repeat(20);
+    let root = git_root(store.clone(), &commit).await?;
+    let mut publishers: Vec<_> = (0..9).map(|_| Keys::generate()).collect();
+    publishers.sort_by_key(|keys| keys.public_key().to_hex());
+    let mut announcements = Vec::new();
+    for (i, publisher) in publishers.iter().enumerate() {
+        // Only the ninth source in lookup order contains the desired repository.
+        let name = format!("repo-{i}");
+        let event = root_event(&author, &name, &root, 100)?;
+        let index = index_root(store.clone(), &[event]).await?;
+        announcements.push(root_event(publisher, "nostr-event-index", &index, 200)?);
+    }
     let mut fixture = Fixture::new(store, vec![]);
-    // Nine independent publishers exceed the eight-index lookup budget while
-    // staying well within the separate event observation budget.
-    fixture.after_eose = (0..9)
-        .map(|number| root_event(&Keys::generate(), "nostr-event-index", &index, 200 + number))
-        .collect::<Result<Vec<_>>>()?;
+    fixture.after_eose = announcements;
     let server = Server::start(fixture).await?;
     let data = tempfile::tempdir()?;
-
-    let error = fetch(
-        config(data.path(), &server),
-        &author,
-        "unobserved-index-budget-root",
-    )
-    .await
-    .unwrap_err()
-    .to_string();
+    let settings = config(data.path(), &server);
+    let (refs, _, _) = fetch(settings.clone(), &author, "repo-8").await?;
+    assert_eq!(refs.get("refs/heads/main"), Some(&commit));
+    let error = fetch(settings, &author, "new-repository")
+        .await
+        .unwrap_err();
     assert!(
-        server.fixture.delivered_after_eose.load(Ordering::SeqCst) >= 9,
-        "fixture must advertise every independent index"
-    );
-    assert!(
-        error.contains("incomplete"),
-        "skipped sources must be reported: {error}"
-    );
-    assert!(
-        error.contains("index") && error.contains("budget"),
-        "the index budget must explain the failure: {error}"
-    );
-    assert!(
-        !error.contains("No repository root observed"),
-        "skipped indexes must not become a quiet repository miss: {error}"
+        error.to_string().contains("No repository root observed"),
+        "{error:#}"
     );
     Ok(())
 }
