@@ -15,7 +15,19 @@ import {
   type StoredNostrEvent,
 } from '@hashtree/nostr';
 import { query, subscribe as nostrSubscribe, unsubscribe as nostrUnsubscribe } from './nostrRuntime';
-import { getCachedRoot, getTreeRootCacheStore, setCachedRoot } from './treeRootCache';
+import {
+  compareReplaceableEventOrder,
+  flushCachedRoots,
+  getCachedRoot,
+  getCachedRootInfo,
+  getTreeRootCacheStore,
+  isRedundantRootEvent,
+  peekCachedRootInfo,
+  setCachedRoot,
+  stageCachedRoot,
+} from './treeRootCache';
+import { CoalescingBatch } from './coalescingBatch';
+import type { StoreEntry } from './rootStoreWriter';
 import type { SignedEvent, TreeVisibility } from './protocol';
 import { nip19 } from 'nostr-tools';
 
@@ -416,32 +428,78 @@ function hasAnyLabel(event: SignedEvent): boolean {
   return event.tags.some(tag => tag[0] === 'l');
 }
 
-export async function handleTreeRootEvent(event: SignedEvent): Promise<void> {
-  // Extract tree name from #d tag
-  const dTag = event.tags.find(t => t[0] === 'd');
-  if (!dTag || !dTag[1]) return;
-  const treeName = dTag[1];
+interface RootEventCandidate {
+  event: SignedEvent;
+  parsed: ParsedTreeRootEvent;
+  npub: string;
+  treeName: string;
+}
 
-  // Accept unlabeled legacy events, ignore other labeled apps.
-  if (hasAnyLabel(event) && !hasLabel(event, HASHTREE_LABEL)) return;
+const npubByPubkey = new Map<string, string>();
 
-  const parsed = parseTreeRootEvent(event);
-  if (!parsed) return;
+function npubFor(pubkeyHex: string): string {
+  let npub = npubByPubkey.get(pubkeyHex);
+  if (!npub) {
+    npub = nip19.npubEncode(pubkeyHex);
+    if (npubByPubkey.size >= 1000) npubByPubkey.clear();
+    npubByPubkey.set(pubkeyHex, npub);
+  }
+  return npub;
+}
 
-  // Convert pubkey to npub
-  const npub = nip19.npubEncode(event.pubkey);
+// Newest pending root event per tree; a burst is applied in grouped rounds.
+const rootEvents = new CoalescingBatch<RootEventCandidate>(
+  (candidate, current) => compareReplaceableEventOrder(
+    candidate.event.created_at,
+    candidate.event.id,
+    current.event.created_at,
+    current.event.id,
+  ) > 0,
+  applyRootEvents,
+);
 
-  // Parse hash and optional key
+/**
+ * Hash the signed-event snapshot without writing it: the blocks are returned
+ * so they can be stored in the same grouped write as the root record.
+ */
+async function prepareSnapshot(
+  event: SignedEvent,
+): Promise<{ snapshotNhash?: string; snapshotBlobs: StoreEntry[] }> {
+  const snapshotBlobs: StoreEntry[] = [];
+  if (!getTreeRootCacheStore()) {
+    return { snapshotBlobs };
+  }
+  const snapshot = await storeTreeEventSnapshot(
+    {
+      put: async (hash, data) => {
+        snapshotBlobs.push({ hash, data });
+        return true;
+      },
+      get: async () => null,
+      has: async () => false,
+      delete: async () => false,
+    },
+    nip19,
+    event as StoredNostrEvent,
+  );
+  return { snapshotNhash: snapshot?.snapshotNhash, snapshotBlobs };
+}
+
+async function stageRootEvent(
+  candidate: RootEventCandidate,
+  snapshot: { snapshotNhash?: string; snapshotBlobs: StoreEntry[] },
+): Promise<void> {
+  const { event, parsed, npub, treeName } = candidate;
   const hash = hexToBytes(parsed.hash);
   const key = parsed.key ? hexToBytes(parsed.key) : undefined;
   const visibility: TreeVisibility = parsed.visibility || 'public';
 
-  // Update cache
-  const { applied, record } = await setCachedRoot(npub, treeName, { hash, key }, visibility, {
+  const { applied, record } = await stageCachedRoot(npub, treeName, { hash, key }, visibility, {
     updatedAt: event.created_at,
     eventId: event.id,
     labels: parsed.labels,
-    snapshotNhash: await storeSnapshotNhash(event),
+    snapshotNhash: snapshot.snapshotNhash,
+    snapshotBlobs: snapshot.snapshotBlobs,
     encryptedKey: parsed.encryptedKey,
     keyId: parsed.keyId,
     selfEncryptedKey: parsed.selfEncryptedKey,
@@ -454,6 +512,61 @@ export async function handleTreeRootEvent(event: SignedEvent): Promise<void> {
   if (notifyCallback) {
     notifyCallback(npub, treeName, record);
   }
+}
+
+async function applyRootEvents(round: RootEventCandidate[]): Promise<void> {
+  const prepared = await Promise.all(round.map(async (candidate) => {
+    try {
+      const existing = await getCachedRootInfo(candidate.npub, candidate.treeName);
+      if (existing && isRedundantRootEvent(existing, candidate.event.created_at, candidate.event.id)) {
+        return null;
+      }
+      return { candidate, snapshot: await prepareSnapshot(candidate.event) };
+    } catch (error) {
+      console.warn('[Worker] Failed to handle tree root event:', error);
+      return null;
+    }
+  }));
+
+  for (const entry of prepared) {
+    if (!entry) continue;
+    try {
+      await stageRootEvent(entry.candidate, entry.snapshot);
+    } catch (error) {
+      console.warn('[Worker] Failed to handle tree root event:', error);
+    }
+  }
+
+  await flushCachedRoots();
+}
+
+/**
+ * Accept a tree root event without waiting on the store.
+ *
+ * Events that carry nothing new for the cached root are dropped at once.
+ * Otherwise the newest event per tree is applied to the in-memory cache and
+ * reported, and its snapshot and root record are persisted in grouped
+ * writes. The returned promise resolves once that persistence has finished.
+ */
+export function handleTreeRootEvent(event: SignedEvent): Promise<void> {
+  // Extract tree name from #d tag
+  const dTag = event.tags.find(t => t[0] === 'd');
+  if (!dTag || !dTag[1]) return Promise.resolve();
+  const treeName = dTag[1];
+
+  // Accept unlabeled legacy events, ignore other labeled apps.
+  if (hasAnyLabel(event) && !hasLabel(event, HASHTREE_LABEL)) return Promise.resolve();
+
+  const parsed = parseTreeRootEvent(event);
+  if (!parsed) return Promise.resolve();
+
+  const npub = npubFor(event.pubkey);
+  const known = peekCachedRootInfo(npub, treeName);
+  if (known && isRedundantRootEvent(known, event.created_at, event.id)) {
+    return rootEvents.settled();
+  }
+
+  return rootEvents.offer(`${npub}/${treeName}`, { event, parsed, npub, treeName });
 }
 
 /**

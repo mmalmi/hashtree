@@ -149,6 +149,34 @@ export class DexieStore implements Store {
     }
   }
 
+  /**
+   * Store several blobs in one transaction. Existing entries are replaced.
+   * @returns true when every entry was stored, false when the write failed
+   */
+  async putMany(entries: ReadonlyArray<{ hash: Hash; data: Uint8Array }>): Promise<boolean> {
+    if (entries.length === 0) {
+      return true;
+    }
+    const lastAccess = Date.now();
+    const blobs = new Map<string, BlobEntry>();
+    for (const { hash, data } of entries) {
+      const hashHex = toHex(hash);
+      blobs.set(hashHex, { hashHex, data, lastAccess });
+    }
+    const accesses = Array.from(blobs.keys(), (hashHex) => ({ hashHex, lastAccess }));
+    try {
+      await this.flushPendingLastAccessUpdates();
+      await this.db.transaction('rw', this.db.blobs, this.db.accesses, async () => {
+        await this.db.blobs.bulkPut(Array.from(blobs.values()));
+        await this.db.accesses.bulkPut(accesses);
+      });
+      return true;
+    } catch (e) {
+      console.error('[DexieStore] putMany error:', e);
+      return false;
+    }
+  }
+
   async get(hash: Hash): Promise<Uint8Array | null> {
     if (!hash) return null;
     const hashHex = toHex(hash);

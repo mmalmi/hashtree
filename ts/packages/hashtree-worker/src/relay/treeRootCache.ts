@@ -15,6 +15,7 @@ import type { CID, Store, TreeVisibility } from '@hashtree/core';
 import { sha256 } from '@hashtree/core';
 import { encode, decode } from '@msgpack/msgpack';
 import { LRUCache } from './utils/lruCache';
+import { RootStoreWriter, type StoreEntry } from './rootStoreWriter';
 
 // Cached root entry
 interface CachedRoot {
@@ -43,8 +44,37 @@ const updateListeners = new Set<(npub: string, treeName: string, cid: CID | null
 
 // Store reference
 let store: Store | null = null;
+// Persists staged roots behind the in-memory cache, in grouped writes.
+let writer = createWriter(null);
+// Storage keys are a hash of the cache key; keep them for hot trees.
+const storageKeys = new LRUCache<string, Uint8Array>(2000);
+// Serializes read-compare-update per tree so the newest root always wins.
+const rootLocks = new Map<string, Promise<void>>();
+let removals = 0;
 
-function compareReplaceableEventOrder(
+function createWriter(target: Store | null): RootStoreWriter<CachedRoot> {
+  return new RootStoreWriter<CachedRoot>(
+    target,
+    (cacheKey) => storageKeyFor(cacheKey),
+    (record) => new Uint8Array(encode(record)),
+  );
+}
+
+function withRootLock<T>(cacheKey: string, task: () => Promise<T>): Promise<T> {
+  const run = (rootLocks.get(cacheKey) ?? Promise.resolve()).then(task);
+  const tail = run.then(() => undefined, () => undefined);
+  rootLocks.set(cacheKey, tail);
+  void tail.then(() => {
+    if (rootLocks.get(cacheKey) === tail) rootLocks.delete(cacheKey);
+  });
+  return run;
+}
+
+/**
+ * Order two versions of a replaceable root: positive when the candidate is
+ * newer than the current one, negative when older, zero when they tie.
+ */
+export function compareReplaceableEventOrder(
   candidateUpdatedAt: number,
   candidateEventId: string | null | undefined,
   currentUpdatedAt: number,
@@ -76,6 +106,7 @@ function notifyUpdate(npub: string, treeName: string, cid: CID | null): void {
  */
 export function initTreeRootCache(storeImpl: Store): void {
   store = storeImpl;
+  writer = createWriter(storeImpl);
 }
 
 export function getTreeRootCacheStore(): Store | null {
@@ -85,88 +116,154 @@ export function getTreeRootCacheStore(): Store | null {
 /**
  * Generate storage key for a tree root
  */
-async function makeStorageKey(npub: string, treeName: string): Promise<Uint8Array> {
-  const keyStr = `root:${npub}/${treeName}`;
-  return sha256(new TextEncoder().encode(keyStr));
+async function storageKeyFor(cacheKey: string): Promise<Uint8Array> {
+  const known = storageKeys.get(cacheKey);
+  if (known) return known;
+  const storageKey = await sha256(new TextEncoder().encode(`root:${cacheKey}`));
+  storageKeys.set(cacheKey, storageKey);
+  return storageKey;
+}
+
+/**
+ * The newest root known without reading the store: the in-memory entry, or a
+ * staged value that has not been written yet (`null` for a pending removal).
+ * `undefined` means only the store can answer.
+ */
+function peekCachedRoot(cacheKey: string): CachedRoot | null | undefined {
+  const memCached = memoryCache.get(cacheKey);
+  if (memCached) return memCached;
+  const pending = writer.pending(cacheKey);
+  if (pending) memoryCache.set(cacheKey, pending);
+  return pending;
+}
+
+async function loadCachedRoot(cacheKey: string): Promise<CachedRoot | null> {
+  for (;;) {
+    const known = peekCachedRoot(cacheKey);
+    if (known !== undefined) return known;
+    if (!store) return null;
+
+    const removalsBefore = removals;
+    const data = await store.get(await storageKeyFor(cacheKey));
+
+    // A newer root may have been staged, or this one removed, during the read.
+    const current = peekCachedRoot(cacheKey);
+    if (current !== undefined) return current;
+    if (removals !== removalsBefore) continue;
+    if (!data) return null;
+
+    try {
+      const cached = decode(data) as CachedRoot;
+      memoryCache.set(cacheKey, cached);
+      return cached;
+    } catch {
+      return null;
+    }
+  }
 }
 
 /**
  * Get a cached tree root
  */
 export async function getCachedRoot(npub: string, treeName: string): Promise<CID | null> {
-  const cacheKey = `${npub}/${treeName}`;
-
-  // Check memory cache first
-  const memCached = memoryCache.get(cacheKey);
-  if (memCached) {
-    return { hash: memCached.hash, key: memCached.key };
-  }
-
-  // Check persistent store
-  if (!store) return null;
-
-  const storageKey = await makeStorageKey(npub, treeName);
-  const data = await store.get(storageKey);
-  if (!data) return null;
-
-  try {
-    const cached = decode(data) as CachedRoot;
-    // Update memory cache
-    memoryCache.set(cacheKey, cached);
-    return { hash: cached.hash, key: cached.key };
-  } catch {
-    return null;
-  }
+  const cached = await loadCachedRoot(`${npub}/${treeName}`);
+  return cached ? { hash: cached.hash, key: cached.key } : null;
 }
 
 /**
  * Get full cached root info (including visibility)
  */
-export async function getCachedRootInfo(npub: string, treeName: string): Promise<CachedRoot | null> {
-  const cacheKey = `${npub}/${treeName}`;
-
-  // Check memory cache first
-  const memCached = memoryCache.get(cacheKey);
-  if (memCached) return memCached;
-
-  // Check persistent store
-  if (!store) return null;
-
-  const storageKey = await makeStorageKey(npub, treeName);
-  const data = await store.get(storageKey);
-  if (!data) return null;
-
-  try {
-    const cached = decode(data) as CachedRoot;
-    memoryCache.set(cacheKey, cached);
-    return cached;
-  } catch {
-    return null;
-  }
+export function getCachedRootInfo(npub: string, treeName: string): Promise<CachedRoot | null> {
+  return loadCachedRoot(`${npub}/${treeName}`);
 }
 
 /**
- * Cache a tree root
+ * Cached root info when it is known without reading the store; `undefined`
+ * when the store would have to be read.
+ */
+export function peekCachedRootInfo(npub: string, treeName: string): CachedRoot | null | undefined {
+  return peekCachedRoot(`${npub}/${treeName}`);
+}
+
+/**
+ * Whether a root event carries nothing new for a cached record: it is older
+ * than the record, or it is the event the record was built from.
+ */
+export function isRedundantRootEvent(
+  record: CachedRoot,
+  updatedAt: number,
+  eventId: string | undefined,
+): boolean {
+  const order = compareReplaceableEventOrder(updatedAt, eventId, record.updatedAt, record.eventId);
+  if (order < 0) return true;
+  return order === 0 && !!eventId && record.eventId === eventId && record.snapshotNhash !== undefined;
+}
+
+/**
+ * Resolves once every root staged so far has been written to the store.
+ */
+export function flushCachedRoots(): Promise<void> {
+  return writer.flush();
+}
+
+interface SetCachedRootOptions {
+  updatedAt?: number;
+  eventId?: string;
+  labels?: string[];
+  snapshotNhash?: string;
+  encryptedKey?: string;
+  keyId?: string;
+  selfEncryptedKey?: string;
+  selfEncryptedLinkKey?: string;
+  force?: boolean;
+  /** Blocks backing `snapshotNhash`, written together with the root record. */
+  snapshotBlobs?: readonly StoreEntry[];
+}
+
+/**
+ * Cache a tree root and wait until it is persisted
  */
 export async function setCachedRoot(
   npub: string,
   treeName: string,
   cid: CID,
   visibility: TreeVisibility = 'public',
-  options?: {
-    updatedAt?: number;
-    eventId?: string;
-    labels?: string[];
-    snapshotNhash?: string;
-    encryptedKey?: string;
-    keyId?: string;
-    selfEncryptedKey?: string;
-    selfEncryptedLinkKey?: string;
-    force?: boolean;
-  }
+  options?: SetCachedRootOptions
+): Promise<SetCachedRootResult> {
+  const result = await stageCachedRoot(npub, treeName, cid, visibility, options);
+  if (result.applied) await writer.flush();
+  return result;
+}
+
+/**
+ * Apply a tree root to the in-memory cache and queue its store write.
+ *
+ * The cache answers with the new root as soon as this resolves; persistence
+ * follows in a grouped write (see `flushCachedRoots`).
+ */
+export function stageCachedRoot(
+  npub: string,
+  treeName: string,
+  cid: CID,
+  visibility: TreeVisibility = 'public',
+  options?: SetCachedRootOptions
 ): Promise<SetCachedRootResult> {
   const cacheKey = `${npub}/${treeName}`;
-  const existing = await getCachedRootInfo(npub, treeName);
+  return withRootLock(cacheKey, async () => {
+    const existing = await loadCachedRoot(cacheKey);
+    return applyCachedRoot(npub, treeName, cid, visibility, options, existing);
+  });
+}
+
+function applyCachedRoot(
+  npub: string,
+  treeName: string,
+  cid: CID,
+  visibility: TreeVisibility,
+  options: SetCachedRootOptions | undefined,
+  existing: CachedRoot | null,
+): SetCachedRootResult {
+  const cacheKey = `${npub}/${treeName}`;
   const updatedAt = options?.updatedAt ?? Math.floor(Date.now() / 1000);
   const eventId = options?.eventId;
   const sameHash = !!existing && hashEquals(existing.hash, cid.hash);
@@ -215,11 +312,7 @@ export async function setCachedRoot(
   notifyUpdate(npub, treeName, { hash: cached.hash, key: cached.key });
 
   // Persist to store
-  if (store) {
-    const storageKey = await makeStorageKey(npub, treeName);
-    const data = encode(cached);
-    await store.put(storageKey, new Uint8Array(data));
-  }
+  writer.queueRecord(cacheKey, cached, options?.snapshotBlobs);
 
   return { applied: true, record: cached };
 }
@@ -235,26 +328,25 @@ export async function mergeCachedRootKey(
 ): Promise<boolean> {
   const cacheKey = `${npub}/${treeName}`;
 
-  const cached = await getCachedRootInfo(npub, treeName);
-  if (!cached) return false;
-  if (cached.key) return false;
-  if (!hashEquals(cached.hash, hash)) return false;
+  const merged = await withRootLock(cacheKey, async () => {
+    const cached = await loadCachedRoot(cacheKey);
+    if (!cached) return false;
+    if (cached.key) return false;
+    if (!hashEquals(cached.hash, hash)) return false;
 
-  const merged: CachedRoot = {
-    ...cached,
-    key,
-  };
+    const next: CachedRoot = {
+      ...cached,
+      key,
+    };
 
-  memoryCache.set(cacheKey, merged);
-  notifyUpdate(npub, treeName, { hash: merged.hash, key: merged.key });
+    memoryCache.set(cacheKey, next);
+    notifyUpdate(npub, treeName, { hash: next.hash, key: next.key });
+    writer.queueRecord(cacheKey, next);
+    return true;
+  });
 
-  if (store) {
-    const storageKey = await makeStorageKey(npub, treeName);
-    const data = encode(merged);
-    await store.put(storageKey, new Uint8Array(data));
-  }
-
-  return true;
+  if (merged) await writer.flush();
+  return merged;
 }
 
 /**
@@ -263,15 +355,16 @@ export async function mergeCachedRootKey(
 export async function removeCachedRoot(npub: string, treeName: string): Promise<void> {
   const cacheKey = `${npub}/${treeName}`;
 
-  // Remove from memory cache
-  memoryCache.delete(cacheKey);
-  notifyUpdate(npub, treeName, null);
+  await withRootLock(cacheKey, async () => {
+    removals++;
+    // Remove from memory cache
+    memoryCache.delete(cacheKey);
+    notifyUpdate(npub, treeName, null);
+    // Remove from persistent store
+    writer.queueRecord(cacheKey, null);
+  });
 
-  // Remove from persistent store
-  if (store) {
-    const storageKey = await makeStorageKey(npub, treeName);
-    await store.delete(storageKey);
-  }
+  await writer.flush();
 }
 
 /**

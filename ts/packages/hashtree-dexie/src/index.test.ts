@@ -32,6 +32,53 @@ describe('DexieStore', () => {
     await DexieStore.deleteDatabase(TEST_DB_NAME);
   });
 
+  describe('putMany', () => {
+    it('stores several blobs in a single transaction', async () => {
+      const entries = Array.from({ length: 40 }, (_, index) => {
+        const data = new TextEncoder().encode(`entry ${index}`);
+        return { hash: makeHash(Uint8Array.from([index, 7, ...data])), data };
+      });
+      const db = (store as unknown as { db: { transaction: (...args: unknown[]) => unknown } }).db;
+      const transaction = vi.spyOn(db, 'transaction');
+
+      await expect(store.putMany(entries)).resolves.toBe(true);
+
+      expect(transaction).toHaveBeenCalledTimes(1);
+      transaction.mockRestore();
+      expect(await store.count()).toBe(entries.length);
+      for (const entry of entries) {
+        expect(await store.get(entry.hash)).toEqual(entry.data);
+      }
+    });
+
+    it('replaces existing entries and keeps the last value for a repeated hash', async () => {
+      const hash = makeHash(Uint8Array.from([1, 2, 3]));
+      await store.put(hash, Uint8Array.from([1]));
+
+      await store.putMany([
+        { hash, data: Uint8Array.from([2]) },
+        { hash, data: Uint8Array.from([3]) },
+      ]);
+
+      expect(await store.get(hash)).toEqual(Uint8Array.from([3]));
+      expect(await store.count()).toBe(1);
+    });
+
+    it('does nothing for an empty batch', async () => {
+      await expect(store.putMany([])).resolves.toBe(true);
+      expect(await store.count()).toBe(0);
+    });
+
+    it('makes entries visible to eviction accounting', async () => {
+      await store.putMany([
+        { hash: makeHash(Uint8Array.from([4])), data: new Uint8Array(100) },
+        { hash: makeHash(Uint8Array.from([5])), data: new Uint8Array(50) },
+      ]);
+
+      expect(await store.totalBytes()).toBe(150);
+    });
+  });
+
   describe('put and get', () => {
     it('should store and retrieve data', async () => {
       const data = new TextEncoder().encode('hello world');

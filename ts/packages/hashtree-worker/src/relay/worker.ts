@@ -875,18 +875,15 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
     console.log('[Worker] Nostr runtime initialized with', cfg.relays.length, 'relays');
 
     // Set up unified event handler for all subscriptions
-    setOnEvent(async (subId, event, info) => {
-      const isTreeRoot = isTreeRootEvent(event);
-      if (isTreeRoot) {
-        try {
-          await handleTreeRootEvent(event);
-        } catch (err) {
-          console.warn('[Worker] Failed to handle tree root event:', err);
-        }
-      }
-
-      // Forward to main thread
+    setOnEvent((subId, event, info) => {
+      // Forward to main thread first: delivery never waits on root persistence.
       respond({ type: 'event', subId, event, info });
+
+      if (isTreeRootEvent(event)) {
+        handleTreeRootEvent(event).catch((err) => {
+          console.warn('[Worker] Failed to handle tree root event:', err);
+        });
+      }
 
       // Route to SocialGraph handler (all socialgraph-* subscriptions)
       if (subId.startsWith('socialgraph-') && (event.kind === KIND_CONTACTS || event.kind === 10000)) {
