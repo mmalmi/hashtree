@@ -1,7 +1,8 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use hashtree_cli::config::{
-    ensure_auth_cookie, ensure_keys, ensure_keys_string, parse_npub, pubkey_bytes,
+    ensure_auth_cookie, ensure_keys, ensure_keys_string, get_auth_cookie_path, parse_npub,
+    pubkey_bytes,
 };
 use hashtree_cli::{
     spawn_background_eviction_task, Config, FetchConfig, FetchProgress, Fetcher, HashtreeServer,
@@ -90,6 +91,26 @@ use std::io;
 use std::process::Command;
 
 pub(crate) const ALLOW_ROOT_DAEMON_ENV: &str = "HTREE_ALLOW_ROOT_DAEMON";
+
+/// The startup line for the authenticated web UI. The login link carries the
+/// credential, so it is shown only on a terminal; output captured by a service
+/// manager or a file gets the address and where the credential is stored.
+pub(crate) fn web_ui_line(
+    bind_address: &str,
+    username: &str,
+    password: &str,
+    cookie_path: &Path,
+    interactive: bool,
+) -> String {
+    if interactive {
+        format!("Web UI: http://{bind_address}/#{username}:{password}")
+    } else {
+        format!(
+            "Web UI: http://{bind_address} (credentials in {})",
+            cookie_path.display()
+        )
+    }
+}
 
 pub(crate) fn root_daemon_override_enabled(value: Option<&str>) -> bool {
     let Some(value) = value else {
@@ -799,7 +820,16 @@ fn run_command(
             if config.server.enable_auth {
                 let (username, password) = ensure_auth_cookie()?;
                 println!();
-                println!("Web UI: http://{}/#{}:{}", bind_address, username, password);
+                println!(
+                    "{}",
+                    web_ui_line(
+                        &bind_address,
+                        &username,
+                        &password,
+                        &get_auth_cookie_path(),
+                        std::io::stdout().is_terminal(),
+                    )
+                );
                 server = server.with_auth(username, password);
             } else {
                 println!("Web UI: http://{}", bind_address);

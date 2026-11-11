@@ -1,6 +1,31 @@
 # Changelog
 
-## Unreleased
+## 0.4.5 - 2026-11-11
+
+Includes `git-remote-htree` 0.4.2.
+
+### Added
+
+- Find public trees and Git repositories by name through your social graph:
+  `htree search <name>` lists matches, and `htree clone <name>` and
+  `htree get <name>` ask you to choose a publisher before fetching. Names
+  resolve through signed profiles, follow lists, public mutes and public tree
+  announcements, up to two follow hops from your identity. Profile names are
+  not unique, so nothing is downloaded without an explicit publisher choice;
+  without a terminal the commands print explicit `npub` URLs and exit.
+
+### Performance
+
+- Relay query diagnostics no longer read `/proc/self/smaps_rollup` before and
+  after every query. The value was unused, and the read walks every mapping of
+  the process, which is slow on a daemon with a large memory-mapped store.
+
+### Security
+
+- `htree start` prints the web UI login link, which carries the credential,
+  only when its output is a terminal. Under a service manager or when
+  redirected to a file it prints the address and the path of the credential
+  file instead, so the credential no longer lands in captured logs.
 
 ### Compatibility
 

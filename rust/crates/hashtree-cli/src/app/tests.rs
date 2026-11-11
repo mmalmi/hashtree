@@ -29,7 +29,7 @@ use super::run::{
 use super::run::{
     format_cid_for_display, pin_input_target, resolve_cat_target_cid, resolve_info_target,
     resolve_load_target_cid, root_daemon_override_enabled, should_spawn_background_update,
-    stored_published_pin_hash,
+    stored_published_pin_hash, web_ui_line,
 };
 use super::storage_stats::{
     classify_storage_bucket, render_storage_inventory, AuthorSummary, PinnedDetail, StorageBucket,
@@ -2226,6 +2226,21 @@ fn test_cli_legacy_keys_applies_to_encrypted_add_and_release_publish() {
         } => assert!(legacy_keys),
         _ => panic!("expected release publish command"),
     }
+}
+
+#[test]
+fn web_ui_credential_is_printed_only_to_a_terminal() {
+    let cookie = std::path::Path::new("/config/auth.cookie");
+    assert_eq!(
+        web_ui_line("127.0.0.1:8080", "htree_1", "secret", cookie, true),
+        "Web UI: http://127.0.0.1:8080/#htree_1:secret"
+    );
+    let captured = web_ui_line("127.0.0.1:8080", "htree_1", "secret", cookie, false);
+    assert_eq!(
+        captured,
+        "Web UI: http://127.0.0.1:8080 (credentials in /config/auth.cookie)"
+    );
+    assert!(!captured.contains("secret") && !captured.contains("htree_1"));
 }
 
 #[test]

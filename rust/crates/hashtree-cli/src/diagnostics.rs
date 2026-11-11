@@ -4,7 +4,6 @@ use nostr::Filter;
 pub struct ProcessMemorySnapshot {
     pub vm_rss_kb: Option<u64>,
     pub rss_anon_kb: Option<u64>,
-    pub anonymous_kb: Option<u64>,
     pub threads: Option<u64>,
 }
 
@@ -20,15 +19,6 @@ pub fn process_memory_snapshot() -> ProcessMemorySnapshot {
                 snapshot.rss_anon_kb = parse_status_kb(value);
             } else if let Some(value) = line.strip_prefix("Threads:") {
                 snapshot.threads = value.trim().parse::<u64>().ok();
-            }
-        }
-    }
-
-    if let Ok(rollup) = std::fs::read_to_string("/proc/self/smaps_rollup") {
-        for line in rollup.lines() {
-            if let Some(value) = line.strip_prefix("Anonymous:") {
-                snapshot.anonymous_kb = parse_status_kb(value);
-                break;
             }
         }
     }
