@@ -20,6 +20,16 @@
 
 ### Fixed
 
+- On Linux, a second process linked against a different C library than the
+  process holding a store no longer hangs. The release binaries are statically
+  linked against musl; a reader built against glibc that opened the same LMDB
+  environments blocked forever in its first read transaction, on x86_64, and
+  overwrote a word of the holder's lock while it waited. Such a process is now
+  refused when it opens the environment (`MDB_VERSION_MISMATCH`), and a stock
+  glibc LMDB reader gets `EINVAL` from transaction begin. Sharing a store still
+  requires both processes to use the same C library: build external readers for
+  the musl target when the store is held by a release binary, or run a glibc
+  build of `htree` next to glibc readers.
 - Upstream relay connections race IPv6 and IPv4 through the WebSocket
   handshake: the other address family starts after 250 ms, each address gets
   4 s and the whole connection 8 s. A host with one broken address family no

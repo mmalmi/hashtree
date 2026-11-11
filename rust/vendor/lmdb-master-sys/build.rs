@@ -143,6 +143,12 @@ fn main() {
         builder.define("MDB_USE_POSIX_SEM", None);
     }
 
+    // musl has no feature-test macro. LMDB needs to know which C library set
+    // up the mutexes in a lock file, see MDB_MUTEX_ABI_GUARD in mdb.c.
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("musl") {
+        builder.define("MDB_LIBC_MUSL", None);
+    }
+
     if cfg!(feature = "use-valgrind") {
         builder.define("USE_VALGRIND", None);
     }

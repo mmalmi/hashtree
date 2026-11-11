@@ -181,3 +181,32 @@ fn interrupted_lock_initialization_reopens_without_removing_durable_data() {
     drop(lock);
     child("recover", &path).wait();
 }
+
+/// Processes linked against glibc and musl must not share a lock file: their
+/// process-shared mutexes have the same size but different layouts, and the
+/// mismatch used to block a second process forever. The bundled LMDB tells
+/// them apart by the int at byte 16 of each mutex (see `MDB_MUTEX_ABI_GUARD`
+/// in `mdb.c`); `rust/scripts/run_lmdb_cross_libc_test_in_docker.sh` runs the
+/// mixed pairings. This pins what this build writes there.
+#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+#[test]
+fn lock_file_mutexes_identify_the_c_library() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("store");
+    let store = open(&path);
+    store.put_sync(sha256(DATA), DATA).unwrap();
+    let lock = std::fs::read(path.join("lock.mdb")).unwrap();
+    // Header: magic, format, last transaction id, reader count, padding.
+    const READER_MUTEX: usize = 24;
+    let word = i32::from_ne_bytes(
+        lock[READER_MUTEX + 16..READER_MUTEX + 20]
+            .try_into()
+            .unwrap(),
+    );
+    if cfg!(target_env = "musl") {
+        assert_eq!(word, 0x0c, "musl mutexes carry the Hashtree stamp");
+    } else if cfg!(target_env = "gnu") {
+        assert_ne!(word & 0x80, 0, "glibc mutex kind has the shared bit");
+    }
+    drop(store);
+}

@@ -5492,6 +5492,73 @@ mdb_env_mname_init(MDB_env *env)
 
 #endif
 
+#if defined(MDB_USE_POSIX_MUTEX) && defined(__linux__) && !defined(MDB_MUTEX_ABI_GUARD)
+# if defined(MDB_LIBC_MUSL) || (defined(__GLIBC__) && !defined(__UCLIBC__))
+#  define MDB_MUTEX_ABI_GUARD	1
+# endif
+#endif
+#ifndef MDB_MUTEX_ABI_GUARD
+# define MDB_MUTEX_ABI_GUARD	0
+#endif
+
+#if MDB_MUTEX_ABI_GUARD
+/** @defgroup mutex_abi	Hashtree: one C library per lock file
+ *
+ *	The lock file holds process-shared pthread mutexes, so every process
+ *	that maps it must agree on their layout. glibc and musl both use a
+ *	40-byte, 8-aligned pthread_mutex_t on most 64-bit Linux targets, which
+ *	is all #MDB_LOCK_FORMAT records, but they keep the futex word at
+ *	different offsets. A glibc process reads musl's type word as a held
+ *	lock: it blocks forever in #LOCK_MUTEX() and overwrites that type word
+ *	while it waits. A musl process ignores glibc's lock word altogether.
+ *
+ *	The int at byte 16 tells the two apart. glibc keeps its immutable mutex
+ *	kind there, always with the process-shared bit set. musl never uses the
+ *	word, so it stays zero, or holds the stamp below.
+ *
+ *	Only the 40-byte layouts collide. Where the sizes differ the lock
+ *	format already differs. 32-bit targets are not covered.
+ *	@{
+ */
+#define MDB_MUTEX_ABI_OFFSET	16
+	/** glibc's PTHREAD_MUTEX_PSHARED_BIT in its mutex kind. */
+#define MDB_MUTEX_ABI_GLIBC_PSHARED	0x80
+	/** Written into musl's unused word. As a glibc mutex kind it is invalid,
+	 *	so pthread_mutex_lock() in a glibc process without this guard returns
+	 *	EINVAL at once and leaves the mutex alone.
+	 */
+#define MDB_MUTEX_ABI_MUSL_STAMP	0x0c
+
+	/** Nonzero if a mutex found in the lock file was set up by a C library
+	 *	other than the one this code is linked against.
+	 */
+static int ESECT
+mdb_mutex_abi_foreign(const pthread_mutex_t *mutex)
+{
+	int word;
+	if (sizeof(pthread_mutex_t) != 40)
+		return 0;
+	memcpy(&word, (const char *)mutex + MDB_MUTEX_ABI_OFFSET, sizeof(word));
+#ifdef MDB_LIBC_MUSL
+	return word != 0 && word != MDB_MUTEX_ABI_MUSL_STAMP;
+#else
+	return !(word & MDB_MUTEX_ABI_GLIBC_PSHARED);
+#endif
+}
+
+#ifdef MDB_LIBC_MUSL
+	/** Mark a freshly initialized musl mutex, see #MDB_MUTEX_ABI_MUSL_STAMP. */
+static void ESECT
+mdb_mutex_abi_stamp(pthread_mutex_t *mutex)
+{
+	int word = MDB_MUTEX_ABI_MUSL_STAMP;
+	if (sizeof(pthread_mutex_t) == 40)
+		memcpy((char *)mutex + MDB_MUTEX_ABI_OFFSET, &word, sizeof(word));
+}
+#endif
+/** @} */
+#endif /* MDB_MUTEX_ABI_GUARD */
+
 /** Open and/or initialize the lock region for the environment.
  * @param[in] env The LMDB environment.
  * @param[in] fname Filename + scratch area, from #mdb_fname_init().
@@ -5682,6 +5749,10 @@ mdb_env_setup_locks(MDB_env *env, MDB_name *fname, int mode, int *excl)
 		pthread_mutexattr_destroy(&mattr);
 		if (rc)
 			goto fail;
+#if (MDB_MUTEX_ABI_GUARD) && defined(MDB_LIBC_MUSL)
+		mdb_mutex_abi_stamp(env->me_txns->mti_rmutex);
+		mdb_mutex_abi_stamp(env->me_txns->mti_wmutex);
+#endif
 #endif	/* _WIN32 || ... */
 
 		env->me_txns->mti_magic = MDB_MAGIC;
@@ -5704,6 +5775,14 @@ mdb_env_setup_locks(MDB_env *env, MDB_name *fname, int mode, int *excl)
 			rc = MDB_VERSION_MISMATCH;
 			goto fail;
 		}
+#if MDB_MUTEX_ABI_GUARD
+		if (mdb_mutex_abi_foreign(env->me_txns->mti_rmutex) ||
+			mdb_mutex_abi_foreign(env->me_txns->mti_wmutex)) {
+			DPUTS("lock region mutexes belong to another C library");
+			rc = MDB_VERSION_MISMATCH;
+			goto fail;
+		}
+#endif
 		rc = ErrCode();
 		if (rc && rc != EACCES && rc != EAGAIN) {
 			goto fail;

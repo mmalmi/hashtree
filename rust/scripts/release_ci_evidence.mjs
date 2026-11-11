@@ -1,7 +1,7 @@
 // These jobs include the six shared release-gate lanes and CI's platform checks.
 export const requiredCiJobs = Object.freeze([
   'TypeScript', 'TypeScript Documentation', 'Release Wiring', 'Pool Migration Systemd', 'Rust Tests',
-  'macOS Updater Security', 'Windows Storage', 'Rust FUSE Smoke',
+  'macOS Updater Security', 'Windows Storage', 'Rust FUSE Smoke', 'LMDB Cross-libc Locking',
   'Rust Peripheral Tests', 'Rust FIPS WebRTC Tests', 'Nostr Index Package', 'CLI Package',
 ]);
 

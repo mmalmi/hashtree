@@ -142,6 +142,19 @@ other processes. Membership and concurrency changes are generation-tracked and
 refresh safely across live processes; LMDB map resizing is deliberately not a live
 membership operation.
 
+On Linux, every process sharing a store must be linked against the same C
+library. LMDB keeps its reader and writer locks as process-shared mutexes inside
+`lock.mdb`, and glibc and musl lay those out differently while reporting the same
+size on x86_64. The statically linked release binaries use musl; a program built
+with `cargo build` on a typical distribution uses glibc. Mixing them on one store
+is refused: the second process fails to open the environment with
+`MDB_VERSION_MISMATCH` instead of blocking forever in its first transaction. A
+stock glibc LMDB reader gets `EINVAL` from transaction begin on a store that a
+musl build of Hashtree initialized. Build the reader for the same target as the
+process that holds the store, for example `x86_64-unknown-linux-musl` next to a
+release `htree` daemon. Two cases are not detected: a stock musl LMDB reader on a
+store held by a glibc build, and 32-bit targets.
+
 On macOS, LMDB's default System V semaphore backend uses `SEM_UNDO`, and the
 default per-process `kern.sysv.semume` limit is ten. The bound applies to
 simultaneous lock-owning transactions across distinct environments, not to the

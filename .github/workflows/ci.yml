@@ -350,6 +350,16 @@ jobs:
       - name: Run FUSE mount smoke test in privileged Docker
         run: bash rust/scripts/run_fuse_smoke_in_docker.sh
 
+  lmdb-cross-libc:
+    name: LMDB Cross-libc Locking
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run glibc and musl lock-file pairings in Docker
+        run: bash rust/scripts/run_lmdb_cross_libc_test_in_docker.sh
+
   rust-peripheral-tests:
     name: Rust Peripheral Tests
     runs-on: ubuntu-latest
