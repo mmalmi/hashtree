@@ -15,6 +15,16 @@
   now shares the same check. The boundary holds only if the proxy in front of
   the daemon sends one of these headers, so check that yours does: some
   proxies add `X-Forwarded-For` only when configured to.
+- The relay proxy forwards and caches an upstream relay's event only when it
+  matches a filter of the subscription and its signature verifies.
+
+### Fixed
+
+- Upstream relay connections race IPv6 and IPv4 through the WebSocket
+  handshake: the other address family starts after 250 ms, each address gets
+  4 s and the whole connection 8 s. A host with one broken address family no
+  longer delays or loses relay subscriptions. The relay hostname is still used
+  for TLS verification and SNI.
 
 ## 0.4.5 - 2026-11-11
 

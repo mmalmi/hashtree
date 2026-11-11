@@ -131,6 +131,8 @@ public-provider-stress = []
 
 [dev-dependencies]
 nvpn-fips-core = "=0.4.119"
+rcgen = "0.13"
+tokio-rustls = "0.26"
 tempfile.workspace = true
 walkdir = "2"
 nostr.workspace = true

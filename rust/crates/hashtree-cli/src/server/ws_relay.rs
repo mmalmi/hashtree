@@ -13,7 +13,9 @@ use nostr::{
 use std::borrow::Cow;
 use std::collections::HashSet;
 use tokio::sync::{mpsc, watch};
-use tokio_tungstenite::{connect_async, tungstenite::Message as TungsteniteMessage};
+use tokio_tungstenite::tungstenite::Message as TungsteniteMessage;
+
+mod upstream_connect;
 
 use super::auth::{AppState, UpstreamNostrSubscription};
 use crate::diagnostics::{
@@ -163,6 +165,7 @@ async fn forward_upstream_nostr_message(
     state: &AppState,
     client_id: u64,
     subscription_id: &SubscriptionId,
+    filters: &[NostrFilter],
     text: &str,
 ) {
     let Ok(message) = NostrRelayMessage::from_json(text) else {
@@ -174,6 +177,15 @@ async fn forward_upstream_nostr_message(
             subscription_id: sid,
             event,
         } if sid.as_ref() == subscription_id => {
+            // Upstream relays are untrusted: forward and cache only signed
+            // events that answer this subscription.
+            if !filters
+                .iter()
+                .any(|filter| filter.match_event(event.as_ref(), Default::default()))
+                || event.verify().is_err()
+            {
+                return;
+            }
             let event = event.into_owned();
             let key = (client_id, subscription_id.to_string());
             let event_id = event.id.to_hex();
@@ -250,7 +262,7 @@ async fn run_upstream_nostr_subscription(
     mut close_rx: watch::Receiver<bool>,
 ) {
     let mut relay_complete = false;
-    let Ok((socket, _)) = connect_async(relay_url.as_str()).await else {
+    let Ok(socket) = upstream_connect::connect(&relay_url).await else {
         tracing::warn!(
             "upstream nostr relay connect failed: client_id={} subscription_id={} relay={}",
             client_id,
@@ -261,7 +273,7 @@ async fn run_upstream_nostr_subscription(
         return;
     };
     let (mut write, mut read) = socket.split();
-    let request = NostrClientMessage::req(subscription_id.clone(), filters).as_json();
+    let request = NostrClientMessage::req(subscription_id.clone(), filters.clone()).as_json();
     state.ws_relay.note_upstream_relay_send(request.len());
     if write.send(TungsteniteMessage::Text(request)).await.is_err() {
         tracing::warn!(
@@ -303,7 +315,7 @@ async fn run_upstream_nostr_subscription(
                             }
                             continue;
                         }
-                        forward_upstream_nostr_message(&state, client_id, &subscription_id, &text).await;
+                        forward_upstream_nostr_message(&state, client_id, &subscription_id, &filters, &text).await;
                     }
                     Some(Ok(TungsteniteMessage::Ping(payload))) => {
                         let _ = write.send(TungsteniteMessage::Pong(payload)).await;
@@ -603,7 +615,11 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::net::TcpListener;
-    use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};
+    use tokio_tungstenite::{
+        accept_async, connect_async, tungstenite::Message as TungsteniteMessage,
+    };
+
+    mod upstream_filter;
 
     #[test]
     fn parse_ws_text_message_detects_nostr_req() {
@@ -663,6 +679,14 @@ mod tests {
     }
 
     async fn spawn_mock_upstream_relay(events: Vec<nostr::Event>) -> String {
+        spawn_mock_upstream_after(events, None).await
+    }
+
+    /// Like `spawn_mock_upstream_relay`, but holds the first REQ until `release` fires.
+    async fn spawn_mock_upstream_after(
+        events: Vec<nostr::Event>,
+        mut release: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind relay");
         let addr = listener.local_addr().expect("relay addr");
         tokio::spawn(async move {
@@ -682,6 +706,9 @@ mod tests {
                     filters,
                 } = parsed
                 {
+                    if let Some(gate) = release.take() {
+                        gate.await.expect("release delayed test relay");
+                    }
                     let subscription_id = subscription_id.into_owned();
                     let filters = filters
                         .into_iter()
