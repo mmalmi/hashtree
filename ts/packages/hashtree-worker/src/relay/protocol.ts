@@ -137,7 +137,7 @@ export type WorkerRequest =
   | { type: 'endBlossomSession'; id: string }
 
   // Republish cached events
-  | { type: 'republishTrees'; id: string }
+  | { type: 'republishTrees'; id: string; prefix?: string }
   | { type: 'republishTree'; id: string; pubkey: string; treeName: string }
 
   // Heartbeat
@@ -153,6 +153,8 @@ export type WorkerRequest =
   | { type: 'getFollowers'; id: string; pubkey: string }
   | { type: 'getFollowedByFriends'; id: string; pubkey: string }
   | { type: 'getSocialGraphSize'; id: string }
+  | { type: 'fetchUserFollows'; id: string; pubkey: string }
+  | { type: 'fetchUserFollowers'; id: string; pubkey: string }
 
   // NIP-07 responses (main thread → worker, after signing/encryption)
   | { type: 'signed'; id: string; event?: SignedEvent; error?: string }
@@ -241,6 +243,7 @@ export type WorkerResponse =
   | { type: 'isFollowingResult'; id: string; result: boolean; error?: string }
   | { type: 'pubkeyList'; id: string; pubkeys: string[]; error?: string }
   | { type: 'socialGraphSize'; id: string; size: number; error?: string }
+  | { type: 'ack'; id: string; error?: string }
 
   // NIP-07 requests (worker → main thread, needs extension)
   | { type: 'signEvent'; id: string; event: UnsignedEvent }

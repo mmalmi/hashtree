@@ -260,3 +260,45 @@ it('answers followed-by-friends with only the followers the viewer follows', asy
     await Dexie.delete(store); await Dexie.delete(`${store}-nostr-index`);
   }
 });
+
+it('moves everyone reached through an account when a follow-list change brings that account closer or drops it', async () => {
+  const db = new Dexie('hashtree-social-graph'); db.version(1).stores({ socialGraph: '&id' });
+  await db.table('socialGraph').clear(); db.close();
+  const nearKey = new Uint8Array(32).fill(43), farKey = new Uint8Array(32).fill(47);
+  const near = friend, far = getPublicKey(farKey), beyond = getPublicKey(new Uint8Array(32).fill(48));
+  const distance = async (pubkey: string) => (await request({ type: 'getFollowDistance', pubkey }) as { distance: number }).distance;
+  const store = `graph-distance-${crypto.randomUUID()}`;
+  try {
+    await init(store);
+    await request({ type: 'handleSocialGraphEvents', events: [
+      finalizeEvent({ kind: 3, created_at: 2000, content: '', tags: [['p', near]] }, key),
+      finalizeEvent({ kind: 3, created_at: 2000, content: '', tags: [['p', far]] }, nearKey),
+      finalizeEvent({ kind: 3, created_at: 2000, content: '', tags: [['p', beyond]] }, farKey),
+    ] });
+    expect([await distance(near), await distance(far), await distance(beyond)]).toEqual([1, 2, 3]);
+    expect(await request({ type: 'getSocialGraphSize' })).toMatchObject({ type: 'socialGraphSize', size: 4 });
+
+    // The viewer follows `far` directly: `beyond`, known only through `far`, is now two steps away.
+    const versions = () => responses.filter(message => message.type === 'socialGraphVersion').length;
+    let before = versions();
+    await request({ type: 'handleSocialGraphEvents', events: [
+      finalizeEvent({ kind: 3, created_at: 2001, content: '', tags: [['p', near], ['p', far]] }, key),
+    ] });
+    expect(await distance(far)).toBe(1);
+    await expect.poll(() => distance(beyond), { timeout: 5000 }).toBe(2);
+    // The page hears about the settled distances, not only about the event itself.
+    await expect.poll(versions, { timeout: 5000 }).toBeGreaterThan(before + 1);
+
+    // The viewer unfollows everyone: nobody is reachable any more.
+    before = versions();
+    await request({ type: 'handleSocialGraphEvents', events: [
+      finalizeEvent({ kind: 3, created_at: 2002, content: '', tags: [] }, key),
+    ] });
+    await expect.poll(async () => [await distance(near), await distance(far), await distance(beyond)], { timeout: 5000 })
+      .toEqual([1000, 1000, 1000]);
+    await expect.poll(versions, { timeout: 5000 }).toBeGreaterThan(before + 1);
+  } finally {
+    await request({ type: 'close' });
+    await Dexie.delete(store); await Dexie.delete(`${store}-nostr-index`);
+  }
+});

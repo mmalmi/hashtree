@@ -3,10 +3,6 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "bundler",
-    "baseUrl": ".",
-    "paths": {
-      "nostr-social-graph": ["./src/relay/shims.d.ts"]
-    },
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,

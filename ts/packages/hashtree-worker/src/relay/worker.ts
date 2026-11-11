@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Hashtree Worker
  *
@@ -444,10 +443,34 @@ function configureGraphCatchup() {
     if (generation !== graphCatchupGeneration) return;
     stopGraphCatchup = startGraphSync({ getGraph: () => socialGraph, relays,
       maxAuthors: 500, maxBytes: 2 * 1024 * 1024,
-      onChange: notifySocialGraphVersionUpdate,
+      onChange: () => { notifySocialGraphVersionUpdate(); scheduleFollowDistanceRefresh(); },
       onError: error => console.warn('[Worker] Public graph catch-up unavailable', error),
     });
   }).catch(error => console.warn('[Worker] Public graph catch-up unavailable', error));
+}
+
+const FOLLOW_DISTANCE_SETTLE_MS = 1000;
+let followDistanceTimer: ReturnType<typeof setTimeout> | null = null;
+function cancelFollowDistanceRefresh() {
+  if (followDistanceTimer) clearTimeout(followDistanceTimer);
+  followDistanceTimer = null;
+}
+/**
+ * A follow-list change moves only the followed account itself in the graph library;
+ * everyone reached through that account keeps the old distance until a full pass.
+ * Run it once incoming lists have settled: a pass interrupted by a change starts over.
+ */
+function scheduleFollowDistanceRefresh() {
+  cancelFollowDistanceRefresh();
+  const graph = socialGraph, lifecycle = graphLifecycleGeneration;
+  followDistanceTimer = setTimeout(() => {
+    followDistanceTimer = null;
+    const current = () => graph === socialGraph && lifecycle === graphLifecycleGeneration;
+    if (!current()) return;
+    graph.recalculateFollowDistances(1_000, 100_000, () => {})
+      .then(() => { if (current()) notifySocialGraphVersionUpdate(); })
+      .catch(error => console.warn('[Worker] Follow distance refresh failed', error));
+  }, FOLLOW_DISTANCE_SETTLE_MS);
 }
 
 function notifySocialGraphVersionUpdate() {
@@ -959,6 +982,7 @@ async function handleSetIdentity(id: string, pubkey: string, nsec?: string) {
     return;
   }
   const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
+  cancelFollowDistanceRefresh();
   stopSocialGraphSubscriptions();
   socialGraphLoading = false;
   graphCatchupGeneration++;
@@ -1056,10 +1080,10 @@ function readRoutedBlob(router: BlobRouter, hash: Uint8Array): Promise<Uint8Arra
 
 function createRoutedStore(primary: DexieStore, router: BlobRouter) {
   return {
-    put: (hash, data) => primary.put(hash, data),
-    get: (hash) => readRoutedBlob(router, hash),
-    has: (hash) => primary.has(hash),
-    delete: (hash) => primary.delete(hash),
+    put: (hash: Uint8Array, data: Uint8Array) => primary.put(hash, data),
+    get: (hash: Uint8Array) => readRoutedBlob(router, hash),
+    has: (hash: Uint8Array) => primary.has(hash),
+    delete: (hash: Uint8Array) => primary.delete(hash),
   };
 }
 
@@ -1069,6 +1093,7 @@ function emitBlossomBandwidthSnapshot(): void {
 
 async function handleClose(id: string) {
   graphLifecycleGeneration++;
+  cancelFollowDistanceRefresh();
   stopSocialGraphSubscriptions();
   socialGraphLoading = false;
   cancelGraphBootstrap();
@@ -1342,7 +1367,7 @@ async function handleSetTreeRootCache(
       throw new Error('Invalid tree root cache source');
     }
     if ((source === 'remote' || updatedAt !== undefined)
-      && (!Number.isSafeInteger(updatedAt) || updatedAt < 0)) {
+      && (updatedAt === undefined || !Number.isSafeInteger(updatedAt) || updatedAt < 0)) {
       throw new Error('Tree root cache requires a nonnegative integer timestamp');
     }
     await setCachedRoot(npub, treeName, { hash, key }, visibility, {
@@ -1567,6 +1592,7 @@ async function handleGetStorageStats(id: string) {
 async function changeSocialGraphRoot(pubkey: string): Promise<boolean> {
   if (pubkey === socialGraph.getRoot()) return true;
   const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
+  cancelFollowDistanceRefresh();
   stopSocialGraphSubscriptions();
   socialGraphLoading = false;
   cancelGraphBootstrap();
@@ -1590,7 +1616,7 @@ async function changeSocialGraphRoot(pubkey: string): Promise<boolean> {
 async function handleInitSocialGraph(id: string, rootPubkey?: string) {
   try {
     if (rootPubkey && !await changeSocialGraphRoot(rootPubkey)) return;
-    const size = socialGraph.size();
+    const size = socialGraph.size().users;
     respond({ type: 'socialGraphInit', id, version: socialGraphVersion, size });
   } catch (err) {
     respond({ type: 'socialGraphInit', id, version: 0, size: 0, error: getErrorMessage(err) });
@@ -1608,14 +1634,15 @@ async function handleSetSocialGraphRoot(id: string, pubkey: string) {
 
 function handleSocialGraphEvents(id: string, events: SocialGraphNostrEvent[]) {
   try {
-    let updated = false;
+    let updated = false, changed = false;
     for (const event of events) {
-      socialGraph.handleEvent(event);
+      if (socialGraph.handleEvent(event)) changed = true;
       updated = true;
     }
     if (updated) {
       notifySocialGraphVersionUpdate();
     }
+    if (changed) scheduleFollowDistanceRefresh();
     respond({ type: 'void', id });
   } catch (err) {
     respond({ type: 'void', id, error: getErrorMessage(err) });
@@ -1669,7 +1696,7 @@ function handleGetFollowedByFriends(id: string, pubkey: string) {
 
 function handleGetSocialGraphSize(id: string) {
   try {
-    const size = socialGraph.size();
+    const size = socialGraph.size().users;
     respond({ type: 'socialGraphSize', id, size });
   } catch (err) {
     respond({ type: 'socialGraphSize', id, size: 0, error: getErrorMessage(err) });
@@ -1806,6 +1833,7 @@ function handleSocialGraphEvent(event: SignedEvent): void {
     }
 
     notifySocialGraphVersionUpdate();
+    scheduleFollowDistanceRefresh();
   }
 }
 
