@@ -118,8 +118,10 @@ return the unchanged `BlobReply`, leaving central size/hash verification to
 `BlobRouter`; it must not restore the deleted blob framing or peer selector.
 
 `hashtree-paid-retrieval` implements that route and its provider as a separate
-`hashtree.paid-blob/1` exchange; see [paid retrieval](paid-retrieval.md). It is
-unreleased: no daemon configures it and it has no FIPS carrier yet.
+`hashtree.paid-blob/1` exchange; see [paid retrieval](paid-retrieval.md). Its
+`fips` feature binds the exchange as its own TCP/FIPS service on port `39020`,
+beside `TcpBlobTransport` and without changing it. It is unreleased: no daemon
+configures it.
 
 ## Browser And Worker Providers
 

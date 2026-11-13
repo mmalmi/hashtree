@@ -43,6 +43,10 @@
   wallet interface with a spending limit. The blob wire and `BlobRouter` are
   unchanged and no daemon configures a paid route. See
   `docs/paid-retrieval.md`.
+- `hashtree-paid-retrieval`: carry the exchange between FIPS nodes as its own
+  service (`fips` feature, `hashtree.paid-blob/1`, port 39020), and keep the
+  provider's accounts, credited payments and tokens in a file ledger that is
+  written before `paid` is sent and restored on start.
 
 ## 0.4.6 - 2026-11-11
 

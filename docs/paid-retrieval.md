@@ -5,7 +5,8 @@ them. The Rust implementation is `hashtree-paid-retrieval`: one opaque
 `PaidBlobRoute` for the client, a `PaidBlobProvider` for the seller, and a small
 wallet interface for the application. The published `BlobRequest`/`BlobReply`
 wire, HTL and `BlobRouter` are unchanged; the paid exchange is its own service
-(`hashtree.paid-blob/1`).
+(`hashtree.paid-blob/1`), carried between nodes over FIPS, and the provider
+keeps its accounts on disk.
 
 The payment exchange does not depend on Hashtree routing, on the carrier, or on
 the hash function that names what is sold; see [Reusable parts](#reusable-parts).
@@ -97,6 +98,8 @@ bytes are never returned or cached and are never counted as a delivery.
   second payment id or account; a token being redeemed is refused meanwhile.
 - A redemption runs to completion even when the connection drops, so a redeemed
   token is always credited.
+- Payment ids and token hashes are on disk before `paid` is sent, so neither
+  guard is lost by a restart; see [Provider ledger](#provider-ledger).
 - The account id is a bearer secret. Carry it only over an encrypted transport,
   or keep balances small where that is not possible.
 
@@ -109,6 +112,14 @@ bytes are never returned or cached and are never counted as a delivery.
   (`redelivery_window`, twice at most).
 - **The provider rejects the token** (`mint`, `method`, `invalid`, `replay`).
   The client asks its wallet to reclaim it.
+- **The provider restarts.** The balance, the credited payment ids and the
+  token hashes are restored. The same `pay` is answered from the record. A
+  blob that was charged but not delivered is not free again: the window of
+  free repeats is kept in memory only.
+- **The provider crashes while it redeems.** The redemption was recorded
+  before the mint was asked. When the client sends its `pay` again, the token
+  is redeemed, or, if the mint already counts it as spent, credited once the
+  provider's wallet confirms that it received it.
 - **The provider keeps the money.** Nothing recovers it. One top-up never puts
   more than `max_prepaid_msat` at risk, the ledger comparison above detects the
   loss, and past `max_loss_msat` the provider is not paid again until the
@@ -136,7 +147,9 @@ the free routes returned nothing.
 The wire does not choose. With `g = 0` (the default) the provider serves only
 from a positive balance, so the client prepays. A provider on an authenticated
 transport may set a grace: it then serves first and the client's next request
-settles the debt. Grace is bound to one account per authenticated peer.
+settles the debt. Grace is bound to one account per authenticated peer. Over
+FIPS that peer is the identity FIPS authenticated, and the binding is kept
+across restarts, so a restart grants no peer a second grace.
 
 ## Wallet interface
 
@@ -163,6 +176,10 @@ one request and one reply:
 
 - **Byte streams** (TCP, TCP/FIPS): each message is prefixed by its length as a
   32-bit big-endian integer. `StreamTransport` and `serve_stream` implement it.
+- **FIPS**: `FipsPaidBlobService` (feature `fips`) binds the exchange as its
+  own TCP/FIPS service on port `39020` with the capability
+  `hashtree.paid-blob/1`, beside the free blob service (`hashtree.blob/1`,
+  port `39018`), which is untouched. See [Over FIPS](#over-fips).
 - **BitTorrent (BEP 10)**: advertise `ht_pay` in the extended handshake `m`
   dictionary; each message is the payload of one extended message, which
   already has the same length prefix. Two uses:
@@ -173,6 +190,92 @@ one request and one reply:
     travel in native `request`/`piece` messages. An unpaid peer stays choked,
     `h` names the piece (with `y` = `sha1` for a v1 piece, `n` its length), and
     the piece hash check is the delivery proof.
+
+## Over FIPS
+
+A provider calls `FipsPaidBlobService::serve` or `serve_advertised` on its FIPS
+endpoint, a client `FipsPaidBlobService::client`. `transport_to(peer)` is the
+`PaidBlobTransport` of one `PaidBlobRoute`; a node that serves can buy through
+the same service.
+
+- FIPS authenticates and encrypts the session, so the account id is not
+  exposed, and the provider passes the peer's identity to
+  `PaidBlobProvider::handle`.
+- A capability reaches only peers on the same host, as for free blobs
+  (`discovered_paid_providers`). A provider elsewhere is named by the
+  application.
+- A connection carries any number of exchanges. The client keeps it for half
+  the idle timeout and repeats a request once on a new connection when a kept
+  one turns out to be dead; requests are idempotent.
+- Bounds: a request is at most 64 KiB, a provider seats 16 connections and 4
+  per peer, and a client opens at most 4 to one provider and queues the rest.
+  A connection without progress for `idle_timeout` (30 s by default, enough to
+  redeem a token) is closed. A timeout or a closed connection is an error,
+  never `none`.
+
+The carrier is a feature of `hashtree-paid-retrieval`, not a part of
+`hashtree-fips-transport`: the published transport crate stays free of payment
+code, a build that only needs the exchange (the BitTorrent glue, a stream
+carrier) pulls in no FIPS stack, and no further crate has to be versioned.
+
+## Provider ledger
+
+`PaidBlobProvider::open` and `PaidSeller::open` take a `LedgerStore`;
+`FileLedgerStore` keeps it in a directory of its own. Without a store the
+ledger is in memory, as before.
+
+| Kept on disk | When |
+|---|---|
+| A redemption about to start: token hash, account, payment id | before the mint is asked |
+| A credit: amount, payment id, token hash, as one entry | before `paid` is sent |
+| Charged totals, dropped accounts, grace bindings | within a second, and on shutdown |
+
+Memory is updated only after a credit is written, so `paid` is never sent for
+a credit that a restart would forget. A charge counts at once and is written
+behind: a crash can forgive the charges of its last second, which costs the
+provider and never the client. Free repeats of a charged blob are not kept.
+
+What a crash leaves, by the point it hits:
+
+| Crash | After the restart |
+|---|---|
+| before the redemption is recorded | nothing happened; the token is unspent |
+| after that, before the mint redeemed | the client's `pay` redeems it |
+| after the mint redeemed, before the credit is written | the mint refuses the token; the provider asks its wallet (`PaymentReceiver::already_received`) and credits what it received |
+| after the credit is written | the client's `pay` is answered from the record |
+
+A token with an open redemption stays with the payment that started it; no
+other account can claim it. If the wallet has no record of receiving it, it is
+not credited: the client's word is not enough, since the client may have spent
+it elsewhere. A credit that could not be written (a full disk) is written by
+the next `pay` without asking the mint again.
+
+The file is a magic line and checksummed records, one per write, each synced
+before the write returns. A record cut short by a crash is dropped on open;
+damage anywhere else stops the provider instead of dropping credits. The log is
+rewritten through a temporary file and a rename once it has grown well past
+its state. One directory is open in one provider at a time.
+
+### Why a file, not `cashu-credit` or LMDB
+
+- **`cashu-credit`** (0.3.0) counts whole sats, and a blob costs millisats.
+  Storing msat in its sat fields would misstate a snapshot that other tools
+  read, and rounding prices up to a sat is a thousandfold change. It keeps
+  every consumption under its own id, so an account would grow with every
+  blob. Grace would have to become its peer credit, which is built on signed
+  receipts that this exchange does not have. And it leaves to the store the
+  one check needed across accounts, that a token backs one account only. Its
+  deposit ids are the payment ids here; that part is small enough to keep.
+- **LMDB** is transactional and already in the workspace, but through a
+  vendored `heed` with process-wide environment bookkeeping that lives in
+  `hashtree-lmdb`, and it would put a C library into a crate that is meant to
+  be reused without Hashtree's storage.
+- **A file** needs only the standard library. The ledger is small (at most
+  `max_accounts` accounts and 16,384 token hashes) and has one writer, so an
+  append and a sync per payment is all the durability it takes.
+
+Prices and balances stay in millisats. `LedgerStore` is two calls (`load`,
+`append`), so a daemon that prefers its own database can supply one.
 
 ## Reusable parts
 
@@ -186,6 +289,8 @@ exchange as it is and replaces only the glue.
 | `PaidBuyer` | the client ledger, quote decisions, top-ups, pending-payment resend, loss detection and blocking |
 | `RetrievalWallet`, `LimitedWallet`, `SpendingLimit`, `CashuWallet`, `CashuReceiver` | the wallet boundary and the spending limit |
 | `PaidBlobTransport`, `StreamTransport`, `serve_stream` | one request and one reply over any carrier |
+| `LedgerStore`, `LedgerEntry`, `LedgerState`, `FileLedgerStore` | the seller's ledger across restarts |
+| `FipsPaidBlobService`, `FipsPaidTransport` (feature `fips`) | the same request and reply between FIPS peers |
 
 Hashtree glue, about 300 lines: `PaidBlobProvider` (reads blobs from a
 `BlobRoute`, asks the seller, answers `get`) and `PaidBlobRoute` (asks the
@@ -220,18 +325,20 @@ hash-verified blob. fips pays through one-way Cashu Spilman channels; `k` leaves
 room for the same channel payment (`cashu-spilman`, a signed cumulative
 balance) without changing the other messages.
 
-`cashu-credit` is not used yet. It is sat-denominated while blob prices need
-millisats, and it is not in this workspace's dependency set. Its validated
-account snapshots and deposit-id idempotency are the intended basis for the
-provider's durable ledger.
+`cashu-credit` is not used; [Provider ledger](#provider-ledger) says why.
 
 ## Not built
 
 - A cost tier in `BlobRouter`, so paid routes are tried after free ones.
-- Durable provider accounts: balances are in memory, with `accounts()` and
-  `restore_accounts()` as the persistence seam. A provider must persist them
-  before taking real money.
-- A FIPS carrier and capability advertisement, daemon and CLI configuration.
+- Daemon and CLI configuration: nothing starts a paid service, chooses a
+  ledger directory, a tariff or mints, or registers a paid route.
+- A wallet that can say what it received earlier. `CashuReceiver` cannot:
+  `cashu_service::CashuPaymentClient` has no such call. Until it has one, a
+  token that the mint redeemed right before a provider crash is not credited
+  after the restart; the open redemption stays in the ledger for the operator
+  to settle by hand.
+- Discovery of paid providers beyond the same host, and selection among
+  several of them.
 - The TypeScript `BlobRouter` route, the BitTorrent glue, refunds of unused
   balance, Spilman channel payments, and the Iris Drive wallet screen.
 
@@ -240,3 +347,5 @@ provider's durable ledger.
 - Default tariff and client caps (the defaults in code are placeholders).
 - Which mints a provider lists and a client trusts by default.
 - Whether providers should grant any grace to authenticated peers.
+- Whether an open redemption that no wallet confirms should expire. Today the
+  oldest is dropped only when 4,096 are open.

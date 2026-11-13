@@ -18,6 +18,12 @@ or hash function (BitTorrent, SHA-1 pieces) can reuse it as it is:
 - `PaidBlobTransport` carries one request and one reply. `StreamTransport` and
   `serve_stream` do that over any byte stream.
 - The `cashu` feature adapts `cashu_service::CashuPaymentClient` on both sides.
+- The `fips` feature adds `FipsPaidBlobService`: the exchange as its own
+  TCP/FIPS service (`hashtree.paid-blob/1`, port 39020), with the
+  authenticated peer passed to the provider.
+- `LedgerStore` keeps a seller's accounts, credited payments and tokens across
+  restarts; `FileLedgerStore` is one in a directory, with no dependency beyond
+  the standard library.
 
 The Hashtree glue is `PaidBlobProvider`, which sells blobs from any `BlobRoute`
 source (normally a `StoreBlobRoute`), and `PaidBlobRoute`, one opaque
@@ -33,6 +39,24 @@ let entry = BlobRouteEntry::new("paid:provider", Arc::new(paid.clone()));
 route registered beside free ones can pay for a blob a slower free route would
 have delivered. Until the router has a cost tier, try a paid route only after
 the free routes returned nothing.
+
+A provider between FIPS nodes, with its ledger on disk:
+
+```rust
+let ledger = Arc::new(FileLedgerStore::open(ledger_dir)?);
+let provider = PaidBlobProvider::open(source, receiver, config, ledger)?;
+let service = FipsPaidBlobService::serve(endpoint, provider.clone(), FipsPaidConfig::default()).await?;
+// ... and before the process ends:
+provider.flush()?;
+```
+
+and its client:
+
+```rust
+let service = FipsPaidBlobService::client(endpoint, FipsPaidConfig::default()).await?;
+let transport = Arc::new(service.transport_to(provider_identity));
+let paid = PaidBlobRoute::new("provider name", transport, wallet, ClientPolicy::default());
+```
 
 `AccountState` holds the account's bearer id and any unacknowledged token;
 persist it privately.
