@@ -202,10 +202,10 @@ A declined read returns `NoResult`, so the router continues to other routes;
   route ahead of a free one.
 - `get_request_within_cost(.., BlobRouteCost::Free)` searches the free routes
   only, and `get_request_at_cost` one tier on its own. The daemon reads from
-  Blossom servers beside its router, so it searches the free tier together
-  with them and the paid tier only once all of them answered that they have
-  no data. A request it serves to a peer never reaches the paid tier: the
-  daemon does not buy blobs for others.
+  Blossom servers beside its FIPS routes, so it searches those free sources
+  together and asks its paid routes, kept in a router of their own, only once
+  all of them have finished without data. A request it serves to a peer never
+  reaches a paid route: the daemon does not buy blobs for others.
 
 ### Prepay or pay after delivery
 
@@ -563,40 +563,40 @@ both would close gaps listed below:
 The daemon (`htree start`, and the embedded daemon) sells and buys only when
 `[paid_retrieval]` is in its configuration. Without it no paid service is
 bound, no ledger or account file is opened and no paid route is registered.
-No price, mint or cap has a default: a section that is present and leaves one
-out stops the daemon at start with a message that names what is missing. The
-numbers below show the shape and are not a recommendation.
+A section that is present takes the defaults below for every value it leaves
+out. The example shows every default; a section needs nothing but its
+providers.
 
 ```toml
-# Sell the blobs of the local store.
+# Sell the blobs of the local store. Every value shown is the default.
 [paid_retrieval.provider]
-mints = ["https://mint.example"]
-min_topup_sat = 1     # default 1, the smallest token there is
-grace_msat = 0        # default 0: prepay
-paying_only = false   # default false
-http = false          # default false: also sell at POST /paid-blob
-# lock = "02..."      # default none: a key quotes ask tokens to be locked to
+# mints = ["https://mint.example"]  # default: the Cashu wallet's accepted mints
+min_topup_sat = 1     # the smallest token there is
+grace_msat = 0        # prepay
+paying_only = false
+http = false          # true: also sell at POST /paid-blob
+# lock = "02..."      # default: none
 # ledger_dir = "..."  # default: paid-retrieval/ledger in the data directory
 
 [paid_retrieval.provider.tariff]
 msat = 1
-per_bytes = 1024
-min_msat = 100
+per_bytes = 10240
+min_msat = 10
 
-# Buy what no free route returned.
+# Buy what no free source returned. Every value shown is the default.
 [paid_retrieval.client]
 spending_limit_sat = 1000
-mints = ["https://mint.example"]
-topup_sat = 20
-max_prepaid_msat = 100000
-max_loss_msat = 20000
+# mints = ["https://mint.example"]  # default: the Cashu wallet's accepted mints
+topup_sat = 10
+max_prepaid_msat = 21000
+max_loss_msat = 10000
 max_token_fee_sat = 2
 max_redeem_fee_msat = 2000
-pay_for_remote_reads = false   # default false
+pay_for_remote_reads = false
 
 [paid_retrieval.client.max_tariff]
 msat = 1
-per_bytes = 1024
+per_bytes = 2048
 min_msat = 100
 
 [[paid_retrieval.client.providers]]
@@ -608,42 +608,74 @@ name = "gateway"
 url = "https://gw.example"   # reached at https://gw.example/paid-blob
 ```
 
-Both sides need the FIPS endpoint (`server.enable_fips`), also when they reach
-each other over HTTP only, and use the `htree-cashu` helper as their wallet. A change takes effect when the daemon is
-restarted.
+### Why these defaults
+
+- **Price**: 1 msat per 10 KiB, at least 10 msat per blob. That is about 1 sat
+  per 10 MiB, close to what cloud storage charges for egress, and the minimum
+  covers the work of one blob.
+- **Price cap**: 1 msat per 2 KiB, at least 100 msat, five times the default
+  price. Ordinary providers are accepted; one that asks more is declined.
+- **Client caps**: a top-up of 10 sat, at most 21 sat held by one provider,
+  10 sat of loss before a provider is blocked, fee ceilings of 2 sat per token
+  and 2 sat per redemption.
+- **Spending limit**: 1000 sat over the daemon's lifetime. It is never reset
+  by the daemon; raising it is an explicit act. fips pay-to-relay found that
+  no loop may reset a lifetime budget.
+- **Mints**: when `mints` is absent, both sides use the mints the daemon's own
+  Cashu wallet accepts (`[cashu] accepted_mints`, `htree cashu mint list`).
+  A mint that holds your money is one you already trust; a peer's list is
+  never trusted. If the wallet accepts no mint either, the daemon refuses to
+  start and says to add one with `htree cashu mint add`. An explicit `mints`
+  overrides.
+- **Grace**: 0. Identities are free to create, so any grace would be a free
+  allowance per identity.
+- **Lock**: none, because no wallet can lock tokens yet.
+- **`paying_only`, `http`**: off. Selling is added to what a daemon serves; it
+  takes nothing away unless asked to.
+- **`pay_for_remote_reads`**: off. Money is spent only for this host's own
+  reads, never on behalf of a peer. Blobs the HTTP gateway serves stay
+  governed by its existing access settings.
+
+A change takes effect when the daemon is restarted. Both sides use the
+`htree-cashu` helper as their wallet.
+
+**FIPS or HTTP.** With the FIPS endpoint (`server.enable_fips`) the provider
+sells over FIPS, and with `http = true` also through its HTTP listener. A
+client reaches a provider named by `npub` over FIPS and one named by `url`
+over HTTP. Without FIPS a provider must have `http = true` and a client may
+buy only from `url` providers; otherwise the daemon refuses to start and
+names what cannot be reached.
 
 **Provider.** The daemon opens the ledger, sells from its local store only
-(a sale never searches the mesh), and serves the exchange over FIPS. It
-refuses to start the paid service when `mints` is empty. With
-`paying_only = true` its free blob service answers every peer with no result,
-so a stored blob reaches peers only against payment; blobs served over HTTP
-are not affected. With `http = true` it also sells through its HTTP listener
-([Over HTTP](#over-http)). `lock`, a compressed public key in hex, is named
-in every quote; unlocked tokens are still accepted. A buyer over FIPS is
-charged to its authenticated identity; a buyer over HTTP to the bearer
-account id it sends. The provider's wallet only receives and needs no funds. The
-ledger holds the account ids of its buyers, which are bearer secrets: its
-directory is made readable by the owner only.
+(a sale never searches the mesh). With `paying_only = true` its free blob
+service answers every peer with no result, so a stored blob reaches peers
+only against payment; blobs served over HTTP are not affected. `lock`, a
+compressed public key in hex, is named in every quote; unlocked tokens are
+still accepted. A buyer over FIPS is charged to its authenticated identity; a
+buyer over HTTP to the bearer account id it sends. The provider's wallet only
+receives and needs no funds. The ledger holds the account ids of its buyers,
+which are bearer secrets: its directory is made readable by the owner only.
 
 **Client.** Each provider has a name and either a FIPS identity (`npub`) or
 the base URL of its HTTP gateway (`url`, `http` or `https`, without user name,
 password or query). The daemon adds an `npub` to its FIPS peers, keeps one
-account per provider in
-`paid-retrieval/accounts/` and the spent total in `paid-retrieval/spent`,
-both in the data directory and readable by the owner only, and registers one
-route per provider in the paid tier. `spending_limit_sat` bounds everything
-the daemon ever spends: the spent total is never reset, so raise the limit to
-allow more. The wallet pays only with the mints listed here, and must hold
-funds at one of them (`htree cashu`). A top-up is a round trip to the mint on
-both sides. When it outlasts the deadline of the read that caused it
-(`server.fips_request_timeout_ms`), that read fails as a timeout, the payment
-still completes, and the next read is served from the balance.
+account per provider in `paid-retrieval/accounts/` and the spent total in
+`paid-retrieval/spent`, both in the data directory and readable by the owner
+only. The paid routes form a router of their own that only reads arriving
+over HTTP use; the router that answers peers never sees them. The wallet pays
+only with the client's mints and must hold funds at one of them
+(`htree cashu`). A top-up is a round trip to the mint on both sides. When it
+outlasts the deadline of the read that caused it, that read fails as a
+timeout, the payment still completes, and the next read is served from the
+balance.
 
-Money is spent only for reads that arrive at the daemon's HTTP listener,
-after the local store, the free FIPS routes and the Blossom servers all
-answered that they do not have the blob. If one of them failed or timed out,
-the read reports that and nothing is bought: slow is not a miss. By default
-money is spent only when the listener is bound to a loopback address;
+Money is spent only for reads that arrive at the daemon's HTTP listener, once
+the local store, the free FIPS routes and the Blossom servers have all
+finished without the blob, whether they answered that they have none, failed
+or timed out. That matches the router's paid tier: a free source that fails is
+exactly when a paid provider should be asked, and the caps bound the cost. If
+nothing is bought, a free source's failure is what the read reports. By
+default money is spent only when the listener is bound to a loopback address;
 `pay_for_remote_reads = true` extends it to any bind address, that is to
 whoever can reach the listener. A loopback listener behind a reverse proxy is
 reachable by others too. A request from a peer over the blob service is never
@@ -655,16 +687,27 @@ cause a purchase from a configured provider. The caps bound what that costs:
 the price cap per blob, the prepaid cap per provider and the spending limit
 in total.
 
-`htree status` shows, for a provider, its tariff, the number of accounts and
-what they hold; for a client, the spending limit with spent and remaining,
-and per provider the balance held, sats paid, blobs bought, declined reads by
-reason, unresolved tokens and the reason of a block. Counts start with the
-daemon. Tokens and account ids are never shown.
+### Operator commands
+
+- `htree status` and `htree paid status` show, for a provider, its tariff,
+  the number of accounts and what they hold; for a client, the spending limit
+  with spent and remaining, and per provider the balance held, sats paid,
+  blobs bought, declined reads by reason, unresolved tokens and the reason of
+  a block. Counts start with the daemon. When the daemon is not running,
+  `htree paid status` reads the account files instead and shows no counts.
+  Tokens and account ids are never shown.
+- `htree paid clear-block <provider>` writes off the loss a provider was
+  blocked for and pays it again.
+- `htree paid settle` resends unacknowledged payments and tries unresolved
+  tokens again, with the daemon's wallet and identity.
+
+The daemon holds a lock on the client's accounts while it runs.
+`clear-block` and `settle` take the same lock and refuse while the daemon
+runs, instead of racing it: stop the daemon first.
 
 ## Not built
 
-- Commands to clear a block (`PaidBlobRoute::clear_block`), to settle
-  unresolved tokens by hand, or to start a new spending period.
+- Starting a new spending period: raise `spending_limit_sat` instead.
 - Applying a changed `[paid_retrieval]` on `htree reload`; it needs a restart.
 - Telling a local HTTP request from a remote one for each read. The choice is
   made once, from the bind address.
@@ -684,22 +727,5 @@ daemon. Tokens and account ids are never shown.
 
 ## Open decisions
 
-- Default tariff and client caps (the defaults in code are placeholders).
-- Which mints a provider lists and a client trusts by default.
-- Whether providers should grant any grace to authenticated peers.
 - Whether an open redemption that no wallet confirms should expire. Today the
   oldest is dropped only when 4,096 are open.
-- Which reads a daemon may pay for. Today: reads through a loopback HTTP
-  listener, any listener with `pay_for_remote_reads`, never a peer's request.
-  Reads are not authenticated, so a local web page can trigger a purchase
-  within the caps.
-- Whether a provider should stop serving free blobs by default once it sells
-  (`paying_only` is off unless set), and whether that should cover HTTP.
-- Whether the spending limit should renew by period instead of being a total.
-- Whether a free source that failed should allow buying. Inside `BlobRouter`
-  a route that returned an error has finished and the paid tier is asked;
-  the daemon's HTTP read is stricter and buys only after every free source
-  answered that it has no data.
-- Publishing `hashtree-paid-retrieval`: `hashtree-cli` now depends on it, so
-  the crate has to be on the registry before the next `hashtree-cli` release
-  there (`publish = false` and `scripts/publish.sh` are unchanged).

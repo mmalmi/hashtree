@@ -756,7 +756,7 @@ mod tests {
             fips_endpoint: None,
             fips_blob_resolver: None,
             paid_retrieval: None,
-            pay_for_blob_reads: false,
+            paid_reads: None,
             fetch_from_fips_peers: true,
             ws_relay: Arc::new(super::super::auth::WsRelayState::new()),
             max_upload_bytes: 5 * 1024 * 1024,

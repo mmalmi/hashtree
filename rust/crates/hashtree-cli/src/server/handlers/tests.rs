@@ -257,7 +257,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         fips_endpoint: None,
         fips_blob_resolver: None,
         paid_retrieval: None,
-        pay_for_blob_reads: false,
+        paid_reads: None,
         fetch_from_fips_peers: true,
         ws_relay: Arc::new(crate::server::auth::WsRelayState::new()),
         max_upload_bytes: 5 * 1024 * 1024,
@@ -909,8 +909,11 @@ impl hashtree_core::BlobRoute for CountingPaidRoute {
 async fn an_http_read_buys_only_where_allowed_and_only_after_the_free_sources() {
     let data = b"sold by a paid provider and by nobody else".to_vec();
     let hash = sha256(&data);
+    let other = b"also sold only by the paid provider here".to_vec();
+    let other_hash = sha256(&other);
     let paid_store = Arc::new(MemoryStore::new());
     paid_store.put(hash, data.clone()).await.unwrap();
+    paid_store.put(other_hash, other.clone()).await.unwrap();
     let paid = Arc::new(CountingPaidRoute {
         source: StoreBlobRoute::new(paid_store),
         asked: Default::default(),
@@ -927,9 +930,16 @@ async fn an_http_read_buys_only_where_allowed_and_only_after_the_free_sources() 
                     Arc::new(StoreBlobRoute::new(local_store.store_arc())),
                 ),
                 BlobRouteEntry::new("free", Arc::new(StoreBlobRoute::new(free_source.clone()))),
-                BlobRouteEntry::paid("paid:archive", paid.clone()),
             ],
             Some(local_store.store_arc()),
+            BlobRouterConfig::default(),
+        )
+        .unwrap(),
+    );
+    let paid_router = Arc::new(
+        BlobRouter::new(
+            vec![BlobRouteEntry::paid("paid:archive", paid.clone())],
+            None,
             BlobRouterConfig::default(),
         )
         .unwrap(),
@@ -945,29 +955,42 @@ async fn an_http_read_buys_only_where_allowed_and_only_after_the_free_sources() 
     let free_data = b"free from another route of the router".to_vec();
     let free_hash = sha256(&free_data);
     free_source.put(free_hash, free_data).await.unwrap();
-    state.pay_for_blob_reads = true;
+    state.paid_reads = Some(paid_router);
     assert!(fetch_and_cache_blob(&state, &free_hash).await.unwrap());
     assert_eq!(asked(), 0);
 
-    // A free source that fails is not a miss: nothing is bought.
+    // Every free source answered that it has none: bought once and cached.
+    assert!(fetch_and_cache_blob(&state, &hash).await.unwrap());
+    assert_eq!(asked(), 1);
+    assert_eq!(local_store.get_blob(&hash).unwrap(), Some(data));
+
+    // A free source that fails has finished without data too: the read
+    // falls through to the paid provider.
     let corrupt = Arc::new(MemoryStore::new());
-    corrupt.put(hash, b"not the blob".to_vec()).await.unwrap();
+    corrupt
+        .put(other_hash, b"not the blob".to_vec())
+        .await
+        .unwrap();
+    let missing = sha256(b"nobody has this one");
+    corrupt
+        .put(missing, b"not that one either".to_vec())
+        .await
+        .unwrap();
     let mut routes = resolver.routes().await;
     routes.push(BlobRouteEntry::new(
         "corrupt",
         Arc::new(StoreBlobRoute::new(corrupt)),
     ));
-    resolver.set_routes(routes.clone()).await.unwrap();
-    assert!(fetch_and_cache_blob(&state, &hash).await.is_err());
-    assert_eq!(asked(), 0);
-    routes.pop();
     resolver.set_routes(routes).await.unwrap();
+    assert!(fetch_and_cache_blob(&state, &other_hash).await.unwrap());
+    assert_eq!(asked(), 2);
+    assert_eq!(local_store.get_blob(&other_hash).unwrap(), Some(other));
 
-    // Allowed, and every free source answered that it has none: bought once
-    // and cached.
-    assert!(fetch_and_cache_blob(&state, &hash).await.unwrap());
-    assert_eq!(asked(), 1);
-    assert_eq!(local_store.get_blob(&hash).unwrap(), Some(data));
+    // When the paid provider has nothing either, the free source's failure
+    // is what the read reports, not a miss.
+    let error = fetch_and_cache_blob(&state, &missing).await.unwrap_err();
+    assert!(error.contains("wrong hash"), "{error}");
+    assert_eq!(asked(), 3);
 }
 
 #[tokio::test]

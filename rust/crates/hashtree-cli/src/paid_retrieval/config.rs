@@ -1,8 +1,8 @@
 //! `[paid_retrieval]` in the daemon's configuration.
 //!
-//! Nothing here has a default that costs or earns money: a section that is
-//! absent starts nothing, and a section that is present must name its prices,
-//! mints and caps itself.
+//! A section that is absent starts nothing. A section that is present takes
+//! the defaults below for every value it leaves out; the reasons are in
+//! `docs/paid-retrieval.md`, "Configuration".
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -15,6 +15,26 @@ use serde::{Deserialize, Serialize};
 /// Where the daemon keeps what paid retrieval must remember, in its data
 /// directory: the provider ledger, the client accounts and the spent total.
 pub const PAID_RETRIEVAL_DIR: &str = "paid-retrieval";
+
+/// About 1 sat per 10 MiB, close to what cloud storage charges for egress;
+/// 10 msat covers the work of one blob.
+pub const DEFAULT_TARIFF: Tariff = Tariff {
+    rate: BytePrice::new(1, 10 * 1024),
+    min_msat: 10,
+};
+/// Five times the default price: ordinary providers are accepted, one that
+/// asks more is declined.
+pub const DEFAULT_MAX_TARIFF: Tariff = Tariff {
+    rate: BytePrice::new(1, 2 * 1024),
+    min_msat: 100,
+};
+pub const DEFAULT_TOPUP_SAT: u64 = 10;
+pub const DEFAULT_MAX_PREPAID_MSAT: u64 = 21_000;
+pub const DEFAULT_MAX_LOSS_MSAT: u64 = 10_000;
+pub const DEFAULT_MAX_TOKEN_FEE_SAT: u64 = 2;
+pub const DEFAULT_MAX_REDEEM_FEE_MSAT: u64 = 2_000;
+/// A lifetime total, never reset by the daemon: raising it is an explicit act.
+pub const DEFAULT_SPENDING_LIMIT_SAT: u64 = 1_000;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaidRetrievalConfig {
@@ -58,10 +78,11 @@ pub struct PaidTariffConfig {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaidProviderConfig {
-    /// What a blob costs. Required.
+    /// What a blob costs. Default: [`DEFAULT_TARIFF`], field by field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tariff: Option<PaidTariffConfig>,
-    /// Mints whose tokens are accepted. Required: at least one.
+    /// Mints whose tokens are accepted. Default: the mints the daemon's own
+    /// Cashu wallet accepts (`[cashu] accepted_mints`).
     #[serde(default)]
     pub mints: Vec<String>,
     /// Smallest top-up accepted, in sat.
@@ -95,29 +116,29 @@ fn smallest_topup_sat() -> u64 {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaidClientConfig {
-    /// The most this daemon may spend on retrieval in total, in sat. Required.
+    /// The most this daemon may ever spend on retrieval, in sat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spending_limit_sat: Option<u64>,
-    /// The highest price accepted. Required.
+    /// The highest price accepted. Default: [`DEFAULT_MAX_TARIFF`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tariff: Option<PaidTariffConfig>,
-    /// Mints the wallet may pay with. Required: at least one.
+    /// Mints the wallet may pay with. Default: the mints the daemon's own
+    /// Cashu wallet accepts (`[cashu] accepted_mints`).
     #[serde(default)]
     pub mints: Vec<String>,
-    /// Size of one top-up, in sat. Required.
+    /// Size of one top-up, in sat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub topup_sat: Option<u64>,
-    /// The most one provider may hold in advance, in msat. Required.
+    /// The most one provider may hold in advance, in msat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_prepaid_msat: Option<u64>,
-    /// Loss after which a provider is no longer paid, in msat. Required.
+    /// Loss after which a provider is no longer paid, in msat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_loss_msat: Option<u64>,
-    /// The most that creating one token may cost, in sat. Required.
+    /// The most that creating one token may cost, in sat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_token_fee_sat: Option<u64>,
     /// The most a provider may keep of one token for redeeming it, in msat.
-    /// Required.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_redeem_fee_msat: Option<u64>,
     /// Also pay for reads when the HTTP listener is not bound to loopback,
@@ -199,18 +220,23 @@ pub struct PaidRetrievalSettings {
 }
 
 impl PaidRetrievalSettings {
-    /// `None` when the configuration asks for nothing. A section that is
-    /// present and incomplete is an error, never a silent default.
-    pub fn from_config(config: &PaidRetrievalConfig, data_dir: &Path) -> Result<Option<Self>> {
+    /// `None` when the configuration asks for nothing. `wallet_mints` are
+    /// the mints the daemon's own Cashu wallet accepts, the default of both
+    /// sides.
+    pub fn from_config(
+        config: &PaidRetrievalConfig,
+        wallet_mints: &[String],
+        data_dir: &Path,
+    ) -> Result<Option<Self>> {
         let state_dir = data_dir.join(PAID_RETRIEVAL_DIR);
         let provider = match &config.provider {
-            Some(provider) => Some(provider_settings(provider, &state_dir)?),
+            Some(provider) => Some(provider_settings(provider, wallet_mints, &state_dir)?),
             None => None,
         };
         let client = match &config.client {
             // A policy without anyone to buy from registers nothing.
             Some(client) if !client.providers.is_empty() => {
-                Some(client_settings(client, state_dir)?)
+                Some(client_settings(client, wallet_mints, state_dir)?)
             }
             _ => None,
         };
@@ -221,73 +247,55 @@ impl PaidRetrievalSettings {
     }
 }
 
-/// Collects every missing value of one section, to name them all at once.
-struct Required<'a> {
-    section: &'a str,
-    missing: Vec<String>,
+/// A tariff, each value it leaves out taken from `default`.
+fn tariff_or(tariff: Option<&PaidTariffConfig>, default: Tariff) -> Tariff {
+    let unset = PaidTariffConfig::default();
+    let tariff = tariff.unwrap_or(&unset);
+    Tariff {
+        rate: BytePrice::new(
+            tariff.msat.unwrap_or(default.rate.msat),
+            tariff.per_bytes.unwrap_or(default.rate.per_bytes),
+        ),
+        min_msat: tariff.min_msat.unwrap_or(default.min_msat),
+    }
 }
 
-impl<'a> Required<'a> {
-    fn new(section: &'a str) -> Self {
-        Self {
-            section,
-            missing: Vec::new(),
-        }
-    }
-
-    fn value(&mut self, key: &str, value: Option<u64>) -> u64 {
-        if value.is_none() {
-            self.missing.push(key.to_string());
-        }
-        value.unwrap_or_default()
-    }
-
-    fn tariff(&mut self, key: &str, tariff: Option<&PaidTariffConfig>) -> Tariff {
-        let unset = PaidTariffConfig::default();
-        let tariff = tariff.unwrap_or(&unset);
-        Tariff {
-            rate: BytePrice::new(
-                self.value(&format!("{key}.msat"), tariff.msat),
-                self.value(&format!("{key}.per_bytes"), tariff.per_bytes),
-            ),
-            min_msat: self.value(&format!("{key}.min_msat"), tariff.min_msat),
-        }
-    }
-
-    fn mints(&mut self, mints: &[String]) -> Vec<String> {
+/// The configured mints, or else the wallet's. A peer's list is never
+/// trusted, so there is no other source.
+fn mints_or_wallet(
+    section: &str,
+    mints: &[String],
+    wallet_mints: &[String],
+) -> Result<Vec<String>> {
+    let chosen = |mints: &[String]| -> Vec<String> {
         let mut seen = HashSet::new();
-        let mints: Vec<String> = mints
+        mints
             .iter()
             .map(|mint| mint.trim().to_string())
             .filter(|mint| !mint.is_empty() && seen.insert(mint.clone()))
-            .collect();
-        if mints.is_empty() {
-            self.missing.push("mints".to_string());
-        }
-        mints
+            .collect()
+    };
+    let mut mints = chosen(mints);
+    if mints.is_empty() {
+        mints = chosen(wallet_mints);
     }
-
-    fn finish(self) -> Result<()> {
-        if self.missing.is_empty() {
-            return Ok(());
-        }
-        let section = self.section;
-        if self.missing == ["mints"] {
-            bail!("{section}.mints lists no mint; none is chosen by default");
-        }
+    if mints.is_empty() {
         bail!(
-            "{section} does not set {}; no price, mint or cap is chosen by default",
-            self.missing.join(", ")
+            "{section}.mints lists no mint and the Cashu wallet accepts none; \
+             add one with `htree cashu mint add <url>`"
         );
     }
+    Ok(mints)
 }
 
-fn provider_settings(provider: &PaidProviderConfig, state_dir: &Path) -> Result<ProviderSettings> {
+fn provider_settings(
+    provider: &PaidProviderConfig,
+    wallet_mints: &[String],
+    state_dir: &Path,
+) -> Result<ProviderSettings> {
     let section = "paid_retrieval.provider";
-    let mut required = Required::new(section);
-    let tariff = required.tariff("tariff", provider.tariff.as_ref());
-    let mints = required.mints(&provider.mints);
-    required.finish()?;
+    let tariff = tariff_or(provider.tariff.as_ref(), DEFAULT_TARIFF);
+    let mints = mints_or_wallet(section, &provider.mints, wallet_mints)?;
     if tariff.rate.per_bytes == 0 {
         bail!("{section}.tariff.per_bytes must be at least 1");
     }
@@ -321,24 +329,30 @@ fn lock_key(hex_key: &str) -> Option<LockKey> {
     matches!(key[0], 0x02 | 0x03).then_some(key)
 }
 
-fn client_settings(client: &PaidClientConfig, state_dir: PathBuf) -> Result<ClientSettings> {
+fn client_settings(
+    client: &PaidClientConfig,
+    wallet_mints: &[String],
+    state_dir: PathBuf,
+) -> Result<ClientSettings> {
     let section = "paid_retrieval.client";
-    let mut required = Required::new(section);
-    let spending_limit_sat = required.value("spending_limit_sat", client.spending_limit_sat);
-    let max_tariff = required.tariff("max_tariff", client.max_tariff.as_ref());
-    let mints = required.mints(&client.mints);
+    let spending_limit_sat = client
+        .spending_limit_sat
+        .unwrap_or(DEFAULT_SPENDING_LIMIT_SAT);
     let policy = ClientPolicy {
-        max_tariff,
-        mints,
-        topup_sat: required.value("topup_sat", client.topup_sat),
-        max_prepaid_msat: required.value("max_prepaid_msat", client.max_prepaid_msat),
-        max_loss_msat: required.value("max_loss_msat", client.max_loss_msat),
-        max_token_fee_sat: required.value("max_token_fee_sat", client.max_token_fee_sat),
-        max_redeem_fee_msat: required.value("max_redeem_fee_msat", client.max_redeem_fee_msat),
+        max_tariff: tariff_or(client.max_tariff.as_ref(), DEFAULT_MAX_TARIFF),
+        mints: mints_or_wallet(section, &client.mints, wallet_mints)?,
+        topup_sat: client.topup_sat.unwrap_or(DEFAULT_TOPUP_SAT),
+        max_prepaid_msat: client.max_prepaid_msat.unwrap_or(DEFAULT_MAX_PREPAID_MSAT),
+        max_loss_msat: client.max_loss_msat.unwrap_or(DEFAULT_MAX_LOSS_MSAT),
+        max_token_fee_sat: client
+            .max_token_fee_sat
+            .unwrap_or(DEFAULT_MAX_TOKEN_FEE_SAT),
+        max_redeem_fee_msat: client
+            .max_redeem_fee_msat
+            .unwrap_or(DEFAULT_MAX_REDEEM_FEE_MSAT),
         // A time, not money: the library's deadline for one read or payment.
         request_timeout: ClientPolicy::default().request_timeout,
     };
-    required.finish()?;
     if policy.max_tariff.rate.per_bytes == 0 {
         bail!("{section}.max_tariff.per_bytes must be at least 1");
     }

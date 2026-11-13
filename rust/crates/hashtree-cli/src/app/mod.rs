@@ -14,6 +14,7 @@ pub(crate) mod mount_registry;
 pub(crate) mod mount_target;
 pub(crate) mod mounts;
 pub(crate) mod nostr_index;
+pub(crate) mod paid;
 pub(crate) mod peers;
 pub(crate) mod pool_migration_checkpoint;
 pub(crate) mod pool_migration_controller;

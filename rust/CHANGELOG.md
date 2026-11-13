@@ -58,13 +58,28 @@
   serves the local store over the paid FIPS service with its ledger on disk;
   `[paid_retrieval.client]` (providers, price cap, mints, top-up, prepaid,
   loss and fee caps, total spending limit) registers one paid route per
-  provider behind the free routes. No price, mint or cap has a default, and a
-  section that leaves one out stops the daemon at start. Money is spent only
-  after the store, the free routes and the Blossom servers all answered that
-  they do not have the blob, only
-  for reads through a loopback HTTP listener unless `pay_for_remote_reads` is
-  set, and never for a peer's request. `htree status` shows balances, sats
-  paid, declined reads, unresolved tokens, blocks and the spending limit.
+  provider in a router of its own. Nothing paid starts without
+  `[paid_retrieval]`; a section that is present takes defaults for what it
+  leaves out: a price of 1 msat per 10 KiB (at least 10 msat), a price cap of
+  five times that, a 10 sat top-up, 21 sat held per provider, 10 sat of loss
+  before a block, a lifetime spending limit of 1000 sat that the daemon never
+  resets, no grace, and the mints of the daemon's own Cashu wallet
+  (`[cashu] accepted_mints`); with no mint at all the daemon refuses to start.
+  Money is spent only after the store, the free routes and the Blossom
+  servers have all finished without the blob (a failing free source falls
+  through to buying, as in the router), only for reads through a loopback
+  HTTP listener unless `pay_for_remote_reads` is set, and never for a peer's
+  request. `htree status` shows balances, sats paid, declined reads,
+  unresolved tokens, blocks and the spending limit. See
+  `docs/paid-retrieval.md`, "Configuration", for the reasons.
+- `htree paid status`, `htree paid clear-block <provider>` and
+  `htree paid settle`: show the paid accounts (from the files when the daemon
+  is not running), pay a blocked provider again by writing off its recorded
+  loss, and resend unacknowledged payments and unresolved tokens. The daemon
+  holds a lock on the accounts; the commands refuse while it runs.
+- Paid retrieval without FIPS: a provider with `http = true` sells only
+  through its HTTP listener, and a client buys from providers named by `url`,
+  when `server.enable_fips` is off.
 - Paid retrieval over HTTP. With `http = true` in `[paid_retrieval.provider]`
   the daemon serves the exchange at `POST /paid-blob` (one encoded request,
   at most 64 KiB, answered by `200` with one encoded reply, `no-store`), and a

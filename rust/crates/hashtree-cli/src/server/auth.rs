@@ -256,9 +256,9 @@ pub struct AppState {
     pub fips_blob_resolver: Option<Arc<DaemonBlobResolver>>,
     /// Running paid retrieval, when it is configured.
     pub paid_retrieval: Option<Arc<crate::paid_retrieval::DaemonPaidRetrieval>>,
-    /// Whether a read that arrives over HTTP may buy a blob from a paid
-    /// provider once every free source has finished without it.
-    pub pay_for_blob_reads: bool,
+    /// The paid providers a read that arrives over HTTP may buy from, once
+    /// every free source has finished without the blob. `None`: never.
+    pub paid_reads: Option<Arc<hashtree_network::BlobRouter>>,
     pub fetch_from_fips_peers: bool,
     /// WebSocket relay state for /ws clients
     pub ws_relay: Arc<WsRelayState>,

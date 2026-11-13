@@ -94,11 +94,14 @@ pub fn format_paid_status(paid: &Value) -> Vec<String> {
                 _ => "",
             }
         ));
-        lines.push(format!(
-            "  Accounts: {}, holding {}",
-            number(provider, "accounts"),
-            sats(provider["held_msat"].as_i64().unwrap_or(0))
-        ));
+        // Only a running daemon has its ledger open.
+        if provider.get("accounts").is_some() {
+            lines.push(format!(
+                "  Accounts: {}, holding {}",
+                number(provider, "accounts"),
+                sats(provider["held_msat"].as_i64().unwrap_or(0))
+            ));
+        }
     }
     if let Some(client) = paid.get("client").filter(|value| !value.is_null()) {
         lines.push(format!(
@@ -109,22 +112,34 @@ pub fn format_paid_status(paid: &Value) -> Vec<String> {
         ));
         let providers = client["providers"].as_array();
         for provider in providers.into_iter().flatten() {
-            let declined = &provider["declined"];
+            let name = provider["name"].as_str().unwrap_or("?");
+            let balance = sats(provider["balance_msat"].as_i64().unwrap_or(0));
+            // Counts since the start exist only in a running daemon.
+            match provider.get("declined") {
+                Some(declined) => {
+                    lines.push(format!(
+                        "  {name}: balance {balance}, paid {} sat, {} blob(s)",
+                        number(provider, "paid_sat"),
+                        number(provider, "blobs")
+                    ));
+                    lines.push(format!(
+                        "    Declined: {} price, {} limit, {} mint, {} blocked",
+                        number(declined, "price"),
+                        number(declined, "limit"),
+                        number(declined, "mint"),
+                        number(declined, "blocked"),
+                    ));
+                }
+                None => lines.push(format!("  {name}: balance {balance}")),
+            }
             lines.push(format!(
-                "  {}: balance {}, paid {} sat, {} blob(s)",
-                provider["name"].as_str().unwrap_or("?"),
-                sats(provider["balance_msat"].as_i64().unwrap_or(0)),
-                number(provider, "paid_sat"),
-                number(provider, "blobs")
-            ));
-            lines.push(format!(
-                "    Declined: {} price, {} limit, {} mint, {} blocked; unresolved tokens: {} ({} sat)",
-                number(declined, "price"),
-                number(declined, "limit"),
-                number(declined, "mint"),
-                number(declined, "blocked"),
+                "    Unresolved tokens: {} ({} sat){}",
                 number(provider, "unresolved_tokens"),
-                number(provider, "unresolved_sat")
+                number(provider, "unresolved_sat"),
+                match provider["payment_pending"].as_bool() {
+                    Some(true) => "; a payment awaits acknowledgement",
+                    _ => "",
+                }
             ));
             if let Some(reason) = provider["blocked"].as_str() {
                 lines.push(format!("    Blocked: {reason}"));

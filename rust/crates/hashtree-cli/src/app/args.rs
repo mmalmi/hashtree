@@ -65,6 +65,7 @@ Identity & Social Commands:
 
 Wallet Commands:
   cashu        Manage Cashu wallet and accepted mints
+  paid         Show and settle paid retrieval accounts
 
 General Commands:
   help         Print this message or the help of the given subcommand(s)";
@@ -123,6 +124,7 @@ Identity & Social Commands:
 
 Wallet Commands:
   cashu        Manage Cashu wallet and accepted mints
+  paid         Show and settle paid retrieval accounts
 
 General Commands:
   help         Print this message or the help of the given subcommand(s)";
@@ -578,6 +580,28 @@ pub(crate) enum Commands {
         #[command(subcommand)]
         command: CashuCommands,
     },
+    /// Show and settle paid retrieval accounts
+    Paid {
+        #[command(subcommand)]
+        command: PaidCommands,
+    },
+}
+
+#[derive(Subcommand)]
+pub(crate) enum PaidCommands {
+    /// Show balances, the spending limit, unresolved tokens and blocks
+    Status {
+        /// Daemon address (default: server.bind_address)
+        #[arg(long)]
+        addr: Option<String>,
+    },
+    /// Pay a blocked provider again, writing off the loss it was blocked for
+    ClearBlock {
+        /// The provider's name in [paid_retrieval.client]
+        provider: String,
+    },
+    /// Resend unacknowledged payments and try unresolved tokens again
+    Settle,
 }
 
 #[derive(Subcommand)]

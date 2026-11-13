@@ -2422,6 +2422,9 @@ fn run_command(
         Commands::Cashu { command } => command_future!({
             run_cashu_helper(&data_dir, &command)?;
         }),
+        Commands::Paid { command } => command_future!({
+            super::paid::run(command, cli.data_dir.clone()).await?;
+        }),
         Commands::Pr { command } => command_future!(match command {
             PrCommands::Create {
                 repo,

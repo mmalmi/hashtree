@@ -2669,3 +2669,29 @@ async fn test_pin_published_repo_indexes_named_ref_and_unpins_stored_root() {
         "unpinned published refs should be removed from the live pinned-ref set"
     );
 }
+
+#[test]
+fn test_cli_parses_paid_commands() {
+    use super::args::PaidCommands;
+    let paid = |args: &[&str]| match Cli::parse_from(args.iter().copied()).command {
+        Commands::Paid { command } => command,
+        _ => panic!("expected a paid command"),
+    };
+    assert!(matches!(
+        paid(&["htree", "paid", "status"]),
+        PaidCommands::Status { addr: None }
+    ));
+    match paid(&["htree", "paid", "status", "--addr", "127.0.0.1:9090"]) {
+        PaidCommands::Status { addr } => assert_eq!(addr.as_deref(), Some("127.0.0.1:9090")),
+        _ => panic!("expected paid status"),
+    }
+    match paid(&["htree", "paid", "clear-block", "archive"]) {
+        PaidCommands::ClearBlock { provider } => assert_eq!(provider, "archive"),
+        _ => panic!("expected paid clear-block"),
+    }
+    assert!(matches!(
+        paid(&["htree", "paid", "settle"]),
+        PaidCommands::Settle
+    ));
+    assert!(Cli::try_parse_from(["htree", "paid", "clear-block"]).is_err());
+}

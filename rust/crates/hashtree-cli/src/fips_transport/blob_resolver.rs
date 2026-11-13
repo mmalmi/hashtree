@@ -69,23 +69,6 @@ pub(crate) async fn read_daemon_blob(
     )
 }
 
-/// Ask the paid routes of the daemon's router, one after another. Call it
-/// only after every free source of the read has finished without data.
-pub(crate) async fn buy_daemon_blob(
-    resolver: &BlobRouter,
-    request: BlobRequest,
-) -> Result<BlobReply, StoreError> {
-    Ok(
-        match resolver
-            .get_request_at_cost(request, None, None, BlobRouteCost::Paid)
-            .await?
-        {
-            Some(data) => BlobReply::Data(data),
-            None => BlobReply::NoResult,
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -186,8 +169,11 @@ mod tests {
 
         let free = read_daemon_blob(&router, request, None).await;
         assert_eq!(free.unwrap(), BlobReply::NoResult);
-        let bought = buy_daemon_blob(&router, request).await;
-        assert_eq!(bought.unwrap(), BlobReply::Data(data));
+        // Only an explicit search of the paid tier reaches it.
+        let bought = router
+            .get_request_at_cost(request, None, None, BlobRouteCost::Paid)
+            .await;
+        assert_eq!(bought.unwrap(), Some(data));
     }
 
     #[tokio::test]

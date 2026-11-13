@@ -1,5 +1,5 @@
 use super::*;
-use crate::fips_transport::{buy_daemon_blob, read_daemon_blob, DaemonBlobResolver};
+use crate::fips_transport::{read_daemon_blob, DaemonBlobResolver};
 use crate::server::blob_read::{
     run_blob_metadata_read, run_blob_read, run_blob_write, BlobIoTaskError, BLOB_READ_BUSY,
 };
@@ -135,14 +135,20 @@ pub(super) async fn fetch_and_cache_blob_with_source(
         tracing::info!("[htree-fetch] No upstream Blossom servers configured");
     }
 
-    let found = match first_available_fetch(fetches).await? {
-        Some(found) => Some(found),
-        // Every free source answered that it does not have the blob. One
-        // that failed or timed out ends the read above: slow is not a miss,
-        // and nothing is bought on its account.
-        None => buy_from_paid_providers(state, hash)
-            .await?
-            .map(|data| FetchResult::Fips { data }),
+    let found = match first_available_fetch(fetches).await {
+        Ok(Some(found)) => Some(found),
+        // Every free source has finished without the blob: it answered that
+        // it has none, failed or timed out. That is when a paid provider is
+        // asked; the caps bound what it costs. If nothing is bought, a free
+        // source's failure is still what the read reports.
+        free => match buy_from_paid_providers(state, hash).await {
+            Ok(Some(data)) => Some(FetchResult::Fips { data }),
+            Ok(None) => free?,
+            Err(error) => {
+                free?;
+                return Err(error);
+            }
+        },
     };
     if let Some(result) = found {
         match result {
@@ -1293,13 +1299,13 @@ pub(super) async fn query_fips_peers(
 }
 
 /// Buy the blob from a paid provider, where the operator allowed that for
-/// reads arriving over HTTP. Call it only after every free source answered
-/// that it has no data: a paid provider is never raced against a free one.
+/// reads arriving over HTTP. Call it only after every free source finished
+/// without data: a paid provider is never raced against a free one.
 async fn buy_from_paid_providers(state: &AppState, hash: &[u8]) -> Result<Option<Vec<u8>>, String> {
-    if !(state.pay_for_blob_reads && state.hash_get_enabled && state.fetch_from_fips_peers) {
+    if !state.hash_get_enabled {
         return Ok(None);
     }
-    let Some(resolver) = &state.fips_blob_resolver else {
+    let Some(paid) = &state.paid_reads else {
         return Ok(None);
     };
     let hash: [u8; 32] = hash
@@ -1309,11 +1315,11 @@ async fn buy_from_paid_providers(state: &AppState, hash: &[u8]) -> Result<Option
         hash,
         htl: hashtree_core::BLOB_DEFAULT_HTL,
     };
-    match buy_daemon_blob(resolver.as_ref(), request).await {
-        Ok(hashtree_core::BlobReply::Data(data)) => Ok(Some(data)),
-        Ok(hashtree_core::BlobReply::NoResult) => Ok(None),
-        Err(err) => Err(format!("paid provider fetch failed: {err}")),
-    }
+    let bought =
+        paid.get_request_at_cost(request, None, None, hashtree_network::BlobRouteCost::Paid);
+    bought
+        .await
+        .map_err(|err| format!("paid provider fetch failed: {err}"))
 }
 
 enum UpstreamBlossomQueryResult {

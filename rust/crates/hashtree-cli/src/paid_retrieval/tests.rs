@@ -6,13 +6,13 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use hashtree_core::{sha256, BlobReply, BlobRequest, Store, BLOB_DEFAULT_HTL};
-use hashtree_paid_retrieval::discovered_paid_providers;
 use hashtree_paid_retrieval::test_support::{FakeMint, FakeReceiver, FakeWallet, MINT};
+use hashtree_paid_retrieval::{discovered_paid_providers, BytePrice};
 use nostr::nips::nip19::ToBech32;
 
 use super::*;
 use crate::fips_transport::{
-    buy_daemon_blob, daemon_fips_peer_configs, read_daemon_blob, start_daemon_fips_transport,
+    daemon_fips_peer_configs, read_daemon_blob, start_daemon_fips_transport,
 };
 
 const DESIGN: &str = include_str!("../../../../../docs/paid-retrieval.md");
@@ -30,8 +30,18 @@ fn npub() -> String {
     nostr::Keys::generate().public_key().to_bech32().unwrap()
 }
 
+/// The mints of the Cashu wallet in these tests.
+const WALLET_MINT: &str = "https://mint.example";
+
 fn settings(config: &PaidRetrievalConfig) -> Result<Option<PaidRetrievalSettings>> {
-    PaidRetrievalSettings::from_config(config, std::path::Path::new("/data"))
+    let wallet_mints = [WALLET_MINT.to_string()];
+    PaidRetrievalSettings::from_config(config, &wallet_mints, std::path::Path::new("/data"))
+}
+
+fn settings_without_wallet_mints(
+    config: &PaidRetrievalConfig,
+) -> Result<Option<PaidRetrievalSettings>> {
+    PaidRetrievalSettings::from_config(config, &[], std::path::Path::new("/data"))
 }
 
 fn paid(toml: &str) -> PaidRetrievalConfig {
@@ -73,16 +83,11 @@ async fn nothing_is_started_or_written_without_configuration() {
 }
 
 #[tokio::test]
-async fn the_daemon_refuses_to_sell_without_a_mint() {
+async fn the_daemon_refuses_to_sell_when_neither_it_nor_its_wallet_names_a_mint() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(HashtreeStore::new(dir.path().join("store")).unwrap());
     let data_dir = dir.path().join("data");
-    let config: Config = toml::from_str(
-        r#"[paid_retrieval.provider]
-paying_only = true
-tariff = { msat = 1, per_bytes = 1024, min_msat = 100 }"#,
-    )
-    .unwrap();
+    let config: Config = toml::from_str("[paid_retrieval.provider]\npaying_only = true").unwrap();
 
     let refused = start_daemon_paid_retrieval(&config, &data_dir, "127.0.0.1:8080", None, &store)
         .await
@@ -92,45 +97,178 @@ tariff = { msat = 1, per_bytes = 1024, min_msat = 100 }"#,
     assert_eq!(
         format!("{refused:#}"),
         "Paid retrieval is configured but cannot start: \
-         paid_retrieval.provider.mints lists no mint; none is chosen by default"
+         paid_retrieval.provider.mints lists no mint and the Cashu wallet accepts none; \
+         add one with `htree cashu mint add <url>`"
     );
     assert!(!data_dir.join(PAID_RETRIEVAL_DIR).exists());
+
+    let config: Config = toml::from_str(
+        "[paid_retrieval.client]\n[[paid_retrieval.client.providers]]\n\
+         name = \"gateway\"\nurl = \"http://127.0.0.1:1\"",
+    )
+    .unwrap();
+    let refused = start_daemon_paid_retrieval(&config, &data_dir, "127.0.0.1:8080", None, &store)
+        .await
+        .err()
+        .expect("a client without a mint must not start");
+    assert!(
+        format!("{refused:#}").contains("htree cashu mint add"),
+        "{refused:#}"
+    );
 }
 
 #[test]
-fn the_documented_example_is_a_complete_configuration() {
+fn the_wallet_mints_are_the_default_of_both_sides_and_an_explicit_list_wins() {
+    let config: Config = toml::from_str(
+        r#"[cashu]
+accepted_mints = ["https://wallet-a.example", "https://wallet-b.example"]
+
+[paid_retrieval.provider]
+
+[paid_retrieval.client]
+[[paid_retrieval.client.providers]]
+name = "gateway"
+url = "https://gw.example""#,
+    )
+    .unwrap();
+    let wallet = &config.cashu.accepted_mints;
+    let data_dir = std::path::Path::new("/data");
+    let parsed = PaidRetrievalSettings::from_config(&config.paid_retrieval, wallet, data_dir);
+    let parsed = parsed.unwrap().unwrap();
+    assert_eq!(parsed.provider.unwrap().config.mints, *wallet);
+    assert_eq!(parsed.client.unwrap().policy.mints, *wallet);
+
+    let mut explicit = config.paid_retrieval.clone();
+    explicit.provider.as_mut().unwrap().mints = vec!["https://own.example".into()];
+    explicit.client.as_mut().unwrap().mints = vec!["https://trusted.example".into()];
+    let parsed = PaidRetrievalSettings::from_config(&explicit, wallet, data_dir);
+    let parsed = parsed.unwrap().unwrap();
+    assert_eq!(
+        parsed.provider.unwrap().config.mints,
+        ["https://own.example"]
+    );
+    assert_eq!(
+        parsed.client.unwrap().policy.mints,
+        ["https://trusted.example"]
+    );
+
+    let error = settings_without_wallet_mints(&config.paid_retrieval)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("the Cashu wallet accepts none"), "{error}");
+}
+
+#[test]
+fn an_empty_section_takes_every_default() {
+    let config = paid(
+        "[provider]\n[client]\n[[client.providers]]\nname = \"gateway\"\n\
+         url = \"https://gw.example\"",
+    );
+    let parsed = settings(&config).unwrap().unwrap();
+
+    let provider = parsed.provider.unwrap();
+    assert_eq!(provider.config.tariff, DEFAULT_TARIFF);
+    assert_eq!(provider.config.tariff.rate.msat, 1);
+    assert_eq!(provider.config.tariff.rate.per_bytes, 10_240);
+    assert_eq!(provider.config.tariff.min_msat, 10);
+    assert_eq!(provider.config.mints, [WALLET_MINT]);
+    assert_eq!(provider.config.min_topup_sat, 1);
+    assert_eq!(provider.config.grace_msat, 0);
+    assert_eq!(provider.config.lock, None);
+    assert!(!provider.paying_only);
+    assert!(!provider.http);
+
+    let client = parsed.client.unwrap();
+    assert_eq!(client.policy.max_tariff, DEFAULT_MAX_TARIFF);
+    assert_eq!(client.policy.max_tariff.rate.msat, 1);
+    assert_eq!(client.policy.max_tariff.rate.per_bytes, 2_048);
+    assert_eq!(client.policy.max_tariff.min_msat, 100);
+    assert_eq!(client.policy.mints, [WALLET_MINT]);
+    assert_eq!(client.policy.topup_sat, 10);
+    assert_eq!(client.policy.max_prepaid_msat, 21_000);
+    assert_eq!(client.policy.max_loss_msat, 10_000);
+    assert_eq!(client.policy.max_token_fee_sat, 2);
+    assert_eq!(client.policy.max_redeem_fee_msat, 2_000);
+    assert_eq!(client.spending_limit_sat, 1_000);
+    assert!(!client.pay_for_remote_reads);
+
+    // The default price is a fifth of the default cap: 2 MiB costs 205 msat
+    // and is accepted up to 1024 msat.
+    let two_mib = 2 * 1024 * 1024;
+    assert_eq!(DEFAULT_TARIFF.price_msat(two_mib), 205);
+    assert_eq!(DEFAULT_MAX_TARIFF.price_msat(two_mib), 1_024);
+}
+
+#[test]
+fn a_value_left_out_takes_its_default_and_one_given_is_kept() {
+    let config = paid(
+        "[provider]\ntariff = { msat = 3 }\n[client]\nmax_tariff = { per_bytes = 512 }\n\
+         topup_sat = 4\nspending_limit_sat = 50\n\
+         [[client.providers]]\nname = \"gateway\"\nurl = \"https://gw.example\"",
+    );
+    let parsed = settings(&config).unwrap().unwrap();
+    let tariff = parsed.provider.unwrap().config.tariff;
+    assert_eq!(tariff.rate, BytePrice::new(3, 10_240));
+    assert_eq!(tariff.min_msat, 10);
+    let client = parsed.client.unwrap();
+    assert_eq!(client.policy.max_tariff.rate, BytePrice::new(1, 512));
+    assert_eq!(client.policy.max_tariff.min_msat, 100);
+    assert_eq!(client.policy.topup_sat, 4);
+    assert_eq!(client.spending_limit_sat, 50);
+    assert_eq!(client.policy.max_prepaid_msat, DEFAULT_MAX_PREPAID_MSAT);
+}
+
+#[test]
+fn the_documented_example_shows_exactly_the_defaults() {
     let mut config = documented_example();
     let peer = npub();
     config.client.as_mut().unwrap().providers[0].npub = Some(peer.clone());
 
-    let settings = settings(&config).unwrap().unwrap();
+    let documented = settings(&config).unwrap().unwrap();
 
-    let provider = settings.provider.unwrap();
-    assert_eq!(provider.config.tariff.rate.msat, 1);
-    assert_eq!(provider.config.tariff.rate.per_bytes, 1024);
-    assert_eq!(provider.config.tariff.min_msat, 100);
-    assert_eq!(provider.config.mints, ["https://mint.example"]);
-    assert_eq!(provider.config.min_topup_sat, 1);
-    assert_eq!(provider.config.grace_msat, 0);
-    assert!(!provider.paying_only);
-    assert!(!provider.http);
-    assert_eq!(provider.config.lock, None);
+    let mut defaults = paid("[provider]\n[client]");
+    defaults.client.as_mut().unwrap().providers = config.client.as_ref().unwrap().providers.clone();
+    let defaults = settings(&defaults).unwrap().unwrap();
+    let (provider, default_provider) = (documented.provider.unwrap(), defaults.provider.unwrap());
+    assert_eq!(provider.config.tariff, default_provider.config.tariff);
+    assert_eq!(provider.config.mints, default_provider.config.mints);
+    assert_eq!(
+        provider.config.min_topup_sat,
+        default_provider.config.min_topup_sat
+    );
+    assert_eq!(
+        provider.config.grace_msat,
+        default_provider.config.grace_msat
+    );
+    assert_eq!(provider.config.lock, default_provider.config.lock);
+    assert_eq!(provider.ledger_dir, default_provider.ledger_dir);
+    assert_eq!(
+        (provider.paying_only, provider.http),
+        (default_provider.paying_only, default_provider.http)
+    );
     assert_eq!(
         provider.ledger_dir,
         PathBuf::from("/data")
             .join(PAID_RETRIEVAL_DIR)
             .join("ledger")
     );
-    let client = settings.client.unwrap();
-    assert_eq!(client.spending_limit_sat, 1000);
-    assert_eq!(client.policy.max_tariff, provider.config.tariff);
-    assert_eq!(client.policy.mints, ["https://mint.example"]);
-    assert_eq!(client.policy.topup_sat, 20);
-    assert_eq!(client.policy.max_prepaid_msat, 100_000);
-    assert_eq!(client.policy.max_loss_msat, 20_000);
-    assert_eq!(client.policy.max_token_fee_sat, 2);
-    assert_eq!(client.policy.max_redeem_fee_msat, 2_000);
-    assert!(!client.pay_for_remote_reads);
+    let (client, default_client) = (documented.client.unwrap(), defaults.client.unwrap());
+    assert_eq!(client.spending_limit_sat, default_client.spending_limit_sat);
+    assert_eq!(
+        client.pay_for_remote_reads,
+        default_client.pay_for_remote_reads
+    );
+    let (policy, default_policy) = (&client.policy, &default_client.policy);
+    assert_eq!(policy.max_tariff, default_policy.max_tariff);
+    assert_eq!(policy.mints, default_policy.mints);
+    assert_eq!(policy.topup_sat, default_policy.topup_sat);
+    assert_eq!(policy.max_prepaid_msat, default_policy.max_prepaid_msat);
+    assert_eq!(policy.max_loss_msat, default_policy.max_loss_msat);
+    assert_eq!(policy.max_token_fee_sat, default_policy.max_token_fee_sat);
+    assert_eq!(
+        policy.max_redeem_fee_msat,
+        default_policy.max_redeem_fee_msat
+    );
     assert_eq!(client.providers.len(), 2);
     assert_eq!(client.providers[0].name, "archive");
     assert_eq!(client.providers[0].place.label(), peer);
@@ -219,50 +357,8 @@ fn a_provider_may_name_a_lock_key_and_nothing_else() {
 }
 
 #[test]
-fn a_provider_without_a_mint_or_a_price_is_refused() {
-    let no_mint = paid("[provider]\ntariff = { msat = 1, per_bytes = 1024, min_msat = 100 }");
-    let error = settings(&no_mint).unwrap_err().to_string();
-    assert_eq!(
-        error,
-        "paid_retrieval.provider.mints lists no mint; none is chosen by default"
-    );
-
-    let no_price = paid("[provider]\nmints = [\"https://mint.example\"]\ntariff = { msat = 1 }");
-    let error = settings(&no_price).unwrap_err().to_string();
-    assert!(
-        error.contains("tariff.per_bytes, tariff.min_msat"),
-        "{error}"
-    );
-    assert!(!error.contains("tariff.msat"), "{error}");
-
-    let nothing = paid("[provider]");
-    let error = settings(&nothing).unwrap_err().to_string();
-    assert!(error.contains("tariff.msat"), "{error}");
-    assert!(error.contains("mints"), "{error}");
-}
-
-#[test]
-fn a_client_must_name_every_cap_itself() {
+fn a_client_refuses_bad_providers_and_inconsistent_caps() {
     let peer = npub();
-    let bare = paid(&format!(
-        "[[client.providers]]\nname = \"archive\"\nnpub = \"{peer}\""
-    ));
-    let error = settings(&bare).unwrap_err().to_string();
-    for key in [
-        "spending_limit_sat",
-        "max_tariff.msat",
-        "max_tariff.per_bytes",
-        "max_tariff.min_msat",
-        "mints",
-        "topup_sat",
-        "max_prepaid_msat",
-        "max_loss_msat",
-        "max_token_fee_sat",
-        "max_redeem_fee_msat",
-    ] {
-        assert!(error.contains(key), "{key} is missing from: {error}");
-    }
-
     let mut config = documented_example();
     let client = config.client.as_mut().unwrap();
     client.providers[0].npub = Some("not an identity".into());
@@ -277,9 +373,13 @@ fn a_client_must_name_every_cap_itself() {
 
     let client = config.client.as_mut().unwrap();
     client.providers.pop();
-    client.topup_sat = Some(101);
+    client.topup_sat = Some(22);
     let error = settings(&config).unwrap_err().to_string();
     assert!(error.contains("max_prepaid_msat"), "{error}");
+
+    let bad_price = paid("[provider]\ntariff = { per_bytes = 0 }");
+    let error = settings(&bad_price).unwrap_err().to_string();
+    assert!(error.contains("per_bytes must be at least 1"), "{error}");
 }
 
 #[test]
@@ -316,33 +416,48 @@ fn only_a_loopback_listener_pays_for_http_reads_unasked() {
 }
 
 #[tokio::test]
-async fn paid_retrieval_without_a_fips_endpoint_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(HashtreeStore::new(dir.path().join("store")).unwrap());
-    let mut config = documented_example();
-    config.client = None;
-    let settings = PaidRetrievalSettings::from_config(&config, dir.path())
-        .unwrap()
-        .unwrap();
+async fn without_fips_only_http_is_sold_and_only_gateways_are_bought_from() {
     let mint = Arc::new(FakeMint::default());
+    let start = |toml: String| {
+        let mint = mint.clone();
+        async move {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Arc::new(HashtreeStore::new(dir.path().join("store")).unwrap());
+            let parsed = PaidRetrievalSettings::from_config(&paid(&toml), &[], dir.path());
+            let started = start_paid_retrieval(
+                parsed.unwrap().unwrap(),
+                "127.0.0.1:8080",
+                None,
+                &store,
+                FakeWallet::funded(&mint, 0),
+                FakeReceiver::new(&mint),
+            )
+            .await;
+            (dir, started)
+        }
+    };
+    let provider = |http: bool| format!("[provider]\nmints = [\"{MINT}\"]\nhttp = {http}");
+    let client = |place: String| {
+        format!("[client]\nmints = [\"{MINT}\"]\n[[client.providers]]\nname = \"p\"\n{place}")
+    };
 
-    let error = start_paid_retrieval(
-        settings,
-        "127.0.0.1:8080",
-        None,
-        &store,
-        FakeWallet::funded(&mint, 0),
-        FakeReceiver::new(&mint),
-    )
-    .await
-    .err()
-    .expect("no endpoint, no paid service");
+    let (_dir, refused) = start(provider(false)).await;
+    let error = refused.err().expect("nothing to sell over").to_string();
+    assert!(error.contains("nowhere to sell"), "{error}");
 
-    assert!(
-        error.to_string().contains("FIPS endpoint is off"),
-        "{error}"
-    );
-    assert!(!dir.path().join(PAID_RETRIEVAL_DIR).exists());
+    let (_dir, refused) = start(client(format!("npub = \"{}\"", npub()))).await;
+    let error = refused.err().expect("an npub needs FIPS").to_string();
+    assert!(error.contains("p can be reached only over FIPS"), "{error}");
+
+    let (_dir, sells) = start(provider(true)).await;
+    let sells = sells.unwrap();
+    assert!(sells.status()["provider"]["http"].as_bool().unwrap());
+    sells.shutdown().await;
+
+    let (_dir, buys) = start(client("url = \"http://127.0.0.1:1\"".into())).await;
+    let buys = buys.unwrap();
+    assert!(buys.http_read_router().is_some());
+    buys.shutdown().await;
 }
 
 fn rendezvous_addr() -> SocketAddrV4 {
@@ -397,7 +512,7 @@ impl TestDaemon {
         receiver: Arc<FakeReceiver>,
     ) -> Arc<DaemonPaidRetrieval> {
         let settings =
-            PaidRetrievalSettings::from_config(&self.config.paid_retrieval, &self.data_dir());
+            PaidRetrievalSettings::from_config(&self.config.paid_retrieval, &[], &self.data_dir());
         start_paid_retrieval(
             settings.unwrap().expect("paid retrieval is configured"),
             "127.0.0.1:8080",
@@ -423,14 +538,11 @@ impl TestDaemon {
         let read = read_daemon_blob(resolver, Self::request(hash), None).await;
         read.unwrap()
     }
+}
 
-    /// What the daemon does once every free source finished without data.
-    async fn buy(&self, hash: hashtree_core::Hash) -> BlobReply {
-        let resolver = &self.fips.blob_resolver;
-        buy_daemon_blob(resolver, Self::request(hash))
-            .await
-            .unwrap()
-    }
+/// What the daemon does once every free source finished without data.
+async fn buy(paid: &DaemonPaidRetrieval, hash: hashtree_core::Hash) -> BlobReply {
+    paid.buy(TestDaemon::request(hash)).await.unwrap()
 }
 
 #[tokio::test]
@@ -485,7 +597,10 @@ npub = "{}""#,
     let buying = client
         .start_paid(wallet.clone(), FakeReceiver::new(&mint))
         .await;
-    assert_eq!(client.fips.blob_resolver.route_count().await, 3);
+    // The paid route is the paid retrieval's own: the FIPS resolver, which
+    // also answers peers, has only its two free routes.
+    assert_eq!(client.fips.blob_resolver.route_count().await, 2);
+    assert!(buying.http_read_router().is_some());
 
     // Both of the provider's services are known to the client.
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -509,7 +624,7 @@ npub = "{}""#,
     assert_eq!(wallet.payments(), 0);
 
     // The paid tier buys the blob, once.
-    let bought = client.buy(hash).await;
+    let bought = buy(&buying, hash).await;
     assert_eq!(bought, BlobReply::Data(data.clone()));
     assert_eq!(wallet.payments(), 1);
     assert_eq!(wallet.balance(), 95);
@@ -595,7 +710,7 @@ npub = "{}""#,
 }
 
 /// Serve the daemon's HTTP routes for `store` on a loopback port.
-async fn serve_http(
+pub(super) async fn serve_http(
     store: Arc<HashtreeStore>,
     paid: Option<Arc<DaemonPaidRetrieval>>,
 ) -> (String, tokio::task::JoinHandle<()>) {
@@ -668,13 +783,13 @@ url = "{gateway}""#
 
     // The first blob needs a top-up: one token of 5 sat, redeemed by the
     // gateway, then 1 sat charged.
-    let bought = client.buy(sha256(&first)).await;
+    let bought = buy(&buying, sha256(&first)).await;
     assert_eq!(bought, BlobReply::Data(first.clone()));
     assert_eq!(wallet.payments(), 1);
     assert_eq!(receiver.received(), 5);
 
     // The second is paid from the balance: no new token.
-    let bought = client.buy(sha256(&second)).await;
+    let bought = buy(&buying, sha256(&second)).await;
     assert_eq!(bought, BlobReply::Data(second.clone()));
     assert_eq!(wallet.payments(), 1);
     assert_eq!(wallet.balance(), 95);

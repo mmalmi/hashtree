@@ -2,9 +2,12 @@
 //! blobs that no free route returned. Both are off unless `[paid_retrieval]`
 //! is configured; see `docs/paid-retrieval.md`.
 //!
-//! Only this module is started with the daemon. One-shot commands that bring
-//! up their own FIPS endpoint never open the ledger or pay anyone.
+//! Only this module is started with the daemon, and `htree paid` acts on the
+//! same account files through it while the daemon is not running.
 
+#[cfg(test)]
+mod command_tests;
+mod commands;
 mod config;
 mod http;
 mod spend_store;
@@ -12,7 +15,7 @@ mod status;
 #[cfg(test)]
 mod tests;
 
-use std::fs;
+use std::fs::{self, File, TryLockError};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,25 +24,28 @@ use tokio::sync::Semaphore;
 
 use anyhow::{bail, Context, Result};
 use cashu_service::CashuHelperClient;
-use hashtree_core::{BlobRoute, StoreBlobRoute};
-use hashtree_network::BlobRouteEntry;
+use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Store, StoreBlobRoute, StoreError};
+use hashtree_network::{BlobRouteCost, BlobRouteEntry, BlobRouter, BlobRouterConfig};
 use hashtree_paid_retrieval::{
     CashuReceiver, CashuWallet, FileAccountStore, FileLedgerStore, FipsPaidBlobService,
     FipsPaidConfig, LimitedWallet, PaidBlobProvider, PaidBlobRoute, PaidBlobTransport,
     PaymentReceiver, RetrievalWallet, SpendingLimit,
 };
 
+pub use commands::{clear_block, ensure_accounts_free, offline_status, settle, ClearedBlock};
 pub use config::{
     ClientSettings, PaidClientConfig, PaidProviderConfig, PaidProviderPeerConfig,
     PaidRetrievalConfig, PaidRetrievalSettings, PaidTariffConfig, ProviderPeer, ProviderPlace,
-    ProviderSettings, PAID_RETRIEVAL_DIR,
+    ProviderSettings, DEFAULT_MAX_LOSS_MSAT, DEFAULT_MAX_PREPAID_MSAT, DEFAULT_MAX_REDEEM_FEE_MSAT,
+    DEFAULT_MAX_TARIFF, DEFAULT_MAX_TOKEN_FEE_SAT, DEFAULT_SPENDING_LIMIT_SAT, DEFAULT_TARIFF,
+    DEFAULT_TOPUP_SAT, PAID_RETRIEVAL_DIR,
 };
 pub use http::{paid_blob_endpoint, HttpPaidTransport, PAID_BLOB_HTTP_PATH};
 pub use spend_store::FileSpendStore;
 pub use status::format_paid_status;
 
 use crate::config::Config;
-use crate::fips_transport::{BlockingStoreRoute, DaemonBlobResolver, DaemonFipsHandle};
+use crate::fips_transport::{BlockingStoreRoute, DaemonFipsHandle};
 use crate::storage::HashtreeStore;
 
 /// Same-host priority of the paid capability, as for the free blob service.
@@ -66,12 +72,18 @@ const MAX_HTTP_EXCHANGES: usize = 16;
 struct BuyingSide {
     limit: Arc<SpendingLimit>,
     routes: Vec<ClientRoute>,
+    /// The paid routes only. The daemon's FIPS resolver never sees them, so
+    /// a peer's request cannot reach them.
+    router: Arc<BlobRouter>,
     /// Whether a read through the HTTP listener may spend money.
     pays_for_http_reads: bool,
+    /// Held while the accounts are in use; `htree paid` refuses meanwhile.
+    _lock: File,
 }
 
 /// The daemon's running paid retrieval.
 pub struct DaemonPaidRetrieval {
+    /// The paid FIPS service, when FIPS is on and something needs it.
     service: tokio::sync::Mutex<Option<FipsPaidBlobService>>,
     selling: Option<SellingSide>,
     buying: Option<BuyingSide>,
@@ -109,6 +121,39 @@ impl DaemonPaidRetrieval {
         buying.is_some_and(|buying| buying.pays_for_http_reads)
     }
 
+    /// The router of the paid providers, for reads through the HTTP
+    /// listener where they may spend money.
+    pub fn http_read_router(&self) -> Option<Arc<BlobRouter>> {
+        let buying = self.buying.as_ref()?;
+        buying
+            .pays_for_http_reads
+            .then(|| Arc::clone(&buying.router))
+    }
+
+    /// Ask the paid providers for one blob, one after another. Call it only
+    /// after every free source of the read has finished without data.
+    pub async fn buy(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        let Some(buying) = &self.buying else {
+            return Ok(BlobReply::NoResult);
+        };
+        let router = &buying.router;
+        let found = router.get_request_at_cost(request, None, None, BlobRouteCost::Paid);
+        Ok(match found.await? {
+            Some(data) => BlobReply::Data(data),
+            None => BlobReply::NoResult,
+        })
+    }
+
+    /// Resend every unacknowledged payment and try unresolved tokens again,
+    /// provider by provider.
+    pub async fn settle(&self) -> Vec<(String, Result<(), StoreError>)> {
+        let mut settled = Vec::new();
+        for entry in self.buying.iter().flat_map(|buying| &buying.routes) {
+            settled.push((entry.name.clone(), entry.route.settle().await));
+        }
+        settled
+    }
+
     /// What `htree status` shows. It holds no token and no account id.
     pub fn status(&self) -> serde_json::Value {
         status::status(self)
@@ -143,8 +188,10 @@ pub async fn start_daemon_paid_retrieval(
     fips: Option<&DaemonFipsHandle>,
     store: &Arc<HashtreeStore>,
 ) -> Result<Option<Arc<DaemonPaidRetrieval>>> {
-    let settings = PaidRetrievalSettings::from_config(&config.paid_retrieval, data_dir)
-        .context("Paid retrieval is configured but cannot start")?;
+    let wallet_mints = &config.cashu.accepted_mints;
+    let settings =
+        PaidRetrievalSettings::from_config(&config.paid_retrieval, wallet_mints, data_dir)
+            .context("Paid retrieval is configured but cannot start")?;
     let Some(settings) = settings else {
         return Ok(None);
     };
@@ -174,34 +221,68 @@ pub(crate) async fn start_paid_retrieval(
     wallet: Arc<dyn RetrievalWallet>,
     receiver: Arc<dyn PaymentReceiver>,
 ) -> Result<Arc<DaemonPaidRetrieval>> {
-    let Some(fips) = fips else {
-        bail!("the FIPS endpoint is off (server.enable_fips, or a server mode without hash reads)");
-    };
+    let fips_off =
+        "the FIPS endpoint is off (server.enable_fips, or a server mode without hash reads)";
+    if fips.is_none() {
+        if settings
+            .provider
+            .as_ref()
+            .is_some_and(|provider| !provider.http)
+        {
+            bail!("{fips_off} and paid_retrieval.provider.http is false: there is nowhere to sell");
+        }
+        let fips_providers = settings
+            .client
+            .iter()
+            .flat_map(|client| &client.providers)
+            .filter(|peer| matches!(peer.place, ProviderPlace::Fips { .. }))
+            .map(|peer| peer.name.as_str())
+            .collect::<Vec<_>>();
+        if !fips_providers.is_empty() {
+            bail!(
+                "{fips_off}, and {} can be reached only over FIPS",
+                fips_providers.join(", ")
+            );
+        }
+    }
+    let needs_fips_client = settings.client.iter().any(|client| {
+        let mut providers = client.providers.iter();
+        providers.any(|peer| matches!(peer.place, ProviderPlace::Fips { .. }))
+    });
     let selling = match settings.provider {
         Some(provider) => Some(open_provider(provider, store, receiver)?),
         None => None,
     };
-    let endpoint = fips.endpoint.clone();
     let carrier = FipsPaidConfig::default();
-    let service = match &selling {
-        Some(selling) => {
-            let provider = selling.provider.clone();
+    let service = match (fips, &selling) {
+        (Some(fips), Some(selling)) => Some(
             FipsPaidBlobService::serve_advertised(
-                endpoint,
-                provider,
+                fips.endpoint.clone(),
+                selling.provider.clone(),
                 carrier,
                 SAME_HOST_PROVIDER_PRIORITY,
             )
-            .await
+            .await,
+        ),
+        (Some(fips), None) if needs_fips_client => {
+            Some(FipsPaidBlobService::client(fips.endpoint.clone(), carrier).await)
         }
-        None => FipsPaidBlobService::client(endpoint, carrier).await,
+        _ => None,
     }
+    .transpose()
     .context("Failed to bind the paid blob service")?;
     let buying = match settings.client {
         Some(client) => {
-            let buying = open_client(client, bind_address, &service, wallet)?;
-            register_paid_routes(&fips.blob_resolver, &buying.routes).await?;
-            Some(buying)
+            // A blob that was paid for is kept, never bought twice.
+            let cache: Arc<dyn Store> = store.store_arc();
+            let service = service.as_ref();
+            Some(open_client(
+                client,
+                bind_address,
+                service,
+                wallet,
+                Some(cache),
+            )?)
         }
         None => None,
     };
@@ -223,7 +304,7 @@ pub(crate) async fn start_paid_retrieval(
         );
     }
     Ok(Arc::new(DaemonPaidRetrieval {
-        service: tokio::sync::Mutex::new(Some(service)),
+        service: tokio::sync::Mutex::new(service),
         selling,
         buying,
     }))
@@ -253,16 +334,37 @@ fn open_provider(
     })
 }
 
+/// Take the accounts of `state_dir` for this process. Another htree process
+/// that holds them, normally the running daemon, makes this fail.
+fn lock_accounts(state_dir: &Path) -> Result<File> {
+    let accounts = state_dir.join("accounts");
+    fs::create_dir_all(&accounts).context("Failed to create the paid account directory")?;
+    keep_private(state_dir)?;
+    keep_private(&accounts)?;
+    let lock = File::create(state_dir.join("accounts.lock"))
+        .context("Failed to open the paid account lock")?;
+    match lock.try_lock() {
+        Ok(()) => Ok(lock),
+        Err(TryLockError::WouldBlock) => bail!(
+            "the paid accounts in {} are in use by another htree process; \
+             if the daemon is running, stop it first",
+            state_dir.display()
+        ),
+        Err(TryLockError::Error(error)) => {
+            Err(error).context("Failed to lock the paid account directory")
+        }
+    }
+}
+
 fn open_client(
     settings: ClientSettings,
     bind_address: &str,
-    service: &FipsPaidBlobService,
+    service: Option<&FipsPaidBlobService>,
     wallet: Arc<dyn RetrievalWallet>,
+    cache: Option<Arc<dyn Store>>,
 ) -> Result<BuyingSide> {
+    let lock = lock_accounts(&settings.state_dir)?;
     let accounts = settings.state_dir.join("accounts");
-    fs::create_dir_all(&accounts).context("Failed to create the paid account directory")?;
-    keep_private(&settings.state_dir)?;
-    keep_private(&accounts)?;
     let spend_store = Arc::new(FileSpendStore::new(settings.state_dir.join("spent")));
     let spent_sat = spend_store
         .load()
@@ -276,9 +378,16 @@ fn open_client(
             .load()
             .with_context(|| format!("Failed to read the paid account with {}", peer.name))?
             .unwrap_or_default();
-        let transport: Arc<dyn PaidBlobTransport> = match &peer.place {
-            ProviderPlace::Fips { identity, .. } => Arc::new(service.transport_to(*identity)),
-            ProviderPlace::Http { url } => Arc::new(HttpPaidTransport::at_endpoint(url.clone())?),
+        let transport: Arc<dyn PaidBlobTransport> = match (&peer.place, service) {
+            (ProviderPlace::Fips { identity, .. }, Some(service)) => {
+                Arc::new(service.transport_to(*identity))
+            }
+            (ProviderPlace::Fips { .. }, None) => {
+                bail!("{} can be reached only over FIPS, which is off", peer.name)
+            }
+            (ProviderPlace::Http { url }, _) => {
+                Arc::new(HttpPaidTransport::at_endpoint(url.clone())?)
+            }
         };
         let route = PaidBlobRoute::with_store(
             peer.name.clone(),
@@ -294,27 +403,27 @@ fn open_client(
             route,
         });
     }
+    let entries = routes
+        .iter()
+        .map(|provider| {
+            let route = Arc::new(provider.route.clone());
+            BlobRouteEntry::paid(format!("paid:{}", provider.name), route)
+        })
+        .collect();
+    let router_config = BlobRouterConfig {
+        request_timeout: settings.policy.request_timeout,
+        ..BlobRouterConfig::default()
+    };
+    let router = BlobRouter::new(entries, cache, router_config)
+        .map_err(anyhow::Error::msg)
+        .context("Failed to set up the paid blob routes")?;
     Ok(BuyingSide {
         limit,
         routes,
+        router: Arc::new(router),
         pays_for_http_reads: settings.pay_for_remote_reads || binds_loopback(bind_address),
+        _lock: lock,
     })
-}
-
-/// Add the paid routes to the daemon's router, in its paid tier.
-async fn register_paid_routes(resolver: &DaemonBlobResolver, paid: &[ClientRoute]) -> Result<()> {
-    let mut routes = resolver.routes().await;
-    for provider in paid {
-        routes.push(BlobRouteEntry::paid(
-            format!("paid:{}", provider.name),
-            Arc::new(provider.route.clone()),
-        ));
-    }
-    resolver
-        .set_routes(routes)
-        .await
-        .map_err(anyhow::Error::msg)
-        .context("Failed to register the paid blob routes")
 }
 
 /// The file of the account with one provider: named by its npub, or by a

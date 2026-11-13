@@ -6,7 +6,7 @@
 mod blob_resolver;
 mod durable_cache;
 mod retained_provider;
-pub(crate) use blob_resolver::{buy_daemon_blob, read_daemon_blob, BlockingStoreRoute};
+pub(crate) use blob_resolver::{read_daemon_blob, BlockingStoreRoute};
 use blob_resolver::{DaemonInboundBlobRoute, NoFreeBlobs};
 pub use retained_provider::DaemonNostrProvider;
 
