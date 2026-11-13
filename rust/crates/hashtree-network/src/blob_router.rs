@@ -43,18 +43,41 @@ impl From<String> for BlobRouteIdentity {
     }
 }
 
+/// Whether an attempt on a route spends the reader's money.
+///
+/// The router never hedges on cost: a paid route is attempted only after
+/// every free route of the search has finished without data, and paid routes
+/// are attempted one at a time.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum BlobRouteCost {
+    #[default]
+    Free,
+    Paid,
+}
+
 /// One route registered with the outer router.
 #[derive(Clone)]
 pub struct BlobRouteEntry {
     pub identity: BlobRouteIdentity,
     pub route: Arc<dyn BlobRoute>,
+    pub cost: BlobRouteCost,
 }
 
 impl BlobRouteEntry {
+    /// A route that costs nothing to ask.
     pub fn new(identity: impl Into<BlobRouteIdentity>, route: Arc<dyn BlobRoute>) -> Self {
         Self {
             identity: identity.into(),
             route,
+            cost: BlobRouteCost::Free,
+        }
+    }
+
+    /// A route that may pay for what it returns.
+    pub fn paid(identity: impl Into<BlobRouteIdentity>, route: Arc<dyn BlobRoute>) -> Self {
+        Self {
+            cost: BlobRouteCost::Paid,
+            ..Self::new(identity, route)
         }
     }
 }
@@ -195,6 +218,27 @@ fn launch_attempt(
     );
 }
 
+/// Whether the next route in order may start now. A free route may hedge up
+/// to `max_in_flight`; a paid one waits until nothing else is in flight, and
+/// free routes sort first, so by then every free route has finished.
+fn may_launch(
+    ordered: &[BlobRouteEntry],
+    next_route: usize,
+    attempted: usize,
+    max_attempts: usize,
+    in_flight: usize,
+    max_in_flight: usize,
+) -> bool {
+    if attempted >= max_attempts {
+        return false;
+    }
+    match ordered.get(next_route).map(|entry| entry.cost) {
+        Some(BlobRouteCost::Free) => in_flight < max_in_flight,
+        Some(BlobRouteCost::Paid) => in_flight == 0,
+        None => false,
+    }
+}
+
 /// One adaptive read router. Routes remain opaque and own any peer sets behind
 /// them; the router only orders route identities and bounds route attempts.
 pub struct BlobRouter {
@@ -256,6 +300,11 @@ impl BlobRouter {
         self.routes.read().await.len()
     }
 
+    /// The registered routes, for an owner that adds to the set.
+    pub async fn routes(&self) -> Vec<BlobRouteEntry> {
+        self.routes.read().await.clone()
+    }
+
     pub async fn outcomes(&self) -> HashMap<BlobRouteIdentity, BlobRouteOutcomeSnapshot> {
         let now = Instant::now();
         self.state
@@ -300,6 +349,20 @@ impl BlobRouter {
         preferred: Option<&[BlobRouteIdentity]>,
         outer_context: Option<BlobRouteContext>,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.get_request_within_cost(request, preferred, outer_context, BlobRouteCost::Paid)
+            .await
+    }
+
+    /// [`Self::get_request`] over the routes that cost at most `max_cost`.
+    /// With [`BlobRouteCost::Free`] the search never spends money: use it for
+    /// a read made on behalf of someone else.
+    pub async fn get_request_within_cost(
+        &self,
+        request: BlobRequest,
+        preferred: Option<&[BlobRouteIdentity]>,
+        outer_context: Option<BlobRouteContext>,
+        max_cost: BlobRouteCost,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         if request.htl > BLOB_MAX_HTL {
             return Err(StoreError::Other(format!(
                 "Hashtree blob HTL {} exceeds the maximum of {BLOB_MAX_HTL}",
@@ -327,7 +390,7 @@ impl BlobRouter {
             ));
         }
 
-        let ordered = self.ordered_routes(preferred).await;
+        let ordered = self.ordered_routes(preferred, max_cost).await;
         if ordered.is_empty() {
             return Ok(None);
         }
@@ -425,7 +488,7 @@ impl BlobRouter {
                             failures.push(format!("route {}: {message}", identity.as_str()));
                         }
                     }
-                    if attempted < max_attempts && pending.len() < max_in_flight {
+                    if may_launch(&ordered, next_route, attempted, max_attempts, pending.len(), max_in_flight) {
                         launch_attempt(
                             &ordered,
                             &mut next_route,
@@ -438,7 +501,7 @@ impl BlobRouter {
                         next_hedge = Instant::now() + self.config.hedge_delay;
                     }
                 }
-                _ = tokio::time::sleep_until(hedge_at), if attempted < max_attempts && pending.len() < max_in_flight => {
+                _ = tokio::time::sleep_until(hedge_at), if may_launch(&ordered, next_route, attempted, max_attempts, pending.len(), max_in_flight) => {
                     launch_attempt(
                         &ordered,
                         &mut next_route,
@@ -467,8 +530,15 @@ impl BlobRouter {
         Ok(None)
     }
 
-    async fn ordered_routes(&self, preferred: Option<&[BlobRouteIdentity]>) -> Vec<BlobRouteEntry> {
-        let routes = self.routes.read().await.clone();
+    /// Routes in the order of attempt: every free route before any paid one,
+    /// and within a tier by preference and outcome as before.
+    async fn ordered_routes(
+        &self,
+        preferred: Option<&[BlobRouteIdentity]>,
+        max_cost: BlobRouteCost,
+    ) -> Vec<BlobRouteEntry> {
+        let mut routes = self.routes.read().await.clone();
+        routes.retain(|entry| entry.cost <= max_cost);
         let preferred_order: HashMap<_, _> = preferred
             .unwrap_or_default()
             .iter()
@@ -484,6 +554,9 @@ impl BlobRouter {
                 .is_multiple_of(self.config.exploration_interval);
         let mut ordered = routes;
         ordered.sort_by(|left, right| {
+            if left.cost != right.cost {
+                return left.cost.cmp(&right.cost);
+            }
             match (
                 preferred_order.get(&left.identity),
                 preferred_order.get(&right.identity),

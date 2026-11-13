@@ -10,7 +10,8 @@ mod mesh_forwarding_route;
 mod routed_store;
 
 pub use blob_router::{
-    BlobRouteEntry, BlobRouteIdentity, BlobRouteOutcomeSnapshot, BlobRouter, BlobRouterConfig,
+    BlobRouteCost, BlobRouteEntry, BlobRouteIdentity, BlobRouteOutcomeSnapshot, BlobRouter,
+    BlobRouterConfig,
 };
 pub use mesh_forwarding_route::MeshForwardingRoute;
 pub use routed_store::RoutedStore;
