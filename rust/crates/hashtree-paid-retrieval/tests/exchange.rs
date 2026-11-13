@@ -347,6 +347,8 @@ async fn a_redeemed_token_is_credited_even_if_the_connection_drops() {
         received_sat: Default::default(),
         offline: Default::default(),
         gate: Some(gate.clone()),
+        records: None,
+        redemptions: Default::default(),
     });
     let seller = Seller::on_mint(mint, receiver, |_| {});
     let token = seller.mint.issue(MINT, 2);

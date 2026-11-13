@@ -1,5 +1,6 @@
 //! Hashtree glue for the selling side: blobs from a source `BlobRoute`.
 
+use std::io;
 use std::sync::Arc;
 
 use hashtree_core::{BlobReply, BlobRequest, BlobRoute, BLOB_MAX_BYTES};
@@ -7,6 +8,7 @@ use hashtree_core::{BlobReply, BlobRequest, BlobRoute, BLOB_MAX_BYTES};
 use crate::ledger::AccountBalance;
 use crate::message::{AccountId, ContentHash, ErrorCode, Reply, Request};
 use crate::seller::{PaidSeller, PaymentReceiver, ProviderConfig, Sale};
+use crate::store::LedgerStore;
 
 /// Answers paid-retrieval requests for Hashtree blobs. Cheap to clone.
 ///
@@ -18,6 +20,7 @@ pub struct PaidBlobProvider {
 }
 
 impl PaidBlobProvider {
+    /// A provider whose accounts live in memory only.
     pub fn new(
         source: Arc<dyn BlobRoute>,
         receiver: Arc<dyn PaymentReceiver>,
@@ -29,19 +32,38 @@ impl PaidBlobProvider {
         }
     }
 
+    /// A provider whose accounts, credited payments and tokens are kept in
+    /// `store` and restored from it.
+    pub fn open(
+        source: Arc<dyn BlobRoute>,
+        receiver: Arc<dyn PaymentReceiver>,
+        config: ProviderConfig,
+        store: Arc<dyn LedgerStore>,
+    ) -> io::Result<Self> {
+        Ok(Self {
+            source,
+            seller: PaidSeller::open(receiver, config, store)?,
+        })
+    }
+
     /// The accounts and payment handling behind this provider.
     pub fn seller(&self) -> &PaidSeller {
         &self.seller
     }
 
-    /// Every account, for the owner to persist.
+    /// Every account as it stands now.
     pub fn accounts(&self) -> Vec<AccountBalance> {
         self.seller.accounts()
     }
 
-    /// Load persisted accounts before serving.
+    /// Load accounts into a provider that has no store.
     pub fn restore_accounts(&self, accounts: &[AccountBalance]) {
         self.seller.restore_accounts(accounts);
+    }
+
+    /// Write charges that are not in the store yet; see [`PaidSeller::flush`].
+    pub fn flush(&self) -> io::Result<()> {
+        self.seller.flush()
     }
 
     /// Answer one encoded request with one encoded reply. `peer` is the

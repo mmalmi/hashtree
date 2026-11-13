@@ -4092,6 +4092,7 @@ dependencies = [
  "hashtree-core",
  "hashtree-network",
  "rand 0.8.6",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
 ]

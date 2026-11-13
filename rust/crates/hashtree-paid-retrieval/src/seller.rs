@@ -3,15 +3,18 @@
 //! Nothing here knows where the sold bytes come from or how they travel, so a
 //! Hashtree blob provider and a BitTorrent seeder can share it as it is.
 
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::io;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use hashtree_core::sha256;
 
-use crate::ledger::{AccountBalance, Charge, Ledger, LedgerConfig, PaymentStart};
+use crate::books::Books;
+use crate::ledger::{AccountBalance, Charge, Ledger, LedgerConfig, PaymentStart, Settlement};
 use crate::message::{AccountId, ContentHash, ErrorCode, PaymentId, Quote, Reply, METHOD_CASHU};
 use crate::price::Tariff;
+use crate::store::{LedgerEntry, LedgerStore, PendingRedemption};
 
 #[derive(Clone, Debug)]
 pub struct ProviderConfig {
@@ -57,6 +60,21 @@ pub trait PaymentReceiver: Send + Sync {
     /// Redeem `token` at `mint_url` and return the sats actually received.
     /// A token that belongs to any other mint must be rejected.
     async fn receive(&self, mint_url: &str, token: &str) -> Result<u64, ReceiveError>;
+
+    /// The sats this wallet received for `token` in an earlier
+    /// [`Self::receive`] whose result never reached the ledger, or `None`
+    /// when it has no record of receiving it.
+    ///
+    /// Asked only when the mint refuses a token whose redemption was started
+    /// and left without an outcome, by a crash or a lost mint reply. A wallet
+    /// that cannot answer leaves such a token uncredited.
+    async fn already_received(
+        &self,
+        _mint_url: &str,
+        _token: &str,
+    ) -> Result<Option<u64>, ReceiveError> {
+        Ok(None)
+    }
 }
 
 /// What a seller decided about one unit a buyer asked for.
@@ -77,14 +95,90 @@ pub enum Sale {
 struct Inner {
     receiver: Arc<dyn PaymentReceiver>,
     config: ProviderConfig,
-    ledger: Mutex<Ledger>,
+    books: Arc<Books>,
 }
 
 impl Inner {
-    fn ledger(&self) -> MutexGuard<'_, Ledger> {
-        self.ledger
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+    /// Ask the mint, and for a token with an earlier open redemption the
+    /// wallet as well.
+    async fn redeem(&self, mint: &str, token: &str, recover: bool) -> Result<u64, ReceiveError> {
+        let detail = match self.receiver.receive(mint, token).await {
+            Ok(0) => "token has no value".to_owned(),
+            Err(ReceiveError::Rejected(detail)) => detail,
+            other => return other,
+        };
+        if recover {
+            if let Some(sat) = self.receiver.already_received(mint, token).await? {
+                if sat > 0 {
+                    return Ok(sat);
+                }
+            }
+        }
+        Err(ReceiveError::Rejected(detail))
+    }
+
+    /// Redeem one token and record its credit. Returns the msat credited
+    /// and the new balance.
+    async fn settle(
+        &self,
+        redemption: PendingRedemption,
+        mint: &str,
+        token: &str,
+        settlement: Settlement,
+    ) -> Result<(u64, i64), ReceiveError> {
+        let books = &self.books;
+        let unwritten = |what: &str| ReceiveError::Unavailable(format!("{what} was not recorded"));
+        let credited_msat = match settlement {
+            Settlement::Record { credited_msat } => credited_msat,
+            Settlement::Redeem { recover } => {
+                if !recover {
+                    // On record before the mint is asked: from here on a
+                    // crash cannot leave a redeemed token without a trace.
+                    let entry = LedgerEntry::Redeeming(redemption);
+                    let recorded = books
+                        .write_off_executor(vec![entry], move |ledger| {
+                            ledger.redemption_recorded(redemption)
+                        })
+                        .await;
+                    if recorded.is_err() {
+                        books.ledger().unresolved(&redemption.token);
+                        return Err(unwritten("the redemption"));
+                    }
+                }
+                match self.redeem(mint, token, recover).await {
+                    Ok(sat) => sat.saturating_mul(1_000),
+                    Err(ReceiveError::Rejected(detail)) => {
+                        books.ledger().abandon(&redemption.token);
+                        books.schedule_flush();
+                        return Err(ReceiveError::Rejected(detail));
+                    }
+                    Err(unavailable) => {
+                        books.ledger().unresolved(&redemption.token);
+                        return Err(unavailable);
+                    }
+                }
+            }
+        };
+        // On record before the client is told: `paid` is never sent for a
+        // credit that a restart would forget.
+        let entry = LedgerEntry::Credited {
+            redemption,
+            credited_msat,
+        };
+        let credited = books
+            .write_off_executor(vec![entry], move |ledger| {
+                ledger.credit(&redemption, credited_msat, Instant::now())
+            })
+            .await;
+        match credited {
+            Ok(balance_msat) => Ok((credited_msat, balance_msat)),
+            Err(_) => {
+                books
+                    .ledger()
+                    .redeemed_unrecorded(&redemption.token, credited_msat);
+                Err(unwritten("the credit"))
+            }
+        }
     }
 }
 
@@ -99,18 +193,45 @@ pub(crate) fn normalize_mint(mint_url: &str) -> &str {
 }
 
 impl PaidSeller {
+    /// A seller whose accounts live in memory only.
     pub fn new(receiver: Arc<dyn PaymentReceiver>, config: ProviderConfig) -> Self {
+        Self::with_books(receiver, config, None)
+    }
+
+    /// A seller whose accounts, credited payments and tokens are kept in
+    /// `store` and restored from it.
+    pub fn open(
+        receiver: Arc<dyn PaymentReceiver>,
+        config: ProviderConfig,
+        store: Arc<dyn LedgerStore>,
+    ) -> io::Result<Self> {
+        let state = store.load()?;
+        let seller = Self::with_books(receiver, config, Some(store));
+        seller
+            .inner
+            .books
+            .ledger()
+            .restore_state(state, Instant::now());
+        Ok(seller)
+    }
+
+    fn with_books(
+        receiver: Arc<dyn PaymentReceiver>,
+        config: ProviderConfig,
+        store: Option<Arc<dyn LedgerStore>>,
+    ) -> Self {
         let ledger = Ledger::new(LedgerConfig {
             grace_msat: config.grace_msat,
             max_accounts: config.max_accounts.max(1),
             redelivery_window: config.redelivery_window,
             max_redeliveries: 2,
+            durable: store.is_some(),
         });
         Self {
             inner: Arc::new(Inner {
                 receiver,
                 config,
-                ledger: Mutex::new(ledger),
+                books: Arc::new(Books::new(ledger, store)),
             }),
         }
     }
@@ -119,14 +240,20 @@ impl PaidSeller {
         &self.inner.config
     }
 
-    /// Every account, for the owner to persist.
+    /// Every account as it stands now.
     pub fn accounts(&self) -> Vec<AccountBalance> {
-        self.inner.ledger().balances()
+        self.inner.books.ledger().balances()
     }
 
-    /// Load persisted accounts before serving.
+    /// Load accounts into a seller that has no store.
     pub fn restore_accounts(&self, accounts: &[AccountBalance]) {
-        self.inner.ledger().restore(accounts, Instant::now());
+        self.inner.books.ledger().restore(accounts, Instant::now());
+    }
+
+    /// Write charges that are not in the store yet. They are written within
+    /// a second on their own; call this before shutdown. Blocks on disk.
+    pub fn flush(&self) -> io::Result<()> {
+        self.inner.books.flush()
     }
 
     /// Charge `account` for one unit of `size` bytes named by `content`, or
@@ -143,7 +270,7 @@ impl PaidSeller {
     ) -> Sale {
         let config = &self.inner.config;
         let price_msat = config.tariff.price_msat(size);
-        let charge = self.inner.ledger().charge(
+        let charge = self.inner.books.ledger().charge(
             account,
             peer,
             &content,
@@ -151,6 +278,7 @@ impl PaidSeller {
             max_msat,
             Instant::now(),
         );
+        self.inner.books.schedule_flush();
         match charge {
             Charge::Done {
                 charged_msat,
@@ -204,12 +332,13 @@ impl PaidSeller {
         {
             return refuse(ErrorCode::Mint, "mint is not accepted");
         }
-        let token_hash = sha256(token.as_bytes());
-        let start = self
-            .inner
-            .ledger()
-            .begin_payment(&account, &payment, &token_hash);
-        match start {
+        let redemption = PendingRedemption {
+            token: sha256(token.as_bytes()),
+            account,
+            payment,
+        };
+        let start = self.inner.books.ledger().begin_payment(&redemption);
+        let settlement = match start {
             PaymentStart::Known {
                 credited_msat,
                 balance_msat,
@@ -223,34 +352,21 @@ impl PaidSeller {
             PaymentStart::Replay => return refuse(ErrorCode::Replay, "token was already credited"),
             PaymentStart::Busy => return refuse(ErrorCode::Retry, "token is being redeemed"),
             PaymentStart::Full => return refuse(ErrorCode::Full, "no room for another account"),
-            PaymentStart::Redeem => {}
-        }
+            PaymentStart::Settle(settlement) => settlement,
+        };
         // Redeeming must finish even if this connection goes away: a redeemed
         // token that is not credited would be lost to the client.
         let inner = Arc::clone(&self.inner);
-        let redeem = tokio::spawn(async move {
-            let received = match inner.receiver.receive(&mint, &token).await {
-                Ok(0) => Err(ReceiveError::Rejected("token has no value".into())),
-                other => other,
-            };
-            let credited_msat = received.as_ref().ok().map(|sat| sat.saturating_mul(1_000));
-            let balance_msat = inner.ledger().finish_payment(
-                &account,
-                &payment,
-                &token_hash,
-                credited_msat,
-                Instant::now(),
-            );
-            (received, balance_msat)
-        });
-        match redeem.await {
-            Ok((Ok(sat), balance_msat)) => Reply::Paid {
+        let settled =
+            tokio::spawn(async move { inner.settle(redemption, &mint, &token, settlement).await });
+        match settled.await {
+            Ok(Ok((credited_msat, balance_msat))) => Reply::Paid {
                 payment,
-                credited_msat: sat.saturating_mul(1_000),
+                credited_msat,
                 balance_msat,
             },
-            Ok((Err(ReceiveError::Rejected(detail)), _)) => refuse(ErrorCode::Invalid, &detail),
-            Ok((Err(ReceiveError::Unavailable(detail)), _)) => refuse(ErrorCode::Retry, &detail),
+            Ok(Err(ReceiveError::Rejected(detail))) => refuse(ErrorCode::Invalid, &detail),
+            Ok(Err(ReceiveError::Unavailable(detail))) => refuse(ErrorCode::Retry, &detail),
             Err(_) => refuse(ErrorCode::Retry, "redemption did not complete"),
         }
     }

@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use hashtree_core::{sha256, Hash, MemoryStore, Store, StoreBlobRoute, StoreError};
 use hashtree_paid_retrieval::{
-    BytePrice, PaidBlobProvider, PaidBlobTransport, PaymentReceiver, PaymentRequest,
-    ProviderConfig, ReceiveError, Reply, Request, RetrievalWallet, Tariff, WalletError,
-    WalletPayment,
+    BytePrice, LedgerEntry, LedgerState, LedgerStore, PaidBlobProvider, PaidBlobTransport,
+    PaymentReceiver, PaymentRequest, ProviderConfig, ReceiveError, Reply, Request, RetrievalWallet,
+    Tariff, WalletError, WalletPayment,
 };
 
 pub const MINT: &str = "https://mint.test";
@@ -134,6 +134,10 @@ pub struct FakeReceiver {
     pub offline: AtomicBool,
     /// When set, a redemption waits here until the test lets it through.
     pub gate: Option<Arc<tokio::sync::Semaphore>>,
+    /// The wallet's own record of the tokens it redeemed. `None` is a wallet
+    /// that cannot say what it received earlier.
+    pub records: Option<Mutex<HashMap<String, u64>>>,
+    pub redemptions: AtomicUsize,
 }
 
 impl FakeReceiver {
@@ -143,11 +147,24 @@ impl FakeReceiver {
             received_sat: Mutex::new(0),
             offline: AtomicBool::new(false),
             gate: None,
+            records: Some(Mutex::default()),
+            redemptions: AtomicUsize::new(0),
         })
+    }
+
+    pub fn without_records(mint: &Arc<FakeMint>) -> Arc<Self> {
+        let mut receiver = Arc::into_inner(Self::new(mint)).unwrap();
+        receiver.records = None;
+        Arc::new(receiver)
     }
 
     pub fn received(&self) -> u64 {
         *self.received_sat.lock().unwrap()
+    }
+
+    /// Calls that reached the mint.
+    pub fn redemptions(&self) -> usize {
+        self.redemptions.load(Ordering::SeqCst)
     }
 }
 
@@ -160,12 +177,26 @@ impl PaymentReceiver for FakeReceiver {
         if self.offline.load(Ordering::SeqCst) {
             return Err(ReceiveError::Unavailable("mint unreachable".into()));
         }
+        self.redemptions.fetch_add(1, Ordering::SeqCst);
         let amount_sat = self
             .mint
             .redeem(mint_url, token)
             .map_err(ReceiveError::Rejected)?;
         *self.received_sat.lock().unwrap() += amount_sat;
+        if let Some(records) = &self.records {
+            let mut records = records.lock().unwrap();
+            records.insert(token.to_owned(), amount_sat);
+        }
         Ok(amount_sat)
+    }
+
+    async fn already_received(
+        &self,
+        _mint_url: &str,
+        token: &str,
+    ) -> Result<Option<u64>, ReceiveError> {
+        let records = self.records.as_ref();
+        Ok(records.and_then(|records| records.lock().unwrap().get(token).copied()))
     }
 }
 
@@ -196,14 +227,36 @@ impl Seller {
         receiver: Arc<FakeReceiver>,
         configure: impl FnOnce(&mut ProviderConfig),
     ) -> Self {
+        Self::build(mint, receiver, None, configure)
+    }
+
+    /// A seller whose ledger is kept in `ledger`. The blobs it sells are
+    /// not: add them again after a restart.
+    pub fn durable(
+        mint: &Arc<FakeMint>,
+        receiver: &Arc<FakeReceiver>,
+        ledger: Arc<dyn LedgerStore>,
+        configure: impl FnOnce(&mut ProviderConfig),
+    ) -> Self {
+        Self::build(mint.clone(), receiver.clone(), Some(ledger), configure)
+    }
+
+    fn build(
+        mint: Arc<FakeMint>,
+        receiver: Arc<FakeReceiver>,
+        ledger: Option<Arc<dyn LedgerStore>>,
+        configure: impl FnOnce(&mut ProviderConfig),
+    ) -> Self {
         let store = Arc::new(MemoryStore::new());
         let mut config = ProviderConfig::new(TARIFF, vec![MINT.to_owned()]);
         configure(&mut config);
-        let provider = PaidBlobProvider::new(
-            Arc::new(StoreBlobRoute::new(store.clone())),
-            receiver.clone(),
-            config,
-        );
+        let source = Arc::new(StoreBlobRoute::new(store.clone()));
+        let provider = match ledger {
+            Some(ledger) => {
+                PaidBlobProvider::open(source, receiver.clone(), config, ledger).unwrap()
+            }
+            None => PaidBlobProvider::new(source, receiver.clone(), config),
+        };
         Self {
             mint,
             receiver,
@@ -272,5 +325,99 @@ impl PaidBlobTransport for DirectTransport {
             Some(reply) => Ok(reply.encode()),
             None => Err(StoreError::Other("connection lost".into())),
         }
+    }
+}
+
+type Trigger = Box<dyn Fn(&LedgerEntry) -> bool + Send + Sync>;
+
+/// A ledger store under a process that dies at a chosen write. From then on
+/// nothing reaches the disk, as after a crash.
+pub struct CrashStore {
+    disk: Arc<dyn LedgerStore>,
+    dead: AtomicBool,
+    /// The entry that kills the process, and whether it is written first.
+    trigger: Mutex<Option<(Trigger, bool)>>,
+}
+
+impl CrashStore {
+    pub fn new(disk: Arc<dyn LedgerStore>) -> Arc<Self> {
+        Arc::new(Self {
+            disk,
+            dead: AtomicBool::new(false),
+            trigger: Mutex::new(None),
+        })
+    }
+
+    /// Die when asked to write a matching entry; it does not reach the disk.
+    pub fn crash_before(&self, entry: impl Fn(&LedgerEntry) -> bool + Send + Sync + 'static) {
+        *self.trigger.lock().unwrap() = Some((Box::new(entry), false));
+    }
+
+    /// Die right after a matching entry is on disk.
+    pub fn crash_after(&self, entry: impl Fn(&LedgerEntry) -> bool + Send + Sync + 'static) {
+        *self.trigger.lock().unwrap() = Some((Box::new(entry), true));
+    }
+
+    pub fn is_dead(&self) -> bool {
+        self.dead.load(Ordering::SeqCst)
+    }
+}
+
+impl LedgerStore for CrashStore {
+    fn load(&self) -> std::io::Result<LedgerState> {
+        self.disk.load()
+    }
+
+    fn append(&self, entries: &[LedgerEntry]) -> std::io::Result<()> {
+        let died = || std::io::Error::other("the process died");
+        if self.is_dead() {
+            return Err(died());
+        }
+        let trigger = self.trigger.lock().unwrap();
+        let written_first = trigger
+            .as_ref()
+            .filter(|(matches, _)| entries.iter().any(matches))
+            .map(|(_, written_first)| *written_first);
+        match written_first {
+            None => self.disk.append(entries),
+            Some(true) => {
+                self.disk.append(entries)?;
+                self.dead.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            Some(false) => {
+                self.dead.store(true, Ordering::SeqCst);
+                Err(died())
+            }
+        }
+    }
+}
+
+/// A ledger store whose disk refuses credits for a while, as when it is full.
+pub struct FailingStore {
+    disk: Arc<dyn LedgerStore>,
+    pub fail_credits: AtomicBool,
+}
+
+impl FailingStore {
+    pub fn new(disk: Arc<dyn LedgerStore>) -> Self {
+        Self {
+            disk,
+            fail_credits: AtomicBool::new(false),
+        }
+    }
+}
+
+impl LedgerStore for FailingStore {
+    fn load(&self) -> std::io::Result<LedgerState> {
+        self.disk.load()
+    }
+
+    fn append(&self, entries: &[LedgerEntry]) -> std::io::Result<()> {
+        let credit = |entry: &LedgerEntry| matches!(entry, LedgerEntry::Credited { .. });
+        if self.fail_credits.load(Ordering::SeqCst) && entries.iter().any(credit) {
+            return Err(std::io::Error::other("no space left on device"));
+        }
+        self.disk.append(entries)
     }
 }

@@ -14,16 +14,19 @@
 
 mod account;
 pub mod bencode;
+mod books;
 mod buyer;
 #[cfg(feature = "cashu")]
 mod cashu;
 mod client;
 mod funding;
+mod journal;
 mod ledger;
 mod message;
 mod price;
 mod provider;
 mod seller;
+mod store;
 mod transport;
 mod wallet;
 
@@ -32,6 +35,7 @@ pub use buyer::{InFlight, PaidBuyer};
 #[cfg(feature = "cashu")]
 pub use cashu::{CashuReceiver, CashuWallet};
 pub use client::PaidBlobRoute;
+pub use journal::FileLedgerStore;
 pub use ledger::AccountBalance;
 pub use message::{
     AccountId, ContentHash, ErrorCode, MessageError, PaymentId, Quote, Reply, Request,
@@ -40,6 +44,9 @@ pub use message::{
 pub use price::{BytePrice, Tariff};
 pub use provider::PaidBlobProvider;
 pub use seller::{PaidSeller, PaymentReceiver, ProviderConfig, ReceiveError, Sale};
+pub use store::{
+    AccountRecord, LedgerEntry, LedgerState, LedgerStore, PendingRedemption, TokenHash,
+};
 pub use transport::{
     read_frame, serve_stream, write_frame, BoxedStream, ByteStream, PaidBlobTransport,
     StreamTransport,

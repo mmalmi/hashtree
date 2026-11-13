@@ -4,12 +4,12 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::message::{AccountId, ContentHash, PaymentId};
+use crate::store::{
+    AccountRecord, LedgerEntry, LedgerState, PendingRedemption, TokenHash,
+    MAX_PAYMENTS_PER_ACCOUNT, MAX_PENDING_REDEMPTIONS, MAX_REMEMBERED_TOKENS,
+};
 
-const MAX_PAYMENTS_PER_ACCOUNT: usize = 32;
 const MAX_RECENT_PER_ACCOUNT: usize = 64;
-const MAX_REMEMBERED_TOKENS: usize = 16_384;
-
-pub(crate) type TokenHash = [u8; 32];
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct LedgerConfig {
@@ -17,6 +17,9 @@ pub(crate) struct LedgerConfig {
     pub max_accounts: usize,
     pub redelivery_window: Duration,
     pub max_redeliveries: u8,
+    /// Whether a store records this ledger; without one nothing is queued
+    /// for writing.
+    pub durable: bool,
 }
 
 /// One account as a provider persists it.
@@ -96,7 +99,36 @@ pub(crate) enum PaymentStart {
     /// The token is being redeemed right now.
     Busy,
     Full,
-    Redeem,
+    Settle(Settlement),
+}
+
+/// What is left to do before a payment is credited.
+#[derive(Clone, Copy)]
+pub(crate) enum Settlement {
+    /// Redeem the token. `recover` means an earlier redemption of it has no
+    /// recorded outcome, so the wallet may already hold its value.
+    Redeem { recover: bool },
+    /// The token was redeemed earlier in this run but the credit could not be
+    /// written; only the write is left to do.
+    Record { credited_msat: u64 },
+}
+
+/// Changes that are written to the store a moment later, in one batch.
+#[derive(Default)]
+pub(crate) struct Lazy {
+    charged: HashSet<AccountId>,
+    removed: Vec<AccountId>,
+    bound: Vec<(String, AccountId)>,
+    abandoned: Vec<TokenHash>,
+}
+
+impl Lazy {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.charged.is_empty()
+            && self.removed.is_empty()
+            && self.bound.is_empty()
+            && self.abandoned.is_empty()
+    }
 }
 
 pub(crate) struct Ledger {
@@ -105,7 +137,12 @@ pub(crate) struct Ledger {
     tokens: HashSet<TokenHash>,
     token_order: VecDeque<TokenHash>,
     redeeming: HashSet<TokenHash>,
+    /// Redemptions without a recorded outcome, oldest first.
+    pending: VecDeque<PendingRedemption>,
+    /// Redeemed tokens whose credit could not be written yet, in msat.
+    unrecorded: HashMap<TokenHash, u64>,
     grace_peers: HashMap<String, AccountId>,
+    lazy: Option<Lazy>,
 }
 
 impl Ledger {
@@ -116,7 +153,10 @@ impl Ledger {
             tokens: HashSet::new(),
             token_order: VecDeque::new(),
             redeeming: HashSet::new(),
+            pending: VecDeque::new(),
+            unrecorded: HashMap::new(),
             grace_peers: HashMap::new(),
+            lazy: config.durable.then(Lazy::default),
         }
     }
 
@@ -149,6 +189,10 @@ impl Ledger {
                 .map(|(id, _)| *id);
             let Some(evict) = evict else { return false };
             self.accounts.remove(&evict);
+            if let Some(lazy) = &mut self.lazy {
+                lazy.charged.remove(&evict);
+                lazy.removed.push(evict);
+            }
         }
         self.accounts.insert(*account, Account::new(now));
         true
@@ -211,9 +255,15 @@ impl Ledger {
             entry.recent.pop_front();
         }
         let balance_msat = entry.balance();
+        if let Some(lazy) = &mut self.lazy {
+            lazy.charged.insert(*account);
+        }
         if balance_msat < 0 {
             if let Some(peer) = peer {
-                self.grace_peers.insert(peer.to_owned(), *account);
+                let bound = self.grace_peers.insert(peer.to_owned(), *account);
+                if let Some(lazy) = self.lazy.as_mut().filter(|_| bound != Some(*account)) {
+                    lazy.bound.push((peer.to_owned(), *account));
+                }
             }
         }
         Charge::Done {
@@ -223,12 +273,12 @@ impl Ledger {
         }
     }
 
-    pub(crate) fn begin_payment(
-        &mut self,
-        account: &AccountId,
-        payment: &PaymentId,
-        token: &TokenHash,
-    ) -> PaymentStart {
+    pub(crate) fn begin_payment(&mut self, redemption: &PendingRedemption) -> PaymentStart {
+        let PendingRedemption {
+            token,
+            account,
+            payment,
+        } = redemption;
         if let Some(entry) = self.accounts.get(account) {
             if let Some((_, credited_msat)) = entry.payments.iter().find(|(id, _)| id == payment) {
                 return PaymentStart::Known {
@@ -243,30 +293,56 @@ impl Ledger {
         if self.redeeming.contains(token) {
             return PaymentStart::Busy;
         }
+        // A token with an open redemption stays with the payment that
+        // started it, whoever presents it.
+        let open = self.pending.iter().find(|pending| pending.token == *token);
+        if open.is_some_and(|pending| pending != redemption) {
+            return PaymentStart::Replay;
+        }
+        let recover = open.is_some();
         let has_room = self.accounts.contains_key(account)
             || self.accounts.len() < self.config.max_accounts
             || self.accounts.values().any(|entry| entry.balance() <= 0);
-        if !has_room {
+        if !has_room && !recover {
             return PaymentStart::Full;
         }
         self.redeeming.insert(*token);
-        PaymentStart::Redeem
+        PaymentStart::Settle(match self.unrecorded.get(token) {
+            Some(credited_msat) => Settlement::Record {
+                credited_msat: *credited_msat,
+            },
+            None => Settlement::Redeem { recover },
+        })
     }
 
-    /// Record the outcome of a redemption; `credited_msat` is `None` when the
-    /// token was not redeemed. Returns the new balance.
-    pub(crate) fn finish_payment(
+    /// The redemption is on record and the mint may now be asked.
+    pub(crate) fn redemption_recorded(&mut self, redemption: PendingRedemption) {
+        self.pending.push_back(redemption);
+        if self.pending.len() > MAX_PENDING_REDEMPTIONS {
+            self.pending.pop_front();
+        }
+    }
+
+    fn close_redemption(&mut self, token: &TokenHash) {
+        self.redeeming.remove(token);
+        self.unrecorded.remove(token);
+        self.pending.retain(|pending| pending.token != *token);
+    }
+
+    /// The token was redeemed and the credit is on record. Returns the new
+    /// balance.
+    pub(crate) fn credit(
         &mut self,
-        account: &AccountId,
-        payment: &PaymentId,
-        token: &TokenHash,
-        credited_msat: Option<u64>,
+        redemption: &PendingRedemption,
+        credited_msat: u64,
         now: Instant,
     ) -> i64 {
-        self.redeeming.remove(token);
-        let Some(credited_msat) = credited_msat else {
-            return self.balance(account);
-        };
+        let PendingRedemption {
+            token,
+            account,
+            payment,
+        } = redemption;
+        self.close_redemption(token);
         if self.tokens.insert(*token) {
             self.token_order.push_back(*token);
             if self.token_order.len() > MAX_REMEMBERED_TOKENS {
@@ -289,6 +365,27 @@ impl Ledger {
         entry.balance()
     }
 
+    /// The token is worthless: forget its redemption.
+    pub(crate) fn abandon(&mut self, token: &TokenHash) {
+        let open = self.pending.iter().any(|pending| pending.token == *token);
+        if let Some(lazy) = self.lazy.as_mut().filter(|_| open) {
+            lazy.abandoned.push(*token);
+        }
+        self.close_redemption(token);
+    }
+
+    /// The attempt ended without an outcome; the redemption stays open.
+    pub(crate) fn unresolved(&mut self, token: &TokenHash) {
+        self.redeeming.remove(token);
+    }
+
+    /// The token was redeemed for `credited_msat` but the credit is not on
+    /// record yet.
+    pub(crate) fn redeemed_unrecorded(&mut self, token: &TokenHash, credited_msat: u64) {
+        self.redeeming.remove(token);
+        self.unrecorded.insert(*token, credited_msat);
+    }
+
     pub(crate) fn balances(&self) -> Vec<AccountBalance> {
         self.accounts
             .iter()
@@ -309,5 +406,72 @@ impl Ledger {
             entry.paid_msat = saved.paid_msat;
             entry.charged_msat = saved.charged_msat;
         }
+    }
+
+    /// Load what a store kept across a restart.
+    pub(crate) fn restore_state(&mut self, state: LedgerState, now: Instant) {
+        for (account, record) in state.accounts {
+            let AccountRecord {
+                paid_msat,
+                charged_msat,
+                payments,
+            } = record;
+            let entry = Account {
+                paid_msat,
+                charged_msat,
+                payments,
+                ..Account::new(now)
+            };
+            self.accounts.insert(account, entry);
+        }
+        self.tokens = state.tokens.iter().copied().collect();
+        self.token_order = state.tokens;
+        self.pending = state.redeeming;
+        self.grace_peers = state.grace;
+    }
+
+    pub(crate) fn has_lazy(&self) -> bool {
+        self.lazy.as_ref().is_some_and(|lazy| !lazy.is_empty())
+    }
+
+    /// Take the changes not written yet, with the entries that record them.
+    pub(crate) fn take_lazy(&mut self) -> (Lazy, Vec<LedgerEntry>) {
+        let lazy = self.lazy.replace(Lazy::default()).unwrap_or_default();
+        // An account dropped and opened again is removed first, then charged.
+        let removed = lazy
+            .removed
+            .iter()
+            .map(|account| LedgerEntry::Removed { account: *account });
+        let charged = lazy.charged.iter().filter_map(|account| {
+            let entry = self.accounts.get(account)?;
+            Some(LedgerEntry::Charged {
+                account: *account,
+                charged_msat: entry.charged_msat,
+            })
+        });
+        let bound = lazy.bound.iter().map(|(peer, account)| LedgerEntry::Grace {
+            peer: peer.clone(),
+            account: *account,
+        });
+        let abandoned = lazy
+            .abandoned
+            .iter()
+            .map(|token| LedgerEntry::Abandoned { token: *token });
+        let entries = removed
+            .chain(charged)
+            .chain(bound)
+            .chain(abandoned)
+            .collect();
+        (lazy, entries)
+    }
+
+    /// Put back changes whose write failed, ahead of any made since.
+    pub(crate) fn return_lazy(&mut self, mut earlier: Lazy) {
+        let later = self.lazy.take().unwrap_or_default();
+        earlier.charged.extend(later.charged);
+        earlier.removed.extend(later.removed);
+        earlier.bound.extend(later.bound);
+        earlier.abandoned.extend(later.abandoned);
+        self.lazy = Some(earlier);
     }
 }
