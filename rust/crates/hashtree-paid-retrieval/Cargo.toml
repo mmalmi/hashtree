@@ -16,6 +16,9 @@ publish = false
 default = []
 # Adapters for the existing cashu-service payment client.
 cashu = ["dep:cashu-service"]
+# The exchange as its own TCP/FIPS service, beside the free blob service of
+# hashtree-fips-transport.
+fips = ["dep:nvpn-fips-core", "dep:nvpn-fips-tcp", "dep:nvpn-fips-tcp-endpoint", "tokio/sync", "tokio/time"]
 
 [dependencies]
 hashtree-core.workspace = true
@@ -24,9 +27,17 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "rt", "macros"] }
 rand = "0.8"
 cashu-service = { workspace = true, optional = true }
+# The versions hashtree-fips-transport builds against.
+nvpn-fips-core = { version = "0.4.95", optional = true }
+nvpn-fips-tcp = { version = "0.2.5", optional = true }
+nvpn-fips-tcp-endpoint = { version = "0.2.30", optional = true }
 
 [dev-dependencies]
 hashtree-network.workspace = true
 tokio = { version = "1", features = ["full"] }
 anyhow.workspace = true
 tempfile.workspace = true
+
+[[test]]
+name = "e2e_fips"
+required-features = ["fips"]

@@ -19,6 +19,8 @@ mod buyer;
 #[cfg(feature = "cashu")]
 mod cashu;
 mod client;
+#[cfg(feature = "fips")]
+mod fips;
 mod funding;
 mod journal;
 mod ledger;
@@ -35,6 +37,11 @@ pub use buyer::{InFlight, PaidBuyer};
 #[cfg(feature = "cashu")]
 pub use cashu::{CashuReceiver, CashuWallet};
 pub use client::PaidBlobRoute;
+#[cfg(feature = "fips")]
+pub use fips::{
+    discovered_paid_providers, FipsPaidBlobService, FipsPaidConfig, FipsPaidError,
+    FipsPaidTransport, PAID_BLOB_CAPABILITY, PAID_BLOB_SERVICE_PORT,
+};
 pub use journal::FileLedgerStore;
 pub use ledger::AccountBalance;
 pub use message::{
@@ -48,8 +55,8 @@ pub use store::{
     AccountRecord, LedgerEntry, LedgerState, LedgerStore, PendingRedemption, TokenHash,
 };
 pub use transport::{
-    read_frame, serve_stream, write_frame, BoxedStream, ByteStream, PaidBlobTransport,
-    StreamTransport,
+    frame_length, frame_prefix, read_frame, serve_stream, write_frame, BoxedStream, ByteStream,
+    PaidBlobTransport, StreamTransport, FRAME_PREFIX_BYTES,
 };
 pub use wallet::{
     LimitedWallet, PaymentRequest, RetrievalWallet, SpendingLimit, WalletError, WalletPayment,

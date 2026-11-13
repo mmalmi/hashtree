@@ -28,25 +28,20 @@ pub type BoxedStream = Box<dyn ByteStream>;
 type Connect =
     dyn Fn() -> Pin<Box<dyn Future<Output = io::Result<BoxedStream>> + Send>> + Send + Sync;
 
-/// Write one message with its 32-bit big-endian length.
-pub async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, message: &[u8]) -> io::Result<()> {
-    let length = u32::try_from(message.len())
+pub const FRAME_PREFIX_BYTES: usize = 4;
+
+/// The prefix of a message of `length` bytes on a byte stream: its length as
+/// a 32-bit big-endian integer.
+pub fn frame_prefix(length: usize) -> io::Result<[u8; FRAME_PREFIX_BYTES]> {
+    u32::try_from(length)
         .ok()
         .filter(|length| *length as usize <= MAX_MESSAGE_BYTES)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "message is too large"))?;
-    writer.write_all(&length.to_be_bytes()).await?;
-    writer.write_all(message).await?;
-    writer.flush().await
+        .map(u32::to_be_bytes)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "message is too large"))
 }
 
-/// Read one message, or `None` when the peer closed between messages.
-pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
-    let mut prefix = [0; 4];
-    match reader.read_exact(&mut prefix).await {
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(error) => return Err(error),
-    }
+/// The length of the message that follows `prefix`.
+pub fn frame_length(prefix: [u8; FRAME_PREFIX_BYTES]) -> io::Result<usize> {
     let length = u32::from_be_bytes(prefix) as usize;
     if length > MAX_MESSAGE_BYTES {
         return Err(io::Error::new(
@@ -54,7 +49,25 @@ pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Opti
             "message is too large",
         ));
     }
-    let mut message = vec![0; length];
+    Ok(length)
+}
+
+/// Write one message with its length prefix.
+pub async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, message: &[u8]) -> io::Result<()> {
+    writer.write_all(&frame_prefix(message.len())?).await?;
+    writer.write_all(message).await?;
+    writer.flush().await
+}
+
+/// Read one message, or `None` when the peer closed between messages.
+pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Option<Vec<u8>>> {
+    let mut prefix = [0; FRAME_PREFIX_BYTES];
+    match reader.read_exact(&mut prefix).await {
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let mut message = vec![0; frame_length(prefix)?];
     reader.read_exact(&mut message).await?;
     Ok(Some(message))
 }
