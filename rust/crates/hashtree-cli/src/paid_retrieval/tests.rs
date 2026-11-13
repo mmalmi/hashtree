@@ -114,6 +114,7 @@ fn the_documented_example_is_a_complete_configuration() {
     assert_eq!(provider.config.grace_msat, 0);
     assert!(!provider.paying_only);
     assert!(!provider.http);
+    assert_eq!(provider.config.lock, None);
     assert_eq!(
         provider.ledger_dir,
         PathBuf::from("/data")
@@ -191,6 +192,30 @@ tariff = { msat = 2, per_bytes = 4096, min_msat = 0 }"#,
     assert_eq!(provider.config.min_topup_sat, 1);
     assert_eq!(provider.ledger_dir, PathBuf::from("/var/ledger"));
     assert!(!provider.paying_only);
+}
+
+#[test]
+fn a_provider_may_name_a_lock_key_and_nothing_else() {
+    let key = format!("02{}", "ab".repeat(32));
+    let config = paid(&format!(
+        "[provider]\nmints = [\"https://mint.example\"]\nlock = \"{key}\"\n\
+         tariff = {{ msat = 1, per_bytes = 1024, min_msat = 100 }}"
+    ));
+    let provider = settings(&config).unwrap().unwrap().provider.unwrap();
+    assert_eq!(provider.config.lock.map(hex::encode), Some(key));
+
+    for bad in [
+        "04".to_string() + &"ab".repeat(32),
+        "02ab".into(),
+        "zz".into(),
+    ] {
+        let config = paid(&format!(
+            "[provider]\nmints = [\"https://mint.example\"]\nlock = \"{bad}\"\n\
+             tariff = {{ msat = 1, per_bytes = 1024, min_msat = 100 }}"
+        ));
+        let error = settings(&config).unwrap_err().to_string();
+        assert!(error.contains("compressed public key"), "{bad}: {error}");
+    }
 }
 
 #[test]
@@ -518,6 +543,11 @@ npub = "{}""#,
         .route
         .account_state();
     let account_id = hex::encode(account.account);
+    // FIPS authenticates the buyer: the provider charges its identity, not
+    // the bearer id the buyer keeps for carriers that do not.
+    let sold_accounts = selling.selling.as_ref().unwrap().provider.accounts();
+    assert_eq!(sold_accounts.len(), 1);
+    assert_ne!(sold_accounts[0].account, account.account);
     for shown in [status.to_string(), sold.to_string()] {
         assert!(!shown.contains("cashu"), "a token is shown: {shown}");
         assert!(!shown.contains(&account_id), "an account id is shown");
@@ -659,6 +689,14 @@ url = "{gateway}""#
     assert_eq!(sold["provider"]["http"], true);
     assert_eq!(sold["provider"]["accounts"], 1);
     assert_eq!(sold["provider"]["held_msat"], 3000);
+    // HTTP authenticates nobody: the account is the buyer's bearer id.
+    let bearer = buying.buying.as_ref().unwrap().routes[0]
+        .route
+        .account_state()
+        .account;
+    let sold_accounts = selling.selling.as_ref().unwrap().provider.accounts();
+    assert_eq!(sold_accounts.len(), 1);
+    assert_eq!(sold_accounts[0].account, bearer);
 
     // The account is kept under a name derived from the gateway.
     let accounts = client.data_dir().join(PAID_RETRIEVAL_DIR).join("accounts");
@@ -707,8 +745,10 @@ async fn the_gateway_answers_every_protocol_outcome_with_200_and_nothing_else() 
     // A blob the gateway does not have, and one it sells.
     let get = |hash: hashtree_core::Hash| Request::Get {
         hash: hash.into(),
-        account: [7; 32],
+        account: Some([7; 32]),
         max_msat: u64::MAX,
+        htl: 0,
+        payment: None,
     };
     let response = exchange(get(sha256(b"absent")).encode()).await.unwrap();
     assert_eq!(response.status(), reqwest::StatusCode::OK);

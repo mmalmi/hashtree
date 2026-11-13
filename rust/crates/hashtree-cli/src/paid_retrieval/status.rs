@@ -28,6 +28,7 @@ fn selling(side: &SellingSide) -> Value {
         "mints": config.mints,
         "min_topup_sat": config.min_topup_sat,
         "grace_msat": config.grace_msat,
+        "lock": config.lock.map(hex::encode),
         "paying_only": side.paying_only,
         "http": side.http.is_some(),
         "accounts": accounts.len(),

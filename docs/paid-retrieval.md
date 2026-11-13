@@ -575,6 +575,7 @@ min_topup_sat = 1     # default 1, the smallest token there is
 grace_msat = 0        # default 0: prepay
 paying_only = false   # default false
 http = false          # default false: also sell at POST /paid-blob
+# lock = "02..."      # default none: a key quotes ask tokens to be locked to
 # ledger_dir = "..."  # default: paid-retrieval/ledger in the data directory
 
 [paid_retrieval.provider.tariff]
@@ -617,7 +618,10 @@ refuses to start the paid service when `mints` is empty. With
 `paying_only = true` its free blob service answers every peer with no result,
 so a stored blob reaches peers only against payment; blobs served over HTTP
 are not affected. With `http = true` it also sells through its HTTP listener
-([Over HTTP](#over-http)). The provider's wallet only receives and needs no funds. The
+([Over HTTP](#over-http)). `lock`, a compressed public key in hex, is named
+in every quote; unlocked tokens are still accepted. A buyer over FIPS is
+charged to its authenticated identity; a buyer over HTTP to the bearer
+account id it sends. The provider's wallet only receives and needs no funds. The
 ledger holds the account ids of its buyers, which are bearer secrets: its
 directory is made readable by the owner only.
 

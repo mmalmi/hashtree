@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Result};
 use hashtree_fips_transport::PeerIdentity;
-use hashtree_paid_retrieval::{BytePrice, ClientPolicy, ProviderConfig, Tariff};
+use hashtree_paid_retrieval::{BytePrice, ClientPolicy, LockKey, ProviderConfig, Tariff};
 use serde::{Deserialize, Serialize};
 
 /// Where the daemon keeps what paid retrieval must remember, in its data
@@ -82,6 +82,10 @@ pub struct PaidProviderConfig {
     /// there is not authenticated and gets no grace.
     #[serde(default)]
     pub http: bool,
+    /// A public key (33 bytes, hex) that tokens should be locked to, named
+    /// in every quote. Unlocked tokens are accepted as well. Unset: none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lock: Option<String>,
 }
 
 /// A Cashu token is whole sats, so one sat is the smallest top-up there is.
@@ -297,12 +301,24 @@ fn provider_settings(provider: &PaidProviderConfig, state_dir: &Path) -> Result<
     let mut config = ProviderConfig::new(tariff, mints);
     config.min_topup_sat = provider.min_topup_sat;
     config.grace_msat = provider.grace_msat;
+    config.lock = match provider.lock.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(key) => Some(lock_key(key).ok_or_else(|| {
+            anyhow::anyhow!("{section}.lock must be a compressed public key: 66 hex digits")
+        })?),
+    };
     Ok(ProviderSettings {
         config,
         ledger_dir,
         paying_only: provider.paying_only,
         http: provider.http,
     })
+}
+
+/// A compressed secp256k1 public key in hex.
+fn lock_key(hex_key: &str) -> Option<LockKey> {
+    let key: LockKey = hex::decode(hex_key).ok()?.try_into().ok()?;
+    matches!(key[0], 0x02 | 0x03).then_some(key)
 }
 
 fn client_settings(client: &PaidClientConfig, state_dir: PathBuf) -> Result<ClientSettings> {

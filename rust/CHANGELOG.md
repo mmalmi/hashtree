@@ -69,7 +69,8 @@
   the daemon serves the exchange at `POST /paid-blob` (one encoded request,
   at most 64 KiB, answered by `200` with one encoded reply, `no-store`), and a
   provider of `[paid_retrieval.client]` may be named by `url`, the base URL of
-  its gateway, instead of `npub`. Off by default.
+  its gateway, instead of `npub`. Off by default. A provider may name a key
+  that tokens should be locked to (`lock`, unset by default).
   `hashtree-cli` now depends on the unpublished `hashtree-paid-retrieval`.
 
 ## 0.4.6 - 2026-11-11
