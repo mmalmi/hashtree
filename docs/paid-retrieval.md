@@ -11,6 +11,10 @@ keeps its accounts on disk.
 The payment exchange does not depend on Hashtree routing, on the carrier, or on
 the hash function that names what is sold; see [Reusable parts](#reusable-parts).
 
+The wire protocol is specified, with vectors, as a draft in the Hashtree
+specification: [Paid retrieval](https://github.com/mmalmi/hashtree-spec/blob/main/specs/paid-retrieval.md).
+This document is the design rationale and the state of the implementation.
+
 ## What the retired design got wrong
 
 The 2026-03 DataQuote/DataPayment/DataChunk protocol (removed 2026-07-17) is not
@@ -291,10 +295,10 @@ account, so one larger token pays for many blobs, and a repeated request for a
 charged blob is free for the redelivery window. A client that knows nothing of
 this still gets exactly BUD-07.
 
-This face costs a mint round trip per token on the provider, and whole-sat
-rounding on small blobs; a mint's default request limit caps it at a few
-paid downloads a minute per token-paying client. It is for compatibility. A
-Hashtree client uses the endpoint above.
+This face costs the provider a mint round trip for every new token, and rounds
+small blobs up to a whole sat. The mint client's default pacing of about
+twenty requests a minute per mint then caps how many new tokens a provider can
+take. It is for compatibility. A Hashtree client uses the endpoint above.
 
 `X-Lightning` (a BOLT-11 invoice, proven by its preimage) needs no Lightning
 node: the provider's wallet can ask its mint for a mint quote and use that
