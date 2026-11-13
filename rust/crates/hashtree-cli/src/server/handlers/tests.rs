@@ -256,6 +256,8 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         hash_get_enabled: true,
         fips_endpoint: None,
         fips_blob_resolver: None,
+        paid_retrieval: None,
+        pay_for_blob_reads: false,
         fetch_from_fips_peers: true,
         ws_relay: Arc::new(crate::server::auth::WsRelayState::new()),
         max_upload_bytes: 5 * 1024 * 1024,
@@ -884,6 +886,88 @@ async fn blob_resolver_with_source(
         )
         .expect("test blob router"),
     )
+}
+
+/// A paid provider that has the blob and counts how often it is asked.
+struct CountingPaidRoute {
+    source: StoreBlobRoute<MemoryStore>,
+    asked: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl hashtree_core::BlobRoute for CountingPaidRoute {
+    async fn route(
+        &self,
+        request: hashtree_core::BlobRequest,
+    ) -> Result<hashtree_core::BlobReply, hashtree_core::StoreError> {
+        self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.source.route(request).await
+    }
+}
+
+#[tokio::test]
+async fn an_http_read_buys_only_where_allowed_and_only_after_the_free_sources() {
+    let data = b"sold by a paid provider and by nobody else".to_vec();
+    let hash = sha256(&data);
+    let paid_store = Arc::new(MemoryStore::new());
+    paid_store.put(hash, data.clone()).await.unwrap();
+    let paid = Arc::new(CountingPaidRoute {
+        source: StoreBlobRoute::new(paid_store),
+        asked: Default::default(),
+    });
+    let asked = || paid.asked.load(std::sync::atomic::Ordering::SeqCst);
+    let temp_dir = TempDir::new().unwrap();
+    let local_store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let free_source = Arc::new(MemoryStore::new());
+    let resolver = Arc::new(
+        BlobRouter::new(
+            vec![
+                BlobRouteEntry::new(
+                    "configured-store",
+                    Arc::new(StoreBlobRoute::new(local_store.store_arc())),
+                ),
+                BlobRouteEntry::new("free", Arc::new(StoreBlobRoute::new(free_source.clone()))),
+                BlobRouteEntry::paid("paid:archive", paid.clone()),
+            ],
+            Some(local_store.store_arc()),
+            BlobRouterConfig::default(),
+        )
+        .unwrap(),
+    );
+    let mut state = test_app_state(local_store.clone(), Vec::new());
+    state.fips_blob_resolver = Some(resolver.clone());
+
+    // Not allowed to pay: a miss, and the provider is not even asked.
+    assert!(!fetch_and_cache_blob(&state, &hash).await.unwrap());
+    assert_eq!(asked(), 0);
+
+    // A free source has another blob: the provider is not asked for it.
+    let free_data = b"free from another route of the router".to_vec();
+    let free_hash = sha256(&free_data);
+    free_source.put(free_hash, free_data).await.unwrap();
+    state.pay_for_blob_reads = true;
+    assert!(fetch_and_cache_blob(&state, &free_hash).await.unwrap());
+    assert_eq!(asked(), 0);
+
+    // A free source that fails is not a miss: nothing is bought.
+    let corrupt = Arc::new(MemoryStore::new());
+    corrupt.put(hash, b"not the blob".to_vec()).await.unwrap();
+    let mut routes = resolver.routes().await;
+    routes.push(BlobRouteEntry::new(
+        "corrupt",
+        Arc::new(StoreBlobRoute::new(corrupt)),
+    ));
+    resolver.set_routes(routes.clone()).await.unwrap();
+    assert!(fetch_and_cache_blob(&state, &hash).await.is_err());
+    assert_eq!(asked(), 0);
+    routes.pop();
+    resolver.set_routes(routes).await.unwrap();
+
+    // Allowed, and every free source answered that it has none: bought once
+    // and cached.
+    assert!(fetch_and_cache_blob(&state, &hash).await.unwrap());
+    assert_eq!(asked(), 1);
+    assert_eq!(local_store.get_blob(&hash).unwrap(), Some(data));
 }
 
 #[tokio::test]

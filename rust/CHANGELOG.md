@@ -40,13 +40,32 @@
 
 - Add the unpublished `hashtree-paid-retrieval` crate: a provider that serves
   blobs against prepaid Cashu balances, the matching opaque `BlobRoute`, and a
-  wallet interface with a spending limit. The blob wire and `BlobRouter` are
-  unchanged and no daemon configures a paid route. See
+  wallet interface with a spending limit. The blob wire is unchanged. See
   `docs/paid-retrieval.md`.
 - `hashtree-paid-retrieval`: carry the exchange between FIPS nodes as its own
   service (`fips` feature, `hashtree.paid-blob/1`, port 39020), and keep the
   provider's accounts, credited payments and tokens in a file ledger that is
   written before `paid` is sent and restored on start.
+- `hashtree-network`: a cost tier in `BlobRouter`. A route registered with
+  `BlobRouteEntry::paid` is asked only after every free route of the search
+  has finished without data, one paid route at a time and never as a hedge;
+  `get_request_within_cost` holds a search to free routes and
+  `get_request_at_cost` searches one tier on its own. `BlobRouteEntry`
+  has a new public field `cost`, so code that builds it as a struct literal
+  must use `BlobRouteEntry::new` or `::paid`.
+- The daemon can sell and buy blobs, off by default. `[paid_retrieval.provider]`
+  (tariff, mints, minimum top-up, grace, ledger directory, `paying_only`)
+  serves the local store over the paid FIPS service with its ledger on disk;
+  `[paid_retrieval.client]` (providers, price cap, mints, top-up, prepaid,
+  loss and fee caps, total spending limit) registers one paid route per
+  provider behind the free routes. No price, mint or cap has a default, and a
+  section that leaves one out stops the daemon at start. Money is spent only
+  after the store, the free routes and the Blossom servers all answered that
+  they do not have the blob, only
+  for reads through a loopback HTTP listener unless `pay_for_remote_reads` is
+  set, and never for a peer's request. `htree status` shows balances, sats
+  paid, declined reads, unresolved tokens, blocks and the spending limit.
+  `hashtree-cli` now depends on the unpublished `hashtree-paid-retrieval`.
 
 ## 0.4.6 - 2026-11-11
 

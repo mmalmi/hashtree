@@ -640,6 +640,23 @@ fn run_command(
                 fips_peer_ids,
             )
             .await?;
+            let paid_retrieval = match hashtree_cli::paid_retrieval::start_daemon_paid_retrieval(
+                &config,
+                &data_dir,
+                &bind_address,
+                fips_handle.as_ref(),
+                &store,
+            )
+            .await
+            {
+                Ok(paid) => paid,
+                Err(error) => {
+                    if let Some(handle) = &fips_handle {
+                        handle.shutdown().await;
+                    }
+                    return Err(error);
+                }
+            };
             let nostr_cache =
                 hashtree_cli::fips_transport::new_daemon_nostr_cache(store.store_arc());
             let retained_nostr_cache = if pool_audit_read_only {
@@ -710,6 +727,9 @@ fn run_command(
                 server = server
                     .with_fips_endpoint(fips_handle.endpoint.clone())
                     .with_fips_blob_resolver(fips_handle.blob_resolver.clone());
+            }
+            if let Some(paid) = &paid_retrieval {
+                server = server.with_paid_retrieval(paid.clone());
             }
 
             let background_services_controller = match (graph_store, social_graph_store.as_ref()) {
@@ -879,6 +899,11 @@ fn run_command(
             #[cfg(feature = "experimental-decentralized-pubsub")]
             if let Some(ref handle) = nostr_pubsub_handle {
                 handle.shutdown().await;
+            }
+
+            // The paid service runs on the FIPS endpoint: stop it first.
+            if let Some(paid) = &paid_retrieval {
+                paid.shutdown().await;
             }
 
             if let Some(ref fips_handle) = fips_handle {

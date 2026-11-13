@@ -16,6 +16,7 @@ pub mod ignore_rules;
 mod managed_env;
 pub mod nostr_mirror;
 pub mod nostr_relay;
+pub mod paid_retrieval;
 pub mod pwa;
 pub mod runtime_config;
 pub mod server;

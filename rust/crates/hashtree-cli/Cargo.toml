@@ -33,6 +33,7 @@ hashtree-nostr.workspace = true
 hashtree-nostr-pubsub.workspace = true
 hashtree-fips-transport.workspace = true
 hashtree-network.workspace = true
+hashtree-paid-retrieval = { workspace = true, features = ["cashu", "fips"] }
 hashtree-bittorrent = { version = "0.2.0", path = "../hashtree-bittorrent", optional = true, features = ["libtorrent"] }
 hashtree-resolver = { workspace = true, features = ["nostr"] }
 hashtree-updater = { workspace = true, features = ["nostr-pubsub"] }
@@ -130,6 +131,7 @@ experimental-decentralized-pubsub = []
 public-provider-stress = []
 
 [dev-dependencies]
+hashtree-paid-retrieval = { workspace = true, features = ["test-support"] }
 nvpn-fips-core = "=0.4.119"
 rcgen = "0.13"
 tokio-rustls = "0.26"

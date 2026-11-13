@@ -202,6 +202,8 @@ impl HashtreeServer {
                 hash_get_enabled: true,
                 fips_endpoint: None,
                 fips_blob_resolver: None,
+                paid_retrieval: None,
+                pay_for_blob_reads: false,
                 fetch_from_fips_peers: true,
                 ws_relay: Arc::new(auth::WsRelayState::new()),
                 max_upload_bytes: 5 * 1024 * 1024, // 5 MB default
@@ -313,6 +315,15 @@ impl HashtreeServer {
         resolver: Arc<crate::fips_transport::DaemonBlobResolver>,
     ) -> Self {
         self.state.fips_blob_resolver = Some(resolver);
+        self
+    }
+
+    pub fn with_paid_retrieval(
+        mut self,
+        paid: Arc<crate::paid_retrieval::DaemonPaidRetrieval>,
+    ) -> Self {
+        self.state.pay_for_blob_reads = paid.pays_for_http_reads();
+        self.state.paid_retrieval = Some(paid);
         self
     }
 

@@ -1,5 +1,5 @@
 use super::*;
-use crate::fips_transport::{read_daemon_blob, DaemonBlobResolver};
+use crate::fips_transport::{buy_daemon_blob, read_daemon_blob, DaemonBlobResolver};
 use crate::server::blob_read::{
     run_blob_metadata_read, run_blob_read, run_blob_write, BlobIoTaskError, BLOB_READ_BUSY,
 };
@@ -135,7 +135,16 @@ pub(super) async fn fetch_and_cache_blob_with_source(
         tracing::info!("[htree-fetch] No upstream Blossom servers configured");
     }
 
-    if let Some(result) = first_available_fetch(fetches).await? {
+    let found = match first_available_fetch(fetches).await? {
+        Some(found) => Some(found),
+        // Every free source answered that it does not have the blob. One
+        // that failed or timed out ends the read above: slow is not a miss,
+        // and nothing is bought on its account.
+        None => buy_from_paid_providers(state, hash)
+            .await?
+            .map(|data| FetchResult::Fips { data }),
+    };
+    if let Some(result) = found {
         match result {
             FetchResult::Fips { data } => {
                 tracing::info!(
@@ -1280,6 +1289,30 @@ pub(super) async fn query_fips_peers(
         Ok(hashtree_core::BlobReply::Data(data)) => Ok(Some(data)),
         Ok(hashtree_core::BlobReply::NoResult) => Ok(None),
         Err(err) => Err(format!("FIPS peer fetch failed: {err}")),
+    }
+}
+
+/// Buy the blob from a paid provider, where the operator allowed that for
+/// reads arriving over HTTP. Call it only after every free source answered
+/// that it has no data: a paid provider is never raced against a free one.
+async fn buy_from_paid_providers(state: &AppState, hash: &[u8]) -> Result<Option<Vec<u8>>, String> {
+    if !(state.pay_for_blob_reads && state.hash_get_enabled && state.fetch_from_fips_peers) {
+        return Ok(None);
+    }
+    let Some(resolver) = &state.fips_blob_resolver else {
+        return Ok(None);
+    };
+    let hash: [u8; 32] = hash
+        .try_into()
+        .map_err(|_| "paid blob hash has the wrong length".to_string())?;
+    let request = hashtree_core::BlobRequest {
+        hash,
+        htl: hashtree_core::BLOB_DEFAULT_HTL,
+    };
+    match buy_daemon_blob(resolver.as_ref(), request).await {
+        Ok(hashtree_core::BlobReply::Data(data)) => Ok(Some(data)),
+        Ok(hashtree_core::BlobReply::NoResult) => Ok(None),
+        Err(err) => Err(format!("paid provider fetch failed: {err}")),
     }
 }
 

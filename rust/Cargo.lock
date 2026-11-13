@@ -3743,6 +3743,7 @@ dependencies = [
  "hashtree-nostr",
  "hashtree-nostr-pubsub",
  "hashtree-nostr-social-graph-heed",
+ "hashtree-paid-retrieval",
  "hashtree-resolver",
  "hashtree-updater",
  "hex",

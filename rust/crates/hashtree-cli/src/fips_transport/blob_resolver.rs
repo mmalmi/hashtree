@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use hashtree_core::{BlobReply, BlobRequest, BlobRoute, BlobRouteContext, StoreError};
-use hashtree_network::BlobRouter;
+use hashtree_network::{BlobRouteCost, BlobRouter};
 
 // StorageRouter can synchronously fall back to S3. Use the existing bounded
 // storage queue so a preferred store cannot block mesh hedges or their timers.
-pub(super) struct BlockingStoreRoute(pub(super) Arc<dyn BlobRoute>);
+pub(crate) struct BlockingStoreRoute(pub(crate) Arc<dyn BlobRoute>);
 
 #[async_trait::async_trait]
 impl BlobRoute for BlockingStoreRoute {
@@ -17,6 +17,8 @@ impl BlobRoute for BlockingStoreRoute {
     }
 }
 
+/// Serves a peer's request from the daemon's router. A peer's request never
+/// reaches a paid route: the daemon does not buy blobs for others.
 pub(super) struct DaemonInboundBlobRoute(pub(super) Arc<BlobRouter>);
 
 #[async_trait::async_trait]
@@ -34,6 +36,18 @@ impl BlobRoute for DaemonInboundBlobRoute {
     }
 }
 
+/// The free blob service of a paying-only provider: nothing for anyone.
+pub(super) struct NoFreeBlobs;
+
+#[async_trait::async_trait]
+impl BlobRoute for NoFreeBlobs {
+    async fn route(&self, _request: BlobRequest) -> Result<BlobReply, StoreError> {
+        Ok(BlobReply::NoResult)
+    }
+}
+
+/// Read through the free routes of the daemon's router. It never spends
+/// money, whoever asks.
 pub(crate) async fn read_daemon_blob(
     resolver: &BlobRouter,
     request: BlobRequest,
@@ -41,7 +55,29 @@ pub(crate) async fn read_daemon_blob(
 ) -> Result<BlobReply, StoreError> {
     Ok(
         match resolver
-            .get_request(request, Some(&["configured-store".into()]), context)
+            .get_request_at_cost(
+                request,
+                Some(&["configured-store".into()]),
+                context,
+                BlobRouteCost::Free,
+            )
+            .await?
+        {
+            Some(data) => BlobReply::Data(data),
+            None => BlobReply::NoResult,
+        },
+    )
+}
+
+/// Ask the paid routes of the daemon's router, one after another. Call it
+/// only after every free source of the read has finished without data.
+pub(crate) async fn buy_daemon_blob(
+    resolver: &BlobRouter,
+    request: BlobRequest,
+) -> Result<BlobReply, StoreError> {
+    Ok(
+        match resolver
+            .get_request_at_cost(request, None, None, BlobRouteCost::Paid)
             .await?
         {
             Some(data) => BlobReply::Data(data),
@@ -117,6 +153,41 @@ mod tests {
             .unwrap();
         assert_eq!(result.unwrap().unwrap(), BlobReply::Data(data));
         assert!(started.elapsed() < Duration::from_millis(500));
+    }
+
+    #[tokio::test]
+    async fn a_peers_request_never_reaches_a_paid_route() {
+        let data = b"only the paid provider has it".to_vec();
+        let hash = sha256(&data);
+        let paid_store = Arc::new(MemoryStore::new());
+        paid_store.put(hash, data.clone()).await.unwrap();
+        let router = Arc::new(
+            BlobRouter::new(
+                vec![
+                    BlobRouteEntry::new(
+                        "configured-store",
+                        Arc::new(StoreBlobRoute::new(Arc::new(MemoryStore::new()))),
+                    ),
+                    BlobRouteEntry::paid("paid:archive", Arc::new(StoreBlobRoute::new(paid_store))),
+                ],
+                None,
+                BlobRouterConfig::default(),
+            )
+            .unwrap(),
+        );
+        let request = BlobRequest { hash, htl: 3 };
+
+        let for_a_peer = DaemonInboundBlobRoute(router.clone()).route(request).await;
+        assert_eq!(for_a_peer.unwrap(), BlobReply::NoResult);
+        assert_eq!(
+            NoFreeBlobs.route(request).await.unwrap(),
+            BlobReply::NoResult
+        );
+
+        let free = read_daemon_blob(&router, request, None).await;
+        assert_eq!(free.unwrap(), BlobReply::NoResult);
+        let bought = buy_daemon_blob(&router, request).await;
+        assert_eq!(bought.unwrap(), BlobReply::Data(data));
     }
 
     #[tokio::test]

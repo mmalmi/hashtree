@@ -32,13 +32,13 @@ source (normally a `StoreBlobRoute`), and `PaidBlobRoute`, one opaque
 ```rust
 let wallet = Arc::new(LimitedWallet::new(my_wallet, SpendingLimit::new(500)));
 let paid = PaidBlobRoute::new("provider name", transport, wallet, ClientPolicy::default());
-let entry = BlobRouteEntry::new("paid:provider", Arc::new(paid.clone()));
+let entry = BlobRouteEntry::paid("paid:provider", Arc::new(paid.clone()));
 ```
 
-`BlobRouter` hedges across its routes and has no notion of cost, so a paid
-route registered beside free ones can pay for a blob a slower free route would
-have delivered. Until the router has a cost tier, try a paid route only after
-the free routes returned nothing.
+Register it with `BlobRouteEntry::paid`: `BlobRouter` then asks it only after
+every free route of a search has finished without data, never as a hedge.
+The `htree` daemon wires both sides from `[paid_retrieval]` in its
+configuration; nothing is on by default.
 
 A provider between FIPS nodes, with its ledger on disk:
 

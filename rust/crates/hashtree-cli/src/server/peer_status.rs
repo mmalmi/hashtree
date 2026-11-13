@@ -192,6 +192,7 @@ pub(super) async fn daemon_status(
             "fips": state.fips_endpoint.is_some(),
         },
         "fips": fips,
+        "paid_retrieval": state.paid_retrieval.as_ref().map(|paid| paid.status()),
         "relay": relay,
         "upstream": upstream,
         "queues": queues,

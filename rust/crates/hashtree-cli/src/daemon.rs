@@ -435,6 +435,7 @@ impl EmbeddedBackgroundServicesController {
 pub struct EmbeddedDaemonController {
     server_controller: Arc<EmbeddedServerController>,
     nostr_provider: tokio::sync::Mutex<Option<Arc<crate::fips_transport::DaemonNostrProvider>>>,
+    paid_retrieval: tokio::sync::Mutex<Option<Arc<crate::paid_retrieval::DaemonPaidRetrieval>>>,
     fips_handle: Option<Arc<crate::fips_transport::DaemonFipsHandle>>,
     #[cfg(feature = "experimental-decentralized-pubsub")]
     nostr_pubsub_handle: Option<Arc<crate::fips_transport::DaemonNostrPubsubHandle>>,
@@ -453,6 +454,7 @@ impl EmbeddedDaemonController {
         Self {
             server_controller,
             nostr_provider: Default::default(),
+            paid_retrieval: Default::default(),
             fips_handle,
             #[cfg(feature = "experimental-decentralized-pubsub")]
             nostr_pubsub_handle,
@@ -465,6 +467,10 @@ impl EmbeddedDaemonController {
         #[cfg(feature = "experimental-decentralized-pubsub")]
         if let Some(handle) = self.nostr_pubsub_handle.as_ref() {
             handle.shutdown().await;
+        }
+        // The paid service runs on the FIPS endpoint: stop it first.
+        if let Some(paid) = self.paid_retrieval.lock().await.take() {
+            paid.shutdown().await;
         }
         if let Some(handle) = self.fips_handle.as_ref() {
             handle.shutdown().await;
@@ -674,6 +680,23 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     )
     .await?
     .map(Arc::new);
+    let paid_retrieval = match crate::paid_retrieval::start_daemon_paid_retrieval(
+        &config,
+        &opts.data_dir,
+        &opts.bind_address,
+        fips_handle.as_deref(),
+        &store,
+    )
+    .await
+    {
+        Ok(paid) => paid,
+        Err(error) => {
+            if let Some(handle) = &fips_handle {
+                handle.shutdown().await;
+            }
+            return Err(error);
+        }
+    };
     let nostr_cache = crate::fips_transport::new_daemon_nostr_cache(store.store_arc());
     let nostr_provider = crate::fips_transport::start_daemon_nostr_provider(
         &config,
@@ -733,6 +756,9 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
             .with_fips_endpoint(fips_handle.endpoint.clone())
             .with_fips_blob_resolver(fips_handle.blob_resolver.clone());
     }
+    if let Some(paid) = &paid_retrieval {
+        server = server.with_paid_retrieval(paid.clone());
+    }
 
     if let Some(extra) = opts.extra_routes {
         server = server.with_extra_routes(extra);
@@ -782,6 +808,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     ));
 
     *daemon_controller.nostr_provider.lock().await = nostr_provider;
+    *daemon_controller.paid_retrieval.lock().await = paid_retrieval;
 
     tracing::info!(
         "Embedded daemon started on {}, identity {}",

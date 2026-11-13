@@ -150,6 +150,15 @@ fn append_upstream_status(lines: &mut Vec<String>, status: &serde_json::Value) {
     }
 }
 
+fn append_paid_status(lines: &mut Vec<String>, status: &serde_json::Value) {
+    let Some(paid) = status.get("paid_retrieval").filter(|paid| !paid.is_null()) else {
+        return;
+    };
+    lines.push(String::new());
+    lines.push("Paid retrieval:".to_string());
+    lines.extend(hashtree_cli::paid_retrieval::format_paid_status(paid));
+}
+
 pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: bool) -> String {
     let mut lines = Vec::new();
     if include_header {
@@ -195,6 +204,7 @@ pub(crate) fn format_daemon_status(status: &serde_json::Value, include_header: b
     }
     append_upstream_status(&mut lines, status);
     append_http_status(&mut lines, status);
+    append_paid_status(&mut lines, status);
 
     if let Some(upstream) = status.get("upstream") {
         if let Some(count) = upstream.get("blossom_servers").and_then(|c| c.as_u64()) {

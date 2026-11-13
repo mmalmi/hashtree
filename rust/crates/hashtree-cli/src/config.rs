@@ -1,3 +1,4 @@
+use crate::paid_retrieval::PaidRetrievalConfig;
 use anyhow::{Context, Result};
 use nostr::nips::nip19::{FromBech32, ToBech32};
 use nostr::{Keys, SecretKey};
@@ -22,6 +23,9 @@ pub struct Config {
     pub cashu: CashuConfig,
     #[serde(default)]
     pub updater: UpdaterConfig,
+    /// Selling and buying blobs. Unset: nothing paid is started.
+    #[serde(default, skip_serializing_if = "PaidRetrievalConfig::is_unset")]
+    pub paid_retrieval: PaidRetrievalConfig,
 }
 
 /// htree self-update preferences. Auto-check is on by default — htree

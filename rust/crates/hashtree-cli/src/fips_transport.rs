@@ -6,8 +6,8 @@
 mod blob_resolver;
 mod durable_cache;
 mod retained_provider;
-pub(crate) use blob_resolver::read_daemon_blob;
-use blob_resolver::{BlockingStoreRoute, DaemonInboundBlobRoute};
+pub(crate) use blob_resolver::{buy_daemon_blob, read_daemon_blob, BlockingStoreRoute};
+use blob_resolver::{DaemonInboundBlobRoute, NoFreeBlobs};
 pub use retained_provider::DaemonNostrProvider;
 
 use crate::config::{Config, NostrEventTransport};
@@ -192,9 +192,14 @@ pub async fn start_daemon_fips_transport(
             .await
             .context("Failed to configure FIPS peers")?;
     }
-    let (blob_resolver, blob_transport) =
-        bind_daemon_blob_resolver(&endpoint, store.store_arc(), &peer_configs, request_timeout)
-            .await?;
+    let (blob_resolver, blob_transport) = bind_daemon_blob_resolver(
+        &endpoint,
+        store.store_arc(),
+        &peer_configs,
+        request_timeout,
+        !config.paid_retrieval.paying_only(),
+    )
+    .await?;
 
     Ok(Some(DaemonFipsHandle {
         endpoint: endpoint.native_endpoint,
@@ -218,6 +223,7 @@ async fn bind_daemon_blob_resolver(
     store: Arc<StorageRouter>,
     peers: &[FipsPeerConfig],
     request_timeout: Duration,
+    serve_free_blobs: bool,
 ) -> Result<(Arc<DaemonBlobResolver>, Arc<DaemonBlobTransport>)> {
     let mut routes = vec![BlobRouteEntry::new(
         "configured-store",
@@ -240,7 +246,12 @@ async fn bind_daemon_blob_resolver(
     // Advertise the same resolver used by in-process daemon reads. The FIPS
     // route added below owns only a weak transport reference, so routing an
     // inbound request through this resolver does not create an Arc cycle.
-    let inbound_route: Arc<dyn BlobRoute> = Arc::new(DaemonInboundBlobRoute(resolver.clone()));
+    // A paying-only provider keeps the service bound for its own reads and
+    // answers every peer with no result.
+    let inbound_route: Arc<dyn BlobRoute> = match serve_free_blobs {
+        true => Arc::new(DaemonInboundBlobRoute(resolver.clone())),
+        false => Arc::new(NoFreeBlobs),
+    };
     let transport = Arc::new(
         TcpBlobTransport::bind_advertised_route_with_config(
             endpoint.native_endpoint.clone(),
@@ -599,7 +610,13 @@ pub fn daemon_fips_peer_configs(
         });
     }
 
-    for peer_id in discovered_peer_ids {
+    // A provider the daemon buys from has to be reachable like any peer.
+    let paid_providers = config.paid_retrieval.client_provider_npubs();
+    for peer_id in discovered_peer_ids
+        .iter()
+        .map(String::as_str)
+        .chain(paid_providers)
+    {
         let npub = peer_id.trim().to_string();
         if npub.is_empty() || !seen.insert(npub.clone()) {
             continue;
@@ -1060,6 +1077,7 @@ fips_trusted_raters = ["invalid-key"]"#,
             store.store_arc(),
             &[],
             Duration::from_secs(1),
+            true,
         )
         .await
         .expect("bind htree provider");
@@ -1190,6 +1208,7 @@ fips_trusted_raters = ["invalid-key"]"#,
             provider_store.store_arc(),
             &[upstream_peer],
             Duration::from_secs(2),
+            true,
         )
         .await
         .unwrap();

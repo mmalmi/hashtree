@@ -21,6 +21,7 @@ async fn daemon_blob_resolver_discovers_other_daemons_through_pure_anchor() {
         provider_store.store_arc(),
         &[],
         Duration::from_secs(5),
+        true,
     )
     .await
     .unwrap();
@@ -29,6 +30,7 @@ async fn daemon_blob_resolver_discovers_other_daemons_through_pure_anchor() {
         consumer_store.store_arc(),
         &[],
         Duration::from_secs(5),
+        true,
     )
     .await
     .unwrap();
