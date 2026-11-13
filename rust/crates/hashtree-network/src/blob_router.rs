@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::ops::RangeInclusive;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -363,6 +364,31 @@ impl BlobRouter {
         outer_context: Option<BlobRouteContext>,
         max_cost: BlobRouteCost,
     ) -> Result<Option<Vec<u8>>, StoreError> {
+        let tiers = BlobRouteCost::Free..=max_cost;
+        self.search(request, preferred, outer_context, tiers).await
+    }
+
+    /// [`Self::get_request`] over the routes of one tier only. An owner that
+    /// also reads from sources outside this router searches the free tier
+    /// beside them, and the paid tier once all of them finished without data.
+    pub async fn get_request_at_cost(
+        &self,
+        request: BlobRequest,
+        preferred: Option<&[BlobRouteIdentity]>,
+        outer_context: Option<BlobRouteContext>,
+        cost: BlobRouteCost,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
+        self.search(request, preferred, outer_context, cost..=cost)
+            .await
+    }
+
+    async fn search(
+        &self,
+        request: BlobRequest,
+        preferred: Option<&[BlobRouteIdentity]>,
+        outer_context: Option<BlobRouteContext>,
+        tiers: RangeInclusive<BlobRouteCost>,
+    ) -> Result<Option<Vec<u8>>, StoreError> {
         if request.htl > BLOB_MAX_HTL {
             return Err(StoreError::Other(format!(
                 "Hashtree blob HTL {} exceeds the maximum of {BLOB_MAX_HTL}",
@@ -390,7 +416,7 @@ impl BlobRouter {
             ));
         }
 
-        let ordered = self.ordered_routes(preferred, max_cost).await;
+        let ordered = self.ordered_routes(preferred, tiers).await;
         if ordered.is_empty() {
             return Ok(None);
         }
@@ -535,10 +561,10 @@ impl BlobRouter {
     async fn ordered_routes(
         &self,
         preferred: Option<&[BlobRouteIdentity]>,
-        max_cost: BlobRouteCost,
+        tiers: RangeInclusive<BlobRouteCost>,
     ) -> Vec<BlobRouteEntry> {
         let mut routes = self.routes.read().await.clone();
-        routes.retain(|entry| entry.cost <= max_cost);
+        routes.retain(|entry| tiers.contains(&entry.cost));
         let preferred_order: HashMap<_, _> = preferred
             .unwrap_or_default()
             .iter()

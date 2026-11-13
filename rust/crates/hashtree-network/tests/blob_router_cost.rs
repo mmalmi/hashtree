@@ -226,3 +226,24 @@ async fn a_free_only_search_never_asks_a_paid_route() {
     assert_eq!(any, Some(data));
     assert_eq!(paid.calls(), 1);
 }
+
+#[tokio::test]
+async fn one_tier_can_be_searched_on_its_own() {
+    let (hash, data) = blob("bought after sources outside the router missed");
+    let log = Log::default();
+    let free = Probe::new("free", Answer::NoResult, Duration::ZERO, &log);
+    let paid = Probe::new("paid", Answer::Data(data.clone()), Duration::ZERO, &log);
+    let router = router(vec![
+        BlobRouteEntry::new("free", free.clone()),
+        BlobRouteEntry::paid("paid", paid.clone()),
+    ]);
+    let request = BlobRequest { hash, htl: 0 };
+
+    let bought = router
+        .get_request_at_cost(request, None, None, BlobRouteCost::Paid)
+        .await
+        .unwrap();
+
+    assert_eq!(bought, Some(data));
+    assert_eq!((free.calls(), paid.calls()), (0, 1));
+}

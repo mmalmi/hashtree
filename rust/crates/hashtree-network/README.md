@@ -24,8 +24,11 @@ Hashtree read path; its only paid-retrieval caller was the simulator. Cashu
 wallet commands remain, but this crate deliberately configures no paid
 `BlobRoute`. A paid provider must own negotiation and replay protection inside
 one opaque route without changing the published blob wire; the unreleased
-`hashtree-paid-retrieval` crate is that route. The router has no cost tier, so
-a paid route should be tried only after free routes returned nothing.
+`hashtree-paid-retrieval` crate is that route. Register it with
+`BlobRouteEntry::paid`: the router asks a paid route only after every free
+route of the search has finished without data, one paid route at a time and
+never as a hedge. `get_request_within_cost` holds a search to free routes and
+`get_request_at_cost` searches one tier on its own.
 
 FIPS owns transport addressing and `nostr-pubsub` owns Nostr event
 distribution.
