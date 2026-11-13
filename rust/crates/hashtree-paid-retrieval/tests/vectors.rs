@@ -12,8 +12,9 @@ use std::path::PathBuf;
 use hashtree_core::BLOB_MAX_BYTES;
 use hashtree_paid_retrieval::bencode::{self, Value};
 use hashtree_paid_retrieval::{
-    BytePrice, ContentHash, ErrorCode, Quote, Reply, Request, Tariff, BEP10_EXTENSION,
-    MAX_HEADER_BYTES, MAX_MESSAGE_BYTES, METHOD_CASHU, PROTOCOL,
+    AccountState, BytePrice, ContentHash, ErrorCode, PaymentIntent, PendingPayment, Quote, Reply,
+    Request, Tariff, WalletPayment, BEP10_EXTENSION, MAX_HEADER_BYTES, MAX_MESSAGE_BYTES,
+    METHOD_CASHU, PROTOCOL,
 };
 use serde_json::{json, Value as Json};
 
@@ -29,6 +30,38 @@ fn hash_json(hash: &ContentHash) -> Json {
         ContentHash::Sha1(_) => "sha1",
     };
     json!({ "algorithm": algorithm, "digest": hex(hash.digest()) })
+}
+
+fn payment_json(pending: &PendingPayment) -> Json {
+    json!({
+        "id": hex(&pending.id),
+        "attempts": pending.attempts,
+        "mint_url": pending.payment.mint_url,
+        "token": pending.payment.token,
+        "amount_sat": pending.payment.amount_sat.to_string(),
+        "fee_sat": pending.payment.fee_sat.to_string(),
+        "reclaim_id": pending.payment.reclaim_id,
+    })
+}
+
+fn account_json(account: &AccountState) -> Json {
+    let intent = account.intent.as_ref().map(|intent| {
+        json!({
+            "id": hex(&intent.id),
+            "amount_sat": intent.amount_sat.to_string(),
+            "mints": intent.mints,
+        })
+    });
+    json!({
+        "account": hex(&account.account),
+        "credited_msat": account.credited_msat.to_string(),
+        "charged_msat": account.charged_msat.to_string(),
+        "balance_msat": account.balance_msat.to_string(),
+        "intent": intent,
+        "pending": account.pending.as_ref().map(payment_json),
+        "unresolved": account.unresolved.iter().map(payment_json).collect::<Vec<_>>(),
+        "blocked": account.blocked,
+    })
 }
 
 fn request_json(request: &Request) -> Json {
@@ -159,6 +192,15 @@ fn texts(values: &[&str]) -> Value {
     Value::List(values.iter().map(|value| text(value)).collect())
 }
 
+fn map(entries: &[(&str, Value)]) -> Value {
+    Value::Dict(
+        entries
+            .iter()
+            .map(|(key, value)| (key.as_bytes().to_vec(), value.clone()))
+            .collect(),
+    )
+}
+
 /// Canonical bencode of a dictionary with arbitrary fields.
 fn dict(entries: &[(&str, Value)]) -> Vec<u8> {
     let entries: BTreeMap<Vec<u8>, Value> = entries
@@ -192,6 +234,7 @@ fn without<'a>(fields: &[(&'a str, Value)], key: &str) -> Vec<(&'a str, Value)> 
 #[derive(Default)]
 struct Vectors {
     messages: Vec<Json>,
+    accounts: Vec<Json>,
     acceptance: Vec<Json>,
 }
 
@@ -245,13 +288,47 @@ impl Vectors {
         self.message(name, "reply", "decode", wire, reply_json(&reply));
     }
 
-    /// Whether a decoder takes `parts`. `kind` is `request`, `reply` or
-    /// `bencode` (one value from the start of the input).
+    fn saved(&mut self, name: &str, direction: &str, wire: &[u8], account: &AccountState) {
+        self.accounts.push(json!({
+            "name": name,
+            "direction": direction,
+            "wire": hex(wire),
+            "account": account_json(account),
+        }));
+    }
+
+    /// Encodes to `wire` and decodes back to the same account.
+    fn account(&mut self, name: &str, account: AccountState) {
+        let wire = account.encode();
+        let decoded = AccountState::decode(&wire).ok();
+        assert_eq!(decoded.as_ref(), Some(&account), "{name}");
+        self.saved(name, "both", &wire, &account);
+    }
+
+    /// Encodes to `wire`, which decodes to something else.
+    fn account_encodes(&mut self, name: &str, account: AccountState) {
+        let wire = account.encode();
+        let decoded = AccountState::decode(&wire).ok();
+        assert_ne!(decoded.as_ref(), Some(&account), "{name}");
+        self.saved(name, "encode", &wire, &account);
+    }
+
+    /// Accepted, but not what the encoder writes for the decoded account.
+    fn account_decodes(&mut self, name: &str, wire: &[u8]) {
+        let account = AccountState::decode(wire).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_ne!(account.encode(), wire, "{name}");
+        self.saved(name, "decode", wire, &account);
+    }
+
+    /// Whether a decoder takes `parts`. `kind` is `request`, `reply`,
+    /// `account` (a saved buyer account) or `bencode` (one value from the
+    /// start of the input).
     fn accept(&mut self, name: &str, kind: &str, expected: bool, parts: &[Part]) {
         let wire = build(parts);
         let (accepted, used) = match kind {
             "request" => (Request::decode(&wire).is_ok(), None),
             "reply" => (Reply::decode(&wire).is_ok(), None),
+            "account" => (AccountState::decode(&wire).is_ok(), None),
             "bencode" => match bencode::decode_prefix(&wire) {
                 Ok((_, used)) => (true, Some(used)),
                 Err(_) => (false, None),
@@ -1098,6 +1175,300 @@ fn reply_acceptance(vectors: &mut Vectors) {
     vectors.accept_bytes("reply_is_empty", "reply", false, b"");
 }
 
+fn token(seed: u8) -> PendingPayment {
+    PendingPayment {
+        id: [seed; 16],
+        attempts: u32::from(seed),
+        payment: WalletPayment {
+            mint_url: MINT.to_owned(),
+            token: format!("cashuFake{seed}"),
+            amount_sat: 5,
+            fee_sat: 1,
+            reclaim_id: seed.is_multiple_of(2).then(|| format!("operation-{seed}")),
+        },
+    }
+}
+
+fn fresh_account() -> AccountState {
+    AccountState {
+        account: account(),
+        credited_msat: 0,
+        charged_msat: 0,
+        balance_msat: 0,
+        intent: None,
+        pending: None,
+        unresolved: Vec::new(),
+        blocked: None,
+    }
+}
+
+/// A buyer's saved account: `AccountState::encode` and `decode`.
+fn accounts(vectors: &mut Vectors) {
+    vectors.account("account_fresh", fresh_account());
+    vectors.account(
+        "account_with_every_field",
+        AccountState {
+            credited_msat: 9_000,
+            charged_msat: 4_096,
+            balance_msat: -17,
+            intent: Some(PaymentIntent {
+                id: [9; 16],
+                amount_sat: 5,
+                mints: vec![MINT.to_owned(), "https://other.test".to_owned()],
+            }),
+            pending: Some(token(1)),
+            unresolved: vec![token(2), token(3)],
+            blocked: Some("provider balance is low".to_owned()),
+            ..fresh_account()
+        },
+    );
+    let largest = i64::MAX as u64;
+    vectors.account(
+        "account_largest_numbers_and_non_ascii_text",
+        AccountState {
+            credited_msat: largest,
+            charged_msat: largest,
+            balance_msat: i64::MIN,
+            intent: Some(PaymentIntent {
+                id: [0xff; 16],
+                amount_sat: largest,
+                mints: Vec::new(),
+            }),
+            pending: Some(PendingPayment {
+                id: payment(),
+                attempts: u32::MAX,
+                payment: WalletPayment {
+                    mint_url: "https://minttu.test/säästö".to_owned(),
+                    token: String::new(),
+                    amount_sat: largest,
+                    fee_sat: largest,
+                    reclaim_id: Some("määrä ✓ 🙂".to_owned()),
+                },
+            }),
+            blocked: Some("määrä ✓ 🙂".to_owned()),
+            ..fresh_account()
+        },
+    );
+    vectors.account_encodes(
+        "account_above_the_largest_number_saturates",
+        AccountState {
+            credited_msat: u64::MAX,
+            charged_msat: u64::MAX,
+            intent: Some(PaymentIntent {
+                id: [9; 16],
+                amount_sat: u64::MAX,
+                mints: vec![MINT.to_owned()],
+            }),
+            unresolved: vec![PendingPayment {
+                payment: WalletPayment {
+                    amount_sat: u64::MAX,
+                    fee_sat: u64::MAX,
+                    ..token(1).payment
+                },
+                ..token(1)
+            }],
+            ..fresh_account()
+        },
+    );
+
+    let paid = [
+        ("a", Value::Int(5)),
+        ("f", Value::Int(1)),
+        ("i", raw(&payment())),
+        ("m", text(MINT)),
+        ("n", Value::Int(2)),
+        ("t", text("cashuFake1")),
+    ];
+    let base = [
+        ("a", raw(&account())),
+        ("b", Value::Int(-17)),
+        ("c", Value::Int(9_000)),
+        ("g", Value::Int(4_096)),
+        ("u", Value::List(Vec::new())),
+        ("v", Value::Int(1)),
+    ];
+    let intent = [
+        ("a", Value::Int(5)),
+        ("i", raw(&payment())),
+        ("m", texts(&[MINT])),
+    ];
+    vectors.account_decodes(
+        "account_with_unknown_keys",
+        &dict(&with(
+            &with(&base, "p", map(&with(&paid, "z", Value::Int(1)))),
+            "z",
+            texts(&["later"]),
+        )),
+    );
+    vectors.account_decodes(
+        "account_attempts_above_32_bits_saturate",
+        &dict(&with(
+            &base,
+            "p",
+            map(&with(&paid, "n", Value::Int(1 << 40))),
+        )),
+    );
+
+    let mut case = |name: &str, expected: bool, fields: &[(&str, Value)]| {
+        vectors.accept_bytes(
+            &format!("account_{name}"),
+            "account",
+            expected,
+            &dict(fields),
+        );
+    };
+    case("minimal", true, &base);
+    for key in ["a", "b", "c", "g", "u", "v"] {
+        case(&format!("without_{key}"), false, &without(&base, key));
+    }
+    case("version_two", false, &with(&base, "v", Value::Int(2)));
+    case("version_zero", false, &with(&base, "v", Value::Int(0)));
+    case("version_is_text", false, &with(&base, "v", text("1")));
+    case("short_id", false, &with(&base, "a", raw(&[1; 31])));
+    case("long_id", false, &with(&base, "a", raw(&[1; 33])));
+    case("negative_credit", false, &with(&base, "c", Value::Int(-1)));
+    case("negative_charge", false, &with(&base, "g", Value::Int(-1)));
+    case("positive_balance", true, &with(&base, "b", Value::Int(17)));
+    case("balance_is_text", false, &with(&base, "b", text("0")));
+    case("blocked", true, &with(&base, "k", text("why")));
+    case(
+        "blocked_is_a_number",
+        false,
+        &with(&base, "k", Value::Int(1)),
+    );
+    case(
+        "blocked_is_not_utf8",
+        false,
+        &with(&base, "k", raw(b"\xff")),
+    );
+    case(
+        "unresolved_is_a_dictionary",
+        false,
+        &with(&base, "u", map(&[])),
+    );
+    case(
+        "unresolved_holds_a_number",
+        false,
+        &with(&base, "u", Value::List(vec![Value::Int(1)])),
+    );
+    case(
+        "unresolved_payments",
+        true,
+        &with(&base, "u", Value::List(vec![map(&paid), map(&paid)])),
+    );
+
+    let mut pending = |name: &str, expected: bool, fields: &[(&str, Value)]| {
+        case(
+            &format!("pending_{name}"),
+            expected,
+            &with(&base, "p", map(fields)),
+        );
+    };
+    pending("token", true, &paid);
+    pending(
+        "token_with_reclaim_id",
+        true,
+        &with(&paid, "r", text("operation-1")),
+    );
+    for key in ["a", "f", "i", "m", "n", "t"] {
+        pending(&format!("without_{key}"), false, &without(&paid, key));
+    }
+    pending("short_id", false, &with(&paid, "i", raw(&[1; 15])));
+    pending("long_id", false, &with(&paid, "i", raw(&[1; 17])));
+    pending("negative_amount", false, &with(&paid, "a", Value::Int(-5)));
+    pending("negative_fee", false, &with(&paid, "f", Value::Int(-1)));
+    pending(
+        "negative_attempts",
+        false,
+        &with(&paid, "n", Value::Int(-1)),
+    );
+    pending("amount_is_text", false, &with(&paid, "a", text("5")));
+    pending(
+        "token_is_not_utf8",
+        false,
+        &with(&paid, "t", raw(b"\xc3\x28")),
+    );
+    pending("mint_is_a_number", false, &with(&paid, "m", Value::Int(1)));
+    pending(
+        "reclaim_id_is_a_number",
+        false,
+        &with(&paid, "r", Value::Int(1)),
+    );
+    case("pending_is_a_list", false, &with(&base, "p", texts(&[])));
+
+    let mut intended = |name: &str, expected: bool, fields: &[(&str, Value)]| {
+        case(
+            &format!("intent_{name}"),
+            expected,
+            &with(&base, "i", map(fields)),
+        );
+    };
+    intended("saved", true, &intent);
+    intended("without_mints", true, &with(&intent, "m", texts(&[])));
+    for key in ["a", "i", "m"] {
+        intended(&format!("without_{key}"), false, &without(&intent, key));
+    }
+    intended("short_id", false, &with(&intent, "i", raw(&[1; 15])));
+    intended(
+        "negative_amount",
+        false,
+        &with(&intent, "a", Value::Int(-5)),
+    );
+    intended("mints_is_text", false, &with(&intent, "m", text(MINT)));
+    intended(
+        "mint_is_a_number",
+        false,
+        &with(&intent, "m", Value::List(vec![Value::Int(1)])),
+    );
+    case(
+        "intent_is_a_number",
+        false,
+        &with(&base, "i", Value::Int(1)),
+    );
+
+    let wire = dict(&base);
+    vectors.accept(
+        "account_trailing_byte",
+        "account",
+        false,
+        &[lit(&wire), lit(b"x")],
+    );
+    vectors.accept_bytes(
+        "account_truncated",
+        "account",
+        false,
+        &wire[..wire.len() - 1],
+    );
+    vectors.accept_bytes("account_empty_dictionary", "account", false, b"de");
+    vectors.accept_bytes("account_is_a_number", "account", false, b"i1e");
+    vectors.accept_bytes("account_is_empty", "account", false, b"");
+
+    // A saved account is not a message: the 64 KiB header bound does not
+    // apply to it, however long a token is.
+    let length = 70_000;
+    let long = dict(&with(
+        &base,
+        "p",
+        map(&with(&paid, "t", raw(&vec![b'T'; length]))),
+    ));
+    let marker = format!("1:t{length}:");
+    let at = long
+        .windows(marker.len())
+        .position(|window| window == marker.as_bytes())
+        .expect("the token")
+        + marker.len();
+    vectors.accept(
+        "account_larger_than_a_message_header",
+        "account",
+        true,
+        &[
+            lit(&long[..at]),
+            Part::Repeat(b'T', length),
+            lit(&long[at + length..]),
+        ],
+    );
+}
+
 fn prices() -> Json {
     let cases: [(u64, u64, u64, u64); 12] = [
         (1, 1024, 5, 0),
@@ -1138,6 +1509,7 @@ fn generate() -> Json {
     bencode_acceptance(&mut vectors);
     request_acceptance(&mut vectors);
     reply_acceptance(&mut vectors);
+    accounts(&mut vectors);
     json!({
         "description": "Paid retrieval wire vectors. Generated by rust/crates/hashtree-paid-retrieval/tests/vectors.rs; do not edit by hand.",
         "protocol": PROTOCOL,
@@ -1147,6 +1519,7 @@ fn generate() -> Json {
         "max_message_bytes": MAX_MESSAGE_BYTES,
         "blob_max_bytes": BLOB_MAX_BYTES,
         "messages": vectors.messages,
+        "accounts": vectors.accounts,
         "acceptance": vectors.acceptance,
         "prices": prices(),
     })

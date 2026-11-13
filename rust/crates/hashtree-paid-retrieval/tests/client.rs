@@ -2,14 +2,15 @@
 
 mod common;
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use common::{DirectTransport, FakeReceiver, FakeWallet, Seller, MINT, TARIFF};
-use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Hash};
+use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Hash, StoreError};
 use hashtree_paid_retrieval::{
-    ClientPolicy, LimitedWallet, PaidBlobRoute, Reply, Request, RetrievalWallet, SpendingLimit,
-    Tariff,
+    ClientPolicy, ContentHash, LimitedWallet, PaidBlobRoute, PaidBlobTransport, Reply, Request,
+    RetrievalWallet, SpendingLimit, Tariff,
 };
 
 const TWO_MIB: usize = 2 * 1024 * 1024;
@@ -429,4 +430,73 @@ async fn concurrent_reads_share_one_top_up() {
     let account = route.account_state();
     assert_eq!((account.charged_msat, account.balance_msat), (4_000, 1_000));
     assert_eq!((account.loss_msat(), account.blocked), (0, None));
+}
+
+/// Delivers the reply to the first get of `hash` only when released, as a
+/// carrier that runs exchanges concurrently may.
+struct LateReply {
+    inner: Arc<DirectTransport>,
+    hash: Hash,
+    chosen: AtomicBool,
+    waiting: AtomicBool,
+    release: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl PaidBlobTransport for LateReply {
+    async fn exchange(&self, request: Vec<u8>) -> Result<Vec<u8>, StoreError> {
+        let late = matches!(
+            Request::decode(&request),
+            Ok(Request::Get { hash, .. }) if hash == ContentHash::Sha256(self.hash)
+        ) && !self.chosen.swap(true, Ordering::SeqCst);
+        let reply = self.inner.exchange(request).await?;
+        if late {
+            self.waiting.store(true, Ordering::SeqCst);
+            self.release.notified().await;
+        }
+        Ok(reply)
+    }
+}
+
+#[tokio::test]
+async fn a_balance_reported_before_a_credited_payment_is_ignored() {
+    let seller = Seller::new();
+    let (first, _) = seller.add(1, 4_096).await;
+    let (second, second_data) = seller.add(2, 4_096).await;
+    let wallet = FakeWallet::funded(&seller.mint, 21);
+    let transport = Arc::new(LateReply {
+        inner: DirectTransport::new(&seller.provider),
+        hash: second,
+        chosen: AtomicBool::new(false),
+        waiting: AtomicBool::new(false),
+        release: tokio::sync::Notify::new(),
+    });
+    let route = PaidBlobRoute::new("seller", transport.clone(), wallet.clone(), policy());
+
+    let late = tokio::spawn({
+        let route = route.clone();
+        async move { read(&route, second).await }
+    });
+    while !transport.waiting.load(Ordering::SeqCst) {
+        tokio::task::yield_now().await;
+    }
+    assert!(matches!(read(&route, first).await, Ok(BlobReply::Data(_))));
+    let account = route.account_state();
+    assert_eq!(
+        (account.credited_msat, account.balance_msat),
+        (5_000, 4_000)
+    );
+
+    // The late quote says "balance 0", from before the top-up was credited.
+    transport.release.notify_one();
+    let late = late.await.unwrap();
+    assert!(
+        matches!(&late, Ok(BlobReply::Data(data)) if *data == second_data),
+        "the late read was not served: {:?}",
+        late.map(|reply| matches!(reply, BlobReply::Data(_)))
+    );
+    assert_eq!(wallet.payments(), 1, "no second top-up for a paid balance");
+    let account = route.account_state();
+    assert_eq!((account.balance_msat, account.loss_msat()), (3_000, 0));
+    assert_eq!(account.blocked, None);
 }
