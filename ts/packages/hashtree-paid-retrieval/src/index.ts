@@ -48,6 +48,7 @@ export {
 } from './account.js';
 export { decodeAccountState, encodeAccountState } from './accountCodec.js';
 export { PaidBuyer, type InFlight, type PaidBuyerOptions } from './buyer.js';
+export { HttpPaidBlobTransport, PAID_BLOB_HTTP_PATH } from './httpTransport.js';
 export { PaidBlobRoute, type PaidBlobRouteOptions } from './paidBlobRoute.js';
 export type { PaidBlobTransport } from './transport.js';
 export {

@@ -50,6 +50,28 @@ A read the client declines to pay for is `no-result`; `paid.stats()` says why
 (price, limit, mint, blocked provider). A read that fails or times out throws,
 so a slow provider is never mistaken for a miss.
 
+## Over HTTP
+
+`HttpPaidBlobTransport` carries the exchange to a gateway with `fetch`:
+`POST <gateway>/paid-blob`, one encoded request as the body, one encoded
+reply in a `200` response.
+
+```typescript
+import { HttpPaidBlobTransport, PaidBlobRoute } from '@hashtree/paid-retrieval';
+
+const paid = new PaidBlobRoute({
+  provider: 'example-gateway',
+  transport: new HttpPaidBlobTransport('https://gateway.example'),
+  wallet,
+});
+```
+
+Any status but `200`, a network error, an abort or a reply above the
+protocol's size limit fails the read; none of them is taken for a missing
+blob. The transport does not retry. A second argument replaces the global
+`fetch`. The request names the account, a bearer secret, so it is sent
+without cookies or a referrer and does not follow redirects.
+
 ## What the application supplies
 
 ```typescript
@@ -91,7 +113,8 @@ interface PaidBlobTransport {
   `SpendStore`, the limit saves what was spent before each payment, and a
   failed save refuses the payment.
 - **Account store.** Where the account is kept; see below.
-- **Transport.** Anything that carries one request and one reply.
+- **Transport.** Anything that carries one request and one reply;
+  `HttpPaidBlobTransport` is one.
 - **Policy** (optional): `maxTariff`, `mints`, `topupSat`, `maxPrepaidMsat`,
   `maxLossMsat`, `maxTokenFeeSat`, `maxRedeemFeeMsat`, `requestTimeoutMs`. The
   defaults are placeholders.

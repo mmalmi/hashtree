@@ -258,7 +258,9 @@ carrier) pulls in no FIPS stack, and no further crate has to be versioned.
 
 ## Over HTTP
 
-Not built. Two faces of the same `PaidSeller`, for two kinds of client.
+The gateway side is not built; the TypeScript buyer has its carrier
+(`HttpPaidBlobTransport`). Two faces of the same `PaidSeller`, for two kinds of
+client.
 
 ### The exchange over one endpoint
 
@@ -395,8 +397,9 @@ Prices and balances stay in millisats. `LedgerStore` is two calls (`load`,
 `@hashtree/paid-retrieval` (`ts/packages/hashtree-paid-retrieval`) is the buying
 side for browsers and workers: the same messages, `PaidBuyer`, `PaidBlobRoute`,
 wallet interface, `SpendingLimit` and `LimitedWallet`, with a transport
-interface that carries one request and one reply. It has no selling side and is
-not in the worker's default route set.
+interface that carries one request and one reply and `HttpPaidBlobTransport`
+as its first carrier. It has no selling side and is not in the worker's
+default route set.
 
 It protects the buyer's money in the same way: fee and shortfall accounting,
 the payment intent and token saved before they are used, `recover` after a
@@ -512,8 +515,9 @@ both would close gaps listed below:
   to settle by hand.
 - Discovery of paid providers beyond the same host, and selection among
   several of them.
-- The HTTP endpoint and the HTTP 402 face ([Over HTTP](#over-http)), and with
-  them the TypeScript buyer's first carrier.
+- The gateway's HTTP endpoint and the HTTP 402 face ([Over HTTP](#over-http)).
+  The TypeScript buyer's side of the endpoint exists and has only been run
+  against a test seller.
 - Wiring into the worker's routes, the BitTorrent
   glue, refunds of unused balance, Spilman channel payments, and the Iris
   Drive wallet screen.
