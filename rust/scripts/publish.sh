@@ -75,6 +75,7 @@ STAGE_3_CRATES=(
 STAGE_4_CRATES=(
     "hashtree-nostr"
     "hashtree-fips-transport"
+    "hashtree-paid-retrieval"
 )
 
 STAGE_5_CRATES=(

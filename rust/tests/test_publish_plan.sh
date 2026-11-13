@@ -55,6 +55,7 @@ fi
 
 printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-fuse' >/dev/null
 printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-collection' >/dev/null
+printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-paid-retrieval' >/dev/null
 printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-cashu-cli' >/dev/null
 printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-lmdb-master-sys' >/dev/null
 printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'hashtree-heed' >/dev/null

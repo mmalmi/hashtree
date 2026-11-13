@@ -9,8 +9,6 @@ authors.workspace = true
 description = "Pay-to-retrieve blob route, provider and wallet interface for Hashtree"
 keywords = ["cashu", "hashtree", "payments", "storage"]
 readme = "README.md"
-# Unreleased: add to scripts/publish.sh when the protocol is accepted.
-publish = false
 
 [features]
 default = []
