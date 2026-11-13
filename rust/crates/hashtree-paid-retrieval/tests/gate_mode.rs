@@ -126,3 +126,55 @@ async fn a_blob_provider_has_nothing_for_a_sha1_name() {
         .await;
     assert_eq!(reply, Reply::NoResult { hash: piece });
 }
+
+#[tokio::test]
+async fn a_reply_older_than_the_latest_credit_does_not_look_like_a_loss() {
+    let mint = Arc::new(FakeMint::default());
+    let seller = PaidSeller::new(
+        FakeReceiver::new(&mint),
+        ProviderConfig::new(TARIFF, vec![MINT.to_owned()]),
+    );
+    let wallet = FakeWallet::funded(&mint, 21);
+    let policy = ClientPolicy {
+        max_tariff: TARIFF,
+        topup_sat: 10,
+        max_loss_msat: 1_000,
+        ..ClientPolicy::default()
+    };
+    let buyer = PaidBuyer::new(
+        "seeder",
+        Arc::new(PaymentChannel(seller.clone())),
+        wallet.clone(),
+        policy,
+        AccountState::new(),
+    );
+    let account = buyer.account_id();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let authorised = TARIFF.price_msat(PIECE_BYTES);
+    let quote_for = |index: u8| {
+        let piece = ContentHash::Sha1([index; 20]);
+        match seller.charge(&account, None, piece, PIECE_BYTES, authorised) {
+            Sale::Quote(quote) => quote,
+            other => panic!("expected a quote, got {other:?}"),
+        }
+    };
+
+    // Two requests are quoted at a zero balance; the first one's top-up is
+    // acknowledged before the second quote is handled.
+    let first = buyer.begin(authorised);
+    let second = buyer.begin(authorised);
+    let (first_quote, late_quote) = (quote_for(1), quote_for(2));
+    assert!(buyer.quoted(&first, &first_quote));
+    drop(first);
+    assert!(buyer.fund(Some(first_quote), deadline).await.unwrap());
+    assert_eq!(buyer.account_state().balance_msat, 10_000);
+
+    assert!(buyer.quoted(&second, &late_quote));
+    drop(second);
+    let state = buyer.account_state();
+    assert_eq!(state.balance_msat, 10_000, "the stale balance is ignored");
+    assert_eq!(state.blocked, None);
+    // The balance already covers the late quote: no second top-up.
+    assert!(buyer.fund(Some(late_quote), deadline).await.unwrap());
+    assert_eq!(wallet.payments(), 1);
+}

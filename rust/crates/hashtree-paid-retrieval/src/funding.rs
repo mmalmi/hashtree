@@ -162,7 +162,8 @@ impl Inner {
                 state.account.pending = None;
                 state.account.credited_msat =
                     state.account.credited_msat.saturating_add(credited_msat);
-                self.note_balance(&mut state, balance_msat, 0);
+                state.credits += 1;
+                self.note_balance(&mut state, balance_msat, None);
                 Ok(())
             }
             Reply::Error {

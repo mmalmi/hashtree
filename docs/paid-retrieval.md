@@ -290,10 +290,10 @@ generated from the Rust encoder by `tests/vectors.rs` and checked by both
 languages: every message both ways, what each decoder accepts and rejects at
 every limit, and prices.
 
-The TypeScript buyer ignores the balance in a reply to a request that was sent
-before the latest acknowledged payment, because such a reply may predate the
-credit. The Rust buyer records it; on a carrier that runs exchanges
-concurrently a late quote can then look like a loss or cause a second top-up.
+Both buyers ignore the balance in a reply to a request that was sent before
+the latest acknowledged payment, because such a reply may predate the credit.
+Otherwise, on a carrier that runs exchanges concurrently, a late quote would
+look like a loss or cause a second top-up.
 
 ## Reusable parts
 

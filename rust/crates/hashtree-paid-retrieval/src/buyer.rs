@@ -34,6 +34,8 @@ pub(crate) struct State {
     /// Units whose charge is already in `charged_msat`, newest last.
     pub counted: VecDeque<ContentHash>,
     pub in_flight: usize,
+    /// Payments the provider has acknowledged, to tell stale replies apart.
+    pub credits: u64,
     /// What the requests in flight authorised the provider to charge.
     pub in_flight_msat: u64,
     pub stats: PaidRouteStats,
@@ -72,10 +74,22 @@ impl Inner {
     }
 
     /// Record the provider's reported balance and stop paying a provider that
-    /// took more than verified deliveries explain. `own` is the number of
-    /// requests in flight that belong to the caller; while others are in
-    /// flight the reported balance may already include their charges.
-    pub(crate) fn note_balance(&self, state: &mut State, balance_msat: i64, own: usize) {
+    /// took more than verified deliveries explain. `request` is the caller's
+    /// own request in flight, if the balance came in a reply to one; while
+    /// other requests are in flight the reported balance may already include
+    /// their charges.
+    pub(crate) fn note_balance(
+        &self,
+        state: &mut State,
+        balance_msat: i64,
+        request: Option<&InFlight>,
+    ) {
+        // A reply to a request sent before the latest acknowledged payment may
+        // predate that credit; its balance says nothing about the account now.
+        if request.is_some_and(|request| request.credits != state.credits) {
+            return;
+        }
+        let own = usize::from(request.is_some());
         state.account.balance_msat = balance_msat;
         if state.in_flight > own || state.account.blocked.is_some() {
             return;
@@ -93,6 +107,7 @@ impl Inner {
 pub struct InFlight {
     inner: Arc<Inner>,
     authorised_msat: u64,
+    credits: u64,
 }
 
 impl Drop for InFlight {
@@ -130,6 +145,7 @@ impl PaidBuyer {
                     terms: None,
                     counted: VecDeque::new(),
                     in_flight: 0,
+                    credits: 0,
                     in_flight_msat: 0,
                     stats: PaidRouteStats::default(),
                 }),
@@ -189,6 +205,7 @@ impl PaidBuyer {
         InFlight {
             inner: Arc::clone(&self.inner),
             authorised_msat,
+            credits: state.credits,
         }
     }
 
@@ -203,9 +220,10 @@ impl PaidBuyer {
 
     /// Take note of a quote. Returns `false` when its price is above
     /// `max_tariff`, in which case it must not be funded.
-    pub fn quoted(&self, _request: &InFlight, quote: &Quote) -> bool {
+    pub fn quoted(&self, request: &InFlight, quote: &Quote) -> bool {
         let mut state = self.inner.state();
-        self.inner.note_balance(&mut state, quote.balance_msat, 1);
+        self.inner
+            .note_balance(&mut state, quote.balance_msat, Some(request));
         state.terms = Some(Terms {
             mints: quote.mints.clone(),
             methods: quote.methods.clone(),
@@ -247,16 +265,18 @@ impl PaidBuyer {
                 "provider charged {charged_msat} msat for a unit worth at most {fair_msat}"
             ));
         }
-        self.inner.note_balance(&mut state, balance_msat, 1);
+        self.inner
+            .note_balance(&mut state, balance_msat, Some(request));
     }
 
     /// Record a reply whose bytes did not match the hash. It is not a
     /// delivery: its charge stays unexplained and counts towards the loss
     /// that blocks this provider.
-    pub fn undelivered(&self, _request: &InFlight, balance_msat: i64) {
+    pub fn undelivered(&self, request: &InFlight, balance_msat: i64) {
         let mut state = self.inner.state();
         state.stats.invalid_blobs += 1;
-        self.inner.note_balance(&mut state, balance_msat, 1);
+        self.inner
+            .note_balance(&mut state, balance_msat, Some(request));
     }
 
     /// Make the account able to pay for `quote`; without one, resend an
