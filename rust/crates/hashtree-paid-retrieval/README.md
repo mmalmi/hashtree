@@ -2,7 +2,7 @@
 
 Pay-to-retrieve for Hashtree blobs: a provider that serves only against
 payment, the matching client route, and the wallet interface an application
-plugs in. Unreleased; the protocol and its open decisions are in
+plugs in. Not yet released; the protocol and its defaults are in
 [`docs/paid-retrieval.md`](../../../docs/paid-retrieval.md).
 
 The payment exchange is separate from the Hashtree glue, so another transport

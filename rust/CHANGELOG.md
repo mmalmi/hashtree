@@ -38,7 +38,7 @@
 
 ### Added
 
-- Add the unpublished `hashtree-paid-retrieval` crate: a provider that serves
+- Add the `hashtree-paid-retrieval` crate: a provider that serves
   blobs against prepaid Cashu balances, the matching opaque `BlobRoute`, and a
   wallet interface with a spending limit. The blob wire is unchanged. See
   `docs/paid-retrieval.md`.
@@ -86,7 +86,8 @@
   provider of `[paid_retrieval.client]` may be named by `url`, the base URL of
   its gateway, instead of `npub`. Off by default. A provider may name a key
   that tokens should be locked to (`lock`, unset by default).
-  `hashtree-cli` now depends on the unpublished `hashtree-paid-retrieval`.
+  `hashtree-cli` now depends on `hashtree-paid-retrieval`, which is published
+  with it.
 
 ## 0.4.6 - 2026-11-11
 

@@ -240,11 +240,16 @@ impl PaidBuyer {
     }
 
     /// Pay this provider again after a block, writing off the recorded loss.
-    pub fn clear_block(&self) {
-        let mut state = self.inner.state();
-        let loss_msat = state.account.loss_msat();
-        state.account.charged_msat = state.account.charged_msat.saturating_add(loss_msat);
-        state.account.blocked = None;
+    /// Saves the account when the buyer has a store; a failed save is
+    /// returned and the change stays in memory.
+    pub fn clear_block(&self) -> Result<(), StoreError> {
+        {
+            let mut state = self.inner.state();
+            let loss_msat = state.account.loss_msat();
+            state.account.charged_msat = state.account.charged_msat.saturating_add(loss_msat);
+            state.account.blocked = None;
+        }
+        self.inner.persist()
     }
 
     /// Get ready to request a unit: an unacknowledged token or a debt comes

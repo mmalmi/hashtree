@@ -98,7 +98,7 @@ pub fn clear_block(config: &Config, data_dir: &Path, provider: &str) -> Result<C
         settings.policy,
         account,
     );
-    route.clear_block();
+    route.clear_block().context("Failed to clear the block")?;
     store
         .save(&route.account_state())
         .map_err(anyhow::Error::msg)

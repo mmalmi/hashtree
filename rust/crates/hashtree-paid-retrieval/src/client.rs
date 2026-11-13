@@ -91,8 +91,8 @@ impl PaidBlobRoute {
     }
 
     /// Pay this provider again after a block, writing off the recorded loss.
-    pub fn clear_block(&self) {
-        self.buyer.clear_block();
+    pub fn clear_block(&self) -> Result<(), StoreError> {
+        self.buyer.clear_block()
     }
 
     async fn fetch(&self, hash: Hash, htl: u8, deadline: Instant) -> Result<BlobReply, StoreError> {

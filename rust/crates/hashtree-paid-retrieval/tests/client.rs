@@ -273,7 +273,7 @@ async fn a_provider_that_takes_payment_and_never_delivers_is_cut_off() {
     assert!(route.stats().declined_blocked >= 1);
 
     // The application may write the loss off and try again.
-    route.clear_block();
+    route.clear_block().unwrap();
     assert_eq!(route.account_state().loss_msat(), 0);
     assert_eq!(route.account_state().blocked, None);
 }
