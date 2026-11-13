@@ -18,6 +18,8 @@ default = []
 cashu = ["dep:cashu-service"]
 # The exchange as its own TCP/FIPS service, beside the free blob service of
 # hashtree-fips-transport.
+# The fake mint, wallet and receiver, for tests here and in applications.
+test-support = ["tokio/sync"]
 fips = ["dep:nvpn-fips-core", "dep:nvpn-fips-tcp", "dep:nvpn-fips-tcp-endpoint", "tokio/sync", "tokio/time"]
 
 [dependencies]
@@ -33,6 +35,8 @@ nvpn-fips-tcp = { version = "0.2.5", optional = true }
 nvpn-fips-tcp-endpoint = { version = "0.2.30", optional = true }
 
 [dev-dependencies]
+# The crate's own tests use its fake mint.
+hashtree-paid-retrieval = { path = ".", features = ["test-support"] }
 hashtree-network.workspace = true
 tokio = { version = "1", features = ["full"] }
 anyhow.workspace = true

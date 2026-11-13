@@ -4091,6 +4091,7 @@ dependencies = [
  "cashu-service",
  "hashtree-core",
  "hashtree-network",
+ "hashtree-paid-retrieval",
  "nvpn-fips-core",
  "nvpn-fips-tcp",
  "nvpn-fips-tcp-endpoint",

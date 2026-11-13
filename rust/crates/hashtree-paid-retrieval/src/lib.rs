@@ -7,8 +7,9 @@
 //! and one reply, and the messages fit a BitTorrent BEP 10 extension message.
 //!
 //! The Hashtree glue is thin: [`PaidBlobProvider`] sells blobs from a source
-//! `BlobRoute`, and [`PaidBlobRoute`] is the matching opaque `BlobRoute`. The
-//! published blob wire and `BlobRouter` are unchanged.
+//! `BlobRoute`, and [`PaidBlobRoute`] is the matching opaque `BlobRoute`, to
+//! be registered in a `BlobRouter`'s paid tier. The published blob wire is
+//! unchanged.
 //!
 //! Design, failure handling and open decisions: `docs/paid-retrieval.md`.
 
@@ -30,6 +31,8 @@ mod price;
 mod provider;
 mod seller;
 mod store;
+#[cfg(feature = "test-support")]
+pub mod test_support;
 mod transport;
 mod wallet;
 
