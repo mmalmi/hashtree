@@ -29,6 +29,7 @@ fn selling(side: &SellingSide) -> Value {
         "min_topup_sat": config.min_topup_sat,
         "grace_msat": config.grace_msat,
         "paying_only": side.paying_only,
+        "http": side.http.is_some(),
         "accounts": accounts.len(),
         "held_msat": held_msat,
     })
@@ -49,7 +50,7 @@ fn provider(entry: &ClientRoute) -> Value {
     let stats = entry.route.stats();
     json!({
         "name": entry.name,
-        "npub": entry.npub,
+        "address": entry.place.label(),
         "balance_msat": account.balance_msat,
         // Counted since the daemon started.
         "paid_sat": stats.paid_sat,
@@ -82,8 +83,13 @@ pub fn format_paid_status(paid: &Value) -> Vec<String> {
             number(tariff, "msat"),
             number(tariff, "per_bytes"),
             number(tariff, "min_msat"),
-            match provider["paying_only"].as_bool() {
-                Some(true) => ", paying only",
+            match (
+                provider["paying_only"].as_bool(),
+                provider["http"].as_bool()
+            ) {
+                (Some(true), Some(true)) => ", paying only, also over HTTP",
+                (Some(true), _) => ", paying only",
+                (_, Some(true)) => ", also over HTTP",
                 _ => "",
             }
         ));

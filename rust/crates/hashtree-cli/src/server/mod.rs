@@ -7,6 +7,7 @@ mod ingest_filter;
 mod local_access;
 mod mime;
 mod nostr_query;
+mod paid_blob;
 mod peer_status;
 #[cfg(all(test, feature = "lmdb"))]
 mod pin_tree_tests;
@@ -552,6 +553,11 @@ impl HashtreeServer {
             .route(
                 "/blob/batch",
                 post(handlers::download_blob_batch).options(blossom::cors_preflight),
+            )
+            // The paid exchange, when the daemon sells over HTTP.
+            .route(
+                "/paid-blob",
+                post(paid_blob::paid_blob_exchange).options(blossom::cors_preflight),
             )
             .route(
                 "/list/:pubkey",

@@ -41,7 +41,7 @@ impl PaidRetrievalConfig {
     /// Identities of the providers the client buys from.
     pub fn client_provider_npubs(&self) -> impl Iterator<Item = &str> {
         let providers = self.client.iter().flat_map(|client| &client.providers);
-        providers.map(|provider| provider.npub.as_str())
+        providers.filter_map(|provider| provider.npub.as_deref())
     }
 }
 
@@ -78,6 +78,10 @@ pub struct PaidProviderConfig {
     /// local store reaches them only through the paid one.
     #[serde(default)]
     pub paying_only: bool,
+    /// Also sell through the HTTP listener, at `POST /paid-blob`. A buyer
+    /// there is not authenticated and gets no grace.
+    #[serde(default)]
+    pub http: bool,
 }
 
 /// A Cashu token is whole sats, so one sat is the smallest top-up there is.
@@ -125,8 +129,12 @@ pub struct PaidClientConfig {
 pub struct PaidProviderPeerConfig {
     /// The operator's name for it, shown in the status and to the wallet.
     pub name: String,
-    /// Its FIPS identity.
-    pub npub: String,
+    /// Its FIPS identity. Set this or `url`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub npub: Option<String>,
+    /// The base URL of its HTTP gateway. Set this or `npub`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 /// A validated `[paid_retrieval.provider]`.
@@ -135,14 +143,37 @@ pub struct ProviderSettings {
     pub config: ProviderConfig,
     pub ledger_dir: PathBuf,
     pub paying_only: bool,
+    pub http: bool,
+}
+
+/// Where a provider of the client is reached.
+#[derive(Debug, Clone)]
+pub enum ProviderPlace {
+    Fips {
+        npub: String,
+        identity: PeerIdentity,
+    },
+    Http {
+        url: reqwest::Url,
+    },
+}
+
+impl ProviderPlace {
+    /// What the status shows and what names the saved account: the npub, or
+    /// the gateway's endpoint URL.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Fips { npub, .. } => npub.clone(),
+            Self::Http { url } => url.to_string(),
+        }
+    }
 }
 
 /// One validated provider of the client.
 #[derive(Debug, Clone)]
 pub struct ProviderPeer {
     pub name: String,
-    pub npub: String,
-    pub identity: PeerIdentity,
+    pub place: ProviderPlace,
 }
 
 /// A validated `[paid_retrieval.client]`.
@@ -270,6 +301,7 @@ fn provider_settings(provider: &PaidProviderConfig, state_dir: &Path) -> Result<
         config,
         ledger_dir,
         paying_only: provider.paying_only,
+        http: provider.http,
     })
 }
 
@@ -301,25 +333,33 @@ fn client_settings(client: &PaidClientConfig, state_dir: PathBuf) -> Result<Clie
         bail!("{section}.topup_sat is more than max_prepaid_msat allows a provider to hold");
     }
     let mut names = HashSet::new();
-    let mut identities = HashSet::new();
+    let mut places = HashSet::new();
     let mut providers = Vec::with_capacity(client.providers.len());
     for provider in &client.providers {
         let name = provider.name.trim().to_string();
-        let npub = provider.npub.trim().to_string();
         if name.is_empty() {
             bail!("{section}.providers has an entry without a name");
         }
-        let Ok(identity) = PeerIdentity::from_npub(&npub) else {
-            bail!("{section}.providers: {name} has no valid npub");
+        let npub = provider.npub.as_deref().map(str::trim);
+        let url = provider.url.as_deref().map(str::trim);
+        let place = match (npub, url) {
+            (Some(npub), None) => {
+                let Ok(identity) = PeerIdentity::from_npub(npub) else {
+                    bail!("{section}.providers: {name} has no valid npub");
+                };
+                let npub = npub.to_string();
+                ProviderPlace::Fips { npub, identity }
+            }
+            (None, Some(url)) => match super::http::paid_blob_endpoint(url) {
+                Ok(url) => ProviderPlace::Http { url },
+                Err(error) => bail!("{section}.providers: {name}: {error}"),
+            },
+            _ => bail!("{section}.providers: {name} needs either npub or url"),
         };
-        if !names.insert(name.clone()) || !identities.insert(npub.clone()) {
-            bail!("{section}.providers lists {name} or its npub twice");
+        if !names.insert(name.clone()) || !places.insert(place.label()) {
+            bail!("{section}.providers lists {name} or its address twice");
         }
-        providers.push(ProviderPeer {
-            name,
-            npub,
-            identity,
-        });
+        providers.push(ProviderPeer { name, place });
     }
     Ok(ClientSettings {
         policy,

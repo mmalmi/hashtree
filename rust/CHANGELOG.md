@@ -65,6 +65,11 @@
   for reads through a loopback HTTP listener unless `pay_for_remote_reads` is
   set, and never for a peer's request. `htree status` shows balances, sats
   paid, declined reads, unresolved tokens, blocks and the spending limit.
+- Paid retrieval over HTTP. With `http = true` in `[paid_retrieval.provider]`
+  the daemon serves the exchange at `POST /paid-blob` (one encoded request,
+  at most 64 KiB, answered by `200` with one encoded reply, `no-store`), and a
+  provider of `[paid_retrieval.client]` may be named by `url`, the base URL of
+  its gateway, instead of `npub`. Off by default.
   `hashtree-cli` now depends on the unpublished `hashtree-paid-retrieval`.
 
 ## 0.4.6 - 2026-11-11

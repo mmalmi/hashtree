@@ -101,7 +101,7 @@ tariff = { msat = 1, per_bytes = 1024, min_msat = 100 }"#,
 fn the_documented_example_is_a_complete_configuration() {
     let mut config = documented_example();
     let peer = npub();
-    config.client.as_mut().unwrap().providers[0].npub = peer.clone();
+    config.client.as_mut().unwrap().providers[0].npub = Some(peer.clone());
 
     let settings = settings(&config).unwrap().unwrap();
 
@@ -113,6 +113,7 @@ fn the_documented_example_is_a_complete_configuration() {
     assert_eq!(provider.config.min_topup_sat, 1);
     assert_eq!(provider.config.grace_msat, 0);
     assert!(!provider.paying_only);
+    assert!(!provider.http);
     assert_eq!(
         provider.ledger_dir,
         PathBuf::from("/data")
@@ -129,9 +130,49 @@ fn the_documented_example_is_a_complete_configuration() {
     assert_eq!(client.policy.max_token_fee_sat, 2);
     assert_eq!(client.policy.max_redeem_fee_msat, 2_000);
     assert!(!client.pay_for_remote_reads);
-    assert_eq!(client.providers.len(), 1);
+    assert_eq!(client.providers.len(), 2);
     assert_eq!(client.providers[0].name, "archive");
-    assert_eq!(client.providers[0].npub, peer);
+    assert_eq!(client.providers[0].place.label(), peer);
+    assert_eq!(client.providers[1].name, "gateway");
+    assert_eq!(
+        client.providers[1].place.label(),
+        "https://gw.example/paid-blob"
+    );
+}
+
+#[test]
+fn a_provider_is_named_by_its_npub_or_by_its_gateway() {
+    let mut config = documented_example();
+    let client = config.client.as_mut().unwrap();
+    client.providers[0].npub = None;
+    client.providers[0].url = Some("http://127.0.0.1:8080/".into());
+    let parsed = settings(&config).unwrap().unwrap();
+    let provider = &parsed.client.unwrap().providers[0];
+    assert!(matches!(provider.place, ProviderPlace::Http { .. }));
+    assert_eq!(provider.place.label(), "http://127.0.0.1:8080/paid-blob");
+    assert_eq!(config.client_provider_npubs().count(), 0);
+
+    let client = config.client.as_mut().unwrap();
+    client.providers[0].npub = Some(npub());
+    let error = settings(&config).unwrap_err().to_string();
+    assert!(
+        error.contains("archive needs either npub or url"),
+        "{error}"
+    );
+
+    let client = config.client.as_mut().unwrap();
+    client.providers[0].npub = None;
+    client.providers[0].url = None;
+    let error = settings(&config).unwrap_err().to_string();
+    assert!(
+        error.contains("archive needs either npub or url"),
+        "{error}"
+    );
+
+    let client = config.client.as_mut().unwrap();
+    client.providers[0].url = Some("https://user:secret@gw.example".into());
+    let error = settings(&config).unwrap_err().to_string();
+    assert!(error.contains("user name or password"), "{error}");
 }
 
 #[test]
@@ -199,12 +240,12 @@ fn a_client_must_name_every_cap_itself() {
 
     let mut config = documented_example();
     let client = config.client.as_mut().unwrap();
-    client.providers[0].npub = "not an identity".into();
+    client.providers[0].npub = Some("not an identity".into());
     let error = settings(&config).unwrap_err().to_string();
     assert!(error.contains("archive has no valid npub"), "{error}");
 
     let client = config.client.as_mut().unwrap();
-    client.providers[0].npub = peer;
+    client.providers[0].npub = Some(peer);
     client.providers.push(client.providers[0].clone());
     let error = settings(&config).unwrap_err().to_string();
     assert!(error.contains("twice"), "{error}");
@@ -231,7 +272,7 @@ fn providers_the_client_buys_from_become_fips_peers() {
         ..Config::default()
     };
     let peer = npub();
-    config.paid_retrieval.client.as_mut().unwrap().providers[0].npub = peer.clone();
+    config.paid_retrieval.client.as_mut().unwrap().providers[0].npub = Some(peer.clone());
 
     let peers = daemon_fips_peer_configs(&config, vec![peer.clone()]);
 
@@ -521,4 +562,202 @@ npub = "{}""#,
     selling.shutdown().await;
     client.fips.shutdown().await;
     provider.fips.shutdown().await;
+}
+
+/// Serve the daemon's HTTP routes for `store` on a loopback port.
+async fn serve_http(
+    store: Arc<HashtreeStore>,
+    paid: Option<Arc<DaemonPaidRetrieval>>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let mut server = crate::server::HashtreeServer::new(store, address.clone());
+    if let Some(paid) = paid {
+        server = server.with_paid_retrieval(paid);
+    }
+    let task = tokio::spawn(async move {
+        let _ = server.run_with_listener(listener).await;
+    });
+    (format!("http://{address}"), task)
+}
+
+fn selling_config(http: bool) -> String {
+    format!(
+        r#"[provider]
+mints = ["{MINT}"]
+http = {http}
+tariff = {{ msat = 1, per_bytes = 1024, min_msat = 1000 }}"#
+    )
+}
+
+#[tokio::test]
+async fn a_daemon_buys_blobs_through_a_gateway_over_http() {
+    let mint = Arc::new(FakeMint::default());
+    // Each daemon has a FIPS rendezvous of its own: nothing reaches the
+    // other side but HTTP.
+    let provider = TestDaemon::start(rendezvous_addr(), "gateway", &selling_config(true)).await;
+    let first = vec![1u8; 2048];
+    let second = vec![2u8; 2048];
+    let provider_store = provider.store.store_arc();
+    for data in [&first, &second] {
+        provider_store
+            .put(sha256(data), data.clone())
+            .await
+            .unwrap();
+    }
+    let receiver = FakeReceiver::new(&mint);
+    let selling = provider
+        .start_paid(FakeWallet::funded(&mint, 0), receiver.clone())
+        .await;
+    let (gateway, server) = serve_http(provider.store.clone(), Some(selling.clone())).await;
+
+    let client = TestDaemon::start(
+        rendezvous_addr(),
+        "http-buyer",
+        &format!(
+            r#"[client]
+spending_limit_sat = 50
+mints = ["{MINT}"]
+topup_sat = 5
+max_prepaid_msat = 20000
+max_loss_msat = 5000
+max_token_fee_sat = 0
+max_redeem_fee_msat = 0
+max_tariff = {{ msat = 1, per_bytes = 1024, min_msat = 1000 }}
+
+[[client.providers]]
+name = "gateway"
+url = "{gateway}""#
+        ),
+    )
+    .await;
+    let wallet = FakeWallet::funded(&mint, 100);
+    let buying = client
+        .start_paid(wallet.clone(), FakeReceiver::new(&mint))
+        .await;
+
+    // The first blob needs a top-up: one token of 5 sat, redeemed by the
+    // gateway, then 1 sat charged.
+    let bought = client.buy(sha256(&first)).await;
+    assert_eq!(bought, BlobReply::Data(first.clone()));
+    assert_eq!(wallet.payments(), 1);
+    assert_eq!(receiver.received(), 5);
+
+    // The second is paid from the balance: no new token.
+    let bought = client.buy(sha256(&second)).await;
+    assert_eq!(bought, BlobReply::Data(second.clone()));
+    assert_eq!(wallet.payments(), 1);
+    assert_eq!(wallet.balance(), 95);
+
+    let status = buying.status();
+    let entry = &status["client"]["providers"][0];
+    assert_eq!(entry["name"], "gateway");
+    assert_eq!(entry["address"], format!("{gateway}/paid-blob"));
+    assert_eq!(entry["balance_msat"], 3000);
+    assert_eq!(entry["blobs"], 2);
+    let sold = selling.status();
+    assert_eq!(sold["provider"]["http"], true);
+    assert_eq!(sold["provider"]["accounts"], 1);
+    assert_eq!(sold["provider"]["held_msat"], 3000);
+
+    // The account is kept under a name derived from the gateway.
+    let accounts = client.data_dir().join(PAID_RETRIEVAL_DIR).join("accounts");
+    let saved: Vec<_> = std::fs::read_dir(&accounts)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(saved.len(), 1);
+    assert!(saved[0].starts_with("http-") && saved[0].ends_with(".account"));
+
+    server.abort();
+    buying.shutdown().await;
+    selling.shutdown().await;
+    client.fips.shutdown().await;
+    provider.fips.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_gateway_answers_every_protocol_outcome_with_200_and_nothing_else() {
+    use hashtree_paid_retrieval::{Reply, Request};
+
+    let mint = Arc::new(FakeMint::default());
+    let provider = TestDaemon::start(rendezvous_addr(), "endpoint", &selling_config(true)).await;
+    let stored = vec![3u8; 2048];
+    let stored_hash = sha256(&stored);
+    let provider_store = provider.store.store_arc();
+    provider_store.put(stored_hash, stored).await.unwrap();
+    let selling = provider
+        .start_paid(FakeWallet::funded(&mint, 0), FakeReceiver::new(&mint))
+        .await;
+    let (gateway, server) = serve_http(provider.store.clone(), Some(selling.clone())).await;
+    let endpoint = format!("{gateway}/paid-blob");
+    let http = reqwest::Client::new();
+    let exchange = |body: Vec<u8>| http.post(&endpoint).body(body).send();
+
+    // Not a request at all: still a 200, holding an `err` reply.
+    let response = exchange(b"not a request".to_vec()).await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let headers = response.headers().clone();
+    assert_eq!(headers["cache-control"], "no-store");
+    assert_eq!(headers["access-control-allow-origin"], "*");
+    assert_eq!(headers["content-type"], "application/octet-stream");
+    let reply = Reply::decode(&response.bytes().await.unwrap()).unwrap();
+    assert!(matches!(reply, Reply::Error { .. }), "{reply:?}");
+
+    // A blob the gateway does not have, and one it sells.
+    let get = |hash: hashtree_core::Hash| Request::Get {
+        hash: hash.into(),
+        account: [7; 32],
+        max_msat: u64::MAX,
+    };
+    let response = exchange(get(sha256(b"absent")).encode()).await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::OK);
+    let reply = Reply::decode(&response.bytes().await.unwrap()).unwrap();
+    assert!(matches!(reply, Reply::NoResult { .. }), "{reply:?}");
+    let response = exchange(get(stored_hash).encode()).await.unwrap();
+    let reply = Reply::decode(&response.bytes().await.unwrap()).unwrap();
+    assert!(matches!(reply, Reply::Quote(_)), "{reply:?}");
+
+    // A body larger than any request is an HTTP error.
+    let response = exchange(vec![0; 64 * 1024 + 1]).await.unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(response.headers()["access-control-allow-origin"], "*");
+    assert!(response.headers().contains_key("x-reason"));
+
+    // A browser may ask first.
+    let preflight = http
+        .request(reqwest::Method::OPTIONS, &endpoint)
+        .header("Origin", "https://app.example")
+        .header("Access-Control-Request-Method", "POST")
+        .send()
+        .await
+        .unwrap();
+    assert!(preflight.status().is_success());
+    assert_eq!(preflight.headers()["access-control-allow-origin"], "*");
+
+    // A daemon that sells only over FIPS, and one that sells nothing.
+    let fips_only = TestDaemon::start(rendezvous_addr(), "fips-only", &selling_config(false)).await;
+    let fips_selling = fips_only
+        .start_paid(FakeWallet::funded(&mint, 0), FakeReceiver::new(&mint))
+        .await;
+    let (fips_gateway, fips_server) =
+        serve_http(fips_only.store.clone(), Some(fips_selling.clone())).await;
+    let (free_gateway, free_server) = serve_http(fips_only.store.clone(), None).await;
+    for base in [&fips_gateway, &free_gateway] {
+        let response = http
+            .post(format!("{base}/paid-blob"))
+            .body(get(stored_hash).encode())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::NOT_FOUND, "{base}");
+    }
+
+    for task in [server, fips_server, free_server] {
+        task.abort();
+    }
+    selling.shutdown().await;
+    fips_selling.shutdown().await;
+    provider.fips.shutdown().await;
+    fips_only.fips.shutdown().await;
 }

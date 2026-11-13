@@ -298,9 +298,12 @@ the key only reaches the wallet.
 
 ## Over HTTP
 
-The gateway side is not built; the TypeScript buyer has its carrier
-(`HttpPaidBlobTransport`). Two faces of the same `PaidSeller`, for two kinds of
-client.
+The endpoint below is built: the daemon serves it when its provider has
+`http = true` (see [Configuration](#configuration)), the daemon's buyer has an
+HTTP carrier (`HttpPaidTransport` in `hashtree-cli`, so that
+`hashtree-paid-retrieval` keeps no HTTP dependency), and the TypeScript buyer
+has its own (`HttpPaidBlobTransport`). The `402` face is not built. Two faces
+of the same `PaidSeller`, for two kinds of client.
 
 ### The exchange over one endpoint
 
@@ -312,6 +315,14 @@ like any other, so accounts, millisat prices, free repeats, payment ids and
 replay protection all apply unchanged, and it is what gives a browser a way to
 pay: the TypeScript buyer needs only `fetch`. Replies are not cacheable
 (`Cache-Control: no-store`); free blobs keep their cacheable `GET`.
+
+In the daemon a body above 64 KiB is `413` and an unreadable one `400`, both
+with `X-Reason`; a daemon that does not sell over HTTP answers `404`, and one
+whose sixteen exchange slots are taken `503` with `Retry-After`. An HTTP buyer
+is not authenticated, so it gets no grace, and its account id crosses the
+network in every request: use `https` to any gateway that is not on the same
+machine. Responses carry the same permissive CORS headers as the Blossom
+endpoints. The buyer follows no redirect and keeps no cookies.
 
 ### Standard clients: HTTP 402
 
@@ -563,6 +574,7 @@ mints = ["https://mint.example"]
 min_topup_sat = 1     # default 1, the smallest token there is
 grace_msat = 0        # default 0: prepay
 paying_only = false   # default false
+http = false          # default false: also sell at POST /paid-blob
 # ledger_dir = "..."  # default: paid-retrieval/ledger in the data directory
 
 [paid_retrieval.provider.tariff]
@@ -588,11 +600,15 @@ min_msat = 100
 
 [[paid_retrieval.client.providers]]
 name = "archive"
-npub = "npub1..."
+npub = "npub1..."            # reached over FIPS
+
+[[paid_retrieval.client.providers]]
+name = "gateway"
+url = "https://gw.example"   # reached at https://gw.example/paid-blob
 ```
 
-Both sides need the FIPS endpoint (`server.enable_fips`) and use the
-`htree-cashu` helper as their wallet. A change takes effect when the daemon is
+Both sides need the FIPS endpoint (`server.enable_fips`), also when they reach
+each other over HTTP only, and use the `htree-cashu` helper as their wallet. A change takes effect when the daemon is
 restarted.
 
 **Provider.** The daemon opens the ledger, sells from its local store only
@@ -600,12 +616,15 @@ restarted.
 refuses to start the paid service when `mints` is empty. With
 `paying_only = true` its free blob service answers every peer with no result,
 so a stored blob reaches peers only against payment; blobs served over HTTP
-are not affected. The provider's wallet only receives and needs no funds. The
+are not affected. With `http = true` it also sells through its HTTP listener
+([Over HTTP](#over-http)). The provider's wallet only receives and needs no funds. The
 ledger holds the account ids of its buyers, which are bearer secrets: its
 directory is made readable by the owner only.
 
-**Client.** Each provider is a FIPS identity and a name. The daemon adds it to
-its FIPS peers, keeps one account per provider in
+**Client.** Each provider has a name and either a FIPS identity (`npub`) or
+the base URL of its HTTP gateway (`url`, `http` or `https`, without user name,
+password or query). The daemon adds an `npub` to its FIPS peers, keeps one
+account per provider in
 `paid-retrieval/accounts/` and the spent total in `paid-retrieval/spent`,
 both in the data directory and readable by the owner only, and registers one
 route per provider in the paid tier. `spending_limit_sat` bounds everything
@@ -652,9 +671,9 @@ daemon. Tokens and account ids are never shown.
   to settle by hand.
 - Discovery of paid providers beyond the same host, and selection among
   several of them.
-- The gateway's HTTP endpoint and the HTTP 402 face ([Over HTTP](#over-http)).
-  The TypeScript buyer's side of the endpoint exists and has only been run
-  against a test seller.
+- The HTTP 402 face ([Over HTTP](#over-http)). It waits for the rework of the
+  exchange's messages and will be specified again as a mapping of them.
+- Discovery of HTTP gateways: each is named in the configuration.
 - Wiring into the worker's routes, the BitTorrent
   glue, refunds of unused balance, Spilman channel payments, and the Iris
   Drive wallet screen.

@@ -6,6 +6,7 @@
 //! up their own FIPS endpoint never open the ledger or pay anyone.
 
 mod config;
+mod http;
 mod spend_store;
 mod status;
 #[cfg(test)]
@@ -16,21 +17,24 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
+use tokio::sync::Semaphore;
+
 use anyhow::{bail, Context, Result};
 use cashu_service::CashuHelperClient;
 use hashtree_core::{BlobRoute, StoreBlobRoute};
 use hashtree_network::BlobRouteEntry;
 use hashtree_paid_retrieval::{
     CashuReceiver, CashuWallet, FileAccountStore, FileLedgerStore, FipsPaidBlobService,
-    FipsPaidConfig, LimitedWallet, PaidBlobProvider, PaidBlobRoute, PaymentReceiver,
-    RetrievalWallet, SpendingLimit,
+    FipsPaidConfig, LimitedWallet, PaidBlobProvider, PaidBlobRoute, PaidBlobTransport,
+    PaymentReceiver, RetrievalWallet, SpendingLimit,
 };
 
 pub use config::{
     ClientSettings, PaidClientConfig, PaidProviderConfig, PaidProviderPeerConfig,
-    PaidRetrievalConfig, PaidRetrievalSettings, PaidTariffConfig, ProviderPeer, ProviderSettings,
-    PAID_RETRIEVAL_DIR,
+    PaidRetrievalConfig, PaidRetrievalSettings, PaidTariffConfig, ProviderPeer, ProviderPlace,
+    ProviderSettings, PAID_RETRIEVAL_DIR,
 };
+pub use http::{paid_blob_endpoint, HttpPaidTransport, PAID_BLOB_HTTP_PATH};
 pub use spend_store::FileSpendStore;
 pub use status::format_paid_status;
 
@@ -44,14 +48,20 @@ const SAME_HOST_PROVIDER_PRIORITY: i16 = 100;
 /// One provider the daemon buys from.
 struct ClientRoute {
     name: String,
-    npub: String,
+    place: ProviderPlace,
     route: PaidBlobRoute,
 }
 
 struct SellingSide {
     provider: PaidBlobProvider,
     paying_only: bool,
+    /// Also sold at `POST /paid-blob`, at most this many exchanges at once.
+    http: Option<Arc<Semaphore>>,
 }
+
+/// Exchanges the HTTP endpoint runs at once, as many as the FIPS carrier
+/// seats connections. A redemption holds one for a mint round trip.
+const MAX_HTTP_EXCHANGES: usize = 16;
 
 struct BuyingSide {
     limit: Arc<SpendingLimit>,
@@ -67,7 +77,32 @@ pub struct DaemonPaidRetrieval {
     buying: Option<BuyingSide>,
 }
 
+/// What `POST /paid-blob` answers.
+pub enum HttpExchange {
+    /// The daemon does not sell over HTTP.
+    NotSold,
+    /// Every exchange slot is taken; try again shortly.
+    Busy,
+    /// One encoded reply, whatever its protocol outcome.
+    Reply(Vec<u8>),
+}
+
 impl DaemonPaidRetrieval {
+    /// Answer one encoded request that arrived over HTTP. The buyer there is
+    /// not authenticated, so it is nobody's peer and gets no grace.
+    pub async fn exchange_over_http(&self, request: &[u8]) -> HttpExchange {
+        let Some(selling) = &self.selling else {
+            return HttpExchange::NotSold;
+        };
+        let Some(slots) = &selling.http else {
+            return HttpExchange::NotSold;
+        };
+        let Ok(_slot) = slots.try_acquire() else {
+            return HttpExchange::Busy;
+        };
+        HttpExchange::Reply(selling.provider.handle(None, request).await)
+    }
+
     /// Whether a read that arrives at the HTTP listener may spend money.
     pub fn pays_for_http_reads(&self) -> bool {
         let buying = self.buying.as_ref();
@@ -208,9 +243,13 @@ fn open_provider(
     let source: Arc<dyn BlobRoute> = Arc::new(BlockingStoreRoute(Arc::new(local)));
     let provider = PaidBlobProvider::open(source, receiver, settings.config, Arc::new(ledger))
         .context("Failed to read the paid ledger")?;
+    let http = settings
+        .http
+        .then(|| Arc::new(Semaphore::new(MAX_HTTP_EXCHANGES)));
     Ok(SellingSide {
         provider,
         paying_only: settings.paying_only,
+        http,
     })
 }
 
@@ -232,14 +271,18 @@ fn open_client(
     let wallet: Arc<dyn RetrievalWallet> = Arc::new(LimitedWallet::new(wallet, limit.clone()));
     let mut routes = Vec::with_capacity(settings.providers.len());
     for peer in settings.providers {
-        let account_store = FileAccountStore::new(accounts.join(format!("{}.account", peer.npub)));
+        let account_store = FileAccountStore::new(accounts.join(account_file(&peer.place)));
         let account = account_store
             .load()
             .with_context(|| format!("Failed to read the paid account with {}", peer.name))?
             .unwrap_or_default();
+        let transport: Arc<dyn PaidBlobTransport> = match &peer.place {
+            ProviderPlace::Fips { identity, .. } => Arc::new(service.transport_to(*identity)),
+            ProviderPlace::Http { url } => Arc::new(HttpPaidTransport::at_endpoint(url.clone())?),
+        };
         let route = PaidBlobRoute::with_store(
             peer.name.clone(),
-            Arc::new(service.transport_to(peer.identity)),
+            transport,
             wallet.clone(),
             settings.policy.clone(),
             account,
@@ -247,7 +290,7 @@ fn open_client(
         );
         routes.push(ClientRoute {
             name: peer.name,
-            npub: peer.npub,
+            place: peer.place,
             route,
         });
     }
@@ -272,6 +315,18 @@ async fn register_paid_routes(resolver: &DaemonBlobResolver, paid: &[ClientRoute
         .await
         .map_err(anyhow::Error::msg)
         .context("Failed to register the paid blob routes")
+}
+
+/// The file of the account with one provider: named by its npub, or by a
+/// hash of its gateway's endpoint.
+fn account_file(place: &ProviderPlace) -> String {
+    match place {
+        ProviderPlace::Fips { npub, .. } => format!("{npub}.account"),
+        ProviderPlace::Http { url } => {
+            let digest = hashtree_core::sha256(url.as_str().as_bytes());
+            format!("http-{}.account", hex::encode(&digest[..16]))
+        }
+    }
 }
 
 /// The account files hold bearer ids and unredeemed tokens, and the ledger
