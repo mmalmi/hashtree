@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use hashtree_core::StoreError;
 
-use crate::account::{AccountState, ClientPolicy, PaidRouteStats};
+use crate::account::{AccountState, AccountStore, ClientPolicy, PaidRouteStats};
 use crate::funding::Funding;
 use crate::message::{AccountId, ContentHash, Quote, Reply, Request};
 use crate::transport::PaidBlobTransport;
@@ -36,6 +36,9 @@ pub(crate) struct State {
     pub in_flight: usize,
     /// Payments the provider has acknowledged, to tell stale replies apart.
     pub credits: u64,
+    /// The account was restored from a store: charges made since its last
+    /// save are unknown until the provider reports its balance.
+    pub resync: bool,
     /// What the requests in flight authorised the provider to charge.
     pub in_flight_msat: u64,
     pub stats: PaidRouteStats,
@@ -46,6 +49,7 @@ pub(crate) struct Inner {
     pub transport: Arc<dyn PaidBlobTransport>,
     pub wallet: Arc<dyn RetrievalWallet>,
     pub policy: ClientPolicy,
+    pub store: Option<Arc<dyn AccountStore>>,
     pub state: Mutex<State>,
     /// Serialises payments so that concurrent requests share one top-up.
     pub paying: tokio::sync::Mutex<()>,
@@ -56,6 +60,17 @@ impl Inner {
         self.state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Save the account where a restart will find it.
+    pub(crate) fn persist(&self) -> Result<(), StoreError> {
+        let Some(store) = &self.store else {
+            return Ok(());
+        };
+        let account = self.state().account.clone();
+        store.save(&account).map_err(|error| {
+            StoreError::Other(format!("paid route cannot save its account: {error}"))
+        })
     }
 
     pub(crate) async fn exchange(
@@ -95,6 +110,13 @@ impl Inner {
             return;
         }
         let loss_msat = state.account.loss_msat();
+        if std::mem::take(&mut state.resync) {
+            // Charges since the last save were never recorded here. The first
+            // balance after a restart is the baseline, not a loss.
+            state.account.charged_msat = state.account.charged_msat.saturating_add(loss_msat);
+            state.stats.resynced_msat += loss_msat;
+            return;
+        }
         if loss_msat > self.policy.max_loss_msat {
             state.account.blocked = Some(format!(
                 "provider balance is {loss_msat} msat lower than verified deliveries explain"
@@ -126,7 +148,8 @@ pub struct PaidBuyer {
 
 impl PaidBuyer {
     /// `provider` is the application's name for the seller, passed to the
-    /// wallet with every payment.
+    /// wallet with every payment. Nothing is saved: use
+    /// [`PaidBuyer::with_store`] wherever real money is paid.
     pub fn new(
         provider: impl Into<String>,
         transport: Arc<dyn PaidBlobTransport>,
@@ -134,19 +157,54 @@ impl PaidBuyer {
         policy: ClientPolicy,
         account: AccountState,
     ) -> Self {
+        Self::build(provider.into(), transport, wallet, policy, account, None)
+    }
+
+    /// A buyer that saves its account in `store` before it asks the wallet
+    /// for a payment and whenever a payment changes state. `account` is what
+    /// the store held, or a new account.
+    pub fn with_store(
+        provider: impl Into<String>,
+        transport: Arc<dyn PaidBlobTransport>,
+        wallet: Arc<dyn RetrievalWallet>,
+        policy: ClientPolicy,
+        account: AccountState,
+        store: Arc<dyn AccountStore>,
+    ) -> Self {
+        Self::build(
+            provider.into(),
+            transport,
+            wallet,
+            policy,
+            account,
+            Some(store),
+        )
+    }
+
+    fn build(
+        provider: String,
+        transport: Arc<dyn PaidBlobTransport>,
+        wallet: Arc<dyn RetrievalWallet>,
+        policy: ClientPolicy,
+        account: AccountState,
+        store: Option<Arc<dyn AccountStore>>,
+    ) -> Self {
+        let resync = account.has_history();
         Self {
             inner: Arc::new(Inner {
-                provider: provider.into(),
+                provider,
                 transport,
                 wallet,
                 policy,
+                store,
                 state: Mutex::new(State {
                     account,
                     terms: None,
                     counted: VecDeque::new(),
                     in_flight: 0,
-                    credits: 0,
                     in_flight_msat: 0,
+                    credits: 0,
+                    resync,
                     stats: PaidRouteStats::default(),
                 }),
                 paying: tokio::sync::Mutex::new(()),
@@ -188,7 +246,9 @@ impl PaidBuyer {
                 state.stats.declined_blocked += 1;
                 return Ok(false);
             }
-            state.account.pending.is_some() || state.account.balance_msat < 0
+            state.account.intent.is_some()
+                || state.account.pending.is_some()
+                || state.account.balance_msat < 0
         };
         if unsettled {
             Funding::run(&self.inner, None, deadline).await?;
@@ -286,7 +346,8 @@ impl PaidBuyer {
         Funding::run(&self.inner, quote, deadline).await
     }
 
-    /// Resend an unacknowledged payment and pay any debt now.
+    /// Resend an unacknowledged payment, try the oldest unresolved token
+    /// again and pay any debt now.
     pub async fn settle(&self) -> Result<(), StoreError> {
         let deadline = Instant::now() + self.inner.policy.request_timeout;
         self.fund(None, deadline).await.map(|_| ())

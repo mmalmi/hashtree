@@ -58,8 +58,11 @@ let transport = Arc::new(service.transport_to(provider_identity));
 let paid = PaidBlobRoute::new("provider name", transport, wallet, ClientPolicy::default());
 ```
 
-`AccountState` holds the account's bearer id and any unacknowledged token;
-persist it privately.
+Wherever real money is paid, build the route with `PaidBlobRoute::with_store`
+and a `FileAccountStore` (or your own `AccountStore`): the payment intent is
+then saved before the wallet is asked and the token before it is sent. Give
+`SpendingLimit` a `SpendStore` for the same reason. The saved account holds a
+bearer id and unredeemed tokens; keep it private.
 
 `tests/vectors.rs` generates `test-vectors/paid-retrieval-vectors.json` from
 this codec and fails when the two differ; the TypeScript client

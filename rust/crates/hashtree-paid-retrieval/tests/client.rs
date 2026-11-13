@@ -21,6 +21,7 @@ fn policy() -> ClientPolicy {
         topup_sat: 5,
         max_prepaid_msat: 10_000,
         max_loss_msat: 1_500,
+        max_token_fee_sat: 0,
         ..ClientPolicy::default()
     }
 }

@@ -8,7 +8,7 @@ use hashtree_core::{
     sha256, BlobReply, BlobRequest, BlobRoute, BlobRouteContext, Hash, StoreError, BLOB_MAX_BYTES,
 };
 
-use crate::account::{AccountState, ClientPolicy, PaidRouteStats};
+use crate::account::{AccountState, AccountStore, ClientPolicy, PaidRouteStats};
 use crate::buyer::{InFlight, PaidBuyer};
 use crate::message::{ContentHash, Quote, Reply, Request};
 use crate::transport::PaidBlobTransport;
@@ -53,6 +53,21 @@ impl PaidBlobRoute {
     ) -> Self {
         Self {
             buyer: PaidBuyer::new(provider, transport, wallet, policy, account),
+        }
+    }
+
+    /// A route that saves its account in `store`, as [`PaidBuyer::with_store`]
+    /// does. Use it wherever real money is paid.
+    pub fn with_store(
+        provider: impl Into<String>,
+        transport: Arc<dyn PaidBlobTransport>,
+        wallet: Arc<dyn RetrievalWallet>,
+        policy: ClientPolicy,
+        account: AccountState,
+        store: Arc<dyn AccountStore>,
+    ) -> Self {
+        Self {
+            buyer: PaidBuyer::with_store(provider, transport, wallet, policy, account, store),
         }
     }
 

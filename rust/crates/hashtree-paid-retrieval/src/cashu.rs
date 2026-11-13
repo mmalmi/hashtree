@@ -12,6 +12,11 @@ fn failed(error: impl std::fmt::Display) -> WalletError {
 }
 
 /// Pays providers from a Cashu wallet, using only the mints it was given.
+///
+/// `CashuPaymentClient` takes no payment id and reports its fee only after
+/// the token exists, so this wallet cannot find a payment again after a crash
+/// (`recover` returns nothing; the token stays in the wallet's own pending
+/// operations) and cannot refuse a fee above `max_fee_sat` in advance.
 pub struct CashuWallet<C> {
     client: C,
     mints: Vec<String>,
@@ -37,7 +42,8 @@ impl<C: CashuPaymentClient> RetrievalWallet for CashuWallet<C> {
         for mint in self.mints.iter().filter(accepted) {
             trusted = true;
             let balance = self.client.mint_balance(mint).await.map_err(failed)?;
-            if balance.balance_sat < request.amount_sat {
+            let needed_sat = request.amount_sat.saturating_add(request.max_fee_sat);
+            if balance.balance_sat < needed_sat {
                 continue;
             }
             let sent = self

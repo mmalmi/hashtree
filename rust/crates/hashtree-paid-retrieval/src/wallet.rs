@@ -4,6 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
+use crate::message::PaymentId;
+
 /// "Pay this much to this provider."
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaymentRequest {
@@ -13,6 +15,11 @@ pub struct PaymentRequest {
     /// wallet must pay only with a mint it trusts itself.
     pub mints: Vec<String>,
     pub amount_sat: u64,
+    /// The most that creating the token may cost beyond `amount_sat`.
+    pub max_fee_sat: u64,
+    /// Stable id of this payment. It was saved before the wallet was asked,
+    /// and a wallet that can find a payment again finds it by this id.
+    pub payment_id: PaymentId,
 }
 
 /// A token handed to the provider.
@@ -52,7 +59,16 @@ impl WalletError {
 #[async_trait]
 pub trait RetrievalWallet: Send + Sync {
     /// Create a token of exactly `amount_sat` for the provider, or refuse.
+    /// Asked again with the same `payment_id`, a wallet that keeps its
+    /// payments should return the same token instead of a second one.
     async fn pay(&self, request: &PaymentRequest) -> Result<WalletPayment, WalletError>;
+
+    /// The token created for `payment_id`, if this wallet created one and can
+    /// still produce it. Asked after a crash between `pay` and the buyer's
+    /// own record of the token.
+    async fn recover(&self, _payment_id: &PaymentId) -> Result<Option<WalletPayment>, WalletError> {
+        Ok(None)
+    }
 
     /// Spendable balance, for display and for refusing early.
     async fn balance_sat(&self) -> Result<u64, WalletError>;
@@ -65,14 +81,36 @@ pub trait RetrievalWallet: Send + Sync {
     }
 }
 
-#[derive(Debug)]
+/// Where a [`SpendingLimit`] keeps what was spent, so that a restart does
+/// not hand the budget back. `save_spent` must be durable when it returns.
+pub trait SpendStore: Send + Sync {
+    fn save_spent(&self, spent_sat: u64) -> Result<(), String>;
+}
+
 struct LimitState {
     limit_sat: u64,
     spent_sat: u64,
+    store: Option<Arc<dyn SpendStore>>,
+}
+
+impl LimitState {
+    /// Move to `spent_sat`, saving first when the amount grows: a payment is
+    /// never made on a reservation that a crash would forget.
+    fn set_spent(&mut self, spent_sat: u64) -> Result<(), WalletError> {
+        if let Some(store) = &self.store {
+            let saved = store.save_spent(spent_sat);
+            if spent_sat > self.spent_sat {
+                saved.map_err(|error| {
+                    WalletError::Failed(format!("cannot save the spending record: {error}"))
+                })?;
+            }
+        }
+        self.spent_sat = spent_sat;
+        Ok(())
+    }
 }
 
 /// A total spending cap shared by any number of routes.
-#[derive(Debug)]
 pub struct SpendingLimit(Mutex<LimitState>);
 
 impl SpendingLimit {
@@ -85,6 +123,16 @@ impl SpendingLimit {
         Arc::new(Self(Mutex::new(LimitState {
             limit_sat,
             spent_sat,
+            store: None,
+        })))
+    }
+
+    /// A limit that saves what was spent before each payment is made.
+    pub fn with_store(limit_sat: u64, spent_sat: u64, store: Arc<dyn SpendStore>) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(LimitState {
+            limit_sat,
+            spent_sat,
+            store: Some(store),
         })))
     }
 
@@ -111,7 +159,7 @@ impl SpendingLimit {
 
     /// Start a new period, for example a new month.
     pub fn reset_spent(&self) {
-        self.state().spent_sat = 0;
+        let _ = self.state().set_spent(0);
     }
 
     fn reserve(&self, amount_sat: u64) -> Result<(), WalletError> {
@@ -123,29 +171,30 @@ impl SpendingLimit {
                 remaining_sat,
             });
         }
-        state.spent_sat += amount_sat;
-        Ok(())
+        let spent_sat = state.spent_sat + amount_sat;
+        state.set_spent(spent_sat)
     }
 
     /// Replace a reservation with what the payment really cost.
     fn settle(&self, reserved_sat: u64, actual_sat: u64) {
         let mut state = self.state();
-        state.spent_sat = state
+        let spent_sat = state
             .spent_sat
             .saturating_sub(reserved_sat)
             .saturating_add(actual_sat);
+        let _ = state.set_spent(spent_sat);
     }
 
     fn release(&self, amount_sat: u64) {
-        let mut state = self.state();
-        state.spent_sat = state.spent_sat.saturating_sub(amount_sat);
+        self.settle(amount_sat, 0);
     }
 }
 
 /// Any wallet, held to a [`SpendingLimit`].
 ///
-/// The amount is reserved before the wallet is asked, so concurrent routes
-/// cannot overspend together. Token fees are counted after the payment.
+/// The amount and the fee ceiling are reserved before the wallet is asked, so
+/// concurrent routes cannot overspend together and a fee cannot push spending
+/// past the limit. The reservation is then replaced by the real cost.
 pub struct LimitedWallet<W> {
     wallet: W,
     limit: Arc<SpendingLimit>,
@@ -164,20 +213,23 @@ impl<W> LimitedWallet<W> {
 #[async_trait]
 impl<W: RetrievalWallet> RetrievalWallet for LimitedWallet<W> {
     async fn pay(&self, request: &PaymentRequest) -> Result<WalletPayment, WalletError> {
-        self.limit.reserve(request.amount_sat)?;
+        let reserved_sat = request.amount_sat.saturating_add(request.max_fee_sat);
+        self.limit.reserve(reserved_sat)?;
         match self.wallet.pay(request).await {
             Ok(payment) => {
-                self.limit.settle(
-                    request.amount_sat,
-                    payment.amount_sat.saturating_add(payment.fee_sat),
-                );
+                let cost_sat = payment.amount_sat.saturating_add(payment.fee_sat);
+                self.limit.settle(reserved_sat, cost_sat);
                 Ok(payment)
             }
             Err(error) => {
-                self.limit.release(request.amount_sat);
+                self.limit.release(reserved_sat);
                 Err(error)
             }
         }
+    }
+
+    async fn recover(&self, payment_id: &PaymentId) -> Result<Option<WalletPayment>, WalletError> {
+        self.wallet.recover(payment_id).await
     }
 
     async fn balance_sat(&self) -> Result<u64, WalletError> {
@@ -195,6 +247,10 @@ impl<W: RetrievalWallet> RetrievalWallet for LimitedWallet<W> {
 impl<W: RetrievalWallet + ?Sized> RetrievalWallet for Arc<W> {
     async fn pay(&self, request: &PaymentRequest) -> Result<WalletPayment, WalletError> {
         (**self).pay(request).await
+    }
+
+    async fn recover(&self, payment_id: &PaymentId) -> Result<Option<WalletPayment>, WalletError> {
+        (**self).recover(payment_id).await
     }
 
     async fn balance_sat(&self) -> Result<u64, WalletError> {

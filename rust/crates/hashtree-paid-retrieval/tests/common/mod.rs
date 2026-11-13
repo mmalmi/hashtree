@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use hashtree_core::{sha256, Hash, MemoryStore, Store, StoreBlobRoute, StoreError};
 use hashtree_paid_retrieval::{
     BytePrice, LedgerEntry, LedgerState, LedgerStore, PaidBlobProvider, PaidBlobTransport,
-    PaymentReceiver, PaymentRequest, ProviderConfig, ReceiveError, Reply, Request, RetrievalWallet,
-    Tariff, WalletError, WalletPayment,
+    PaymentId, PaymentReceiver, PaymentRequest, ProviderConfig, ReceiveError, Reply, Request,
+    RetrievalWallet, Tariff, WalletError, WalletPayment,
 };
 
 pub const MINT: &str = "https://mint.test";
@@ -68,6 +68,13 @@ pub struct FakeWallet {
     pub payments: AtomicUsize,
     /// Pay this many sats less than asked, to exercise underpayment.
     pub short_sat: u64,
+    /// What creating a token costs on top of its value.
+    pub fee_sat: u64,
+    /// Create the token, then fail as if the process died before answering.
+    pub lose_reply: AtomicBool,
+    pub cannot_reclaim: AtomicBool,
+    /// Tokens by payment id: asked again, the wallet returns the same one.
+    pub made: Mutex<HashMap<PaymentId, WalletPayment>>,
 }
 
 impl FakeWallet {
@@ -78,6 +85,10 @@ impl FakeWallet {
             balance_sat: Mutex::new(balance_sat),
             payments: AtomicUsize::new(0),
             short_sat: 0,
+            fee_sat: 0,
+            lose_reply: AtomicBool::new(false),
+            cannot_reclaim: AtomicBool::new(false),
+            made: Mutex::new(HashMap::new()),
         })
     }
 
@@ -96,21 +107,38 @@ impl RetrievalWallet for FakeWallet {
         if !request.mints.contains(&self.mint_url) {
             return Err(WalletError::NoAcceptedMint);
         }
+        if let Some(made) = self.made.lock().unwrap().get(&request.payment_id) {
+            return Ok(made.clone());
+        }
+        if self.fee_sat > request.max_fee_sat {
+            return Err(WalletError::Failed("the fee is above the ceiling".into()));
+        }
         let amount_sat = request.amount_sat.saturating_sub(self.short_sat).max(1);
+        let cost_sat = amount_sat + self.fee_sat;
         let mut balance = self.balance_sat.lock().unwrap();
-        if *balance < amount_sat {
+        if *balance < cost_sat {
             return Err(WalletError::InsufficientFunds);
         }
-        *balance -= amount_sat;
+        *balance -= cost_sat;
         self.payments.fetch_add(1, Ordering::SeqCst);
         let token = self.mint.issue(&self.mint_url, amount_sat);
-        Ok(WalletPayment {
+        let payment = WalletPayment {
             mint_url: self.mint_url.clone(),
             token: token.clone(),
             amount_sat,
-            fee_sat: 0,
+            fee_sat: self.fee_sat,
             reclaim_id: Some(token),
-        })
+        };
+        let mut made = self.made.lock().unwrap();
+        made.insert(request.payment_id, payment.clone());
+        if self.lose_reply.swap(false, Ordering::SeqCst) {
+            return Err(WalletError::Failed("the process died".into()));
+        }
+        Ok(payment)
+    }
+
+    async fn recover(&self, payment_id: &PaymentId) -> Result<Option<WalletPayment>, WalletError> {
+        Ok(self.made.lock().unwrap().get(payment_id).cloned())
     }
 
     async fn balance_sat(&self) -> Result<u64, WalletError> {
@@ -118,6 +146,9 @@ impl RetrievalWallet for FakeWallet {
     }
 
     async fn reclaim(&self, payment: &WalletPayment) -> Result<(), WalletError> {
+        if self.cannot_reclaim.load(Ordering::SeqCst) {
+            return Err(WalletError::Failed("the mint is unreachable".into()));
+        }
         let amount_sat = self
             .mint
             .redeem(&payment.mint_url, &payment.token)
@@ -138,6 +169,8 @@ pub struct FakeReceiver {
     /// that cannot say what it received earlier.
     pub records: Option<Mutex<HashMap<String, u64>>>,
     pub redemptions: AtomicUsize,
+    /// Sats the mint keeps of every redeemed token.
+    pub mint_fee_sat: u64,
 }
 
 impl FakeReceiver {
@@ -149,6 +182,7 @@ impl FakeReceiver {
             gate: None,
             records: Some(Mutex::default()),
             redemptions: AtomicUsize::new(0),
+            mint_fee_sat: 0,
         })
     }
 
@@ -182,6 +216,7 @@ impl PaymentReceiver for FakeReceiver {
             .mint
             .redeem(mint_url, token)
             .map_err(ReceiveError::Rejected)?;
+        let amount_sat = amount_sat.saturating_sub(self.mint_fee_sat);
         *self.received_sat.lock().unwrap() += amount_sat;
         if let Some(records) = &self.records {
             let mut records = records.lock().unwrap();

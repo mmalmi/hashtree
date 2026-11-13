@@ -116,6 +116,8 @@ async fn the_cashu_payment_client_pays_and_receives() {
         provider: "seller".into(),
         mints: vec!["https://other.test".into()],
         amount_sat: 1,
+        max_fee_sat: 0,
+        payment_id: [1; 16],
     };
     assert_eq!(
         wallet.pay(&untrusted).await,
@@ -125,6 +127,8 @@ async fn the_cashu_payment_client_pays_and_receives() {
         provider: "seller".into(),
         mints: vec![MINT.into()],
         amount_sat: 100,
+        max_fee_sat: 0,
+        payment_id: [2; 16],
     };
     assert_eq!(
         wallet.pay(&too_much).await,

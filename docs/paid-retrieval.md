@@ -111,7 +111,21 @@ bytes are never returned or cached and are never counted as a delivery.
   account. A blob that was charged is served again free for a short window
   (`redelivery_window`, twice at most).
 - **The provider rejects the token** (`mint`, `method`, `invalid`, `replay`).
-  The client asks its wallet to reclaim it.
+  The client asks its wallet to reclaim it. A token the wallet cannot take
+  back is kept as unresolved, never dropped: a provider that refused it may
+  still redeem it. Its value counts as money the provider holds, and it is
+  tried again whenever the client pays or settles.
+- **The provider keeps answering `retry`.** After three such answers the token
+  is set aside as unresolved in the same way, so one stuck token does not hold
+  up later payments; the prepaid cap still bounds the total.
+- **The provider credits less than the token was worth.** A provider's mint
+  may charge for redeeming, so the client accepts a shortfall of up to
+  `max_redeem_fee_msat` per payment and records it as a fee. Anything beyond
+  that is counted as a loss, like a charge without a delivery.
+- **The client crashes around a payment.** Before the wallet is asked, the
+  client saves a payment intent with a fresh id; the token is saved before it
+  is sent. After a restart an intent without a token makes the client ask the
+  wallet for that id again (`recover`) instead of paying a second time.
 - **The provider restarts.** The balance, the credited payment ids and the
   token hashes are restored. The same `pay` is answered from the record. A
   blob that was charged but not delivered is not free again: the window of
@@ -133,6 +147,22 @@ Three independent bounds, all on the client:
 2. `ClientPolicy.max_prepaid_msat`: the most a single provider may hold.
 3. The wallet's own limit. `LimitedWallet` wraps any wallet with a
    `SpendingLimit` (total sats, adjustable, readable for a settings screen).
+   It reserves the amount plus the fee ceiling before the wallet is asked,
+   and with a `SpendStore` saves what was spent before each payment.
+
+Unresolved tokens count against `max_prepaid_msat`, so a provider cannot
+collect more by leaving payments unanswered.
+
+### What the client keeps
+
+`PaidBuyer::with_store` and `PaidBlobRoute::with_store` take an
+`AccountStore`; `FileAccountStore` keeps one account in one file, replaced
+atomically. The account is saved before the wallet is asked, when a token
+arrives and when a payment is settled. Charges for delivered blobs are not
+saved one by one: after a restart the first balance the provider reports is
+taken as the baseline. `AccountState::encode` gives the same bytes to an
+application that has its own database. The account holds a bearer id and
+unredeemed tokens and must be stored privately.
 
 A declined read returns `NoResult`, so the router continues to other routes;
 `PaidBlobRoute::stats()` says why (price, limit, mint, blocked provider).
@@ -161,9 +191,13 @@ trait RetrievalWallet {
 }
 ```
 
-`PaymentRequest` names the provider, the mints the provider accepts and the
-amount in sat. An application implements `pay` and `balance_sat`, and either
-enforces its own limit or wraps the wallet in `LimitedWallet`. With the `cashu`
+`PaymentRequest` names the provider, the mints the provider accepts, the
+amount in sat, the most the token may cost in fees, and a payment id that was
+saved before the call. A wallet that keeps its payments returns the same token
+when it is asked for the same id again, and implements `recover` to find a
+token by that id after a crash. An application implements `pay` and
+`balance_sat`, and either enforces its own limit or wraps the wallet in
+`LimitedWallet`. With the `cashu`
 feature, `CashuWallet` and `CashuReceiver` adapt the existing
 `cashu_service::CashuPaymentClient` (the `htree-cashu` helper). Lightning is
 used only where Cashu needs it: funding a wallet and cashing out at the mint.
@@ -344,6 +378,42 @@ room for the same channel payment (`cashu-spilman`, a signed cumulative
 balance) without changing the other messages.
 
 `cashu-credit` is not used; [Provider ledger](#provider-ledger) says why.
+
+### What should become shared code
+
+The payment exchange in this crate is not specific to Hashtree: `PaidSeller`,
+`PaidBuyer`, the messages, the ledger with its journal, the wallet boundary and
+the spending limit need only a hash function and an error type from
+`hashtree-core`. Their natural home is the `cashu-service` workspace, beside
+`cashu-credit` (sat-level accounts) and `peer-payments` (mint-less signed
+credit), as the third way to pay for a metered service: a prepaid bearer
+account in millisats. fips could then sell guest or relay access with the same
+accounts where a Spilman channel is too heavy.
+
+It is not moved yet, for three reasons. Nothing in fips uses it today.
+Hashtree builds against `cashu-service` 0.3.0 and fips against 0.4.8, so
+shared code means upgrading Hashtree's wallet stack first. And a new published
+crate is a release decision. Two changes belong in `cashu-service` itself, and
+both would close gaps listed below:
+
+- a token send that takes a caller's payment id and a fee ceiling, so that
+  `CashuWallet::recover` can find a token again and refuse a fee in advance;
+- a lookup of what the wallet received for a token, so that a provider can
+  credit a token the mint redeemed right before a crash.
+
+### Not adopted from fips yet
+
+- A lifetime budget that no reset replenishes, beside the resettable
+  `SpendingLimit`.
+- Expiry and return of an unused balance (fips channels have a service limit,
+  a refund deadline and cooperative settlement).
+- Choosing among several providers by price over measured success rate, with
+  a small trial top-up for an unknown provider.
+- Rate limits on unpaid work: an unpaid `get` costs the provider a blob lookup
+  and tells the asker what it has.
+- Reaching the mint over the mesh for a client without other connectivity.
+- Pacing of mint requests: the mint client allows 20 requests a minute by
+  default, which many small top-ups from many buyers would exhaust.
 
 ## Not built
 

@@ -5,12 +5,17 @@ use std::time::Instant;
 
 use hashtree_core::StoreError;
 
-use crate::account::PendingPayment;
+use crate::account::{PaymentIntent, PendingPayment};
 use crate::buyer::Inner;
-use crate::message::{ErrorCode, Quote, Reply, Request, METHOD_CASHU};
+use crate::message::{ErrorCode, PaymentId, Quote, Reply, Request, METHOD_CASHU};
 use crate::price::sat_ceil;
 use crate::seller::normalize_mint;
 use crate::wallet::{PaymentRequest, WalletError};
+
+/// Answers of "not yet" after which a payment stops holding up new ones.
+const MAX_ATTEMPTS: u32 = 3;
+/// Tokens of unknown fate kept per provider; beyond it nothing more is paid.
+const MAX_UNRESOLVED: usize = 8;
 
 pub(crate) struct Funding;
 
@@ -37,12 +42,25 @@ impl Funding {
     }
 }
 
+/// What became of one token handed to the provider.
+enum Sent {
+    Credited,
+    /// Refused for good, and the wallet took the token back.
+    Reclaimed(String),
+    /// Refused for good, and the wallet could not take it back.
+    Refused(String),
+    /// The provider cannot take it yet.
+    NotYet(String),
+}
+
 impl Inner {
     async fn fund(&self, quote: Option<Quote>) -> Result<bool, StoreError> {
         let _paying = self.paying.lock().await;
-        self.send_pending().await?;
+        self.recover_intent().await?;
+        self.settle_pending().await?;
+        self.retry_unresolved().await;
 
-        let (balance_msat, terms) = {
+        let (balance_msat, unresolved_msat, terms) = {
             let mut state = self.state();
             // Requests still in flight may explain part of a low balance,
             // but never more than they authorised.
@@ -51,7 +69,7 @@ impl Inner {
                 .max_loss_msat
                 .saturating_add(state.in_flight_msat);
             let loss_msat = state.account.loss_msat();
-            if state.account.blocked.is_none() && loss_msat > allowed_msat {
+            if state.account.blocked.is_none() && !state.resync && loss_msat > allowed_msat {
                 state.account.blocked = Some(format!(
                     "provider balance is {loss_msat} msat lower than verified deliveries explain"
                 ));
@@ -59,7 +77,11 @@ impl Inner {
             if state.account.blocked.is_some() {
                 return Ok(false);
             }
-            (state.account.balance_msat, state.terms.clone())
+            (
+                state.account.balance_msat,
+                state.account.unresolved_msat(),
+                state.terms.clone(),
+            )
         };
         let (price_msat, grace_msat) = quote
             .as_ref()
@@ -73,7 +95,11 @@ impl Inner {
             return Ok(true);
         }
 
-        let room_msat = i128::from(self.policy.max_prepaid_msat) - i128::from(balance_msat);
+        // Tokens of unknown fate may still be redeemed by the provider, so
+        // they count as money it holds.
+        let room_msat = i128::from(self.policy.max_prepaid_msat)
+            - i128::from(balance_msat)
+            - i128::from(unresolved_msat);
         let max_sat = sat_ceil(u64::try_from(room_msat.max(0)).unwrap_or(u64::MAX));
         let min_sat = sat_ceil(need_msat).max(terms.min_topup_sat);
         if min_sat > max_sat {
@@ -97,55 +123,185 @@ impl Inner {
             return Ok(false);
         }
 
+        let id: PaymentId = rand::random();
         let mut amount_sat = self.policy.topup_sat.clamp(min_sat, max_sat);
         let payment = loop {
+            // The intent is on disk before the wallet is asked: a crash after
+            // this point is followed by asking the wallet about this id.
+            self.state().account.intent = Some(PaymentIntent {
+                id,
+                amount_sat,
+                mints: mints.clone(),
+            });
+            if let Err(error) = self.persist() {
+                self.state().account.intent = None;
+                return Err(error);
+            }
             let request = PaymentRequest {
                 provider: self.provider.clone(),
                 mints: mints.clone(),
                 amount_sat,
+                max_fee_sat: self.policy.max_token_fee_sat,
+                payment_id: id,
             };
-            match self.wallet.pay(&request).await {
+            let declined = match self.wallet.pay(&request).await {
                 Ok(payment) => break payment,
-                Err(WalletError::NoAcceptedMint) => {
-                    self.state().stats.declined_mint += 1;
-                    return Ok(false);
-                }
                 // The preferred top-up did not fit; the bare minimum may.
-                Err(error) if error.is_decline() && amount_sat > min_sat => amount_sat = min_sat,
-                Err(error) if error.is_decline() => {
-                    self.state().stats.declined_limit += 1;
-                    return Ok(false);
+                Err(error) if error.is_decline() && amount_sat > min_sat => {
+                    amount_sat = min_sat;
+                    continue;
                 }
-                Err(error) => {
-                    return Err(StoreError::Other(format!("paid route {error}")));
+                Err(error) if error.is_decline() => error,
+                // The wallet may have created a token all the same: the
+                // intent stays, and the wallet is asked about it next time.
+                Err(error) => return Err(StoreError::Other(format!("paid route {error}"))),
+            };
+            {
+                let mut state = self.state();
+                state.account.intent = None;
+                match declined {
+                    WalletError::NoAcceptedMint => state.stats.declined_mint += 1,
+                    _ => state.stats.declined_limit += 1,
                 }
             }
+            let _ = self.persist();
+            return Ok(false);
         };
+        self.adopt(id, payment);
+        self.settle_pending().await?;
+        Ok(true)
+    }
+
+    /// Make a token the wallet produced the pending payment, and save it
+    /// before it is sent anywhere.
+    fn adopt(&self, id: PaymentId, payment: crate::wallet::WalletPayment) {
         {
             let mut state = self.state();
             state.stats.paid_sat += payment.amount_sat;
             state.stats.fee_sat += payment.fee_sat;
+            state.account.intent = None;
             state.account.pending = Some(PendingPayment {
-                id: rand::random(),
+                id,
                 payment,
+                attempts: 0,
             });
         }
-        self.send_pending().await?;
-        Ok(true)
+        // If this save fails the older record still names the intent, and the
+        // wallet is asked for the token again after a restart.
+        let _ = self.persist();
     }
 
-    /// Hand the pending token to the provider. The token stays pending until
-    /// the provider credits it or refuses it for good.
-    async fn send_pending(&self) -> Result<(), StoreError> {
-        let (account, pending) = {
+    /// After a restart: a payment the wallet was asked for may exist without
+    /// this account knowing its token.
+    async fn recover_intent(&self) -> Result<(), StoreError> {
+        let intent = {
             let state = self.state();
-            match &state.account.pending {
-                Some(pending) => (state.account.account, pending.clone()),
-                None => return Ok(()),
+            match (&state.account.intent, &state.account.pending) {
+                (Some(intent), None) => intent.clone(),
+                _ => return Ok(()),
             }
         };
+        let found = self.wallet.recover(&intent.id).await;
+        let found = found.map_err(|error| StoreError::Other(format!("paid route {error}")))?;
+        match found {
+            Some(payment) => self.adopt(intent.id, payment),
+            None => {
+                // The wallet made no token it can hand over; if it made one
+                // at all, it is in the wallet's own records.
+                self.state().account.intent = None;
+                let _ = self.persist();
+            }
+        }
+        Ok(())
+    }
+
+    /// Hand the pending token to the provider. It stays pending until the
+    /// provider credits it, the wallet takes it back, or it is set aside as
+    /// unresolved; it is never dropped.
+    async fn settle_pending(&self) -> Result<(), StoreError> {
+        let Some(pending) = self.state().account.pending.clone() else {
+            return Ok(());
+        };
+        let sent = self.send(&pending).await?;
+        let outcome = {
+            let mut state = self.state();
+            let has_room = state.account.unresolved.len() < MAX_UNRESOLVED;
+            let set_aside = |state: &mut crate::buyer::State, pending: PendingPayment| {
+                state.account.pending = None;
+                state.account.unresolved.push(pending);
+            };
+            match sent {
+                Sent::Credited => {
+                    state.account.pending = None;
+                    Ok(())
+                }
+                Sent::Reclaimed(refusal) => {
+                    state.account.pending = None;
+                    Err(refusal)
+                }
+                Sent::Refused(refusal) => {
+                    // Neither credited nor back in the wallet. A provider
+                    // that refuses a token may still redeem it.
+                    if has_room {
+                        set_aside(&mut state, pending);
+                    }
+                    Err(refusal)
+                }
+                Sent::NotYet(detail) => {
+                    let attempts = pending.attempts.saturating_add(1);
+                    if attempts >= MAX_ATTEMPTS && has_room {
+                        // Stop holding up new payments; this one is tried
+                        // again later and still counts as money held.
+                        set_aside(
+                            &mut state,
+                            PendingPayment {
+                                attempts,
+                                ..pending
+                            },
+                        );
+                        Ok(())
+                    } else {
+                        if let Some(current) = &mut state.account.pending {
+                            current.attempts = attempts;
+                        }
+                        Err(format!(
+                            "paid route provider could not take the payment yet: {detail}"
+                        ))
+                    }
+                }
+            }
+        };
+        let _ = self.persist();
+        outcome.map_err(StoreError::Other)
+    }
+
+    /// Try the oldest unresolved token once more. Failures leave it in place.
+    async fn retry_unresolved(&self) {
+        let Some(oldest) = self.state().account.unresolved.first().cloned() else {
+            return;
+        };
+        let sent = self.send(&oldest).await;
+        {
+            let mut state = self.state();
+            let unresolved = &mut state.account.unresolved;
+            let Some(index) = unresolved
+                .iter()
+                .position(|payment| payment.id == oldest.id)
+            else {
+                return;
+            };
+            let payment = unresolved.remove(index);
+            if !matches!(sent, Ok(Sent::Credited | Sent::Reclaimed(_))) {
+                unresolved.push(payment);
+            }
+        }
+        let _ = self.persist();
+    }
+
+    /// One `pay` exchange for one token, with its accounting.
+    async fn send(&self, pending: &PendingPayment) -> Result<Sent, StoreError> {
         let request = Request::Pay {
-            account,
+            account: self.state().account.account,
             payment: pending.id,
             method: METHOD_CASHU.to_owned(),
             mint: pending.payment.mint_url.clone(),
@@ -159,38 +315,45 @@ impl Inner {
                 balance_msat,
             } if payment == pending.id => {
                 let mut state = self.state();
-                state.account.pending = None;
-                state.account.credited_msat =
-                    state.account.credited_msat.saturating_add(credited_msat);
+                // A provider may keep a little of a token for its mint's
+                // redemption fee. Anything beyond the allowance is owed: it
+                // is added here, missing from the reported balance, and so
+                // counted as a loss.
+                let paid_msat = pending.payment.amount_sat.saturating_mul(1_000);
+                let shortfall_msat = paid_msat.saturating_sub(credited_msat);
+                let fee_msat = shortfall_msat.min(self.policy.max_redeem_fee_msat);
+                state.stats.redeem_fee_msat += fee_msat;
+                state.account.credited_msat = state
+                    .account
+                    .credited_msat
+                    .saturating_add(credited_msat)
+                    .saturating_add(shortfall_msat - fee_msat);
                 state.credits += 1;
                 self.note_balance(&mut state, balance_msat, None);
-                Ok(())
+                Ok(Sent::Credited)
             }
             Reply::Error {
                 code: ErrorCode::Retry,
                 detail,
                 ..
-            } => Err(StoreError::Other(format!(
-                "paid route provider could not take the payment yet: {detail}"
-            ))),
+            } => Ok(Sent::NotYet(detail)),
             Reply::Error { code, detail, .. } => {
-                // Refused for good: the token is ours again if the wallet can
-                // take it back. Cleared only afterwards, so an interrupted
-                // reclaim is repeated.
+                let refusal = format!(
+                    "paid route provider refused the payment ({}): {detail}",
+                    code.as_str()
+                );
                 let reclaimed = self.wallet.reclaim(&pending.payment).await.is_ok();
                 let mut state = self.state();
-                state.account.pending = None;
                 state.stats.rejected_payments += 1;
                 if reclaimed {
                     state.stats.paid_sat = state
                         .stats
                         .paid_sat
                         .saturating_sub(pending.payment.amount_sat);
+                    Ok(Sent::Reclaimed(refusal))
+                } else {
+                    Ok(Sent::Refused(refusal))
                 }
-                Err(StoreError::Other(format!(
-                    "paid route provider refused the payment ({}): {detail}",
-                    code.as_str()
-                )))
             }
             _ => Err(StoreError::Other(
                 "paid route provider sent an unexpected reply to a payment".into(),

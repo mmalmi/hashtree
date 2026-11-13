@@ -13,6 +13,7 @@
 //! Design, failure handling and open decisions: `docs/paid-retrieval.md`.
 
 mod account;
+mod account_store;
 pub mod bencode;
 mod books;
 mod buyer;
@@ -32,7 +33,10 @@ mod store;
 mod transport;
 mod wallet;
 
-pub use account::{AccountState, ClientPolicy, PaidRouteStats, PendingPayment};
+pub use account::{
+    AccountState, AccountStore, ClientPolicy, PaidRouteStats, PaymentIntent, PendingPayment,
+};
+pub use account_store::FileAccountStore;
 pub use buyer::{InFlight, PaidBuyer};
 #[cfg(feature = "cashu")]
 pub use cashu::{CashuReceiver, CashuWallet};
@@ -59,5 +63,6 @@ pub use transport::{
     PaidBlobTransport, StreamTransport, FRAME_PREFIX_BYTES,
 };
 pub use wallet::{
-    LimitedWallet, PaymentRequest, RetrievalWallet, SpendingLimit, WalletError, WalletPayment,
+    LimitedWallet, PaymentRequest, RetrievalWallet, SpendStore, SpendingLimit, WalletError,
+    WalletPayment,
 };
