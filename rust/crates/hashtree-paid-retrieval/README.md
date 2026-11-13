@@ -61,6 +61,11 @@ let paid = PaidBlobRoute::new("provider name", transport, wallet, ClientPolicy::
 `AccountState` holds the account's bearer id and any unacknowledged token;
 persist it privately.
 
+`tests/vectors.rs` generates `test-vectors/paid-retrieval-vectors.json` from
+this codec and fails when the two differ; the TypeScript client
+(`@hashtree/paid-retrieval`) is checked against the same file. After an
+intended wire change, regenerate it as the top of that test says.
+
 ```sh
 cargo test -p hashtree-paid-retrieval --all-features
 ```

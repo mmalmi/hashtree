@@ -36,6 +36,7 @@ nvpn-fips-tcp-endpoint = { version = "0.2.30", optional = true }
 hashtree-network.workspace = true
 tokio = { version = "1", features = ["full"] }
 anyhow.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 
 [[test]]

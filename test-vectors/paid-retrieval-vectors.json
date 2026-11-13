@@ -1,0 +1,2049 @@
+{
+  "acceptance": [
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_int_zero",
+      "used": 3,
+      "wire": [
+        "693065"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_int_negative",
+      "used": 4,
+      "wire": [
+        "692d3165"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_int_largest",
+      "used": 21,
+      "wire": [
+        "693932323333373230333638353437373538303765"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_int_smallest",
+      "used": 22,
+      "wire": [
+        "692d3932323333373230333638353437373538303865"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_above_largest",
+      "wire": [
+        "693932323333373230333638353437373538303865"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_below_smallest",
+      "wire": [
+        "692d3932323333373230333638353437373538303965"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_twenty_digits",
+      "wire": [
+        "69393939393939393939393939393939393939393965"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_twenty_one_digits",
+      "wire": [
+        "6931303030303030303030303030303030303030303065"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_leading_zero",
+      "wire": [
+        "69303165"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_negative_zero",
+      "wire": [
+        "692d3065"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_negative_leading_zero",
+      "wire": [
+        "692d303165"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_empty",
+      "wire": [
+        "6965"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_only_minus",
+      "wire": [
+        "692d65"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_plus_sign",
+      "wire": [
+        "692b3165"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_space",
+      "wire": [
+        "69203165"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_fraction",
+      "wire": [
+        "69312e3065"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_hex",
+      "wire": [
+        "6930783165"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_int_unterminated",
+      "wire": [
+        "6931"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_string_empty",
+      "used": 2,
+      "wire": [
+        "303a"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_string_binary",
+      "used": 5,
+      "wire": [
+        "333a00ff80"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_string_leading_zero_length",
+      "wire": [
+        "30313a61"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_string_double_zero_length",
+      "wire": [
+        "30303a"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_string_negative_length",
+      "wire": [
+        "2d313a61"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_string_longer_than_input",
+      "wire": [
+        "353a616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_string_length_out_of_range",
+      "wire": [
+        "39393939393939393939393939393939393939393a"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_string_length_without_colon",
+      "wire": [
+        "33616263"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_list_empty",
+      "used": 2,
+      "wire": [
+        "6c65"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_list_mixed",
+      "used": 16,
+      "wire": [
+        "6c693165313a6164313a616932656565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_list_unterminated",
+      "wire": [
+        "6c693165"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_nesting_five_levels",
+      "used": 10,
+      "wire": [
+        "6c6c6c6c6c6565656565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_nesting_value_at_fifth_level",
+      "used": 11,
+      "wire": [
+        "6c6c6c6c69316565656565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_nesting_six_levels",
+      "wire": [
+        "6c6c6c6c6c6c656565656565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_nesting_value_at_sixth_level",
+      "wire": [
+        "6c6c6c6c6c6931656565656565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_dict_empty",
+      "used": 2,
+      "wire": [
+        "6465"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_dict_sorted_by_bytes",
+      "used": 27,
+      "wire": [
+        "64313a41693165313a61693265323a6161693365313a6269346565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_dict_high_bytes_sort_last",
+      "used": 20,
+      "wire": [
+        "64313a7f693165313ac3693265313aff69336565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_dict_high_bytes_out_of_order",
+      "wire": [
+        "64313aff693165313a7f69326565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_dict_unsorted",
+      "wire": [
+        "64313a62693165313a6169326565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_dict_prefix_after_longer_key",
+      "wire": [
+        "64323a6161693165313a6169326565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_dict_duplicate_key",
+      "wire": [
+        "64313a61693165313a6169326565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_dict_integer_key",
+      "wire": [
+        "6469316569326565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_dict_key_without_value",
+      "wire": [
+        "64313a6165"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_dict_unterminated",
+      "wire": [
+        "64313a61693165"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "bencode",
+      "name": "bencode_trailing_bytes_are_left_alone",
+      "used": 3,
+      "wire": [
+        "69316558595a"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_unknown_type",
+      "wire": [
+        "78"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "bencode",
+      "name": "bencode_empty_input",
+      "wire": [
+        ""
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "request",
+      "name": "request_get",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_without_type",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_without_hash",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a74333a676574313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_without_account",
+      "wire": [
+        "64313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_without_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a67657465"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_unknown_type",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74343a6e6f7065313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_type_is_a_number",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74693165313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_type_is_not_utf8",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74343a676574ff313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_type_is_case_sensitive",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a476574313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_negative_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a78692d316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_limit_is_text",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a78313a3765"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_short_account",
+      "wire": [
+        "64313a6133313a01010101010101010101010101010101010101010101010101010101010101313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_long_account",
+      "wire": [
+        "64313a6133333a010101010101010101010101010101010101010101010101010101010101010101313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_account_is_a_number",
+      "wire": [
+        "64313a61693165313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_sha256_named_explicitly",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a78693765313a79363a73686132353665"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "request",
+      "name": "request_get_sha1",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6832303a404142434445464748494a4b4c4d4e4f50515253313a74333a676574313a78693765313a79343a7368613165"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_sha1_digest_without_algorithm",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6832303a404142434445464748494a4b4c4d4e4f50515253313a74333a676574313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_sha1_with_sha256_digest",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a78693765313a79343a7368613165"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_unknown_algorithm",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a78693765313a79333a6d643565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_algorithm_is_a_number",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a78693765313a7969316565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "request",
+      "name": "request_pay",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a7631333a6361736875426578616d706c6565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_without_a",
+      "wire": [
+        "64313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a7631333a6361736875426578616d706c6565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_without_i",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a7631333a6361736875426578616d706c6565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_without_k",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a7631333a6361736875426578616d706c6565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_without_m",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a74333a706179313a7631333a6361736875426578616d706c6565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_without_v",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a70617965"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_short_id",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931353a010101010101010101010101010101313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a7631333a6361736875426578616d706c6565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_long_id",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931373a0101010101010101010101010101010101313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a7631333a6361736875426578616d706c6565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "request",
+      "name": "request_pay_method_at_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b3235363a6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a7631333a6361736875426578616d706c6565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_method_above_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b3235373a6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a7631333a6361736875426578616d706c6565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "request",
+      "name": "request_pay_mint_at_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d3531323a6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d313a74333a706179313a7631333a6361736875426578616d706c6565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_mint_above_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d3531333a6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d313a74333a706179313a7631333a6361736875426578616d706c6565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_token_is_not_utf8",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a76323ac32865"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_token_is_a_list",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a766c31333a6361736875426578616d706c656565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_trailing_byte",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a7869376565",
+        "78"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_is_a_list",
+      "wire": [
+        "6c333a67657465"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_is_a_number",
+      "wire": [
+        "693165"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_is_empty",
+      "wire": [
+        ""
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_keys_out_of_order",
+      "wire": [
+        "64313a74333a676574313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a7869376565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "request",
+      "name": "request_pay_token_at_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179",
+        "313a7634393135323a",
+        {
+          "repeat": "41",
+          "times": 49152
+        },
+        "65"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_pay_token_above_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179",
+        "313a7634393135333a",
+        {
+          "repeat": "41",
+          "times": 49153
+        },
+        "65"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "request",
+      "name": "request_header_at_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a78693765",
+        "313a7a36353433353a",
+        {
+          "repeat": "00",
+          "times": 65435
+        },
+        "65"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_header_above_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a78693765",
+        "313a7a36353433363a",
+        {
+          "repeat": "00",
+          "times": 65436
+        },
+        "65"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_data",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165",
+        "616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_shorter_than_declared",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165",
+        "6162"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_longer_than_declared",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165",
+        "61626364"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_without_payload",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165",
+        ""
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_without_size",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74343a6461746165",
+        "616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_without_charge",
+      "wire": [
+        "64313a62692d3565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165",
+        "616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_without_balance",
+      "wire": [
+        "64313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165",
+        "616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_negative_size",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e692d3365313a74343a6461746165",
+        "616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_negative_charge",
+      "wire": [
+        "64313a62692d3565313a63692d3165313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165",
+        "616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_balance_is_text",
+      "wire": [
+        "64313a62313a30313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165",
+        "616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_negative_repeat_flag",
+      "wire": [
+        "64313a62692d3565313a63693565313a64692d3165313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165",
+        "616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_repeat_flag_is_text",
+      "wire": [
+        "64313a62692d3565313a63693565313a64313a31313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165",
+        "616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_short_hash",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833313a01010101010101010101010101010101010101010101010101010101010101313a6e693365313a74343a6461746165",
+        "616263"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_data_larger_than_the_header_limit",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e69373030303065313a74343a6461746165",
+        {
+          "repeat": "ab",
+          "times": 70000
+        }
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_data_at_blob_limit",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e69313637373732313665313a74343a6461746165",
+        {
+          "repeat": "ab",
+          "times": 16777216
+        }
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_above_blob_limit",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e69313637373732313765313a74343a6461746165",
+        {
+          "repeat": "ab",
+          "times": 16777217
+        }
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_quote",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_without_h",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_without_n",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_without_c",
+      "wire": [
+        "64313a62693065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_without_b",
+      "wire": [
+        "64313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_without_g",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_without_r",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_without_f",
+      "wire": [
+        "64313a62693065313a63693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_without_m",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_without_k",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_without_u",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f746565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_rate_of_one_number",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_rate_of_three_numbers",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569326569336565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_negative_rate",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c692d316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_negative_rate_bytes",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c693165692d313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_quote_rate_per_zero_bytes",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569306565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_rate_is_text",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c313a31343a3130323465313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_rate_is_a_number",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a72693165313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_quote_sixteen_mints",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31353a68747470733a2f2f6d302e7465737431353a68747470733a2f2f6d312e7465737431353a68747470733a2f2f6d322e7465737431353a68747470733a2f2f6d332e7465737431353a68747470733a2f2f6d342e7465737431353a68747470733a2f2f6d352e7465737431353a68747470733a2f2f6d362e7465737431353a68747470733a2f2f6d372e7465737431353a68747470733a2f2f6d382e7465737431353a68747470733a2f2f6d392e7465737431363a68747470733a2f2f6d31302e7465737431363a68747470733a2f2f6d31312e7465737431363a68747470733a2f2f6d31322e7465737431363a68747470733a2f2f6d31332e7465737431363a68747470733a2f2f6d31342e7465737431363a68747470733a2f2f6d31352e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_seventeen_mints",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31353a68747470733a2f2f6d302e7465737431353a68747470733a2f2f6d312e7465737431353a68747470733a2f2f6d322e7465737431353a68747470733a2f2f6d332e7465737431353a68747470733a2f2f6d342e7465737431353a68747470733a2f2f6d352e7465737431353a68747470733a2f2f6d362e7465737431353a68747470733a2f2f6d372e7465737431353a68747470733a2f2f6d382e7465737431353a68747470733a2f2f6d392e7465737431363a68747470733a2f2f6d31302e7465737431363a68747470733a2f2f6d31312e7465737431363a68747470733a2f2f6d31322e7465737431363a68747470733a2f2f6d31332e7465737431363a68747470733a2f2f6d31342e7465737431363a68747470733a2f2f6d31352e7465737431363a68747470733a2f2f6d31362e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_quote_mint_at_limit",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c3531323a6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d65313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_mint_above_limit",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c3531333a6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d6d65313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_mint_is_not_utf8",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c313aff65313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_mints_is_text",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d31373a68747470733a2f2f6d696e742e74657374313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_method_is_a_number",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c69316565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_negative_price",
+      "wire": [
+        "64313a62693065313a63692d3165313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_quote_negative_balance",
+      "wire": [
+        "64313a62692d3165313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_negative_grace",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67692d3165313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_negative_top_up",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a75692d316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_unknown_algorithm",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a75693165313a79363a626c616b653365"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_none",
+      "wire": [
+        "64313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74343a6e6f6e6565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_none_without_hash",
+      "wire": [
+        "64313a74343a6e6f6e6565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_paid",
+      "wire": [
+        "64313a62693530303065313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a74343a70616964313a7669353030306565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_paid_without_i",
+      "wire": [
+        "64313a62693530303065313a74343a70616964313a7669353030306565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_paid_without_v",
+      "wire": [
+        "64313a62693530303065313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a74343a7061696465"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_paid_without_b",
+      "wire": [
+        "64313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a74343a70616964313a7669353030306565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_paid_short_id",
+      "wire": [
+        "64313a62693530303065313a6931353a010101010101010101010101010101313a74343a70616964313a7669353030306565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_paid_negative_credit",
+      "wire": [
+        "64313a62693530303065313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a74343a70616964313a76692d316565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_err",
+      "wire": [
+        "64313a6431363a6d696e7420756e726561636861626c65313a72353a7265747279313a74333a65727265"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_err_without_code",
+      "wire": [
+        "64313a6431363a6d696e7420756e726561636861626c65313a74333a65727265"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_err_without_detail",
+      "wire": [
+        "64313a72353a7265747279313a74333a65727265"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_err_code_is_a_number",
+      "wire": [
+        "64313a6431363a6d696e7420756e726561636861626c65313a72693165313a74333a65727265"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_err_with_id",
+      "wire": [
+        "64313a6431363a6d696e7420756e726561636861626c65313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a72353a7265747279313a74333a65727265"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_err_with_short_id",
+      "wire": [
+        "64313a6431363a6d696e7420756e726561636861626c65313a6931353a010101010101010101010101010101313a72353a7265747279313a74333a65727265"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_err_id_is_a_number",
+      "wire": [
+        "64313a6431363a6d696e7420756e726561636861626c65313a69693165313a72353a7265747279313a74333a65727265"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_err_detail_at_limit",
+      "wire": [
+        "64313a643235363a64646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464313a72353a7265747279313a74333a65727265"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_err_detail_above_limit",
+      "wire": [
+        "64313a643235373a6464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464646464313a72353a7265747279313a74333a65727265"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_err_detail_is_not_utf8",
+      "wire": [
+        "64313a64333aeda080313a72353a7265747279313a74333a65727265"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_unknown_type",
+      "wire": [
+        "64313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74343a6e6f706565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_request_type",
+      "wire": [
+        "64313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a67657465"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_without_type",
+      "wire": [
+        "64313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f65"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_none_trailing_byte",
+      "wire": [
+        "64313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74343a6e6f6e6565",
+        "78"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_is_a_number",
+      "wire": [
+        "693165"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_is_truncated",
+      "wire": [
+        "64313a6833323a"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_is_empty",
+      "wire": [
+        ""
+      ]
+    }
+  ],
+  "bep10_extension": "ht_pay",
+  "blob_max_bytes": 16777216,
+  "description": "Paid retrieval wire vectors. Generated by rust/crates/hashtree-paid-retrieval/tests/vectors.rs; do not edit by hand.",
+  "max_header_bytes": 65536,
+  "max_message_bytes": 16842752,
+  "messages": [
+    {
+      "direction": "both",
+      "kind": "request",
+      "message": {
+        "account": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "max_msat": "16384",
+        "type": "get"
+      },
+      "name": "get_sha256",
+      "wire": "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a786931363338346565"
+    },
+    {
+      "direction": "both",
+      "kind": "request",
+      "message": {
+        "account": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "hash": {
+          "algorithm": "sha1",
+          "digest": "404142434445464748494a4b4c4d4e4f50515253"
+        },
+        "max_msat": "1",
+        "type": "get"
+      },
+      "name": "get_sha1",
+      "wire": "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6832303a404142434445464748494a4b4c4d4e4f50515253313a74333a676574313a78693165313a79343a7368613165"
+    },
+    {
+      "direction": "both",
+      "kind": "request",
+      "message": {
+        "account": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
+        "max_msat": "0",
+        "type": "get"
+      },
+      "name": "get_authorising_nothing",
+      "wire": "64313a6133323affffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff313a6833323a0000000000000000000000000000000000000000000000000000000000000000313a74333a676574313a7869306565"
+    },
+    {
+      "direction": "both",
+      "kind": "request",
+      "message": {
+        "account": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "max_msat": "9223372036854775807",
+        "type": "get"
+      },
+      "name": "get_largest_number",
+      "wire": "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a7869393232333337323033363835343737353830376565"
+    },
+    {
+      "direction": "encode",
+      "kind": "request",
+      "message": {
+        "account": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "max_msat": "18446744073709551615",
+        "type": "get"
+      },
+      "name": "get_above_the_largest_number_saturates",
+      "wire": "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a7869393232333337323033363835343737353830376565"
+    },
+    {
+      "direction": "both",
+      "kind": "request",
+      "message": {
+        "account": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "method": "cashu",
+        "mint": "https://mint.test",
+        "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "token": "cashuBexample",
+        "type": "pay"
+      },
+      "name": "pay_cashu",
+      "wire": "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a7631333a6361736875426578616d706c6565"
+    },
+    {
+      "direction": "both",
+      "kind": "request",
+      "message": {
+        "account": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "method": "",
+        "mint": "https://minttu.test/säästö",
+        "payment": "00000000000000000000000000000000",
+        "token": "﻿token ✓",
+        "type": "pay"
+      },
+      "name": "pay_empty_and_non_ascii_text",
+      "wire": "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6931363a00000000000000000000000000000000313a6b303a313a6d32393a68747470733a2f2f6d696e7474752e746573742f73c3a4c3a47374c3b6313a74333a706179313a7631323aefbbbf746f6b656e20e29c9365"
+    },
+    {
+      "direction": "decode",
+      "kind": "request",
+      "message": {
+        "account": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "max_msat": "7",
+        "type": "get"
+      },
+      "name": "get_with_unknown_keys",
+      "wire": "64313a41373a69676e6f726564313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a78693765313a7a6c692d3165353a6c617465726565"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "2952",
+        "charged_msat": "2048",
+        "data": "626c6f62206279746573",
+        "duplicate": false,
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "type": "data"
+      },
+      "name": "data_charged",
+      "wire": "64313a62693239353265313a63693230343865313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e69313065313a74343a6461746165626c6f62206279746573"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "-1000",
+        "charged_msat": "1000",
+        "data": "000102ff6564",
+        "duplicate": true,
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "type": "data"
+      },
+      "name": "data_free_repeat_on_a_debt",
+      "wire": "64313a62692d3130303065313a63693130303065313a64693165313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693665313a74343a6461746165000102ff6564"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "0",
+        "charged_msat": "0",
+        "data": "",
+        "duplicate": false,
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "type": "data"
+      },
+      "name": "data_empty",
+      "wire": "64313a62693065313a63693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693065313a74343a6461746165"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "-9223372036854775808",
+        "charged_msat": "9223372036854775807",
+        "data": "7069656365",
+        "duplicate": false,
+        "hash": {
+          "algorithm": "sha1",
+          "digest": "404142434445464748494a4b4c4d4e4f50515253"
+        },
+        "type": "data"
+      },
+      "name": "data_sha1_lowest_balance",
+      "wire": "64313a62692d3932323333373230333638353437373538303865313a63693932323333373230333638353437373538303765313a6832303a404142434445464748494a4b4c4d4e4f50515253313a6e693565313a74343a64617461313a79343a73686131657069656365"
+    },
+    {
+      "direction": "encode",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "0",
+        "charged_msat": "18446744073709551615",
+        "data": "78",
+        "duplicate": false,
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "type": "data"
+      },
+      "name": "data_charge_above_the_largest_number_saturates",
+      "wire": "64313a62693065313a63693932323333373230333638353437373538303765313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693165313a74343a646174616578"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "100",
+        "grace_msat": "0",
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "methods": [
+          "cashu"
+        ],
+        "min_topup_sat": "1",
+        "mints": [
+          "https://mint.test"
+        ],
+        "price_msat": "2048",
+        "size": "2097152",
+        "tariff": {
+          "min_msat": "1000",
+          "msat": "1",
+          "per_bytes": "1024"
+        },
+        "type": "quote"
+      },
+      "name": "quote",
+      "wire": "64313a626931303065313a63693230343865313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693230393731353265313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "-1500",
+        "grace_msat": "1500",
+        "hash": {
+          "algorithm": "sha1",
+          "digest": "404142434445464748494a4b4c4d4e4f50515253"
+        },
+        "methods": [
+          "cashu"
+        ],
+        "min_topup_sat": "21",
+        "mints": [
+          "https://mint.test"
+        ],
+        "price_msat": "256",
+        "size": "262144",
+        "tariff": {
+          "min_msat": "1000",
+          "msat": "1",
+          "per_bytes": "1024"
+        },
+        "type": "quote"
+      },
+      "name": "quote_sha1_with_grace_and_a_debt",
+      "wire": "64313a62692d3135303065313a636932353665313a66693130303065313a67693135303065313a6832303a404142434445464748494a4b4c4d4e4f50515253313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e6932363231343465313a726c69316569313032346565313a74353a71756f7465313a7569323165313a79343a7368613165"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "100",
+        "grace_msat": "0",
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "methods": [],
+        "min_topup_sat": "1",
+        "mints": [],
+        "price_msat": "2048",
+        "size": "2097152",
+        "tariff": {
+          "min_msat": "0",
+          "msat": "0",
+          "per_bytes": "1"
+        },
+        "type": "quote"
+      },
+      "name": "quote_without_mints_or_methods",
+      "wire": "64313a626931303065313a63693230343865313a66693065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c65313a6d6c65313a6e693230393731353265313a726c69306569316565313a74353a71756f7465313a7569316565"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "9223372036854775807",
+        "grace_msat": "9223372036854775807",
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "methods": [
+          "cashu",
+          "cashu-spilman"
+        ],
+        "min_topup_sat": "9223372036854775807",
+        "mints": [
+          "https://mint0.test/",
+          "https://mint1.test/",
+          "https://mint2.test/",
+          "https://mint3.test/",
+          "https://mint4.test/",
+          "https://mint5.test/",
+          "https://mint6.test/",
+          "https://mint7.test/",
+          "https://mint8.test/",
+          "https://mint9.test/",
+          "https://mint10.test/",
+          "https://mint11.test/",
+          "https://mint12.test/",
+          "https://mint13.test/",
+          "https://mint14.test/",
+          "https://mint15.test/"
+        ],
+        "price_msat": "9223372036854775807",
+        "size": "9223372036854775807",
+        "tariff": {
+          "min_msat": "9223372036854775807",
+          "msat": "9223372036854775807",
+          "per_bytes": "9223372036854775807"
+        },
+        "type": "quote"
+      },
+      "name": "quote_largest_numbers_and_sixteen_mints",
+      "wire": "64313a62693932323333373230333638353437373538303765313a63693932323333373230333638353437373538303765313a66693932323333373230333638353437373538303765313a67693932323333373230333638353437373538303765313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687531333a63617368752d7370696c6d616e65313a6d6c31393a68747470733a2f2f6d696e74302e746573742f31393a68747470733a2f2f6d696e74312e746573742f31393a68747470733a2f2f6d696e74322e746573742f31393a68747470733a2f2f6d696e74332e746573742f31393a68747470733a2f2f6d696e74342e746573742f31393a68747470733a2f2f6d696e74352e746573742f31393a68747470733a2f2f6d696e74362e746573742f31393a68747470733a2f2f6d696e74372e746573742f31393a68747470733a2f2f6d696e74382e746573742f31393a68747470733a2f2f6d696e74392e746573742f32303a68747470733a2f2f6d696e7431302e746573742f32303a68747470733a2f2f6d696e7431312e746573742f32303a68747470733a2f2f6d696e7431322e746573742f32303a68747470733a2f2f6d696e7431332e746573742f32303a68747470733a2f2f6d696e7431342e746573742f32303a68747470733a2f2f6d696e7431352e746573742f65313a6e693932323333373230333638353437373538303765313a726c69393232333337323033363835343737353830376569393232333337323033363835343737353830376565313a74353a71756f7465313a7569393232333337323033363835343737353830376565"
+    },
+    {
+      "direction": "encode",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "100",
+        "grace_msat": "18446744073709551615",
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "methods": [
+          "cashu"
+        ],
+        "min_topup_sat": "18446744073709551615",
+        "mints": [
+          "https://mint.test"
+        ],
+        "price_msat": "18446744073709551615",
+        "size": "18446744073709551615",
+        "tariff": {
+          "min_msat": "18446744073709551615",
+          "msat": "18446744073709551615",
+          "per_bytes": "18446744073709551615"
+        },
+        "type": "quote"
+      },
+      "name": "quote_above_the_largest_number_saturates",
+      "wire": "64313a626931303065313a63693932323333373230333638353437373538303765313a66693932323333373230333638353437373538303765313a67693932323333373230333638353437373538303765313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693932323333373230333638353437373538303765313a726c69393232333337323033363835343737353830376569393232333337323033363835343737353830376565313a74353a71756f7465313a7569393232333337323033363835343737353830376565"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "type": "none"
+      },
+      "name": "none",
+      "wire": "64313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74343a6e6f6e6565"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "hash": {
+          "algorithm": "sha1",
+          "digest": "404142434445464748494a4b4c4d4e4f50515253"
+        },
+        "type": "none"
+      },
+      "name": "none_sha1",
+      "wire": "64313a6832303a404142434445464748494a4b4c4d4e4f50515253313a74343a6e6f6e65313a79343a7368613165"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "5000",
+        "credited_msat": "5000",
+        "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "type": "paid"
+      },
+      "name": "paid",
+      "wire": "64313a62693530303065313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a74343a70616964313a7669353030306565"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "-500",
+        "credited_msat": "1000",
+        "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "type": "paid"
+      },
+      "name": "paid_still_in_debt",
+      "wire": "64313a62692d35303065313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a74343a70616964313a7669313030306565"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "code": "bad",
+        "detail": "why: bad",
+        "payment": null,
+        "type": "err"
+      },
+      "name": "err_bad",
+      "wire": "64313a64383a7768793a20626164313a72333a626164313a74333a65727265"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "code": "mint",
+        "detail": "why: mint",
+        "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "type": "err"
+      },
+      "name": "err_mint",
+      "wire": "64313a64393a7768793a206d696e74313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a72343a6d696e74313a74333a65727265"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "code": "method",
+        "detail": "why: method",
+        "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "type": "err"
+      },
+      "name": "err_method",
+      "wire": "64313a6431313a7768793a206d6574686f64313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a72363a6d6574686f64313a74333a65727265"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "code": "invalid",
+        "detail": "why: invalid",
+        "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "type": "err"
+      },
+      "name": "err_invalid",
+      "wire": "64313a6431323a7768793a20696e76616c6964313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a72373a696e76616c6964313a74333a65727265"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "code": "replay",
+        "detail": "why: replay",
+        "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "type": "err"
+      },
+      "name": "err_replay",
+      "wire": "64313a6431313a7768793a207265706c6179313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a72363a7265706c6179313a74333a65727265"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "code": "retry",
+        "detail": "why: retry",
+        "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "type": "err"
+      },
+      "name": "err_retry",
+      "wire": "64313a6431303a7768793a207265747279313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a72353a7265747279313a74333a65727265"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "code": "full",
+        "detail": "why: full",
+        "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "type": "err"
+      },
+      "name": "err_full",
+      "wire": "64313a64393a7768793a2066756c6c313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a72343a66756c6c313a74333a65727265"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "code": "unknown",
+        "detail": "why: unknown",
+        "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+        "type": "err"
+      },
+      "name": "err_unknown",
+      "wire": "64313a6431323a7768793a20756e6b6e6f776e313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a72373a756e6b6e6f776e313a74333a65727265"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "code": "retry",
+        "detail": "määrä ✓ 🙂",
+        "payment": null,
+        "type": "err"
+      },
+      "name": "err_empty_and_non_ascii_detail",
+      "wire": "64313a6431373a6dc3a4c3a472c3a420e29c9320f09f9982313a72353a7265747279313a74333a65727265"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "code": "retry",
+        "detail": "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂",
+        "payment": null,
+        "type": "err"
+      },
+      "name": "err_detail_of_64_characters",
+      "wire": "64313a643235363af09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982313a72353a7265747279313a74333a65727265"
+    },
+    {
+      "direction": "encode",
+      "kind": "reply",
+      "message": {
+        "code": "retry",
+        "detail": "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂ä",
+        "payment": null,
+        "type": "err"
+      },
+      "name": "err_detail_is_cut_to_64_characters",
+      "wire": "64313a643235363af09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982f09f9982313a72353a7265747279313a74333a65727265"
+    },
+    {
+      "direction": "decode",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "-5",
+        "charged_msat": "5",
+        "data": "616263",
+        "duplicate": false,
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "type": "data"
+      },
+      "name": "data_repeat_flag_zero_is_not_a_repeat",
+      "wire": "64313a62692d3565313a63693565313a64693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165616263"
+    },
+    {
+      "direction": "decode",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "-5",
+        "charged_msat": "5",
+        "data": "616263",
+        "duplicate": true,
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "type": "data"
+      },
+      "name": "data_repeat_flag_other_than_one",
+      "wire": "64313a62692d3565313a63693565313a64693765313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a6461746165616263"
+    },
+    {
+      "direction": "decode",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "-5",
+        "charged_msat": "5",
+        "data": "616263",
+        "duplicate": false,
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "type": "data"
+      },
+      "name": "data_with_unknown_keys",
+      "wire": "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a64617461313a7a646565616263"
+    },
+    {
+      "direction": "decode",
+      "kind": "reply",
+      "message": {
+        "code": "unknown",
+        "detail": "x",
+        "payment": null,
+        "type": "err"
+      },
+      "name": "err_with_a_code_from_the_future",
+      "wire": "64313a64313a78313a72353a6c61746572313a74333a65727265"
+    }
+  ],
+  "method_cashu": "cashu",
+  "prices": [
+    {
+      "bytes": "0",
+      "min_msat": "5",
+      "msat": "1",
+      "per_bytes": "1024",
+      "price_msat": "5"
+    },
+    {
+      "bytes": "1",
+      "min_msat": "5",
+      "msat": "1",
+      "per_bytes": "1024",
+      "price_msat": "5"
+    },
+    {
+      "bytes": "6144",
+      "min_msat": "5",
+      "msat": "1",
+      "per_bytes": "1024",
+      "price_msat": "6"
+    },
+    {
+      "bytes": "6145",
+      "min_msat": "5",
+      "msat": "1",
+      "per_bytes": "1024",
+      "price_msat": "7"
+    },
+    {
+      "bytes": "2097152",
+      "min_msat": "1000",
+      "msat": "1",
+      "per_bytes": "1024",
+      "price_msat": "2048"
+    },
+    {
+      "bytes": "16777216",
+      "min_msat": "100",
+      "msat": "1",
+      "per_bytes": "1024",
+      "price_msat": "16384"
+    },
+    {
+      "bytes": "16777216",
+      "min_msat": "0",
+      "msat": "0",
+      "per_bytes": "1",
+      "price_msat": "0"
+    },
+    {
+      "bytes": "2",
+      "min_msat": "0",
+      "msat": "3",
+      "per_bytes": "0",
+      "price_msat": "6"
+    },
+    {
+      "bytes": "10",
+      "min_msat": "0",
+      "msat": "7",
+      "per_bytes": "3",
+      "price_msat": "24"
+    },
+    {
+      "bytes": "18446744073709551615",
+      "min_msat": "0",
+      "msat": "18446744073709551615",
+      "per_bytes": "1",
+      "price_msat": "18446744073709551615"
+    },
+    {
+      "bytes": "18446744073709551615",
+      "min_msat": "0",
+      "msat": "18446744073709551615",
+      "per_bytes": "18446744073709551615",
+      "price_msat": "18446744073709551615"
+    },
+    {
+      "bytes": "1",
+      "min_msat": "18446744073709551615",
+      "msat": "1",
+      "per_bytes": "18446744073709551615",
+      "price_msat": "18446744073709551615"
+    }
+  ],
+  "protocol": "hashtree.paid-blob/1"
+}
