@@ -252,6 +252,81 @@ The carrier is a feature of `hashtree-paid-retrieval`, not a part of
 code, a build that only needs the exchange (the BitTorrent glue, a stream
 carrier) pulls in no FIPS stack, and no further crate has to be versioned.
 
+## Over HTTP
+
+Not built. Two faces of the same `PaidSeller`, for two kinds of client.
+
+### The exchange over one endpoint
+
+A gateway accepts the exchange as it is: `POST /paid-blob` with one encoded
+request as the body (`application/octet-stream`) answers `200` with one encoded
+reply. Transport failures are HTTP errors; every protocol outcome, including
+`quote` and `err`, is a `200` with that reply. This is a `PaidBlobTransport`
+like any other, so accounts, millisat prices, free repeats, payment ids and
+replay protection all apply unchanged, and it is what gives a browser a way to
+pay: the TypeScript buyer needs only `fetch`. Replies are not cacheable
+(`Cache-Control: no-store`); free blobs keep their cacheable `GET`.
+
+### Standard clients: HTTP 402
+
+Blossom's BUD-07 (draft) and Cashu's NUT-24 already define paying for a blob
+download, so a gateway that charges should answer foreign clients in their
+terms on the ordinary `GET /<sha256>`:
+
+- An unpaid request gets `402 Payment Required` with `X-Cashu` holding a
+  NUT-18 payment request: the price rounded up to whole sats, unit `sat`, and
+  the provider's mints as a strict list.
+- The client repeats the request with a `cashuB` token in `X-Cashu`. The
+  provider redeems it through the same seller and serves the blob. A bad or
+  short token is `400` with `X-Reason`, as BUD-07 says.
+- `HEAD /<sha256>` answers `402` with the same header and no body, so a client
+  can learn the price without fetching.
+
+Neither document says what happens to an overpayment, how a payment covers
+more than one request, or what a client can do when the token is taken and no
+data arrives. Here the token is credited to an account named by the hash of
+the token, and the blob is charged to it at the exact millisat price. A client
+that sends the same `X-Cashu` header again spends what is left on that
+account, so one larger token pays for many blobs, and a repeated request for a
+charged blob is free for the redelivery window. A client that knows nothing of
+this still gets exactly BUD-07.
+
+This face costs a mint round trip per token on the provider, and whole-sat
+rounding on small blobs; a mint's default request limit caps it at a few
+paid downloads a minute per token-paying client. It is for compatibility. A
+Hashtree client uses the endpoint above.
+
+`X-Lightning` (a BOLT-11 invoice, proven by its preimage) needs no Lightning
+node: the provider's wallet can ask its mint for a mint quote and use that
+invoice. A one-blob invoice is not worth its fees, so Lightning fits better as
+a second way to top up an account (`k` = `bolt11`) than as a per-blob price.
+
+### Paying other people's servers
+
+A Hashtree client that meets `402` with `X-Cashu` on a third-party Blossom
+server can pay it through the same wallet and limits: check the requested
+amount against `max_tariff` for the size that `HEAD` reports, pay exactly that
+amount, verify the hash, and count a payment without valid data as a loss
+against that server. There is no account and nothing to recover; the loss is
+at most one blob's price per attempt.
+
+## Paying for availability, not for retrieval
+
+Pay-to-retrieve rewards serving what is asked for. It does not reward keeping
+data that nobody asks for. Durabit (2023, not built) addresses that for
+torrents: a sponsor locks bitcoin in pre-signed, timelocked payouts to a
+Chaumian mint, and the mint issues ecash each period to the seeders it finds
+serving the torrent. Its weak point is the mint, which must be trusted to pay
+out and to judge who really seeds.
+
+The closest fit here needs no new exchange. An account id is a bearer
+credential, so a publisher can fund an account at a provider and hand the id
+to readers: retrieval is then paid by the publisher. And a sponsor who wants
+data kept can do what the Durabit mint does without being a mint: fetch
+randomly chosen blobs of the tree through a paid route now and then. Each
+hash-verified reply is a proof that the provider still has that blob, and the
+payment for it is the reward. Neither is built or tested as such.
+
 ## Provider ledger
 
 `PaidBlobProvider::open` and `PaidSeller::open` take a `LedgerStore`;
@@ -433,7 +508,9 @@ both would close gaps listed below:
   to settle by hand.
 - Discovery of paid providers beyond the same host, and selection among
   several of them.
-- A TypeScript carrier and wiring into the worker's routes, the BitTorrent
+- The HTTP endpoint and the HTTP 402 face ([Over HTTP](#over-http)), and with
+  them the TypeScript buyer's first carrier.
+- Wiring into the worker's routes, the BitTorrent
   glue, refunds of unused balance, Spilman channel payments, and the Iris
   Drive wallet screen.
 
