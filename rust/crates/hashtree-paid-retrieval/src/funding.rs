@@ -28,10 +28,11 @@ impl Funding {
     pub(crate) async fn run(
         inner: &Arc<Inner>,
         quote: Option<Quote>,
+        carry: bool,
         deadline: Instant,
     ) -> Result<bool, StoreError> {
         let owner = Arc::clone(inner);
-        let task = tokio::spawn(async move { owner.fund(quote).await });
+        let task = tokio::spawn(async move { owner.fund(quote, carry).await });
         match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), task).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(StoreError::Other("paid route payment task failed".into())),
@@ -54,7 +55,9 @@ enum Sent {
 }
 
 impl Inner {
-    async fn fund(&self, quote: Option<Quote>) -> Result<bool, StoreError> {
+    /// With `carry`, a new token is left pending for the caller to carry in
+    /// its next request instead of being sent on its own.
+    async fn fund(&self, quote: Option<Quote>, carry: bool) -> Result<bool, StoreError> {
         let _paying = self.paying.lock().await;
         self.recover_intent().await?;
         self.settle_pending().await?;
@@ -142,6 +145,7 @@ impl Inner {
                 mints: mints.clone(),
                 amount_sat,
                 max_fee_sat: self.policy.max_token_fee_sat,
+                lock: terms.lock,
                 payment_id: id,
             };
             let declined = match self.wallet.pay(&request).await {
@@ -168,7 +172,9 @@ impl Inner {
             return Ok(false);
         };
         self.adopt(id, payment);
-        self.settle_pending().await?;
+        if !carry {
+            self.settle_pending().await?;
+        }
         Ok(true)
     }
 
@@ -223,6 +229,53 @@ impl Inner {
             return Ok(());
         };
         let sent = self.send(&pending).await?;
+        self.conclude(pending, sent)
+    }
+
+    /// A payment carried by a `get`: settle it from the reply, if the reply
+    /// says what became of it. Returns whether it was credited. The caller
+    /// holds the payment lock from before the request was sent.
+    pub(crate) async fn settle_carried(
+        &self,
+        pending: &PendingPayment,
+        reply: &Reply,
+    ) -> Result<bool, StoreError> {
+        let credit = match reply {
+            Reply::Data {
+                credit,
+                balance_msat,
+                ..
+            } => credit.map(|credit| (credit, *balance_msat)),
+            Reply::Quote(quote) => quote.credit.map(|credit| (credit, quote.balance_msat)),
+            _ => None,
+        };
+        let answer = match (credit, reply) {
+            (Some((credit, balance_msat)), _) if credit.payment == pending.id => Reply::Paid {
+                payment: credit.payment,
+                credited_msat: credit.credited_msat,
+                balance_msat,
+            },
+            (_, Reply::Error { payment, .. }) if *payment == Some(pending.id) => reply.clone(),
+            _ => return Ok(false),
+        };
+        // A concurrent request may have settled the same token already.
+        let current = self
+            .state()
+            .account
+            .pending
+            .as_ref()
+            .map(|current| current.id);
+        if current != Some(pending.id) {
+            return Ok(false);
+        }
+        let sent = self.outcome(pending, answer).await?;
+        let credited = matches!(sent, Sent::Credited);
+        self.conclude(pending.clone(), sent)?;
+        Ok(credited)
+    }
+
+    /// Record what became of the pending token.
+    fn conclude(&self, pending: PendingPayment, sent: Sent) -> Result<(), StoreError> {
         let outcome = {
             let mut state = self.state();
             let has_room = state.account.unresolved.len() < MAX_UNRESOLVED;
@@ -301,14 +354,18 @@ impl Inner {
     /// One `pay` exchange for one token, with its accounting.
     async fn send(&self, pending: &PendingPayment) -> Result<Sent, StoreError> {
         let request = Request::Pay {
-            account: self.state().account.account,
-            payment: pending.id,
-            method: METHOD_CASHU.to_owned(),
-            mint: pending.payment.mint_url.clone(),
-            token: pending.payment.token.clone(),
+            account: self.wire_account(),
+            payment: pending.wire(),
         };
         let deadline = Instant::now() + self.policy.request_timeout;
-        match self.exchange(&request, deadline).await? {
+        let reply = self.exchange(&request, deadline).await?;
+        self.outcome(pending, reply).await
+    }
+
+    /// What one reply says about one token handed to the provider, with its
+    /// accounting.
+    async fn outcome(&self, pending: &PendingPayment, reply: Reply) -> Result<Sent, StoreError> {
+        match reply {
             Reply::Paid {
                 payment,
                 credited_msat,

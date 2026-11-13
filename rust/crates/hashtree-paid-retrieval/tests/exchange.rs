@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use common::{FakeMint, FakeReceiver, Seller, MINT, TARIFF};
 use hashtree_core::Hash;
-use hashtree_paid_retrieval::{AccountId, ErrorCode, PaymentId, Reply, Request, METHOD_CASHU};
+use hashtree_paid_retrieval::{
+    AccountId, ErrorCode, Payment, PaymentId, Reply, Request, METHOD_CASHU,
+};
 
 const ACCOUNT: AccountId = [7; 32];
 const TWO_MIB: usize = 2 * 1024 * 1024;
@@ -20,8 +22,10 @@ fn get(hash: Hash, max_msat: u64) -> Request {
 fn get_from(account: AccountId, hash: Hash, max_msat: u64) -> Request {
     Request::Get {
         hash: hash.into(),
-        account,
+        account: Some(account),
         max_msat,
+        htl: 0,
+        payment: None,
     }
 }
 
@@ -31,11 +35,13 @@ fn pay(payment: PaymentId, token: &str) -> Request {
 
 fn pay_into(account: AccountId, payment: PaymentId, mint: &str, token: &str) -> Request {
     Request::Pay {
-        account,
-        payment,
-        method: METHOD_CASHU.into(),
-        mint: mint.into(),
-        token: token.into(),
+        account: Some(account),
+        payment: Payment {
+            id: payment,
+            method: METHOD_CASHU.into(),
+            mint: mint.into(),
+            token: token.into(),
+        },
     }
 }
 
@@ -83,6 +89,7 @@ async fn quote_then_payment_then_delivery() {
             balance_msat: 952,
             duplicate: false,
             data,
+            credit: None,
         }
     );
     assert_eq!(seller.receiver.received(), 3);
@@ -195,11 +202,13 @@ async fn spent_tokens_and_foreign_mints_are_refused() {
 
     let reply = seller
         .ask(Request::Pay {
-            account: ACCOUNT,
-            payment: [4; 16],
-            method: "iou".into(),
-            mint: MINT.into(),
-            token: "x".into(),
+            account: Some(ACCOUNT),
+            payment: Payment {
+                id: [4; 16],
+                method: "iou".into(),
+                mint: MINT.into(),
+                token: "x".into(),
+            },
         })
         .await;
     assert_eq!(error_code(&reply), ErrorCode::Method);

@@ -11,9 +11,9 @@ use std::time::Instant;
 
 use hashtree_core::StoreError;
 
-use crate::account::{AccountState, AccountStore, ClientPolicy, PaidRouteStats};
+use crate::account::{AccountState, AccountStore, ClientPolicy, PaidRouteStats, PendingPayment};
 use crate::funding::Funding;
-use crate::message::{AccountId, ContentHash, Quote, Reply, Request};
+use crate::message::{AccountId, ContentHash, LockKey, Quote, Reply, Request};
 use crate::transport::PaidBlobTransport;
 use crate::wallet::RetrievalWallet;
 
@@ -26,6 +26,7 @@ pub(crate) struct Terms {
     pub mints: Vec<String>,
     pub methods: Vec<String>,
     pub min_topup_sat: u64,
+    pub lock: Option<LockKey>,
 }
 
 pub(crate) struct State {
@@ -60,6 +61,15 @@ impl Inner {
         self.state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// The account id to name on the wire: none on a carrier that
+    /// authenticates this client, whose identity is then the account.
+    pub(crate) fn wire_account(&self) -> Option<AccountId> {
+        match self.transport.authenticates_peer() {
+            true => None,
+            false => Some(self.state().account.account),
+        }
     }
 
     /// Save the account where a restart will find it.
@@ -251,9 +261,89 @@ impl PaidBuyer {
                 || state.account.balance_msat < 0
         };
         if unsettled {
-            Funding::run(&self.inner, None, deadline).await?;
+            Funding::run(&self.inner, None, false, deadline).await?;
         }
         Ok(true)
+    }
+
+    /// Like [`PaidBuyer::prepare`], for a request that will carry a fresh
+    /// pending token itself: such a token is returned instead of being sent
+    /// on its own.
+    pub(crate) async fn prepare_carrying(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<Option<PendingPayment>>, StoreError> {
+        let (unsettled, carried) = {
+            let mut state = self.inner.state();
+            if state.account.blocked.is_some() {
+                state.stats.declined_blocked += 1;
+                return Ok(None);
+            }
+            let fresh = state
+                .account
+                .pending
+                .clone()
+                .filter(|pending| pending.attempts == 0 && state.account.intent.is_none());
+            let unsettled = state.account.intent.is_some()
+                || (state.account.pending.is_some() && fresh.is_none())
+                || (state.account.balance_msat < 0 && fresh.is_none());
+            (unsettled, fresh)
+        };
+        if unsettled {
+            Funding::run(&self.inner, None, false, deadline).await?;
+            let pending = self.inner.state().account.pending.clone();
+            return Ok(Some(pending.filter(|pending| pending.attempts == 0)));
+        }
+        Ok(Some(carried))
+    }
+
+    /// Take the payment lock for a request that carries `pending`, so that
+    /// one request at a time carries a token. Returns the lock and the token
+    /// if it is still unsettled once the lock is held.
+    pub(crate) async fn carry(
+        &self,
+        pending: Option<PendingPayment>,
+    ) -> (
+        Option<tokio::sync::MutexGuard<'_, ()>>,
+        Option<PendingPayment>,
+    ) {
+        let Some(pending) = pending else {
+            return (None, None);
+        };
+        let guard = self.inner.paying.lock().await;
+        let current = self.inner.state().account.pending.as_ref().map(|p| p.id);
+        match current == Some(pending.id) {
+            true => (Some(guard), Some(pending)),
+            false => (None, None),
+        }
+    }
+
+    /// Fund a quote, leaving a new token for the next request to carry.
+    pub(crate) async fn fund_carrying(
+        &self,
+        quote: Quote,
+        deadline: Instant,
+    ) -> Result<bool, StoreError> {
+        Funding::run(&self.inner, Some(quote), true, deadline).await
+    }
+
+    /// Settle a token that `request` carried, from the reply to it. After a
+    /// credit, the reply's balance counts as current for `request`.
+    pub(crate) async fn settle_carried(
+        &self,
+        request: &mut InFlight,
+        pending: &PendingPayment,
+        reply: &Reply,
+    ) -> Result<(), StoreError> {
+        if self.inner.settle_carried(pending, reply).await? {
+            request.credits = self.inner.state().credits;
+        }
+        Ok(())
+    }
+
+    /// The account id to name on the wire, if the carrier needs one.
+    pub(crate) fn wire_account(&self) -> Option<AccountId> {
+        self.inner.wire_account()
     }
 
     /// Mark a request as outstanding until the returned guard is dropped.
@@ -288,6 +378,7 @@ impl PaidBuyer {
             mints: quote.mints.clone(),
             methods: quote.methods.clone(),
             min_topup_sat: quote.min_topup_sat,
+            lock: quote.lock,
         });
         if quote.price_msat > self.inner.policy.max_tariff.price_msat(quote.size) {
             state.stats.declined_price += 1;
@@ -343,7 +434,7 @@ impl PaidBuyer {
     /// unacknowledged payment and pay any debt. Returns `false` when the
     /// client declines to pay (limit, mint, blocked provider).
     pub async fn fund(&self, quote: Option<Quote>, deadline: Instant) -> Result<bool, StoreError> {
-        Funding::run(&self.inner, quote, deadline).await
+        Funding::run(&self.inner, quote, false, deadline).await
     }
 
     /// Resend an unacknowledged payment, try the oldest unresolved token

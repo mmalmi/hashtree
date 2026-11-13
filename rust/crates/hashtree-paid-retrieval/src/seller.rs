@@ -12,7 +12,9 @@ use hashtree_core::sha256;
 
 use crate::books::Books;
 use crate::ledger::{AccountBalance, Charge, Ledger, LedgerConfig, PaymentStart, Settlement};
-use crate::message::{AccountId, ContentHash, ErrorCode, PaymentId, Quote, Reply, METHOD_CASHU};
+use crate::message::{
+    AccountId, ContentHash, ErrorCode, LockKey, Payment, Quote, Reply, METHOD_CASHU, PROTOCOL,
+};
 use crate::price::Tariff;
 use crate::store::{LedgerEntry, LedgerStore, PendingRedemption};
 
@@ -26,6 +28,9 @@ pub struct ProviderConfig {
     pub min_topup_sat: u64,
     /// Msat served before payment to an authenticated peer. Zero means prepay.
     pub grace_msat: u64,
+    /// The key tokens should be locked to, named in every quote. Unlocked
+    /// tokens are accepted as well.
+    pub lock: Option<LockKey>,
     pub max_accounts: usize,
     /// How long a charged unit is served again without a new charge.
     pub redelivery_window: Duration,
@@ -38,6 +43,7 @@ impl ProviderConfig {
             mints,
             min_topup_sat: 1,
             grace_msat: 0,
+            lock: None,
             max_accounts: 10_000,
             redelivery_window: Duration::from_secs(60),
         }
@@ -188,6 +194,14 @@ pub struct PaidSeller {
     inner: Arc<Inner>,
 }
 
+/// The account of a client that its carrier authenticates as `peer`.
+pub fn account_for_peer(peer: &str) -> AccountId {
+    let mut tagged = format!("{PROTOCOL} peer").into_bytes();
+    tagged.push(0);
+    tagged.extend_from_slice(peer.as_bytes());
+    sha256(&tagged)
+}
+
 pub(crate) fn normalize_mint(mint_url: &str) -> &str {
     mint_url.trim().trim_end_matches('/')
 }
@@ -302,20 +316,21 @@ impl PaidSeller {
                 mints: config.mints.clone(),
                 methods: vec![METHOD_CASHU.to_owned()],
                 min_topup_sat: config.min_topup_sat,
+                lock: config.lock,
+                credit: None,
             }),
             Charge::Full => Sale::Full,
         }
     }
 
     /// Credit one payment and return the `paid` or `err` reply for it.
-    pub async fn pay(
-        &self,
-        account: AccountId,
-        payment: PaymentId,
-        method: &str,
-        mint: &str,
-        token: String,
-    ) -> Reply {
+    pub async fn pay(&self, account: AccountId, payment: Payment) -> Reply {
+        let Payment {
+            id: payment,
+            method,
+            mint,
+            token,
+        } = payment;
         let refuse = |code, detail: &str| Reply::Error {
             code,
             payment: Some(payment),
@@ -324,7 +339,7 @@ impl PaidSeller {
         if method != METHOD_CASHU {
             return refuse(ErrorCode::Method, "unsupported payment method");
         }
-        let mint = normalize_mint(mint).to_owned();
+        let mint = normalize_mint(&mint).to_owned();
         let accepted = self.inner.config.mints.iter();
         if !accepted
             .map(|url| normalize_mint(url))

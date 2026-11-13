@@ -25,12 +25,9 @@ impl PaidBlobTransport for PaymentChannel {
     async fn exchange(&self, request: Vec<u8>) -> Result<Vec<u8>, StoreError> {
         let reply = match Request::decode(&request) {
             Ok(Request::Pay {
-                account,
+                account: Some(account),
                 payment,
-                method,
-                mint,
-                token,
-            }) => self.0.pay(account, payment, &method, &mint, token).await,
+            }) => self.0.pay(account, payment).await,
             _ => Reply::error(ErrorCode::Bad, "pieces travel in native messages"),
         };
         Ok(reply.encode())
@@ -120,8 +117,10 @@ async fn a_blob_provider_has_nothing_for_a_sha1_name() {
     let reply = seller
         .ask(Request::Get {
             hash: piece,
-            account: [1; 32],
+            account: Some([1; 32]),
             max_msat: u64::MAX,
+            htl: 0,
+            payment: None,
         })
         .await;
     assert_eq!(reply, Reply::NoResult { hash: piece });

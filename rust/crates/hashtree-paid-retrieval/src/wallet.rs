@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 
-use crate::message::PaymentId;
+use crate::message::{LockKey, PaymentId};
 
 /// "Pay this much to this provider."
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -17,6 +17,9 @@ pub struct PaymentRequest {
     pub amount_sat: u64,
     /// The most that creating the token may cost beyond `amount_sat`.
     pub max_fee_sat: u64,
+    /// The key the provider asks tokens to be locked to (NUT-11 P2PK). A
+    /// wallet that can lock tokens should; one that cannot sends them unlocked.
+    pub lock: Option<LockKey>,
     /// Stable id of this payment. It was saved before the wallet was asked,
     /// and a wallet that can find a payment again finds it by this id.
     pub payment_id: PaymentId,

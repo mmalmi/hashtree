@@ -8,7 +8,7 @@ use hashtree_core::{
     sha256, BlobReply, BlobRequest, BlobRoute, BlobRouteContext, Hash, StoreError, BLOB_MAX_BYTES,
 };
 
-use crate::account::{AccountState, AccountStore, ClientPolicy, PaidRouteStats};
+use crate::account::{AccountState, AccountStore, ClientPolicy, PaidRouteStats, PendingPayment};
 use crate::buyer::{InFlight, PaidBuyer};
 use crate::message::{ContentHash, Quote, Reply, Request};
 use crate::transport::PaidBlobTransport;
@@ -95,27 +95,37 @@ impl PaidBlobRoute {
         self.buyer.clear_block();
     }
 
-    async fn fetch(&self, hash: Hash, deadline: Instant) -> Result<BlobReply, StoreError> {
+    async fn fetch(&self, hash: Hash, htl: u8, deadline: Instant) -> Result<BlobReply, StoreError> {
         let buyer = &self.buyer;
         let max_msat = buyer.policy().max_tariff.price_msat(BLOB_MAX_BYTES as u64);
         for _ in 0..MAX_ROUNDS {
-            if !buyer.prepare(deadline).await? {
+            // A fresh token rides with the request instead of costing a
+            // round trip of its own.
+            let Some(carried) = buyer.prepare_carrying(deadline).await? else {
                 return Ok(BlobReply::NoResult);
-            }
+            };
             let accepted = {
-                let in_flight = buyer.begin(max_msat);
+                let (_carrying, carried) = buyer.carry(carried).await;
+                let mut in_flight = buyer.begin(max_msat);
                 let request = Request::Get {
                     hash: hash.into(),
-                    account: buyer.account_id(),
+                    account: buyer.wire_account(),
                     max_msat,
+                    htl,
+                    payment: carried.as_ref().map(PendingPayment::wire),
                 };
                 let reply = buyer.exchange(&request, deadline).await?;
+                if let Some(pending) = &carried {
+                    buyer
+                        .settle_carried(&mut in_flight, pending, &reply)
+                        .await?;
+                }
                 self.accept(&in_flight, hash, reply)?
             };
             match accepted {
                 Accepted::Reply(reply) => return Ok(reply),
                 Accepted::Quote(quote) => {
-                    if !buyer.fund(Some(quote), deadline).await? {
+                    if !buyer.fund_carrying(quote, deadline).await? {
                         return Ok(BlobReply::NoResult);
                     }
                 }
@@ -140,6 +150,7 @@ impl PaidBlobRoute {
                 balance_msat,
                 duplicate,
                 data,
+                ..
             } if replied == content => {
                 if data.len() > BLOB_MAX_BYTES || sha256(&data) != hash {
                     self.buyer.undelivered(request, balance_msat);
@@ -178,7 +189,7 @@ impl PaidBlobRoute {
 impl BlobRoute for PaidBlobRoute {
     async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
         let deadline = Instant::now() + self.buyer.policy().request_timeout;
-        self.fetch(request.hash, deadline).await
+        self.fetch(request.hash, request.htl, deadline).await
     }
 
     async fn route_with_context(
@@ -186,6 +197,7 @@ impl BlobRoute for PaidBlobRoute {
         request: BlobRequest,
         context: BlobRouteContext,
     ) -> Result<BlobReply, StoreError> {
-        self.fetch(request.hash, context.deadline).await
+        self.fetch(request.hash, request.htl, context.deadline)
+            .await
     }
 }

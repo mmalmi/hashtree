@@ -32,22 +32,35 @@ restored. Its problems, and what replaces each:
 
 ## The exchange
 
-The client holds an account with each provider: a random 32-byte id that the
-provider maps to a balance in millisats. Balance is everything paid minus
-everything charged.
+The client holds an account with each provider, which the provider maps to a
+balance in millisats. Balance is everything paid minus everything charged. On
+a carrier that authenticates the client (FIPS) the account is the client's
+identity and requests name none. Elsewhere (HTTP, plain streams) it is a
+random 32-byte id `a` that the client sends with every request.
 
 ```text
 client                                   provider
-  get {h, a, x}            ──────────►   has blob, price ≤ x, balance covers it
+  get {h, a?, x, l?}       ──────────►   has blob, price ≤ x, balance covers it
                            ◄──────────   data {h, n, c, b} + n raw bytes
 
-  get {h, a, x}            ──────────►   balance too low, or price > x
-                           ◄──────────   quote {h, n, c, b, g, r, f, m, k, u}
-  pay {a, i, k, m, v}      ──────────►   redeems the token at the mint
-                           ◄──────────   paid {i, v, b}
-  get {h, a, x}            ──────────►
-                           ◄──────────   data …
+  get {h, a?, x}           ──────────►   balance too low, or price > x
+                           ◄──────────   quote {h, n, c, b, g, r, f, m, k, u, o?}
+  get {h, a?, x, i, k, m, v} ────────►   credits the token, then charges
+                           ◄──────────   data {h, n, c, b, i, v} + n raw bytes
 ```
+
+A payment rides with the next `get`, so a first paid read is two round trips.
+The reply carries the credit (`i`, `v`) beside the blob or beside a new
+quote; a payment that fails answers the whole request with `err`. `pay` remains
+for resending a token whose answer was lost and for carriers that sell
+something other than blobs (BitTorrent gate mode). One request at a time
+carries a given token; concurrent reads wait for it and then read from the
+balance.
+
+`l` is the hop budget, the same HTL as in the free blob request: the provider
+passes it to its own source, which may forward. Paid forwarding itself, where a
+provider buys from the next hop within what the requester authorised, is not
+built yet.
 
 `none {h}` means only that this provider has no data for the hash (it becomes
 `BlobReply::NoResult`). `err {r, d, i?}` reports `bad`, `mint`, `method`,
@@ -70,7 +83,9 @@ client                                   provider
 | `k` | payment method (`pay`), accepted methods (`quote`); `cashu` today |
 | `u` | smallest top-up the provider accepts, in sat |
 | `i` | 16-byte payment id chosen by the client |
-| `v` | the Cashu token (`pay`), msat credited (`paid`) |
+| `v` | the Cashu token (`pay`, `get`), msat credited (`paid`, `data`, `quote`) |
+| `l` | hop budget, 1 to 10; absent means 0 |
+| `o` | 33-byte public key that tokens should be locked to (NUT-11) |
 
 ### Unit and price
 
@@ -255,6 +270,15 @@ The carrier is a feature of `hashtree-paid-retrieval`, not a part of
 `hashtree-fips-transport`: the published transport crate stays free of payment
 code, a build that only needs the exchange (the BitTorrent glue, a stream
 carrier) pulls in no FIPS stack, and no further crate has to be versioned.
+
+### Locked tokens
+
+A provider may name a key in its quotes (`o`). A wallet that can lock tokens to
+that key (NUT-11 P2PK) should, so that a token taken on the way is worthless to
+anyone else and, with NUT-12 proofs, the provider can check it without asking
+the mint. Unlocked tokens are still accepted. Neither the `cashu-service`
+helper nor `CashuWallet` can lock tokens or check them offline yet, so today
+the key only reaches the wallet.
 
 ## Over HTTP
 

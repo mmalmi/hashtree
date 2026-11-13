@@ -49,12 +49,15 @@ pub use fips::{
 pub use journal::FileLedgerStore;
 pub use ledger::AccountBalance;
 pub use message::{
-    AccountId, ContentHash, ErrorCode, MessageError, PaymentId, Quote, Reply, Request,
-    BEP10_EXTENSION, MAX_HEADER_BYTES, MAX_MESSAGE_BYTES, METHOD_CASHU, PROTOCOL,
+    AccountId, ContentHash, Credit, ErrorCode, LockKey, MessageError, Payment, PaymentId, Quote,
+    Reply, Request, BEP10_EXTENSION, LOCK_KEY_BYTES, MAX_HEADER_BYTES, MAX_MESSAGE_BYTES,
+    METHOD_CASHU, PROTOCOL,
 };
 pub use price::{BytePrice, Tariff};
 pub use provider::PaidBlobProvider;
-pub use seller::{PaidSeller, PaymentReceiver, ProviderConfig, ReceiveError, Sale};
+pub use seller::{
+    account_for_peer, PaidSeller, PaymentReceiver, ProviderConfig, ReceiveError, Sale,
+};
 pub use store::{
     AccountRecord, LedgerEntry, LedgerState, LedgerStore, PendingRedemption, TokenHash,
 };

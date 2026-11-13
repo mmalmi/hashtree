@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 
-use hashtree_core::{Hash, BLOB_MAX_BYTES};
+use hashtree_core::{Hash, BLOB_MAX_BYTES, BLOB_MAX_HTL};
 
 use crate::bencode::{self, Value};
 use crate::price::{BytePrice, Tariff};
@@ -75,21 +75,47 @@ pub type PaymentId = [u8; 16];
 #[error("invalid paid-retrieval message: {0}")]
 pub struct MessageError(pub &'static str);
 
+/// Length of a compressed secp256k1 public key, the form of a lock key.
+pub const LOCK_KEY_BYTES: usize = 33;
+/// A public key that tokens paid to a provider should be locked to (NUT-11).
+pub type LockKey = [u8; LOCK_KEY_BYTES];
+
+/// One payment as it travels: in `pay`, or carried by `get`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Payment {
+    /// Chosen at random by the client; repeating it repeats the answer.
+    pub id: PaymentId,
+    pub method: String,
+    pub mint: String,
+    pub token: String,
+}
+
+/// A payment carried by a `get` that the provider credited before replying.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Credit {
+    pub payment: PaymentId,
+    pub credited_msat: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Request {
     /// Fetch a blob, authorising a debit of at most `max_msat`.
     Get {
         hash: ContentHash,
-        account: AccountId,
+        /// The account to charge. `None` on a carrier that authenticates the
+        /// client: the account is then the client's identity.
+        account: Option<AccountId>,
         max_msat: u64,
+        /// How many more times the request may be forwarded. Zero: the
+        /// provider answers from what it has.
+        htl: u8,
+        /// A payment to credit before the blob is charged.
+        payment: Option<Payment>,
     },
     /// Credit the account with one payment.
     Pay {
-        account: AccountId,
-        payment: PaymentId,
-        method: String,
-        mint: String,
-        token: String,
+        account: Option<AccountId>,
+        payment: Payment,
     },
 }
 
@@ -105,6 +131,10 @@ pub struct Quote {
     pub mints: Vec<String>,
     pub methods: Vec<String>,
     pub min_topup_sat: u64,
+    /// The key that tokens paid to this provider should be locked to.
+    pub lock: Option<LockKey>,
+    /// A payment carried by the request, credited before this quote.
+    pub credit: Option<Credit>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -164,6 +194,8 @@ pub enum Reply {
         balance_msat: i64,
         /// A free repeat of a blob this account was already charged for.
         duplicate: bool,
+        /// A payment carried by the request, credited before the charge.
+        credit: Option<Credit>,
         data: Vec<u8>,
     },
     Quote(Quote),
@@ -220,6 +252,36 @@ impl Fields {
 
     fn text(self, key: &str, value: &str) -> Self {
         self.bytes(key, value.as_bytes())
+    }
+
+    fn lock(self, lock: &Option<LockKey>) -> Self {
+        match lock {
+            Some(lock) => self.bytes("o", lock),
+            None => self,
+        }
+    }
+
+    fn account(self, account: &Option<AccountId>) -> Self {
+        match account {
+            Some(account) => self.bytes("a", account),
+            None => self,
+        }
+    }
+
+    fn payment(self, payment: &Payment) -> Self {
+        self.bytes("i", &payment.id)
+            .text("k", &payment.method)
+            .text("m", &payment.mint)
+            .text("v", &payment.token)
+    }
+
+    fn credit(self, credit: &Option<Credit>) -> Self {
+        match credit {
+            Some(credit) => self
+                .bytes("i", &credit.payment)
+                .uint("v", credit.credited_msat),
+            None => self,
+        }
     }
 
     fn content(self, hash: &ContentHash) -> Self {
@@ -284,6 +346,60 @@ impl Dict {
         text_value(self.get(key)?, max)
     }
 
+    fn has(&self, key: &'static str) -> bool {
+        self.0.contains_key(key.as_bytes())
+    }
+
+    fn optional_fixed<const N: usize>(
+        &self,
+        key: &'static str,
+    ) -> Result<Option<[u8; N]>, MessageError> {
+        match self.has(key) {
+            true => self.fixed(key).map(Some),
+            false => Ok(None),
+        }
+    }
+
+    /// `i`, `k`, `m` and `v` together, or none of them.
+    fn payment(&self) -> Result<Option<Payment>, MessageError> {
+        let present = ["i", "k", "m", "v"].map(|key| self.has(key));
+        if present.iter().all(|present| !present) {
+            return Ok(None);
+        }
+        if !present.iter().all(|present| *present) {
+            return Err(MessageError("a payment is incomplete"));
+        }
+        Ok(Some(Payment {
+            id: self.fixed("i")?,
+            method: self.text("k", MAX_TEXT_BYTES)?,
+            mint: self.text("m", MAX_URL_BYTES)?,
+            token: self.text("v", MAX_TOKEN_BYTES)?,
+        }))
+    }
+
+    /// `i` and `v` together, or neither.
+    fn credit(&self) -> Result<Option<Credit>, MessageError> {
+        match (self.has("i"), self.has("v")) {
+            (false, false) => Ok(None),
+            (true, true) => Ok(Some(Credit {
+                payment: self.fixed("i")?,
+                credited_msat: self.uint("v")?,
+            })),
+            _ => Err(MessageError("a credit is incomplete")),
+        }
+    }
+
+    /// Absent means zero; zero has no second spelling.
+    fn htl(&self) -> Result<u8, MessageError> {
+        if !self.has("l") {
+            return Ok(0);
+        }
+        u8::try_from(self.uint("l")?)
+            .ok()
+            .filter(|htl| (1..=BLOB_MAX_HTL).contains(htl))
+            .ok_or(MessageError("the hop budget is out of range"))
+    }
+
     /// SHA-256 has one encoding: `y` is absent, never spelled out.
     fn content(&self) -> Result<ContentHash, MessageError> {
         if !self.0.contains_key(&b"y"[..]) {
@@ -324,24 +440,25 @@ impl Request {
                 hash,
                 account,
                 max_msat,
-            } => Fields::kind("get")
-                .content(hash)
-                .bytes("a", account)
-                .uint("x", *max_msat)
-                .finish(0),
-            Self::Pay {
-                account,
+                htl,
                 payment,
-                method,
-                mint,
-                token,
-            } => Fields::kind("pay")
-                .bytes("a", account)
-                .bytes("i", payment)
-                .text("k", method)
-                .text("m", mint)
-                .text("v", token)
-                .finish(token.len()),
+            } => {
+                let mut fields = Fields::kind("get")
+                    .content(hash)
+                    .account(account)
+                    .uint("x", *max_msat);
+                if *htl > 0 {
+                    fields = fields.uint("l", u64::from(*htl));
+                }
+                match payment {
+                    Some(payment) => fields.payment(payment).finish(payment.token.len()),
+                    None => fields.finish(0),
+                }
+            }
+            Self::Pay { account, payment } => Fields::kind("pay")
+                .account(account)
+                .payment(payment)
+                .finish(payment.token.len()),
         }
     }
 
@@ -353,15 +470,16 @@ impl Request {
         match dict.text("t", MAX_TEXT_BYTES)?.as_str() {
             "get" => Ok(Self::Get {
                 hash: dict.content()?,
-                account: dict.fixed("a")?,
+                account: dict.optional_fixed("a")?,
                 max_msat: dict.uint("x")?,
+                htl: dict.htl()?,
+                payment: dict.payment()?,
             }),
             "pay" => Ok(Self::Pay {
-                account: dict.fixed("a")?,
-                payment: dict.fixed("i")?,
-                method: dict.text("k", MAX_TEXT_BYTES)?,
-                mint: dict.text("m", MAX_URL_BYTES)?,
-                token: dict.text("v", MAX_TOKEN_BYTES)?,
+                account: dict.optional_fixed("a")?,
+                payment: dict
+                    .payment()?
+                    .ok_or(MessageError("a required field is missing"))?,
             }),
             _ => Err(MessageError("unknown request type")),
         }
@@ -376,13 +494,15 @@ impl Reply {
                 charged_msat,
                 balance_msat,
                 duplicate,
+                credit,
                 data,
             } => {
                 let mut fields = Fields::kind("data")
                     .content(hash)
                     .uint("n", data.len() as u64)
                     .uint("c", *charged_msat)
-                    .int("b", *balance_msat);
+                    .int("b", *balance_msat)
+                    .credit(credit);
                 if *duplicate {
                     fields = fields.uint("d", 1);
                 }
@@ -392,6 +512,7 @@ impl Reply {
             }
             Self::Quote(quote) => Fields::kind("quote")
                 .content(&quote.hash)
+                .credit(&quote.credit)
                 .uint("n", quote.size)
                 .uint("c", quote.price_msat)
                 .int("b", quote.balance_msat)
@@ -407,6 +528,7 @@ impl Reply {
                 .texts("m", &quote.mints)
                 .texts("k", &quote.methods)
                 .uint("u", quote.min_topup_sat)
+                .lock(&quote.lock)
                 .finish(0),
             Self::NoResult { hash } => Fields::kind("none").content(hash).finish(0),
             Self::Paid {
@@ -453,6 +575,7 @@ impl Reply {
                     charged_msat: dict.uint("c")?,
                     balance_msat: dict.int("b")?,
                     duplicate: dict.0.contains_key(&b"d"[..]) && dict.uint("d")? != 0,
+                    credit: dict.credit()?,
                     data: trailing.to_vec(),
                 })
             }
@@ -481,6 +604,8 @@ impl Reply {
                     mints: dict.texts("m")?,
                     methods: dict.texts("k")?,
                     min_topup_sat: dict.uint("u")?,
+                    lock: dict.optional_fixed("o")?,
+                    credit: dict.credit()?,
                 }))
             }
             "none" => Ok(Self::NoResult {
@@ -512,8 +637,10 @@ mod tests {
     fn requests_round_trip_with_one_canonical_encoding() {
         let get = Request::Get {
             hash: [7; 32].into(),
-            account: [9; 32],
+            account: Some([9; 32]),
             max_msat: 16_384,
+            htl: 0,
+            payment: None,
         };
         let encoded = get.encode();
         assert!(encoded.starts_with(b"d1:a32:"));
@@ -521,11 +648,13 @@ mod tests {
         assert_eq!(Request::decode(&encoded).unwrap(), get);
 
         let pay = Request::Pay {
-            account: [1; 32],
-            payment: [2; 16],
-            method: METHOD_CASHU.into(),
-            mint: "https://mint.example".into(),
-            token: "cashuBexample".into(),
+            account: Some([1; 32]),
+            payment: Payment {
+                id: [2; 16],
+                method: METHOD_CASHU.into(),
+                mint: "https://mint.example".into(),
+                token: "cashuBexample".into(),
+            },
         };
         assert_eq!(Request::decode(&pay.encode()).unwrap(), pay);
     }
@@ -538,6 +667,7 @@ mod tests {
             balance_msat: -5,
             duplicate: true,
             data: b"blob bytes".to_vec(),
+            credit: None,
         };
         let encoded = data.encode();
         assert!(encoded.ends_with(b"eblob bytes"));
@@ -557,6 +687,8 @@ mod tests {
                 mints: vec!["https://mint.example".into()],
                 methods: vec![METHOD_CASHU.into()],
                 min_topup_sat: 2,
+                lock: None,
+                credit: None,
             }),
             Reply::NoResult {
                 hash: [5; 32].into(),
@@ -582,8 +714,10 @@ mod tests {
     fn the_hash_algorithm_is_named_on_the_wire() {
         let piece = Request::Get {
             hash: ContentHash::Sha1([b'B'; 20]),
-            account: [b'A'; 32],
+            account: Some([b'A'; 32]),
             max_msat: 1,
+            htl: 0,
+            payment: None,
         };
         let encoded = piece.encode();
         let wire = |hash: &str, algorithm: &str| {
@@ -618,6 +752,7 @@ mod tests {
             balance_msat: 0,
             duplicate: false,
             data: vec![1, 2, 3],
+            credit: None,
         }
         .encode();
         data.pop();
@@ -625,8 +760,10 @@ mod tests {
 
         let mut get = Request::Get {
             hash: [0; 32].into(),
-            account: [0; 32],
+            account: Some([0; 32]),
             max_msat: 0,
+            htl: 0,
+            payment: None,
         }
         .encode();
         get.push(b'x');

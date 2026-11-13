@@ -117,6 +117,7 @@ async fn the_cashu_payment_client_pays_and_receives() {
         mints: vec!["https://other.test".into()],
         amount_sat: 1,
         max_fee_sat: 0,
+        lock: None,
         payment_id: [1; 16],
     };
     assert_eq!(
@@ -128,6 +129,7 @@ async fn the_cashu_payment_client_pays_and_receives() {
         mints: vec![MINT.into()],
         amount_sat: 100,
         max_fee_sat: 0,
+        lock: None,
         payment_id: [2; 16],
     };
     assert_eq!(

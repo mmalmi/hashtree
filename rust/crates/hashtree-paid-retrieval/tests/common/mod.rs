@@ -13,6 +13,14 @@ use hashtree_paid_retrieval::{
     RetrievalWallet, Tariff, WalletError, WalletPayment,
 };
 
+/// The payment a request carries: in `pay`, or riding with `get`.
+pub fn payment_of(request: &Request) -> Option<&hashtree_paid_retrieval::Payment> {
+    match request {
+        Request::Pay { payment, .. } => Some(payment),
+        Request::Get { payment, .. } => payment.as_ref(),
+    }
+}
+
 pub const MINT: &str = "https://mint.test";
 
 /// 1 msat per KiB, at least 1000 msat per blob.

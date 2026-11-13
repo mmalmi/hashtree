@@ -214,6 +214,10 @@ impl PaidBlobTransport for FipsPaidTransport {
             .await
             .map_err(|error| StoreError::Other(error.to_string()))
     }
+
+    fn authenticates_peer(&self) -> bool {
+        true
+    }
 }
 
 /// Peers on this host that advertise the paid blob service, best first.

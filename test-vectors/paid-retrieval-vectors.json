@@ -407,11 +407,75 @@
       ]
     },
     {
-      "accepted": false,
+      "accepted": true,
       "kind": "request",
       "name": "request_get_without_account",
       "wire": [
         "64313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a74333a676574313a7869376565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "request",
+      "name": "request_get_hop_budget_at_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6c69313065313a74333a676574313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_hop_budget_zero_spelled_out",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6c693065313a74333a676574313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_hop_budget_above_limit",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6c69313165313a74333a676574313a7869376565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "request",
+      "name": "request_get_carrying_a_payment",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a676574313a7631333a6361736875426578616d706c65313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_carrying_a_payment_without_i",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a676574313a7631333a6361736875426578616d706c65313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_carrying_a_payment_without_k",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a676574313a7631333a6361736875426578616d706c65313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_carrying_a_payment_without_m",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a74333a676574313a7631333a6361736875426578616d706c65313a7869376565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "request",
+      "name": "request_get_carrying_a_payment_without_v",
+      "wire": [
+        "64313a6133323a000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a676574313a7869376565"
       ]
     },
     {
@@ -551,9 +615,9 @@
       ]
     },
     {
-      "accepted": false,
+      "accepted": true,
       "kind": "request",
-      "name": "request_pay_without_a",
+      "name": "request_pay_without_account",
       "wire": [
         "64313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a7631333a6361736875426578616d706c6565"
       ]
@@ -761,6 +825,33 @@
       ]
     },
     {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_data_with_a_credit",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6e693365313a74343a64617461313a7669353030306565",
+        "616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_with_a_credit_without_amount",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6e693365313a74343a6461746165",
+        "616263"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_data_with_a_credit_without_payment",
+      "wire": [
+        "64313a62692d3565313a63693565313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6e693365313a74343a64617461313a7669353030306565",
+        "616263"
+      ]
+    },
+    {
       "accepted": false,
       "kind": "reply",
       "name": "reply_data_shorter_than_declared",
@@ -910,6 +1001,22 @@
       "name": "reply_quote",
       "wire": [
         "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": true,
+      "kind": "reply",
+      "name": "reply_quote_with_a_lock_key",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a6f33333a020202020202020202020202020202020202020202020202020202020202020202313a726c69316569313032346565313a74353a71756f7465313a7569316565"
+      ]
+    },
+    {
+      "accepted": false,
+      "kind": "reply",
+      "name": "reply_quote_with_a_short_lock_key",
+      "wire": [
+        "64313a62693065313a63693130303065313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693430393665313a6f33323a0202020202020202020202020202020202020202020202020202020202020202313a726c69316569313032346565313a74353a71756f7465313a7569316565"
       ]
     },
     {
@@ -1985,7 +2092,9 @@
           "algorithm": "sha256",
           "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
         },
+        "htl": 0,
         "max_msat": "16384",
+        "payment": null,
         "type": "get"
       },
       "name": "get_sha256",
@@ -2000,7 +2109,9 @@
           "algorithm": "sha1",
           "digest": "404142434445464748494a4b4c4d4e4f50515253"
         },
+        "htl": 0,
         "max_msat": "1",
+        "payment": null,
         "type": "get"
       },
       "name": "get_sha1",
@@ -2015,7 +2126,9 @@
           "algorithm": "sha256",
           "digest": "0000000000000000000000000000000000000000000000000000000000000000"
         },
+        "htl": 0,
         "max_msat": "0",
+        "payment": null,
         "type": "get"
       },
       "name": "get_authorising_nothing",
@@ -2030,7 +2143,9 @@
           "algorithm": "sha256",
           "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
         },
+        "htl": 0,
         "max_msat": "9223372036854775807",
+        "payment": null,
         "type": "get"
       },
       "name": "get_largest_number",
@@ -2045,7 +2160,9 @@
           "algorithm": "sha256",
           "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
         },
+        "htl": 0,
         "max_msat": "18446744073709551615",
+        "payment": null,
         "type": "get"
       },
       "name": "get_above_the_largest_number_saturates",
@@ -2055,11 +2172,51 @@
       "direction": "both",
       "kind": "request",
       "message": {
+        "account": null,
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "htl": 3,
+        "max_msat": "4096",
+        "payment": {
+          "id": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+          "method": "cashu",
+          "mint": "https://mint.test",
+          "token": "cashuBexample"
+        },
+        "type": "get"
+      },
+      "name": "get_forwarded_on_an_authenticated_carrier_carrying_a_payment",
+      "wire": "64313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6c693365313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a676574313a7631333a6361736875426578616d706c65313a7869343039366565"
+    },
+    {
+      "direction": "both",
+      "kind": "request",
+      "message": {
+        "account": null,
+        "payment": {
+          "id": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+          "method": "cashu",
+          "mint": "https://mint.test",
+          "token": "cashuBexample"
+        },
+        "type": "pay"
+      },
+      "name": "pay_on_an_authenticated_carrier",
+      "wire": "64313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b353a6361736875313a6d31373a68747470733a2f2f6d696e742e74657374313a74333a706179313a7631333a6361736875426578616d706c6565"
+    },
+    {
+      "direction": "both",
+      "kind": "request",
+      "message": {
         "account": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        "method": "cashu",
-        "mint": "https://mint.test",
-        "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
-        "token": "cashuBexample",
+        "payment": {
+          "id": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff",
+          "method": "cashu",
+          "mint": "https://mint.test",
+          "token": "cashuBexample"
+        },
         "type": "pay"
       },
       "name": "pay_cashu",
@@ -2070,10 +2227,12 @@
       "kind": "request",
       "message": {
         "account": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        "method": "",
-        "mint": "https://minttu.test/säästö",
-        "payment": "00000000000000000000000000000000",
-        "token": "﻿token ✓",
+        "payment": {
+          "id": "00000000000000000000000000000000",
+          "method": "",
+          "mint": "https://minttu.test/säästö",
+          "token": "﻿token ✓"
+        },
         "type": "pay"
       },
       "name": "pay_empty_and_non_ascii_text",
@@ -2088,7 +2247,9 @@
           "algorithm": "sha256",
           "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
         },
+        "htl": 0,
         "max_msat": "7",
+        "payment": null,
         "type": "get"
       },
       "name": "get_with_unknown_keys",
@@ -2100,6 +2261,7 @@
       "message": {
         "balance_msat": "2952",
         "charged_msat": "2048",
+        "credit": null,
         "data": "626c6f62206279746573",
         "duplicate": false,
         "hash": {
@@ -2117,6 +2279,7 @@
       "message": {
         "balance_msat": "-1000",
         "charged_msat": "1000",
+        "credit": null,
         "data": "000102ff6564",
         "duplicate": true,
         "hash": {
@@ -2134,6 +2297,7 @@
       "message": {
         "balance_msat": "0",
         "charged_msat": "0",
+        "credit": null,
         "data": "",
         "duplicate": false,
         "hash": {
@@ -2151,6 +2315,7 @@
       "message": {
         "balance_msat": "-9223372036854775808",
         "charged_msat": "9223372036854775807",
+        "credit": null,
         "data": "7069656365",
         "duplicate": false,
         "hash": {
@@ -2168,6 +2333,7 @@
       "message": {
         "balance_msat": "0",
         "charged_msat": "18446744073709551615",
+        "credit": null,
         "data": "78",
         "duplicate": false,
         "hash": {
@@ -2184,11 +2350,13 @@
       "kind": "reply",
       "message": {
         "balance_msat": "100",
+        "credit": null,
         "grace_msat": "0",
         "hash": {
           "algorithm": "sha256",
           "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
         },
+        "lock": null,
         "methods": [
           "cashu"
         ],
@@ -2212,12 +2380,69 @@
       "direction": "both",
       "kind": "reply",
       "message": {
+        "balance_msat": "100",
+        "credit": {
+          "credited_msat": "1000",
+          "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+        },
+        "grace_msat": "0",
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "lock": "020202020202020202020202020202020202020202020202020202020202020202",
+        "methods": [
+          "cashu"
+        ],
+        "min_topup_sat": "1",
+        "mints": [
+          "https://mint.test"
+        ],
+        "price_msat": "2048",
+        "size": "2097152",
+        "tariff": {
+          "min_msat": "1000",
+          "msat": "1",
+          "per_bytes": "1024"
+        },
+        "type": "quote"
+      },
+      "name": "quote_with_a_lock_key_and_a_credit",
+      "wire": "64313a626931303065313a63693230343865313a66693130303065313a67693065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6b6c353a636173687565313a6d6c31373a68747470733a2f2f6d696e742e7465737465313a6e693230393731353265313a6f33333a020202020202020202020202020202020202020202020202020202020202020202313a726c69316569313032346565313a74353a71756f7465313a75693165313a7669313030306565"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
+        "balance_msat": "4000",
+        "charged_msat": "1000",
+        "credit": {
+          "credited_msat": "5000",
+          "payment": "f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff"
+        },
+        "data": "70616964",
+        "duplicate": false,
+        "hash": {
+          "algorithm": "sha256",
+          "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
+        },
+        "type": "data"
+      },
+      "name": "data_with_a_credit",
+      "wire": "64313a62693430303065313a63693130303065313a6833323a808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f313a6931363af0f1f2f3f4f5f6f7f8f9fafbfcfdfeff313a6e693465313a74343a64617461313a766935303030656570616964"
+    },
+    {
+      "direction": "both",
+      "kind": "reply",
+      "message": {
         "balance_msat": "-1500",
+        "credit": null,
         "grace_msat": "1500",
         "hash": {
           "algorithm": "sha1",
           "digest": "404142434445464748494a4b4c4d4e4f50515253"
         },
+        "lock": null,
         "methods": [
           "cashu"
         ],
@@ -2242,11 +2467,13 @@
       "kind": "reply",
       "message": {
         "balance_msat": "100",
+        "credit": null,
         "grace_msat": "0",
         "hash": {
           "algorithm": "sha256",
           "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
         },
+        "lock": null,
         "methods": [],
         "min_topup_sat": "1",
         "mints": [],
@@ -2267,11 +2494,13 @@
       "kind": "reply",
       "message": {
         "balance_msat": "9223372036854775807",
+        "credit": null,
         "grace_msat": "9223372036854775807",
         "hash": {
           "algorithm": "sha256",
           "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
         },
+        "lock": null,
         "methods": [
           "cashu",
           "cashu-spilman"
@@ -2312,11 +2541,13 @@
       "kind": "reply",
       "message": {
         "balance_msat": "100",
+        "credit": null,
         "grace_msat": "18446744073709551615",
         "hash": {
           "algorithm": "sha256",
           "digest": "808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9f"
         },
+        "lock": null,
         "methods": [
           "cashu"
         ],
@@ -2524,6 +2755,7 @@
       "message": {
         "balance_msat": "-5",
         "charged_msat": "5",
+        "credit": null,
         "data": "616263",
         "duplicate": false,
         "hash": {
@@ -2541,6 +2773,7 @@
       "message": {
         "balance_msat": "-5",
         "charged_msat": "5",
+        "credit": null,
         "data": "616263",
         "duplicate": true,
         "hash": {
@@ -2558,6 +2791,7 @@
       "message": {
         "balance_msat": "-5",
         "charged_msat": "5",
+        "credit": null,
         "data": "616263",
         "duplicate": false,
         "hash": {

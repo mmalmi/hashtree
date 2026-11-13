@@ -125,8 +125,10 @@ async fn serve(endpoint: &Arc<FipsEndpoint>, seller: &Seller) -> FipsPaidBlobSer
 async fn ask(transport: &FipsPaidTransport, account: AccountId, hash: Hash) -> Reply {
     let request = Request::Get {
         hash: hash.into(),
-        account,
+        account: Some(account),
         max_msat: u64::MAX,
+        htl: 0,
+        payment: None,
     };
     Reply::decode(&transport.request(request.encode()).await.unwrap()).unwrap()
 }

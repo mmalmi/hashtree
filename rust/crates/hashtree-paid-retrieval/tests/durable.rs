@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use common::{CrashStore, FakeMint, FakeReceiver, Seller, MINT};
 use hashtree_core::Hash;
 use hashtree_paid_retrieval::{
-    AccountId, ErrorCode, FileLedgerStore, LedgerEntry, LedgerStore, PaymentId, Reply, Request,
-    METHOD_CASHU,
+    AccountId, ErrorCode, FileLedgerStore, LedgerEntry, LedgerStore, Payment, PaymentId, Reply,
+    Request, METHOD_CASHU,
 };
 
 const ACCOUNT: AccountId = [7; 32];
@@ -22,18 +22,22 @@ const TWO_MIB: usize = 2 * 1024 * 1024;
 fn get(hash: Hash) -> Request {
     Request::Get {
         hash: hash.into(),
-        account: ACCOUNT,
+        account: Some(ACCOUNT),
         max_msat: u64::MAX,
+        htl: 0,
+        payment: None,
     }
 }
 
 fn pay_into(account: AccountId, payment: PaymentId, token: &str) -> Request {
     Request::Pay {
-        account,
-        payment,
-        method: METHOD_CASHU.into(),
-        mint: MINT.into(),
-        token: token.into(),
+        account: Some(account),
+        payment: Payment {
+            id: payment,
+            method: METHOD_CASHU.into(),
+            mint: MINT.into(),
+            token: token.into(),
+        },
     }
 }
 

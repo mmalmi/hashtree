@@ -19,6 +19,13 @@ use crate::provider::PaidBlobProvider;
 #[async_trait]
 pub trait PaidBlobTransport: Send + Sync {
     async fn exchange(&self, request: Vec<u8>) -> Result<Vec<u8>, StoreError>;
+
+    /// Whether the provider learns this client's identity from the carrier
+    /// itself. The client's account is then that identity, and requests name
+    /// no account id.
+    fn authenticates_peer(&self) -> bool {
+        false
+    }
 }
 
 pub trait ByteStream: AsyncRead + AsyncWrite + Unpin + Send {}

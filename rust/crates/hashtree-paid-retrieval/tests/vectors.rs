@@ -12,9 +12,9 @@ use std::path::PathBuf;
 use hashtree_core::BLOB_MAX_BYTES;
 use hashtree_paid_retrieval::bencode::{self, Value};
 use hashtree_paid_retrieval::{
-    AccountState, BytePrice, ContentHash, ErrorCode, PaymentIntent, PendingPayment, Quote, Reply,
-    Request, Tariff, WalletPayment, BEP10_EXTENSION, MAX_HEADER_BYTES, MAX_MESSAGE_BYTES,
-    METHOD_CASHU, PROTOCOL,
+    AccountState, BytePrice, ContentHash, Credit, ErrorCode, Payment, PaymentIntent,
+    PendingPayment, Quote, Reply, Request, Tariff, WalletPayment, BEP10_EXTENSION,
+    MAX_HEADER_BYTES, MAX_MESSAGE_BYTES, METHOD_CASHU, PROTOCOL,
 };
 use serde_json::{json, Value as Json};
 
@@ -64,31 +64,42 @@ fn account_json(account: &AccountState) -> Json {
     })
 }
 
+fn wire_payment_json(payment: &Payment) -> Json {
+    json!({
+        "id": hex(&payment.id),
+        "method": payment.method,
+        "mint": payment.mint,
+        "token": payment.token,
+    })
+}
+
+fn credit_json(credit: &Option<Credit>) -> Json {
+    json!(credit.as_ref().map(|credit| json!({
+        "payment": hex(&credit.payment),
+        "credited_msat": credit.credited_msat.to_string(),
+    })))
+}
+
 fn request_json(request: &Request) -> Json {
     match request {
         Request::Get {
             hash,
             account,
             max_msat,
+            htl,
+            payment,
         } => json!({
             "type": "get",
             "hash": hash_json(hash),
-            "account": hex(account),
+            "account": account.as_ref().map(|account| hex(account)),
             "max_msat": max_msat.to_string(),
+            "htl": htl,
+            "payment": payment.as_ref().map(wire_payment_json),
         }),
-        Request::Pay {
-            account,
-            payment,
-            method,
-            mint,
-            token,
-        } => json!({
+        Request::Pay { account, payment } => json!({
             "type": "pay",
-            "account": hex(account),
-            "payment": hex(payment),
-            "method": method,
-            "mint": mint,
-            "token": token,
+            "account": account.as_ref().map(|account| hex(account)),
+            "payment": wire_payment_json(payment),
         }),
     }
 }
@@ -100,6 +111,7 @@ fn reply_json(reply: &Reply) -> Json {
             charged_msat,
             balance_msat,
             duplicate,
+            credit,
             data,
         } => json!({
             "type": "data",
@@ -107,6 +119,7 @@ fn reply_json(reply: &Reply) -> Json {
             "charged_msat": charged_msat.to_string(),
             "balance_msat": balance_msat.to_string(),
             "duplicate": duplicate,
+            "credit": credit_json(credit),
             "data": hex(data),
         }),
         Reply::Quote(quote) => json!({
@@ -124,6 +137,8 @@ fn reply_json(reply: &Reply) -> Json {
             "mints": quote.mints,
             "methods": quote.methods,
             "min_topup_sat": quote.min_topup_sat.to_string(),
+            "lock": quote.lock.as_ref().map(|lock| hex(lock)),
+            "credit": credit_json(&quote.credit),
         }),
         Reply::NoResult { hash } => json!({ "type": "none", "hash": hash_json(hash) }),
         Reply::Paid {
@@ -383,6 +398,8 @@ fn quote() -> Quote {
         mints: vec![MINT.to_owned()],
         methods: vec![METHOD_CASHU.to_owned()],
         min_topup_sat: 1,
+        lock: None,
+        credit: None,
     }
 }
 
@@ -391,60 +408,101 @@ fn requests(vectors: &mut Vectors) {
         "get_sha256",
         Request::Get {
             hash: sha256_name(),
-            account: account(),
+            account: Some(account()),
             max_msat: 16_384,
+            htl: 0,
+            payment: None,
         },
     );
     vectors.request(
         "get_sha1",
         Request::Get {
             hash: sha1_name(),
-            account: account(),
+            account: Some(account()),
             max_msat: 1,
+            htl: 0,
+            payment: None,
         },
     );
     vectors.request(
         "get_authorising_nothing",
         Request::Get {
             hash: ContentHash::Sha256([0; 32]),
-            account: [0xff; 32],
+            account: Some([0xff; 32]),
             max_msat: 0,
+            htl: 0,
+            payment: None,
         },
     );
     vectors.request(
         "get_largest_number",
         Request::Get {
             hash: sha256_name(),
-            account: account(),
+            account: Some(account()),
             max_msat: i64::MAX as u64,
+            htl: 0,
+            payment: None,
         },
     );
     vectors.request_encodes(
         "get_above_the_largest_number_saturates",
         Request::Get {
             hash: sha256_name(),
-            account: account(),
+            account: Some(account()),
             max_msat: u64::MAX,
+            htl: 0,
+            payment: None,
+        },
+    );
+    vectors.request(
+        "get_forwarded_on_an_authenticated_carrier_carrying_a_payment",
+        Request::Get {
+            hash: sha256_name(),
+            account: None,
+            max_msat: 4_096,
+            htl: 3,
+            payment: Some(Payment {
+                id: payment(),
+                method: METHOD_CASHU.to_owned(),
+                mint: MINT.to_owned(),
+                token: "cashuBexample".to_owned(),
+            }),
+        },
+    );
+    vectors.request(
+        "pay_on_an_authenticated_carrier",
+        Request::Pay {
+            account: None,
+            payment: Payment {
+                id: payment(),
+                method: METHOD_CASHU.to_owned(),
+                mint: MINT.to_owned(),
+                token: "cashuBexample".to_owned(),
+            },
         },
     );
     vectors.request(
         "pay_cashu",
         Request::Pay {
-            account: account(),
-            payment: payment(),
-            method: METHOD_CASHU.to_owned(),
-            mint: MINT.to_owned(),
-            token: "cashuBexample".to_owned(),
+            account: Some(account()),
+            payment: Payment {
+                id: payment(),
+                method: METHOD_CASHU.to_owned(),
+                mint: MINT.to_owned(),
+                token: "cashuBexample".to_owned(),
+            },
         },
     );
     vectors.request(
         "pay_empty_and_non_ascii_text",
         Request::Pay {
-            account: account(),
-            payment: [0; 16],
-            method: String::new(),
-            mint: "https://minttu.test/säästö".to_owned(),
-            token: "\u{feff}token ✓".to_owned(),
+            account: Some(account()),
+            payment: Payment {
+                id: [0; 16],
+                method: String::new(),
+                mint: "https://minttu.test/säästö".to_owned(),
+                token: "\u{feff}token ✓".to_owned(),
+            },
         },
     );
 
@@ -473,6 +531,7 @@ fn replies(vectors: &mut Vectors) {
             balance_msat: 2_952,
             duplicate: false,
             data: b"blob bytes".to_vec(),
+            credit: None,
         },
     );
     vectors.reply(
@@ -483,6 +542,7 @@ fn replies(vectors: &mut Vectors) {
             balance_msat: -1_000,
             duplicate: true,
             data: vec![0, 1, 2, 0xff, b'e', b'd'],
+            credit: None,
         },
     );
     vectors.reply(
@@ -493,6 +553,7 @@ fn replies(vectors: &mut Vectors) {
             balance_msat: 0,
             duplicate: false,
             data: Vec::new(),
+            credit: None,
         },
     );
     vectors.reply(
@@ -503,6 +564,7 @@ fn replies(vectors: &mut Vectors) {
             balance_msat: i64::MIN,
             duplicate: false,
             data: b"piece".to_vec(),
+            credit: None,
         },
     );
     vectors.reply_encodes(
@@ -513,9 +575,35 @@ fn replies(vectors: &mut Vectors) {
             balance_msat: 0,
             duplicate: false,
             data: b"x".to_vec(),
+            credit: None,
         },
     );
     vectors.reply("quote", Reply::Quote(quote()));
+    vectors.reply(
+        "quote_with_a_lock_key_and_a_credit",
+        Reply::Quote(Quote {
+            lock: Some([2; 33]),
+            credit: Some(Credit {
+                payment: payment(),
+                credited_msat: 1_000,
+            }),
+            ..quote()
+        }),
+    );
+    vectors.reply(
+        "data_with_a_credit",
+        Reply::Data {
+            hash: sha256_name(),
+            charged_msat: 1_000,
+            balance_msat: 4_000,
+            duplicate: false,
+            credit: Some(Credit {
+                payment: payment(),
+                credited_msat: 5_000,
+            }),
+            data: b"paid".to_vec(),
+        },
+    );
     vectors.reply(
         "quote_sha1_with_grace_and_a_debt",
         Reply::Quote(Quote {
@@ -554,6 +642,8 @@ fn replies(vectors: &mut Vectors) {
                 .collect(),
             methods: vec![METHOD_CASHU.to_owned(), "cashu-spilman".to_owned()],
             min_topup_sat: i64::MAX as u64,
+            lock: None,
+            credit: None,
         }),
     );
     vectors.reply_encodes(
@@ -757,7 +847,39 @@ fn request_acceptance(vectors: &mut Vectors) {
     case("get", true, &get);
     case("get_without_type", false, &without(&get, "t"));
     case("get_without_hash", false, &without(&get, "h"));
-    case("get_without_account", false, &without(&get, "a"));
+    case("get_without_account", true, &without(&get, "a"));
+    case(
+        "get_hop_budget_at_limit",
+        true,
+        &with(&get, "l", Value::Int(10)),
+    );
+    case(
+        "get_hop_budget_zero_spelled_out",
+        false,
+        &with(&get, "l", Value::Int(0)),
+    );
+    case(
+        "get_hop_budget_above_limit",
+        false,
+        &with(&get, "l", Value::Int(11)),
+    );
+    let carried: Vec<_> = get
+        .iter()
+        .cloned()
+        .chain(
+            pay.iter()
+                .filter(|(key, _)| ["i", "k", "m", "v"].contains(key))
+                .cloned(),
+        )
+        .collect();
+    case("get_carrying_a_payment", true, &carried);
+    for key in ["i", "k", "m", "v"] {
+        case(
+            &format!("get_carrying_a_payment_without_{key}"),
+            false,
+            &without(&carried, key),
+        );
+    }
     case("get_without_limit", false, &without(&get, "x"));
     case("unknown_type", false, &with(&get, "t", text("nope")));
     case("type_is_a_number", false, &with(&get, "t", Value::Int(1)));
@@ -811,7 +933,8 @@ fn request_acceptance(vectors: &mut Vectors) {
         &with(&get, "y", Value::Int(1)),
     );
     case("pay", true, &pay);
-    for key in ["a", "i", "k", "m", "v"] {
+    case("pay_without_account", true, &without(&pay, "a"));
+    for key in ["i", "k", "m", "v"] {
         case(&format!("pay_without_{key}"), false, &without(&pay, key));
     }
     case("pay_short_id", false, &with(&pay, "i", raw(&[1; 15])));
@@ -925,6 +1048,20 @@ fn reply_acceptance(vectors: &mut Vectors) {
             );
         };
     payload_case("data", true, &data, b"abc");
+    let credited = with(&with(&data, "i", raw(&payment())), "v", Value::Int(5_000));
+    payload_case("data_with_a_credit", true, &credited, b"abc");
+    payload_case(
+        "data_with_a_credit_without_amount",
+        false,
+        &without(&credited, "v"),
+        b"abc",
+    );
+    payload_case(
+        "data_with_a_credit_without_payment",
+        false,
+        &without(&credited, "i"),
+        b"abc",
+    );
     payload_case("data_shorter_than_declared", false, &data, b"ab");
     payload_case("data_longer_than_declared", false, &data, b"abcd");
     payload_case("data_without_payload", false, &data, b"");
@@ -1027,6 +1164,16 @@ fn reply_acceptance(vectors: &mut Vectors) {
         vectors.accept_bytes(&format!("reply_{name}"), "reply", expected, &dict(fields));
     };
     case("quote", true, &quote);
+    case(
+        "quote_with_a_lock_key",
+        true,
+        &with(&quote, "o", raw(&[2; 33])),
+    );
+    case(
+        "quote_with_a_short_lock_key",
+        false,
+        &with(&quote, "o", raw(&[2; 32])),
+    );
     for key in ["h", "n", "c", "b", "g", "r", "f", "m", "k", "u"] {
         case(
             &format!("quote_without_{key}"),

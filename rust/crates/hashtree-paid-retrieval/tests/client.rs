@@ -52,9 +52,9 @@ async fn one_top_up_pays_for_several_blobs() {
     let route = route(&transport, wallet.clone(), policy());
 
     assert_eq!(read(&route, first).await, Ok(BlobReply::Data(first_data)));
-    assert_eq!(transport.exchanges(), 3, "get, pay, get");
+    assert_eq!(transport.exchanges(), 2, "get, then get carrying the token");
     assert_eq!(read(&route, second).await, Ok(BlobReply::Data(second_data)));
-    assert_eq!(transport.exchanges(), 4, "a funded read is one round trip");
+    assert_eq!(transport.exchanges(), 3, "a funded read is one round trip");
 
     assert_eq!(wallet.payments(), 1);
     assert_eq!(wallet.balance(), 16);
@@ -173,7 +173,15 @@ async fn a_lost_payment_acknowledgement_is_resent_not_repaid() {
     let wallet = FakeWallet::funded(&seller.mint, 21);
     let mut lose_next_paid = true;
     let transport = DirectTransport::tampering(&seller.provider, move |_, reply| {
-        if matches!(reply, Reply::Paid { .. }) && std::mem::take(&mut lose_next_paid) {
+        let acknowledges = matches!(
+            reply,
+            Reply::Paid { .. }
+                | Reply::Data {
+                    credit: Some(_),
+                    ..
+                }
+        );
+        if acknowledges && std::mem::take(&mut lose_next_paid) {
             return None;
         }
         Some(reply)
@@ -282,6 +290,7 @@ async fn wrong_bytes_are_never_returned_or_counted_as_a_delivery() {
             balance_msat,
             duplicate,
             mut data,
+            credit,
         } => {
             data[0] ^= 1;
             Some(Reply::Data {
@@ -290,6 +299,7 @@ async fn wrong_bytes_are_never_returned_or_counted_as_a_delivery() {
                 balance_msat,
                 duplicate,
                 data,
+                credit,
             })
         }
         other => Some(other),
@@ -323,6 +333,7 @@ async fn an_overcharging_provider_is_blocked() {
             balance_msat: balance_msat - 3_000,
             duplicate,
             data,
+            credit: None,
         }),
         other => Some(other),
     });
@@ -361,9 +372,9 @@ async fn a_refused_token_is_reclaimed() {
     // The provider answers every payment as if the token were worthless.
     let transport =
         DirectTransport::tampering(&seller.provider, |request, reply| match (request, reply) {
-            (Request::Pay { payment, .. }, _) => Some(Reply::Error {
+            (request, _) if common::payment_of(request).is_some() => Some(Reply::Error {
                 code: hashtree_paid_retrieval::ErrorCode::Invalid,
-                payment: Some(*payment),
+                payment: common::payment_of(request).map(|payment| payment.id),
                 detail: "refused".into(),
             }),
             (_, reply) => Some(reply),

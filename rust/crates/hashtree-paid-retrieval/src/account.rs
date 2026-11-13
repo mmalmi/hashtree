@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crate::message::{AccountId, PaymentId};
+use crate::message::{AccountId, Payment, PaymentId, METHOD_CASHU};
 use crate::price::{BytePrice, Tariff};
 use crate::wallet::WalletPayment;
 
@@ -56,6 +56,18 @@ pub struct PendingPayment {
     pub payment: WalletPayment,
     /// Times the provider answered that it cannot take the payment yet.
     pub attempts: u32,
+}
+
+impl PendingPayment {
+    /// The payment as it travels to the provider.
+    pub fn wire(&self) -> Payment {
+        Payment {
+            id: self.id,
+            method: METHOD_CASHU.to_owned(),
+            mint: self.payment.mint_url.clone(),
+            token: self.payment.token.clone(),
+        }
+    }
 }
 
 /// A payment the wallet is about to be asked for. It is saved before the

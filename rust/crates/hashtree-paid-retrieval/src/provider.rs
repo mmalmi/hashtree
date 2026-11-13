@@ -6,8 +6,8 @@ use std::sync::Arc;
 use hashtree_core::{BlobReply, BlobRequest, BlobRoute, BLOB_MAX_BYTES};
 
 use crate::ledger::AccountBalance;
-use crate::message::{AccountId, ContentHash, ErrorCode, Reply, Request};
-use crate::seller::{PaidSeller, PaymentReceiver, ProviderConfig, Sale};
+use crate::message::{AccountId, ContentHash, Credit, ErrorCode, Payment, Quote, Reply, Request};
+use crate::seller::{account_for_peer, PaidSeller, PaymentReceiver, ProviderConfig, Sale};
 use crate::store::LedgerStore;
 
 /// Answers paid-retrieval requests for Hashtree blobs. Cheap to clone.
@@ -67,7 +67,8 @@ impl PaidBlobProvider {
     }
 
     /// Answer one encoded request with one encoded reply. `peer` is the
-    /// transport-authenticated identity of the sender, if there is one.
+    /// transport-authenticated identity of the sender, if there is one; a
+    /// request that names no account is charged to that identity.
     pub async fn handle(&self, peer: Option<&str>, request: &[u8]) -> Vec<u8> {
         let reply = match Request::decode(request) {
             Err(error) => Reply::error(ErrorCode::Bad, error.0),
@@ -75,18 +76,16 @@ impl PaidBlobProvider {
                 hash,
                 account,
                 max_msat,
-            }) => self.get(peer, hash, account, max_msat).await,
-            Ok(Request::Pay {
-                account,
+                htl,
                 payment,
-                method,
-                mint,
-                token,
-            }) => {
-                self.seller
-                    .pay(account, payment, &method, &mint, token)
-                    .await
-            }
+            }) => match resolve(account, peer) {
+                Some(account) => self.get(peer, hash, account, max_msat, htl, payment).await,
+                None => no_account(),
+            },
+            Ok(Request::Pay { account, payment }) => match resolve(account, peer) {
+                Some(account) => self.seller.pay(account, payment).await,
+                None => no_account(),
+            },
         };
         reply.encode()
     }
@@ -97,15 +96,33 @@ impl PaidBlobProvider {
         content: ContentHash,
         account: AccountId,
         max_msat: u64,
+        htl: u8,
+        payment: Option<Payment>,
     ) -> Reply {
         // Hashtree blobs are addressed by SHA-256 only.
         let Some(hash) = content.sha256() else {
             return Reply::NoResult { hash: content };
         };
-        let data = match self.source.route(BlobRequest { hash, htl: 0 }).await {
+        let data = match self.source.route(BlobRequest { hash, htl }).await {
             Ok(BlobReply::Data(data)) if data.len() <= BLOB_MAX_BYTES => data,
             Ok(_) => return Reply::NoResult { hash: content },
             Err(_) => return Reply::error(ErrorCode::Retry, "the blob source failed"),
+        };
+        // A carried payment is credited first, so that it can pay for this
+        // blob. A payment that fails answers the whole request.
+        let credit = match payment {
+            None => None,
+            Some(payment) => match self.seller.pay(account, payment).await {
+                Reply::Paid {
+                    payment,
+                    credited_msat,
+                    ..
+                } => Some(Credit {
+                    payment,
+                    credited_msat,
+                }),
+                refused => return refused,
+            },
         };
         match self
             .seller
@@ -120,10 +137,21 @@ impl PaidBlobProvider {
                 charged_msat,
                 balance_msat,
                 duplicate,
+                credit,
                 data,
             },
-            Sale::Quote(quote) => Reply::Quote(quote),
+            Sale::Quote(quote) => Reply::Quote(Quote { credit, ..quote }),
             Sale::Full => Reply::error(ErrorCode::Full, "no room for another account"),
         }
     }
+}
+
+/// The account a request is charged to: the one it names, or else the
+/// identity its carrier authenticated.
+fn resolve(account: Option<AccountId>, peer: Option<&str>) -> Option<AccountId> {
+    account.or_else(|| peer.map(account_for_peer))
+}
+
+fn no_account() -> Reply {
+    Reply::error(ErrorCode::Bad, "an account is needed on this carrier")
 }

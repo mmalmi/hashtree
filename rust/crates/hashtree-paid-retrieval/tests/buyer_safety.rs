@@ -10,7 +10,7 @@ use common::{DirectTransport, FakeMint, FakeReceiver, FakeWallet, Seller, MINT, 
 use hashtree_core::{BlobReply, BlobRequest, BlobRoute, Hash};
 use hashtree_paid_retrieval::{
     AccountState, AccountStore, ClientPolicy, ErrorCode, FileAccountStore, LimitedWallet,
-    PaidBlobRoute, PaymentIntent, PaymentRequest, PendingPayment, Reply, Request, RetrievalWallet,
+    PaidBlobRoute, PaymentIntent, PaymentRequest, PendingPayment, Reply, RetrievalWallet,
     SpendStore, SpendingLimit, WalletError, WalletPayment,
 };
 
@@ -80,12 +80,15 @@ async fn a_small_redemption_fee_is_recorded_and_is_not_a_loss() {
 async fn a_provider_that_credits_less_than_it_was_paid_is_caught() {
     // Three of five sats vanish at the provider: more than any mint fee.
     let seller = seller_keeping(3);
-    let (hash, _) = seller.add(1, 4_096).await;
+    let (hash, data) = seller.add(1, 4_096).await;
+    let (second, _) = seller.add(2, 4_096).await;
     let wallet = FakeWallet::funded(&seller.mint, 21);
     let transport = DirectTransport::new(&seller.provider);
     let route = PaidBlobRoute::new("seller", transport, wallet.clone(), policy());
 
-    assert_eq!(read(&route, hash).await, Ok(BlobReply::NoResult));
+    // The token rode with the request and still covered this blob.
+    assert_eq!(read(&route, hash).await, Ok(BlobReply::Data(data)));
+    assert_eq!(read(&route, second).await, Ok(BlobReply::NoResult));
     let account = route.account_state();
     assert_eq!(
         account.loss_msat(),
@@ -109,6 +112,7 @@ async fn the_spending_limit_reserves_the_fee_before_the_wallet_is_asked() {
         mints: vec![MINT.into()],
         amount_sat,
         max_fee_sat: 1,
+        lock: None,
         payment_id: [amount_sat as u8; 16],
     };
 
@@ -144,6 +148,7 @@ async fn spending_is_saved_before_a_payment_and_a_failed_save_stops_it() {
         mints: vec![MINT.into()],
         amount_sat: 4,
         max_fee_sat: 1,
+        lock: None,
         payment_id: [1; 16],
     };
 
@@ -225,9 +230,9 @@ async fn a_token_is_saved_before_it_is_sent() {
     let seen = store.clone();
     // The provider receives the token only after it was saved as pending.
     let transport = DirectTransport::tampering(&seller.provider, move |request, reply| {
-        if let Request::Pay { token, .. } = request {
+        if let Some(payment) = common::payment_of(request) {
             let pending = seen.last().pending.expect("pending before sending");
-            assert_eq!(&pending.payment.token, token);
+            assert_eq!(pending.payment.token, payment.token);
         }
         Some(reply)
     });
@@ -251,9 +256,9 @@ async fn a_refused_token_that_cannot_be_reclaimed_is_kept_not_dropped() {
     seller.receiver.offline.store(true, Ordering::SeqCst);
     let transport =
         DirectTransport::tampering(&seller.provider, |request, reply| match (request, reply) {
-            (Request::Pay { payment, .. }, _) => Some(Reply::Error {
+            (request, _) if common::payment_of(request).is_some() => Some(Reply::Error {
                 code: ErrorCode::Invalid,
-                payment: Some(*payment),
+                payment: common::payment_of(request).map(|payment| payment.id),
                 detail: "refused".into(),
             }),
             (_, reply) => Some(reply),
