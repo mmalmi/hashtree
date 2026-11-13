@@ -7,13 +7,17 @@ import {
   MAX_MESSAGE_BYTES,
   METHOD_CASHU,
   PROTOCOL,
+  decodeAccountState,
   decodeBencodePrefix,
   decodeReply,
   decodeRequest,
+  encodeAccountState,
   encodeReply,
   encodeRequest,
   priceMsat,
+  type AccountState,
   type ContentHash,
+  type PendingPayment,
   type Reply,
   type Request,
 } from '../src/index.js';
@@ -41,9 +45,15 @@ interface VectorFile {
     wire: string;
     message: Json;
   }>;
+  accounts: Array<{
+    name: string;
+    direction: 'both' | 'encode' | 'decode';
+    wire: string;
+    account: Json;
+  }>;
   acceptance: Array<{
     name: string;
-    kind: 'request' | 'reply' | 'bencode';
+    kind: 'request' | 'reply' | 'account' | 'bencode';
     accepted: boolean;
     used?: number;
     wire: WirePart[];
@@ -127,6 +137,38 @@ function reply(json: Json): Reply {
   }
 }
 
+function payment(json: Json): PendingPayment {
+  return {
+    id: bytes(json.id),
+    attempts: json.attempts as number,
+    payment: {
+      mintUrl: json.mint_url as string,
+      token: json.token as string,
+      amountSat: int(json.amount_sat),
+      feeSat: int(json.fee_sat),
+      ...(json.reclaim_id === null ? {} : { reclaimId: json.reclaim_id as string }),
+    },
+  };
+}
+
+function account(json: Json): AccountState {
+  const intent = json.intent as Json | null;
+  return {
+    account: bytes(json.account),
+    creditedMsat: int(json.credited_msat),
+    chargedMsat: int(json.charged_msat),
+    balanceMsat: int(json.balance_msat),
+    intent: intent && {
+      id: bytes(intent.id),
+      amountSat: int(intent.amount_sat),
+      mints: intent.mints as string[],
+    },
+    pending: json.pending === null ? null : payment(json.pending as Json),
+    unresolved: (json.unresolved as Json[]).map(payment),
+    blocked: json.blocked as string | null,
+  };
+}
+
 function build(parts: WirePart[]): Uint8Array {
   const pieces = parts.map((part) => typeof part === 'string'
     ? fromHex(part)
@@ -156,7 +198,10 @@ describe('paid retrieval vectors shared with Rust', () => {
       'reply:data', 'reply:err', 'reply:none', 'reply:paid', 'reply:quote',
       'request:get', 'request:pay',
     ]);
-    expect(VECTORS.acceptance.length).toBeGreaterThan(100);
+    expect(VECTORS.acceptance.length).toBeGreaterThan(200);
+    expect(VECTORS.accounts.length).toBeGreaterThan(5);
+    expect(new Set(VECTORS.acceptance.map((vector) => vector.kind)))
+      .toEqual(new Set(['request', 'reply', 'account', 'bencode']));
   });
 
   for (const vector of VECTORS.messages) {
@@ -175,11 +220,22 @@ describe('paid retrieval vectors shared with Rust', () => {
     });
   }
 
+  for (const vector of VECTORS.accounts) {
+    it(`${vector.direction === 'both' ? 'encodes and decodes' : `${vector.direction}s`} ${vector.name}`, () => {
+      const saved = account(vector.account);
+      if (vector.direction !== 'decode') expect(toHex(encodeAccountState(saved))).toBe(vector.wire);
+      const decoded = decodeAccountState(fromHex(vector.wire));
+      if (vector.direction === 'encode') expect(decoded).not.toEqual(saved);
+      else expect(decoded).toEqual(saved);
+    });
+  }
+
   for (const vector of VECTORS.acceptance) {
     it(`${vector.accepted ? 'accepts' : 'rejects'} ${vector.name}`, () => {
       const wire = build(vector.wire);
       const decode = (): unknown => {
         if (vector.kind === 'bencode') return decodeBencodePrefix(wire).used;
+        if (vector.kind === 'account') return decodeAccountState(wire);
         return vector.kind === 'request' ? decodeRequest(wire) : decodeReply(wire);
       };
       if (!vector.accepted) {

@@ -38,11 +38,15 @@ export {
   defaultClientPolicy,
   lossMsat,
   newAccountState,
+  unresolvedMsat,
   type AccountState,
+  type AccountStore,
   type ClientPolicy,
   type PaidRouteStats,
+  type PaymentIntent,
   type PendingPayment,
 } from './account.js';
+export { decodeAccountState, encodeAccountState } from './accountCodec.js';
 export { PaidBuyer, type InFlight, type PaidBuyerOptions } from './buyer.js';
 export { PaidBlobRoute, type PaidBlobRouteOptions } from './paidBlobRoute.js';
 export type { PaidBlobTransport } from './transport.js';
@@ -52,6 +56,7 @@ export {
   WalletError,
   type PaymentRequest,
   type RetrievalWallet,
+  type SpendStore,
   type WalletErrorKind,
   type WalletPayment,
 } from './wallet.js';

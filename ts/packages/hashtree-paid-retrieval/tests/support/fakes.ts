@@ -9,10 +9,14 @@ import { sha256, toHex, type Hash } from '@hashtree/core';
 import {
   METHOD_CASHU,
   WalletError,
+  decodeAccountState,
   decodeReply,
   decodeRequest,
+  encodeAccountState,
   encodeReply,
   priceMsat,
+  type AccountState,
+  type AccountStore,
   type PaidBlobTransport,
   type PaymentRequest,
   type Reply,
@@ -53,6 +57,13 @@ export class FakeWallet implements RetrievalWallet {
   payments = 0;
   /** Pay this many sats less than asked, to exercise underpayment. */
   shortSat = 0n;
+  /** What creating a token costs on top of its value. */
+  feeSat = 0n;
+  /** Create the token, then fail as if the process died before answering. */
+  loseReply = false;
+  cannotReclaim = false;
+  /** Tokens by payment id: asked again, the wallet returns the same one. */
+  readonly made = new Map<string, WalletPayment>();
   /** When set, a payment waits here until the test lets it through. */
   gate: Promise<void> | null = null;
 
@@ -61,13 +72,35 @@ export class FakeWallet implements RetrievalWallet {
   async pay(request: PaymentRequest): Promise<WalletPayment> {
     if (this.gate) await this.gate;
     if (!request.mints.includes(this.mintUrl)) throw WalletError.noAcceptedMint();
+    const id = toHex(request.paymentId);
+    const made = this.made.get(id);
+    if (made) return { ...made };
+    if (this.feeSat > request.maxFeeSat) throw WalletError.failed('the fee is above the ceiling');
     const reduced = request.amountSat - this.shortSat;
     const amountSat = reduced > 1n ? reduced : 1n;
-    if (this.balance < amountSat) throw WalletError.insufficientFunds();
-    this.balance -= amountSat;
+    const costSat = amountSat + this.feeSat;
+    if (this.balance < costSat) throw WalletError.insufficientFunds();
+    this.balance -= costSat;
     this.payments += 1;
     const token = this.mint.issue(this.mintUrl, amountSat);
-    return { mintUrl: this.mintUrl, token, amountSat, feeSat: 0n, reclaimId: token };
+    const payment: WalletPayment = {
+      mintUrl: this.mintUrl,
+      token,
+      amountSat,
+      feeSat: this.feeSat,
+      reclaimId: token,
+    };
+    this.made.set(id, payment);
+    if (this.loseReply) {
+      this.loseReply = false;
+      throw WalletError.failed('the process died');
+    }
+    return { ...payment };
+  }
+
+  async recover(paymentId: Uint8Array): Promise<WalletPayment | null> {
+    const made = this.made.get(toHex(paymentId));
+    return made ? { ...made } : null;
   }
 
   async balanceSat(): Promise<bigint> {
@@ -75,7 +108,37 @@ export class FakeWallet implements RetrievalWallet {
   }
 
   async reclaim(payment: WalletPayment): Promise<void> {
+    if (this.cannotReclaim) throw WalletError.failed('the mint is unreachable');
     this.balance += this.mint.redeem(payment.mintUrl, payment.token);
+  }
+}
+
+/** Remembers every saved account, like a database would. */
+export class RecordingStore implements AccountStore {
+  readonly saves: AccountState[] = [];
+
+  async save(account: AccountState): Promise<void> {
+    this.saves.push(account);
+  }
+
+  last(): AccountState {
+    const account = this.saves.at(-1);
+    if (!account) throw new Error('nothing was saved');
+    return account;
+  }
+}
+
+/** Keeps one account as the bytes a real store would hold. */
+export class MemoryAccountStore implements AccountStore {
+  private bytes: Uint8Array | null = null;
+
+  async save(account: AccountState): Promise<void> {
+    this.bytes = encodeAccountState(account);
+  }
+
+  /** The saved account, or `null` when nothing was saved yet. */
+  load(): AccountState | null {
+    return this.bytes && decodeAccountState(this.bytes);
   }
 }
 
@@ -92,6 +155,8 @@ export interface SellerConfig {
   minTopupSat: bigint;
   /** Msat served before payment to an authenticated peer. */
   graceMsat: bigint;
+  /** Sats the mint keeps of every redeemed token. */
+  mintFeeSat: bigint;
   redeliveryWindowMs: number;
 }
 
@@ -116,6 +181,7 @@ export class FakeSeller {
       mints: [MINT],
       minTopupSat: 1n,
       graceMsat: 0n,
+      mintFeeSat: 0n,
       redeliveryWindowMs: 60_000,
       ...configure,
     };
@@ -240,6 +306,8 @@ export class FakeSeller {
     } catch (error) {
       return refuse('invalid', error instanceof Error ? error.message : String(error));
     }
+    sat = sat > this.config.mintFeeSat ? sat - this.config.mintFeeSat : 0n;
+    if (sat === 0n) return refuse('invalid', 'token has no value');
     this.received += sat;
     this.tokens.add(request.token);
     const entry = this.account(id);

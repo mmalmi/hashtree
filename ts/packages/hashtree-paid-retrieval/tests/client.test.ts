@@ -25,6 +25,7 @@ function policy(overrides: Partial<ClientPolicy> = {}): Partial<ClientPolicy> {
     topupSat: 5n,
     maxPrepaidMsat: 10_000n,
     maxLossMsat: 1_500n,
+    maxTokenFeeSat: 0n,
     ...overrides,
   };
 }

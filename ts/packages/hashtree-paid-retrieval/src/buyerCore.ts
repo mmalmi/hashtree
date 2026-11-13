@@ -1,8 +1,18 @@
 /** The state one buyer keeps about one provider, shared by its steps. */
 
-import { emptyStats, lossMsat, type AccountState, type ClientPolicy, type PaidRouteStats } from './account.js';
+import {
+  cloneAccountState,
+  emptyStats,
+  hasHistory,
+  lossMsat,
+  type AccountState,
+  type AccountStore,
+  type ClientPolicy,
+  type PaidRouteStats,
+} from './account.js';
 import { withDeadline } from './deadline.js';
 import { decodeReply, encodeRequest, type Reply, type Request } from './message.js';
+import { saturate } from './price.js';
 import type { PaidBlobTransport } from './transport.js';
 import type { RetrievalWallet } from './wallet.js';
 
@@ -36,6 +46,11 @@ export class BuyerCore {
   inFlightMsat = 0n;
   /** Payments the provider has acknowledged. */
   credits = 0;
+  /**
+   * The account was restored from a store: charges made since its last save
+   * are unknown until the provider reports its balance.
+   */
+  resync: boolean;
   stats: PaidRouteStats = emptyStats();
   private paying: Promise<unknown> = Promise.resolve();
 
@@ -45,7 +60,25 @@ export class BuyerCore {
     readonly wallet: RetrievalWallet,
     readonly policy: ClientPolicy,
     public account: AccountState,
-  ) {}
+    readonly store?: AccountStore,
+  ) {
+    this.resync = hasHistory(account);
+  }
+
+  /** Save the account where a restart will find it. */
+  async persist(): Promise<void> {
+    if (!this.store) return;
+    try {
+      await this.store.save(cloneAccountState(this.account));
+    } catch (error) {
+      throw new Error(`paid route cannot save its account: ${describe(error)}`);
+    }
+  }
+
+  /** Save where nothing depends on it: the older record still holds. */
+  async persistIfPossible(): Promise<void> {
+    await this.persist().catch(() => undefined);
+  }
 
   /** Serialise payments so that concurrent requests share one top-up. */
   payingOnly<T>(step: () => Promise<T>): Promise<T> {
@@ -86,6 +119,14 @@ export class BuyerCore {
     const own = request === null ? 0 : 1;
     if (this.inFlight > own || this.account.blocked !== null) return;
     const loss = lossMsat(this.account);
+    if (this.resync) {
+      // Charges since the last save were never recorded here. The first
+      // balance after a restart is the baseline, not a loss.
+      this.resync = false;
+      this.account.chargedMsat = saturate(this.account.chargedMsat + loss);
+      this.stats.resyncedMsat = saturate(this.stats.resyncedMsat + loss);
+      return;
+    }
     if (loss > this.policy.maxLossMsat) this.block(loss);
   }
 

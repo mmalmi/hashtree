@@ -14,6 +14,7 @@ import {
 import {
   defaultClientPolicy,
   type AccountState,
+  type AccountStore,
   type ClientPolicy,
   type PaidRouteStats,
 } from './account.js';
@@ -33,8 +34,13 @@ export interface PaidBlobRouteOptions {
   wallet: RetrievalWallet;
   /** Missing fields take the placeholder defaults of `defaultClientPolicy`. */
   policy?: Partial<ClientPolicy>;
-  /** Continue with an account the application persisted. */
+  /** Continue with the account the store held. */
   account?: AccountState;
+  /**
+   * Where the account is saved before the wallet is asked for a payment and
+   * whenever a payment changes state. Give one wherever real money is paid.
+   */
+  store?: AccountStore;
   /** Route identity in a `BlobRouter`; `paid:<provider>` unless given. */
   id?: string;
   groupId?: string;
@@ -72,6 +78,7 @@ export class PaidBlobRoute implements BlobRoute {
       wallet: options.wallet,
       policy: defaultClientPolicy(options.policy),
       account: options.account,
+      store: options.store,
     });
   }
 
@@ -84,7 +91,10 @@ export class PaidBlobRoute implements BlobRoute {
     return this.buyer.stats();
   }
 
-  /** Resend an unacknowledged payment and pay any debt now. */
+  /**
+   * Resend an unacknowledged payment, try the oldest unresolved token again
+   * and pay any debt now.
+   */
   settle(): Promise<void> {
     return this.buyer.settle();
   }

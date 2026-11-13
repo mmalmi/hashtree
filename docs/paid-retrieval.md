@@ -319,10 +319,16 @@ wallet interface, `SpendingLimit` and `LimitedWallet`, with a transport
 interface that carries one request and one reply. It has no selling side and is
 not in the worker's default route set.
 
+It protects the buyer's money in the same way: fee and shortfall accounting,
+the payment intent and token saved before they are used, `recover` after a
+restart, and unresolved tokens. Its `AccountStore` and `SpendStore` are
+asynchronous, as browser storage is. It has no file store;
+`encodeAccountState` writes the same record as `AccountState::encode`.
+
 `test-vectors/paid-retrieval-vectors.json` holds the two codecs together. It is
 generated from the Rust encoder by `tests/vectors.rs` and checked by both
-languages: every message both ways, what each decoder accepts and rejects at
-every limit, and prices.
+languages: every message both ways, the saved account record, what each
+decoder accepts and rejects at every limit, and prices.
 
 Both buyers ignore the balance in a reply to a request that was sent before
 the latest acknowledged payment, because such a reply may predate the credit.

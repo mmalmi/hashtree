@@ -13,6 +13,7 @@ import {
   lossMsat,
   newAccountState,
   type AccountState,
+  type AccountStore,
   type ClientPolicy,
   type PaidRouteStats,
 } from './account.js';
@@ -32,8 +33,14 @@ export interface PaidBuyerOptions {
   transport: PaidBlobTransport;
   wallet: RetrievalWallet;
   policy: ClientPolicy;
-  /** Continue with an account the application persisted. */
+  /** Continue with the account the store held. */
   account?: AccountState;
+  /**
+   * Where the account is saved before the wallet is asked for a payment and
+   * whenever a payment changes state. Without one nothing is saved: give one
+   * wherever real money is paid.
+   */
+  store?: AccountStore;
 }
 
 function contentKey(content: ContentHash): string {
@@ -54,6 +61,7 @@ export class PaidBuyer {
       options.wallet,
       options.policy,
       options.account ? cloneAccountState(options.account) : newAccountState(),
+      options.store,
     );
   }
 
@@ -91,7 +99,7 @@ export class PaidBuyer {
       stats.declinedBlocked += 1;
       return false;
     }
-    if (account.pending !== null || account.balanceMsat < 0n) {
+    if (account.intent !== null || account.pending !== null || account.balanceMsat < 0n) {
       await runFunding(this.core, null, deadlineMs, signal);
     }
     return true;
@@ -187,7 +195,10 @@ export class PaidBuyer {
     return runFunding(this.core, quote, deadlineMs, signal);
   }
 
-  /** Resend an unacknowledged payment and pay any debt now. */
+  /**
+   * Resend an unacknowledged payment, try the oldest unresolved token again
+   * and pay any debt now.
+   */
   async settle(): Promise<void> {
     await this.fund(null, Date.now() + this.core.policy.requestTimeoutMs);
   }

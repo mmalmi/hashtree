@@ -12,6 +12,8 @@ const request = (amountSat: bigint): PaymentRequest => ({
   provider: 'seller',
   mints: ['https://mint.test'],
   amountSat,
+  maxFeeSat: 0n,
+  paymentId: new Uint8Array(16).fill(Number(amountSat)),
 });
 
 function paying(feeSat = 0n): RetrievalWallet {
@@ -33,7 +35,7 @@ describe('SpendingLimit', () => {
     expect([limit.limitSat, limit.spentSat, limit.remainingSat]).toEqual([10n, 4n, 6n]);
     limit.setLimitSat(3n);
     expect(limit.remainingSat).toBe(0n);
-    limit.resetSpent();
+    void limit.resetSpent();
     expect([limit.spentSat, limit.remainingSat]).toEqual([0n, 3n]);
   });
 });
