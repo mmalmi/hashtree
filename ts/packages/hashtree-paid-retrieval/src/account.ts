@@ -1,6 +1,6 @@
 /** What a client knows about its account with one provider. */
 
-import { ACCOUNT_ID_BYTES, PAYMENT_ID_BYTES } from './message.js';
+import { ACCOUNT_ID_BYTES, METHOD_CASHU, PAYMENT_ID_BYTES, type Payment } from './message.js';
 import { U64_MAX, saturate, type Tariff } from './price.js';
 import type { WalletPayment } from './wallet.js';
 
@@ -83,6 +83,16 @@ export interface PendingPayment {
   payment: WalletPayment;
   /** Times the provider answered that it cannot take the payment yet. */
   attempts: number;
+}
+
+/** The payment as it travels to the provider. */
+export function wirePayment(pending: PendingPayment): Payment {
+  return {
+    id: pending.id.slice(),
+    method: METHOD_CASHU,
+    mint: pending.payment.mintUrl,
+    token: pending.payment.token,
+  };
 }
 
 /**

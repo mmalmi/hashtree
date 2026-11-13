@@ -15,9 +15,12 @@ import {
   encodeAccountState,
   encodeReply,
   priceMsat,
+  PROTOCOL,
   type AccountState,
   type AccountStore,
+  type Credit,
   type PaidBlobTransport,
+  type Payment,
   type PaymentRequest,
   type Reply,
   type Request,
@@ -157,7 +160,25 @@ export interface SellerConfig {
   graceMsat: bigint;
   /** Sats the mint keeps of every redeemed token. */
   mintFeeSat: bigint;
+  /** The key tokens should be locked to, named in every quote. */
+  lock: Uint8Array | null;
   redeliveryWindowMs: number;
+}
+
+const PEER_TAG = new TextEncoder().encode(`${PROTOCOL} peer\0`);
+
+/** The account of a client that its carrier authenticates as `peer`, as the Rust provider derives it. */
+export async function accountForPeer(peer: string): Promise<Uint8Array> {
+  const name = new TextEncoder().encode(peer);
+  const tagged = new Uint8Array(PEER_TAG.length + name.length);
+  tagged.set(PEER_TAG);
+  tagged.set(name, PEER_TAG.length);
+  return sha256(tagged);
+}
+
+/** The payment a request carries: in `pay`, or riding with `get`. */
+export function paymentOf(request: Request): Payment | null {
+  return request.type === 'pay' ? request.payment : request.payment;
 }
 
 const trimMint = (mint: string): string => mint.trim().replace(/\/+$/, '');
@@ -182,6 +203,7 @@ export class FakeSeller {
       minTopupSat: 1n,
       graceMsat: 0n,
       mintFeeSat: 0n,
+      lock: null,
       redeliveryWindowMs: 60_000,
       ...configure,
     };
@@ -202,7 +224,14 @@ export class FakeSeller {
     }));
   }
 
-  /** Answer one encoded request with one encoded reply. */
+  /** The hop budgets of the gets this seller was asked, in order. */
+  readonly hopBudgets: number[] = [];
+
+  /**
+   * Answer one encoded request with one encoded reply. `peer` is the
+   * transport-authenticated identity of the sender; a request that names no
+   * account is charged to that identity.
+   */
   async handle(peer: string | undefined, request: Uint8Array): Promise<Uint8Array> {
     let decoded: Request;
     try {
@@ -210,7 +239,14 @@ export class FakeSeller {
     } catch (error) {
       return encodeReply({ type: 'err', code: 'bad', detail: String(error) });
     }
-    return encodeReply(decoded.type === 'get' ? this.get(peer, decoded) : this.pay(decoded));
+    const account = decoded.account ?? (peer === undefined ? null : await accountForPeer(peer));
+    if (account === null) {
+      return encodeReply({ type: 'err', code: 'bad', detail: 'an account is needed on this carrier' });
+    }
+    const id = toHex(account);
+    return encodeReply(decoded.type === 'get'
+      ? this.get(peer, id, decoded)
+      : this.pay(id, decoded.payment));
   }
 
   private account(id: string): SellerAccount {
@@ -227,12 +263,20 @@ export class FakeSeller {
     return entry ? entry.paidMsat - entry.chargedMsat : 0n;
   }
 
-  private get(peer: string | undefined, request: Extract<Request, { type: 'get' }>): Reply {
+  private get(peer: string | undefined, id: string, request: Extract<Request, { type: 'get' }>): Reply {
     const { hash } = request;
+    this.hopBudgets.push(request.htl);
     const key = toHex(hash.digest);
     const data = hash.algorithm === 'sha256' ? this.blobs.get(key) : undefined;
     if (!data) return { type: 'none', hash };
-    const id = toHex(request.account);
+    // A carried payment is credited first, so that it can pay for this blob.
+    // A payment that fails answers the whole request.
+    let credit: Credit | null = null;
+    if (request.payment !== null) {
+      const paid = this.pay(id, request.payment);
+      if (paid.type !== 'paid') return paid;
+      credit = { payment: paid.payment, creditedMsat: paid.creditedMsat };
+    }
     const now = Date.now();
     const repeat = this.ledger.get(id)?.recent.find((recent) => recent.hash === key
       && recent.left > 0 && now - recent.at <= this.config.redeliveryWindowMs);
@@ -244,6 +288,7 @@ export class FakeSeller {
         chargedMsat: repeat.priceMsat,
         balanceMsat: this.balance(id),
         duplicate: true,
+        credit,
         data,
       };
     }
@@ -266,6 +311,8 @@ export class FakeSeller {
           mints: [...this.config.mints],
           methods: [METHOD_CASHU],
           minTopupSat: this.config.minTopupSat,
+          lock: this.config.lock,
+          credit,
         },
       };
     }
@@ -279,12 +326,13 @@ export class FakeSeller {
       chargedMsat: price,
       balanceMsat: this.balance(id),
       duplicate: false,
+      credit,
       data,
     };
   }
 
-  private pay(request: Extract<Request, { type: 'pay' }>): Reply {
-    const { payment } = request;
+  private pay(id: string, request: Payment): Reply {
+    const payment = request.id;
     const refuse = (code: 'method' | 'mint' | 'replay' | 'retry' | 'invalid', detail: string): Reply => (
       { type: 'err', code, payment, detail }
     );
@@ -293,7 +341,6 @@ export class FakeSeller {
     if (!this.config.mints.map(trimMint).includes(mint)) {
       return refuse('mint', 'mint is not accepted');
     }
-    const id = toHex(request.account);
     const known = this.ledger.get(id)?.payments.get(toHex(payment));
     if (known !== undefined) {
       return { type: 'paid', payment, creditedMsat: known, balanceMsat: this.balance(id) };
@@ -327,6 +374,12 @@ export class DirectTransport implements PaidBlobTransport {
   exchanges = 0;
   /** Transport-authenticated identity of this client, if there is one. */
   peer: string | undefined;
+  /** Whether the client relies on `peer` instead of naming its account, as on FIPS. */
+  authenticated = false;
+
+  authenticatesPeer(): boolean {
+    return this.authenticated;
+  }
 
   constructor(
     private readonly seller: FakeSeller,

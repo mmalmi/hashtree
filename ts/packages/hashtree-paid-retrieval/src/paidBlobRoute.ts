@@ -13,6 +13,7 @@ import {
 } from '@hashtree/core';
 import {
   defaultClientPolicy,
+  wirePayment,
   type AccountState,
   type AccountStore,
   type ClientPolicy,
@@ -112,21 +113,37 @@ export class PaidBlobRoute implements BlobRoute {
     const maxMsat = priceMsat(buyer.policy.maxTariff, BigInt(BLOB_MAX_BYTES));
     const content: ContentHash = { algorithm: 'sha256', digest: request.hash };
     for (let round = 0; round < MAX_ROUNDS; round += 1) {
-      if (!(await buyer.prepare(deadlineMs, signal))) return BLOB_NO_RESULT;
-      const inFlight = buyer.begin(maxMsat);
+      // A fresh token rides with the request instead of costing a round trip
+      // of its own.
+      const prepared = await buyer.prepareCarrying(deadlineMs, signal);
+      if (prepared === null) return BLOB_NO_RESULT;
+      const { carried, release } = await buyer.carry(prepared.carried, deadlineMs, signal);
       let accepted: Accepted;
       try {
-        const reply = await buyer.exchange(
-          { type: 'get', hash: content, account: buyer.accountId, maxMsat },
-          deadlineMs,
-          signal,
-        );
-        accepted = await this.accept(inFlight, request.hash, content, reply);
+        const inFlight = buyer.begin(maxMsat);
+        try {
+          const reply = await buyer.exchange(
+            {
+              type: 'get',
+              hash: content,
+              account: buyer.wireAccount(),
+              maxMsat,
+              htl: request.htl,
+              payment: carried === null ? null : wirePayment(carried),
+            },
+            deadlineMs,
+            signal,
+          );
+          if (carried !== null) await buyer.settleCarried(inFlight, carried, reply);
+          accepted = await this.accept(inFlight, request.hash, content, reply);
+        } finally {
+          inFlight.end();
+        }
       } finally {
-        inFlight.end();
+        release();
       }
       if ('reply' in accepted) return accepted.reply;
-      if (!(await buyer.fund(accepted.quote, deadlineMs, signal))) return BLOB_NO_RESULT;
+      if (!(await buyer.fundCarrying(accepted.quote, deadlineMs, signal))) return BLOB_NO_RESULT;
     }
     throw protocol('kept asking for payment');
   }

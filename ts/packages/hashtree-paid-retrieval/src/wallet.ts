@@ -15,6 +15,11 @@ export interface PaymentRequest {
   /** The most that creating the token may cost beyond `amountSat`. */
   maxFeeSat: bigint;
   /**
+   * The 33-byte key the provider asks tokens to be locked to (NUT-11 P2PK). A
+   * wallet that can lock tokens should; one that cannot sends them unlocked.
+   */
+  lock: Uint8Array | null;
+  /**
    * Stable id of this payment, 16 bytes. It was saved before the wallet was
    * asked, and a wallet that can find a payment again finds it by this id.
    */

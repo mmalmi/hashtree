@@ -87,6 +87,7 @@ interface PaymentRequest {
   mints: string[];
   amountSat: bigint;
   maxFeeSat: bigint;
+  lock: Uint8Array | null;
   paymentId: Uint8Array;
 }
 
@@ -96,6 +97,7 @@ interface AccountStore {
 
 interface PaidBlobTransport {
   exchange(request: Uint8Array, signal?: AbortSignal): Promise<Uint8Array>;
+  authenticatesPeer?(): boolean;
 }
 ```
 
@@ -105,7 +107,9 @@ interface PaidBlobTransport {
   `insufficientFunds`). Anything else it throws is a failure and fails the
   read. Asked again with the same `paymentId` it should return the same
   token; `recover` finds the token of a `paymentId` after a crash, and
-  `reclaim` takes back a token the provider refused.
+  `reclaim` takes back a token the provider refused. `lock` is the key the
+  provider asks tokens to be locked to (NUT-11); a wallet that cannot lock
+  tokens sends them unlocked.
 - **Spending limit.** `SpendingLimit` is a total in sats, readable and
   adjustable for a settings screen (`limitSat`, `spentSat`, `remainingSat`,
   `setLimitSat`, `resetSpent`). `LimitedWallet` holds any wallet to it: the
@@ -114,13 +118,24 @@ interface PaidBlobTransport {
   failed save refuses the payment.
 - **Account store.** Where the account is kept; see below.
 - **Transport.** Anything that carries one request and one reply;
-  `HttpPaidBlobTransport` is one.
+  `HttpPaidBlobTransport` is one. A carrier that authenticates the client
+  itself, as FIPS does, says so with `authenticatesPeer()`: requests then name
+  no account, and the provider charges the client's identity.
 - **Policy** (optional): `maxTariff`, `mints`, `topupSat`, `maxPrepaidMsat`,
   `maxLossMsat`, `maxTokenFeeSat`, `maxRedeemFeeMsat`, `requestTimeoutMs`. The
   defaults are placeholders.
 
 Amounts of money are `bigint` (sats and millisats, as on the wire); counts and
 byte sizes are `number`.
+
+## Round trips
+
+A new token rides with the next `get` instead of being sent in a `pay` of its
+own, and its credit comes back with the blob or the next quote, so a first
+paid read is two round trips: `get` → `quote`, then `get` carrying the token
+→ `data`. A funded read is one. Only one request at a time carries a given
+token; a token the provider answered "not yet" is sent on its own before the
+next `get`. The route passes the read's hop budget (`htl`) to the provider.
 
 ## Keeping the account
 
@@ -164,6 +179,8 @@ stats are the same. What differs:
   `SpendingLimit` counts a reservation at once, so concurrent payments still
   cannot overspend together, and takes it back if the save fails; its saves
   reach the store one at a time, in order. `resetSpent()` returns a promise.
+- A read that waits for the payment lock to carry a token stops waiting at
+  its deadline, like the rest of the read.
 - Hashing is asynchronous in the browser, so deliveries are accounted in the
   order they arrived rather than the order their hashes finish.
 - A wallet result, policy or saved account that is not in `bigint` amounts is
@@ -178,6 +195,6 @@ pnpm --filter @hashtree/paid-retrieval test
 `tests/vectors.test.ts` checks the codec against
 `test-vectors/paid-retrieval-vectors.json`, which is generated from the Rust
 encoder and checked there too (`rust/crates/hashtree-paid-retrieval/tests/vectors.rs`).
-`tests/client.test.ts` and `tests/buyerSafety.test.ts` mirror the Rust client
-and buyer-safety tests with a fake mint, wallet and provider; no network and
+`tests/client.test.ts`, `tests/buyerSafety.test.ts` and `tests/wireV2.test.ts`
+mirror the Rust client, buyer-safety and wire v2 tests with a fake mint, wallet and provider; no network and
 no real funds.

@@ -425,6 +425,10 @@ interface that carries one request and one reply and `HttpPaidBlobTransport`
 as its first carrier. It has no selling side and is not in the worker's
 default route set.
 
+It carries a fresh token with the next `get`, names no account on a carrier
+that authenticates it, passes the hop budget on and hands a quote's lock key
+to the wallet, as the Rust buyer does.
+
 It protects the buyer's money in the same way: fee and shortfall accounting,
 the payment intent and token saved before they are used, `recover` after a
 restart, and unresolved tokens. Its `AccountStore` and `SpendStore` are

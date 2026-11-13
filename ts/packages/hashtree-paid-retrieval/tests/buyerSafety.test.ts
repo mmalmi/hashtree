@@ -34,6 +34,7 @@ import {
   MemoryAccountStore,
   RecordingStore,
   TARIFF,
+  paymentOf,
 } from './support/fakes.js';
 
 const POLICY: Partial<ClientPolicy> = {
@@ -69,6 +70,7 @@ function request(amountSat: bigint): PaymentRequest {
     mints: [MINT],
     amountSat,
     maxFeeSat: 1n,
+    lock: null,
     paymentId: new Uint8Array(16).fill(Number(amountSat)),
   };
 }
@@ -90,10 +92,13 @@ describe('fees and under-crediting', () => {
     // Three of five sats vanish at the provider: more than any mint fee.
     const seller = new FakeSeller({ mintFeeSat: 3n });
     const { hash } = await seller.add(1, 4_096);
+    const second = await seller.add(2, 4_096);
     const wallet = new FakeWallet(seller.mint, 21n);
     const paid = route(new DirectTransport(seller), wallet);
 
-    expect(await outcome(paid, hash)).toBe('no-result');
+    // The token rode with the request and still covered this blob.
+    expect(await outcome(paid, hash)).toBe('data');
+    expect(await outcome(paid, second.hash)).toBe('no-result');
     const account = paid.accountState();
     expect(lossMsat(account), 'the shortfall beyond the allowance').toBe(2_000n);
     expect(account.blocked).not.toBeNull();
@@ -179,9 +184,8 @@ describe('what is saved before acting', () => {
     const savedFirst: boolean[] = [];
     // The provider receives the token only after it was saved as pending.
     const transport = new DirectTransport(seller, (sent, reply) => {
-      if (sent.type === 'pay') {
-        savedFirst.push(store.last().pending?.payment.token === sent.token);
-      }
+      const payment = paymentOf(sent);
+      if (payment !== null) savedFirst.push(store.last().pending?.payment.token === payment.token);
       return reply;
     });
     const paid = route(transport, new FakeWallet(seller.mint, 21n), { store });
@@ -296,9 +300,12 @@ describe('tokens whose fate is not known', () => {
     const wallet = new FakeWallet(seller.mint, 21n);
     // The provider answers every payment as refused, without redeeming.
     seller.offline = true;
-    const transport = new DirectTransport(seller, (sent, reply) => (sent.type === 'pay'
-      ? { type: 'err', code: 'invalid', payment: sent.payment, detail: 'refused' }
-      : reply));
+    const transport = new DirectTransport(seller, (request, reply) => {
+      const payment = paymentOf(request);
+      return payment === null
+        ? reply
+        : { type: 'err', code: 'invalid', payment: payment.id, detail: 'refused' };
+    });
     const paid = route(transport, wallet);
 
     wallet.cannotReclaim = true;

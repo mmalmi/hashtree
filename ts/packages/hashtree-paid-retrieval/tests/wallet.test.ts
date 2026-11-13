@@ -13,6 +13,7 @@ const request = (amountSat: bigint): PaymentRequest => ({
   mints: ['https://mint.test'],
   amountSat,
   maxFeeSat: 0n,
+  lock: null,
   paymentId: new Uint8Array(16).fill(Number(amountSat)),
 });
 

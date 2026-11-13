@@ -7,7 +7,7 @@
  * See `docs/paid-retrieval.md`.
  */
 
-import { BLOB_MAX_BYTES } from '@hashtree/core';
+import { BLOB_MAX_BYTES, BLOB_MAX_HTL } from '@hashtree/core';
 import {
   decodeBencodePrefix,
   encodeBencode,
@@ -26,6 +26,8 @@ export const MAX_HEADER_BYTES = 64 * 1024;
 export const MAX_MESSAGE_BYTES = BLOB_MAX_BYTES + MAX_HEADER_BYTES;
 export const ACCOUNT_ID_BYTES = 32;
 export const PAYMENT_ID_BYTES = 16;
+/** Length of a compressed secp256k1 public key, the form of a lock key. */
+export const LOCK_KEY_BYTES = 33;
 
 const MAX_MINTS = 16;
 const MAX_URL_BYTES = 512;
@@ -47,18 +49,39 @@ export const ERROR_CODES = ['bad', 'mint', 'method', 'invalid', 'replay', 'retry
 /** `unknown` stands for any code this version does not know. */
 export type ErrorCode = (typeof ERROR_CODES)[number] | 'unknown';
 
+/** One payment as it travels: in `pay`, or carried by `get`. */
+export interface Payment {
+  /** 16 bytes chosen at random by the client; repeating it repeats the answer. */
+  id: Uint8Array;
+  method: string;
+  mint: string;
+  token: string;
+}
+
+/** A payment carried by a `get` that the provider credited before replying. */
+export interface Credit {
+  payment: Uint8Array;
+  creditedMsat: bigint;
+}
+
 export type Request =
   /** Fetch a blob, authorising a debit of at most `maxMsat`. */
-  | { type: 'get'; hash: ContentHash; account: Uint8Array; maxMsat: bigint }
-  /** Credit the account with one payment. */
   | {
-    type: 'pay';
-    account: Uint8Array;
-    payment: Uint8Array;
-    method: string;
-    mint: string;
-    token: string;
-  };
+    type: 'get';
+    hash: ContentHash;
+    /**
+     * The account to charge. `null` on a carrier that authenticates the
+     * client: the account is then the client's identity.
+     */
+    account: Uint8Array | null;
+    maxMsat: bigint;
+    /** How many more times the request may be forwarded; 0 answers from what the provider has. */
+    htl: number;
+    /** A payment to credit before the blob is charged. */
+    payment: Payment | null;
+  }
+  /** Credit the account with one payment. */
+  | { type: 'pay'; account: Uint8Array | null; payment: Payment };
 
 /** The provider's terms for one blob: payment is required before delivery. */
 export interface Quote {
@@ -71,6 +94,10 @@ export interface Quote {
   mints: string[];
   methods: string[];
   minTopupSat: bigint;
+  /** The 33-byte key that tokens paid to this provider should be locked to (NUT-11). */
+  lock: Uint8Array | null;
+  /** A payment carried by the request, credited before this quote. */
+  credit: Credit | null;
 }
 
 export type Reply =
@@ -81,6 +108,8 @@ export type Reply =
     balanceMsat: bigint;
     /** A free repeat of a blob this account was already charged for. */
     duplicate: boolean;
+    /** A payment carried by the request, credited before the charge. */
+    credit: Credit | null;
     data: Uint8Array;
   }
   | { type: 'quote'; quote: Quote }
@@ -144,6 +173,23 @@ class Fields {
 
   text(key: string, value: string): this {
     return this.bytes(key, textEncoder.encode(value));
+  }
+
+  optionalBytes(key: string, value: Uint8Array | null, length: number): this {
+    return value === null ? this : this.bytes(key, value, length);
+  }
+
+  payment(payment: Payment): this {
+    return this.bytes('i', payment.id, PAYMENT_ID_BYTES)
+      .text('k', payment.method)
+      .text('m', payment.mint)
+      .text('v', payment.token);
+  }
+
+  credit(credit: Credit | null): this {
+    return credit === null
+      ? this
+      : this.bytes('i', credit.payment, PAYMENT_ID_BYTES).uint('v', credit.creditedMsat);
   }
 
   content(hash: ContentHash): this {
@@ -232,6 +278,40 @@ class Dict {
     return textValue(this.get(key), max);
   }
 
+  optionalFixed(key: string, length: number): Uint8Array | null {
+    return this.has(key) ? this.fixed(key, length) : null;
+  }
+
+  /** `i`, `k`, `m` and `v` together, or none of them. */
+  payment(): Payment | null {
+    const present = ['i', 'k', 'm', 'v'].filter((key) => this.has(key)).length;
+    if (present === 0) return null;
+    if (present !== 4) throw new MessageError('a payment is incomplete');
+    return {
+      id: this.fixed('i', PAYMENT_ID_BYTES),
+      method: this.text('k', MAX_TEXT_BYTES),
+      mint: this.text('m', MAX_URL_BYTES),
+      token: this.text('v', MAX_TOKEN_BYTES),
+    };
+  }
+
+  /** `i` and `v` together, or neither. */
+  credit(): Credit | null {
+    const hasId = this.has('i');
+    if (hasId !== this.has('v')) throw new MessageError('a credit is incomplete');
+    return hasId ? { payment: this.fixed('i', PAYMENT_ID_BYTES), creditedMsat: this.uint('v') } : null;
+  }
+
+  /** Absent means zero; zero has no second spelling. */
+  htl(): number {
+    if (!this.has('l')) return 0;
+    const htl = this.uint('l');
+    if (htl < 1n || htl > BigInt(BLOB_MAX_HTL)) {
+      throw new MessageError('the hop budget is out of range');
+    }
+    return Number(htl);
+  }
+
   /** SHA-256 has one encoding: `y` is absent, never spelled out. */
   content(): ContentHash {
     if (!this.has('y')) return { algorithm: 'sha256', digest: this.fixed('h', DIGEST_BYTES.sha256) };
@@ -263,20 +343,23 @@ class Dict {
 }
 
 export function encodeRequest(request: Request): Uint8Array {
-  if (request.type === 'get') {
-    return new Fields('get')
-      .content(request.hash)
-      .bytes('a', request.account, ACCOUNT_ID_BYTES)
-      .uint('x', request.maxMsat)
+  if (request.type === 'pay') {
+    return new Fields('pay')
+      .optionalBytes('a', request.account, ACCOUNT_ID_BYTES)
+      .payment(request.payment)
       .finish();
   }
-  return new Fields('pay')
-    .bytes('a', request.account, ACCOUNT_ID_BYTES)
-    .bytes('i', request.payment, PAYMENT_ID_BYTES)
-    .text('k', request.method)
-    .text('m', request.mint)
-    .text('v', request.token)
-    .finish();
+  const { htl, payment } = request;
+  if (!Number.isInteger(htl) || htl < 0 || htl > 0xff) {
+    throw new RangeError('paid-retrieval hop budget must be an integer from 0 to 255');
+  }
+  const fields = new Fields('get')
+    .content(request.hash)
+    .optionalBytes('a', request.account, ACCOUNT_ID_BYTES)
+    .uint('x', request.maxMsat);
+  if (htl > 0) fields.uint('l', BigInt(htl));
+  if (payment !== null) fields.payment(payment);
+  return fields.finish();
 }
 
 export function decodeRequest(bytes: Uint8Array): Request {
@@ -287,18 +370,17 @@ export function decodeRequest(bytes: Uint8Array): Request {
       return {
         type: 'get',
         hash: dict.content(),
-        account: dict.fixed('a', ACCOUNT_ID_BYTES),
+        account: dict.optionalFixed('a', ACCOUNT_ID_BYTES),
         maxMsat: dict.uint('x'),
+        htl: dict.htl(),
+        payment: dict.payment(),
       };
-    case 'pay':
-      return {
-        type: 'pay',
-        account: dict.fixed('a', ACCOUNT_ID_BYTES),
-        payment: dict.fixed('i', PAYMENT_ID_BYTES),
-        method: dict.text('k', MAX_TEXT_BYTES),
-        mint: dict.text('m', MAX_URL_BYTES),
-        token: dict.text('v', MAX_TOKEN_BYTES),
-      };
+    case 'pay': {
+      const account = dict.optionalFixed('a', ACCOUNT_ID_BYTES);
+      const payment = dict.payment();
+      if (payment === null) throw new MessageError('a required field is missing');
+      return { type: 'pay', account, payment };
+    }
     default:
       throw new MessageError('unknown request type');
   }
@@ -308,6 +390,7 @@ function encodeQuote(quote: Quote): Uint8Array {
   const { rate, minMsat } = quote.tariff;
   return new Fields('quote')
     .content(quote.hash)
+    .credit(quote.credit)
     .uint('n', quote.size)
     .uint('c', quote.priceMsat)
     .int('b', quote.balanceMsat)
@@ -317,6 +400,7 @@ function encodeQuote(quote: Quote): Uint8Array {
     .texts('m', quote.mints)
     .texts('k', quote.methods)
     .uint('u', quote.minTopupSat)
+    .optionalBytes('o', quote.lock, LOCK_KEY_BYTES)
     .finish();
 }
 
@@ -327,7 +411,8 @@ export function encodeReply(reply: Reply): Uint8Array {
         .content(reply.hash)
         .uint('n', BigInt(reply.data.length))
         .uint('c', reply.chargedMsat)
-        .int('b', reply.balanceMsat);
+        .int('b', reply.balanceMsat)
+        .credit(reply.credit);
       if (reply.duplicate) fields.uint('d', 1n);
       return fields.finish(reply.data);
     }
@@ -361,6 +446,7 @@ function decodeData(dict: Dict, payload: Uint8Array): Reply {
     chargedMsat: dict.uint('c'),
     balanceMsat: dict.int('b'),
     duplicate: dict.has('d') && dict.uint('d') !== 0n,
+    credit: dict.credit(),
     data: payload.slice(),
   };
 }
@@ -392,6 +478,8 @@ export function decodeReply(bytes: Uint8Array): Reply {
           mints: dict.texts('m'),
           methods: dict.texts('k'),
           minTopupSat: dict.uint('u'),
+          lock: dict.optionalFixed('o', LOCK_KEY_BYTES),
+          credit: dict.credit(),
         },
       };
     }

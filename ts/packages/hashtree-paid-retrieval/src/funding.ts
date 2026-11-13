@@ -1,9 +1,9 @@
 /** The client's payment step: resend, top up, reclaim. */
 
-import { lossMsat, unresolvedMsat, type PendingPayment } from './account.js';
-import type { BuyerCore } from './buyerCore.js';
+import { lossMsat, unresolvedMsat, wirePayment, type PendingPayment } from './account.js';
+import type { BuyerCore, Terms } from './buyerCore.js';
 import { withDeadline } from './deadline.js';
-import { METHOD_CASHU, PAYMENT_ID_BYTES, bytesEqual, type Quote } from './message.js';
+import { METHOD_CASHU, PAYMENT_ID_BYTES, bytesEqual, type Quote, type Reply } from './message.js';
 import { U64_MAX, satCeil, saturate } from './price.js';
 import { WalletError, type WalletPayment } from './wallet.js';
 
@@ -28,6 +28,12 @@ const MAX_ATTEMPTS = 3;
 /** Tokens of unknown fate kept per provider; beyond it nothing more is paid. */
 const MAX_UNRESOLVED = 8;
 
+/** The provider's mints that the client policy allows; any of them when it names none. */
+function acceptedMints(own: string[], offered: string[]): string[] {
+  const allowed = own.map(normalizeMint);
+  return offered.filter((mint) => allowed.length === 0 || allowed.includes(normalizeMint(mint)));
+}
+
 function isAmount(value: unknown): value is bigint {
   return typeof value === 'bigint' && value >= 0n && value <= U64_MAX;
 }
@@ -46,17 +52,21 @@ function checked(payment: WalletPayment): WalletPayment {
  * Make the account able to pay for `quote` (or, without one, settle what is
  * outstanding). Resolves to `false` when the client declines to pay.
  *
+ * With `carry`, a new token is left pending for the caller to carry in its
+ * next request instead of being sent on its own.
+ *
  * A read that reaches its deadline stops waiting, but the step itself runs
  * on: a token the wallet already created is never dropped.
  */
 export function runFunding(
   core: BuyerCore,
   quote: Quote | null,
+  carry: boolean,
   deadlineMs: number,
   signal?: AbortSignal,
 ): Promise<boolean> {
   return withDeadline(
-    core.payingOnly(() => fund(core, quote)),
+    core.payingOnly(() => fund(core, quote, carry)),
     deadlineMs,
     signal,
     'paid route payment is still in progress; availability is unknown',
@@ -73,7 +83,7 @@ type Sent =
   /** The provider cannot take it yet. */
   | { outcome: 'not-yet'; detail: string };
 
-async function fund(core: BuyerCore, quote: Quote | null): Promise<boolean> {
+async function fund(core: BuyerCore, quote: Quote | null, carry: boolean): Promise<boolean> {
   await recoverIntent(core);
   await settlePending(core);
   await retryUnresolved(core);
@@ -101,20 +111,37 @@ async function fund(core: BuyerCore, quote: Quote | null): Promise<boolean> {
     stats.declinedLimit += 1;
     return false;
   }
-  const own = policy.mints.map(normalizeMint);
-  const mints = terms.mints.filter(
-    (mint) => own.length === 0 || own.includes(normalizeMint(mint)),
-  );
+  const mints = acceptedMints(policy.mints, terms.mints);
   if (mints.length === 0 || !terms.methods.includes(METHOD_CASHU)) {
     stats.declinedMint += 1;
     return false;
   }
 
+  const token = await requestToken(core, terms, mints, minSat, maxSat);
+  if (token === null) return false;
+  const { id, payment } = token;
+  await adopt(core, id, payment);
+  if (!carry) await settlePending(core);
+  return true;
+}
+
+/**
+ * Ask the wallet for a token of the preferred top-up, or the bare minimum if
+ * that does not fit. The intent is saved first. Resolves to `null` when the
+ * wallet declines.
+ */
+async function requestToken(
+  core: BuyerCore,
+  terms: Terms,
+  mints: string[],
+  minSat: bigint,
+  maxSat: bigint,
+): Promise<{ id: Uint8Array; payment: WalletPayment } | null> {
+  const { account, policy, stats } = core;
   const id = crypto.getRandomValues(new Uint8Array(PAYMENT_ID_BYTES));
   let amountSat = policy.topupSat;
   if (amountSat < minSat) amountSat = minSat;
   if (amountSat > maxSat) amountSat = maxSat;
-  let payment: WalletPayment;
   for (;;) {
     // The intent is saved before the wallet is asked: a crash after this
     // point is followed by asking the wallet about this id.
@@ -126,14 +153,15 @@ async function fund(core: BuyerCore, quote: Quote | null): Promise<boolean> {
       throw error;
     }
     try {
-      payment = checked(await core.wallet.pay({
+      const payment = checked(await core.wallet.pay({
         provider: core.provider,
         mints: [...mints],
         amountSat,
         maxFeeSat: policy.maxTokenFeeSat,
+        lock: terms.lock === null ? null : terms.lock.slice(),
         paymentId: id.slice(),
       }));
-      break;
+      return { id, payment };
     } catch (thrown) {
       const error = WalletError.from(thrown);
       // The wallet may have created a token all the same: the intent stays,
@@ -148,12 +176,9 @@ async function fund(core: BuyerCore, quote: Quote | null): Promise<boolean> {
       if (error.kind === 'no-accepted-mint') stats.declinedMint += 1;
       else stats.declinedLimit += 1;
       await core.persistIfPossible();
-      return false;
+      return null;
     }
   }
-  await adopt(core, id, payment);
-  await settlePending(core);
-  return true;
 }
 
 /**
@@ -202,11 +227,55 @@ async function recoverIntent(core: BuyerCore): Promise<void> {
  * is never dropped.
  */
 async function settlePending(core: BuyerCore): Promise<void> {
-  const { account } = core;
-  const pending = account.pending;
+  const pending = core.account.pending;
   if (pending === null) return;
-  const sent = await send(core, pending);
+  await conclude(core, pending, await send(core, pending));
+}
+
+/**
+ * A payment carried by a `get`: settle it from the reply, if the reply says
+ * what became of it. Resolves to whether it was credited. The caller holds the
+ * payment lock from before the request was sent.
+ */
+export async function settleCarried(
+  core: BuyerCore,
+  pending: PendingPayment,
+  reply: Reply,
+): Promise<boolean> {
+  const credited = reply.type === 'data'
+    ? { credit: reply.credit, balanceMsat: reply.balanceMsat }
+    : reply.type === 'quote'
+      ? { credit: reply.quote.credit, balanceMsat: reply.quote.balanceMsat }
+      : null;
+  let answer: Reply;
+  if (credited?.credit && bytesEqual(credited.credit.payment, pending.id)) {
+    answer = {
+      type: 'paid',
+      payment: credited.credit.payment,
+      creditedMsat: credited.credit.creditedMsat,
+      balanceMsat: credited.balanceMsat,
+    };
+  } else if (reply.type === 'err' && reply.payment && bytesEqual(reply.payment, pending.id)) {
+    answer = reply;
+  } else {
+    return false;
+  }
+  // A concurrent request may have settled the same token already.
+  const current = core.account.pending;
+  if (current === null || !bytesEqual(current.id, pending.id)) return false;
+  const sent = await outcome(core, pending, answer);
+  await conclude(core, pending, sent);
+  return sent.outcome === 'credited';
+}
+
+/** Record what became of the pending token; rejects unless it was credited or set aside. */
+async function conclude(core: BuyerCore, pending: PendingPayment, sent: Sent): Promise<void> {
+  const { account } = core;
   const hasRoom = account.unresolved.length < MAX_UNRESOLVED;
+  const setAside = (payment: PendingPayment): void => {
+    account.pending = null;
+    account.unresolved.push(payment);
+  };
   let failure: string | null = null;
   switch (sent.outcome) {
     case 'credited':
@@ -219,23 +288,21 @@ async function settlePending(core: BuyerCore): Promise<void> {
     case 'refused':
       // Neither credited nor back in the wallet. A provider that refuses a
       // token may still redeem it.
-      if (hasRoom) {
-        account.pending = null;
-        account.unresolved.push(pending);
-      }
+      if (hasRoom) setAside(pending);
       failure = sent.refusal;
       break;
-    case 'not-yet':
-      pending.attempts = Math.min(pending.attempts + 1, 0xffff_ffff);
-      if (pending.attempts >= MAX_ATTEMPTS && hasRoom) {
+    case 'not-yet': {
+      const attempts = Math.min(pending.attempts + 1, 0xffff_ffff);
+      if (attempts >= MAX_ATTEMPTS && hasRoom) {
         // Stop holding up new payments; this one is tried again later and
         // still counts as money held.
-        account.pending = null;
-        account.unresolved.push(pending);
+        setAside({ ...pending, attempts });
       } else {
+        if (account.pending !== null) account.pending.attempts = attempts;
         failure = `paid route provider could not take the payment yet: ${sent.detail}`;
       }
       break;
+    }
   }
   await core.persistIfPossible();
   if (failure !== null) throw new Error(failure);
@@ -246,29 +313,27 @@ async function retryUnresolved(core: BuyerCore): Promise<void> {
   const { unresolved } = core.account;
   const oldest = unresolved[0];
   if (oldest === undefined) return;
-  const outcome = await send(core, oldest).then((sent) => sent.outcome, () => 'failed' as const);
+  const result = await send(core, oldest).then((sent) => sent.outcome, () => 'failed' as const);
   const index = unresolved.indexOf(oldest);
   if (index < 0) return;
   unresolved.splice(index, 1);
-  if (outcome !== 'credited' && outcome !== 'reclaimed') unresolved.push(oldest);
+  if (result !== 'credited' && result !== 'reclaimed') unresolved.push(oldest);
   await core.persistIfPossible();
 }
 
 /** One `pay` exchange for one token, with its accounting. */
 async function send(core: BuyerCore, pending: PendingPayment): Promise<Sent> {
+  const reply = await core.exchange(
+    { type: 'pay', account: core.wireAccount(), payment: wirePayment(pending) },
+    Date.now() + core.policy.requestTimeoutMs,
+  );
+  return outcome(core, pending, reply);
+}
+
+/** What one reply says about one token handed to the provider, with its accounting. */
+async function outcome(core: BuyerCore, pending: PendingPayment, reply: Reply): Promise<Sent> {
   const { account, stats, policy } = core;
   const { payment } = pending;
-  const reply = await core.exchange(
-    {
-      type: 'pay',
-      account: account.account,
-      payment: pending.id,
-      method: METHOD_CASHU,
-      mint: payment.mintUrl,
-      token: payment.token,
-    },
-    Date.now() + policy.requestTimeoutMs,
-  );
   if (reply.type === 'paid' && bytesEqual(reply.payment, pending.id)) {
     // A provider may keep a little of a token for its mint's redemption fee.
     // Anything beyond the allowance is owed: it is added here, missing from

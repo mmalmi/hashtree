@@ -16,10 +16,12 @@ import {
   type AccountStore,
   type ClientPolicy,
   type PaidRouteStats,
+  type PendingPayment,
 } from './account.js';
 import { BuyerCore, type InFlight } from './buyerCore.js';
-import { runFunding } from './funding.js';
-import type { ContentHash, Quote, Reply, Request } from './message.js';
+import { withDeadline } from './deadline.js';
+import { runFunding, settleCarried } from './funding.js';
+import { bytesEqual, type ContentHash, type Quote, type Reply, type Request } from './message.js';
 import { priceMsat, saturate } from './price.js';
 import type { PaidBlobTransport } from './transport.js';
 import type { RetrievalWallet } from './wallet.js';
@@ -100,9 +102,88 @@ export class PaidBuyer {
       return false;
     }
     if (account.intent !== null || account.pending !== null || account.balanceMsat < 0n) {
-      await runFunding(this.core, null, deadlineMs, signal);
+      await runFunding(this.core, null, false, deadlineMs, signal);
     }
     return true;
+  }
+
+  /**
+   * Like `prepare`, for a request that will carry a fresh pending token
+   * itself: such a token is returned instead of being sent on its own.
+   * Resolves to `null` when this provider is blocked.
+   */
+  async prepareCarrying(
+    deadlineMs: number,
+    signal?: AbortSignal,
+  ): Promise<{ carried: PendingPayment | null } | null> {
+    const { core } = this;
+    const { account, stats } = core;
+    if (account.blocked !== null) {
+      stats.declinedBlocked += 1;
+      return null;
+    }
+    const fresh = account.pending !== null && account.pending.attempts === 0
+      && account.intent === null
+      ? account.pending
+      : null;
+    const unsettled = account.intent !== null
+      || (account.pending !== null && fresh === null)
+      || (account.balanceMsat < 0n && fresh === null);
+    if (!unsettled) return { carried: fresh };
+    await runFunding(core, null, false, deadlineMs, signal);
+    const pending = core.account.pending;
+    return { carried: pending !== null && pending.attempts === 0 ? pending : null };
+  }
+
+  /**
+   * Take the payment lock for a request that carries `pending`, so that one
+   * request at a time carries a token. Resolves to the token, if it is still
+   * unsettled once the lock is held, and the function that releases the
+   * lock. Waiting ends at the deadline, like the read.
+   */
+  async carry(
+    pending: PendingPayment | null,
+    deadlineMs: number,
+    signal?: AbortSignal,
+  ): Promise<{ carried: PendingPayment | null; release: () => void }> {
+    const none = { carried: null, release: () => undefined };
+    if (pending === null) return none;
+    const { core } = this;
+    const acquiring = core.acquirePaying();
+    const release = await withDeadline(
+      acquiring,
+      deadlineMs,
+      signal,
+      'paid route payment is still in progress; availability is unknown',
+      () => {
+        void acquiring.then((unused) => unused());
+      },
+    );
+    const current = core.account.pending;
+    if (current !== null && bytesEqual(current.id, pending.id)) {
+      return { carried: current, release };
+    }
+    release();
+    return none;
+  }
+
+  /** Fund a quote, leaving a new token for the next request to carry. */
+  fundCarrying(quote: Quote, deadlineMs: number, signal?: AbortSignal): Promise<boolean> {
+    return runFunding(this.core, quote, true, deadlineMs, signal);
+  }
+
+  /**
+   * Settle a token that `request` carried, from the reply to it. After a
+   * credit, the reply's balance counts as current for `request`. Call it
+   * while holding the lock `carry` took.
+   */
+  async settleCarried(request: InFlight, pending: PendingPayment, reply: Reply): Promise<void> {
+    if (await settleCarried(this.core, pending, reply)) request.credits = this.core.credits;
+  }
+
+  /** The account id to name on the wire, if the carrier needs one. */
+  wireAccount(): Uint8Array | null {
+    return this.core.wireAccount();
   }
 
   /** Mark a request as outstanding until `end()` is called on the result. */
@@ -139,6 +220,7 @@ export class PaidBuyer {
       mints: [...quote.mints],
       methods: [...quote.methods],
       minTopupSat: quote.minTopupSat,
+      lock: quote.lock === null ? null : quote.lock.slice(),
     };
     if (quote.priceMsat > priceMsat(core.policy.maxTariff, quote.size)) {
       core.stats.declinedPrice += 1;
@@ -192,7 +274,7 @@ export class PaidBuyer {
    * client declines to pay (limit, mint, blocked provider).
    */
   fund(quote: Quote | null, deadlineMs: number, signal?: AbortSignal): Promise<boolean> {
-    return runFunding(this.core, quote, deadlineMs, signal);
+    return runFunding(this.core, quote, false, deadlineMs, signal);
   }
 
   /**

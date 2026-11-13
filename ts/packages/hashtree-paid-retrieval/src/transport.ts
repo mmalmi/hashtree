@@ -10,4 +10,11 @@
  */
 export interface PaidBlobTransport {
   exchange(request: Uint8Array, signal?: AbortSignal): Promise<Uint8Array>;
+
+  /**
+   * Whether the provider learns this client's identity from the carrier
+   * itself. The client's account is then that identity, and requests name no
+   * account id. Absent means `false`.
+   */
+  authenticatesPeer?(): boolean;
 }

@@ -14,7 +14,7 @@ import {
   type Reply,
   type RetrievalWallet,
 } from '../src/index.js';
-import { DirectTransport, FakeSeller, FakeWallet, MINT, TARIFF } from './support/fakes.js';
+import { DirectTransport, FakeSeller, FakeWallet, MINT, TARIFF, paymentOf } from './support/fakes.js';
 
 const TWO_MIB = 2 * 1024 * 1024;
 
@@ -52,11 +52,14 @@ function expectData(reply: BlobReply, expected: Uint8Array): void {
   expect(actual.every((byte, index) => byte === expected[index])).toBe(true);
 }
 
-/** Loses the first reply of one type, after the provider acted on the request. */
-function losingFirst(type: Reply['type']): (request: unknown, reply: Reply) => Reply | null {
+/**
+ * Loses the first reply that matches, after the provider acted on the
+ * request.
+ */
+function losingFirst(matches: (reply: Reply) => boolean): (request: unknown, reply: Reply) => Reply | null {
   let lose = true;
   return (_request, reply) => {
-    if (reply.type === type && lose) {
+    if (matches(reply) && lose) {
       lose = false;
       return null;
     }
@@ -74,9 +77,9 @@ describe('PaidBlobRoute', () => {
     const paid = route(transport, wallet);
 
     expectData(await read(paid, first.hash), first.data);
-    expect(transport.exchanges, 'get, pay, get').toBe(3);
+    expect(transport.exchanges, 'get, then get carrying the token').toBe(2);
     expectData(await read(paid, second.hash), second.data);
-    expect(transport.exchanges, 'a funded read is one round trip').toBe(4);
+    expect(transport.exchanges, 'a funded read is one round trip').toBe(3);
 
     expect(wallet.payments).toBe(1);
     expect(wallet.balance).toBe(16n);
@@ -163,7 +166,10 @@ describe('PaidBlobRoute', () => {
     const seller = new FakeSeller();
     const blob = await seller.add(1, TWO_MIB);
     const wallet = new FakeWallet(seller.mint, 21n);
-    const paid = route(new DirectTransport(seller, losingFirst('paid')), wallet);
+    // The acknowledgement comes as `paid`, or as the credit with the blob.
+    const acknowledges = (reply: Reply): boolean => reply.type === 'paid'
+      || (reply.type === 'data' && reply.credit !== null);
+    const paid = route(new DirectTransport(seller, losingFirst(acknowledges)), wallet);
 
     await expect(read(paid, blob.hash)).rejects.toThrow('connection lost');
     expect(paid.accountState().pending?.payment.amountSat, 'the token is kept').toBe(5n);
@@ -180,7 +186,10 @@ describe('PaidBlobRoute', () => {
     const seller = new FakeSeller();
     const blob = await seller.add(1, TWO_MIB);
     const wallet = new FakeWallet(seller.mint, 21n);
-    const paid = route(new DirectTransport(seller, losingFirst('data')), wallet);
+    const paid = route(
+      new DirectTransport(seller, losingFirst((reply) => reply.type === 'data')),
+      wallet,
+    );
 
     await expect(read(paid, blob.hash)).rejects.toThrow('connection lost');
     expectData(await read(paid, blob.hash), blob.data);
@@ -252,7 +261,7 @@ describe('PaidBlobRoute', () => {
     const second = await seller.add(2, 4_096);
     const wallet = new FakeWallet(seller.mint, 21n);
     const transport = new DirectTransport(seller, (_request, reply) => (reply.type === 'data'
-      ? { ...reply, chargedMsat: 4_000n, balanceMsat: reply.balanceMsat - 3_000n }
+      ? { ...reply, chargedMsat: 4_000n, balanceMsat: reply.balanceMsat - 3_000n, credit: null }
       : reply));
     const paid = route(transport, wallet);
 
@@ -282,9 +291,12 @@ describe('PaidBlobRoute', () => {
     const { hash } = await seller.add(1, 4_096);
     const wallet = new FakeWallet(seller.mint, 21n);
     // The provider answers every payment as if the token were worthless.
-    const transport = new DirectTransport(seller, (request, reply) => (request.type === 'pay'
-      ? { type: 'err', code: 'invalid', payment: request.payment, detail: 'refused' }
-      : reply));
+    const transport = new DirectTransport(seller, (request, reply) => {
+      const payment = paymentOf(request);
+      return payment === null
+        ? reply
+        : { type: 'err', code: 'invalid', payment: payment.id, detail: 'refused' };
+    });
     seller.offline = true;
     const paid = route(transport, wallet);
 

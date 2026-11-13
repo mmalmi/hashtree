@@ -21,14 +21,18 @@ export interface Terms {
   mints: string[];
   methods: string[];
   minTopupSat: bigint;
+  lock: Uint8Array | null;
 }
 
 /** One request for a unit that the provider has not answered yet. */
 export interface InFlight {
   /** The most the request lets the provider charge. */
   readonly authorisedMsat: bigint;
-  /** Payments the provider had acknowledged when the request was sent. */
-  readonly credits: number;
+  /**
+   * Payments the provider had acknowledged when the request was sent, or once
+   * a payment the request carried was credited.
+   */
+  credits: number;
   /** The request is over, answered or not. */
   end(): void;
 }
@@ -52,7 +56,8 @@ export class BuyerCore {
    */
   resync: boolean;
   stats: PaidRouteStats = emptyStats();
-  private paying: Promise<unknown> = Promise.resolve();
+  /** Settles when the holder of the payment lock releases it. */
+  private paying: Promise<void> = Promise.resolve();
 
   constructor(
     readonly provider: string,
@@ -80,11 +85,36 @@ export class BuyerCore {
     await this.persist().catch(() => undefined);
   }
 
-  /** Serialise payments so that concurrent requests share one top-up. */
-  payingOnly<T>(step: () => Promise<T>): Promise<T> {
-    const run = this.paying.then(step);
-    this.paying = run.catch(() => undefined);
-    return run;
+  /**
+   * Take the payment lock: payments are serialised so that concurrent
+   * requests share one top-up, and one request at a time carries a token.
+   * Resolves to the function that releases it.
+   */
+  acquirePaying(): Promise<() => void> {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const acquired = this.paying.then(() => release);
+    this.paying = held;
+    return acquired;
+  }
+
+  async payingOnly<T>(step: () => Promise<T>): Promise<T> {
+    const release = await this.acquirePaying();
+    try {
+      return await step();
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * The account id to name on the wire: none on a carrier that authenticates
+   * this client, whose identity is then the account.
+   */
+  wireAccount(): Uint8Array | null {
+    return this.transport.authenticatesPeer?.() ? null : this.account.account.slice();
   }
 
   async exchange(request: Request, deadlineMs: number, signal?: AbortSignal): Promise<Reply> {

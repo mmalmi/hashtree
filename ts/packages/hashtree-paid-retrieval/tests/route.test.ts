@@ -200,6 +200,8 @@ describe('PaidBlobRoute as a BlobRoute', () => {
           mints: [MINT],
           methods: ['cashu'],
           minTopupSat: 1n,
+          lock: null,
+          credit: null,
         },
       }
       : reply));

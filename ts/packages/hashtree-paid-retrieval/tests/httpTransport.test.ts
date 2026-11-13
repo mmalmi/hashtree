@@ -69,6 +69,8 @@ const GET = encodeRequest({
   hash: { algorithm: 'sha256', digest: new Uint8Array(32) },
   account: new Uint8Array(32),
   maxMsat: 0n,
+  htl: 0,
+  payment: null,
 });
 
 describe('HttpPaidBlobTransport', () => {
@@ -82,8 +84,8 @@ describe('HttpPaidBlobTransport', () => {
     expect([wallet.payments, seller.received]).toEqual([1, 5n]);
     expect(paid.accountState()).toMatchObject({ creditedMsat: 5_000n, balanceMsat: 4_000n });
 
-    expect(calls.map((call) => call.url), 'get, pay, get').toEqual(
-      Array(3).fill(`${GATEWAY}/paid-blob`),
+    expect(calls.map((call) => call.url), 'get, then get carrying the token').toEqual(
+      Array(2).fill(`${GATEWAY}/paid-blob`),
     );
     expect(calls[0].init).toMatchObject({
       method: 'POST',

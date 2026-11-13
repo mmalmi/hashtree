@@ -17,6 +17,8 @@ import {
   priceMsat,
   type AccountState,
   type ContentHash,
+  type Credit,
+  type Payment,
   type PendingPayment,
   type Reply,
   type Request,
@@ -68,25 +70,32 @@ function hash(json: unknown): ContentHash {
 
 const int = (json: unknown): bigint => BigInt(json as string);
 const bytes = (json: unknown): Uint8Array => fromHex(json as string);
+const maybeBytes = (json: unknown): Uint8Array | null => (json === null ? null : bytes(json));
+
+function payment(json: unknown): Payment {
+  const { id, method, mint, token } = json as Record<string, string>;
+  return { id: fromHex(id), method, mint, token };
+}
+
+function credit(json: unknown): Credit | null {
+  if (json === null) return null;
+  const { payment: id, credited_msat: creditedMsat } = json as Record<string, string>;
+  return { payment: fromHex(id), creditedMsat: BigInt(creditedMsat) };
+}
 
 function request(json: Json): Request {
   if (json.type === 'get') {
     return {
       type: 'get',
       hash: hash(json.hash),
-      account: bytes(json.account),
+      account: maybeBytes(json.account),
       maxMsat: int(json.max_msat),
+      htl: json.htl as number,
+      payment: json.payment === null ? null : payment(json.payment),
     };
   }
   expect(json.type).toBe('pay');
-  return {
-    type: 'pay',
-    account: bytes(json.account),
-    payment: bytes(json.payment),
-    method: json.method as string,
-    mint: json.mint as string,
-    token: json.token as string,
-  };
+  return { type: 'pay', account: maybeBytes(json.account), payment: payment(json.payment) };
 }
 
 function reply(json: Json): Reply {
@@ -98,6 +107,7 @@ function reply(json: Json): Reply {
         chargedMsat: int(json.charged_msat),
         balanceMsat: int(json.balance_msat),
         duplicate: json.duplicate as boolean,
+        credit: credit(json.credit),
         data: bytes(json.data),
       };
     case 'quote': {
@@ -117,6 +127,8 @@ function reply(json: Json): Reply {
           mints: json.mints as string[],
           methods: json.methods as string[],
           minTopupSat: int(json.min_topup_sat),
+          lock: maybeBytes(json.lock),
+          credit: credit(json.credit),
         },
       };
     }
@@ -137,7 +149,7 @@ function reply(json: Json): Reply {
   }
 }
 
-function payment(json: Json): PendingPayment {
+function pendingPayment(json: Json): PendingPayment {
   return {
     id: bytes(json.id),
     attempts: json.attempts as number,
@@ -163,8 +175,8 @@ function account(json: Json): AccountState {
       amountSat: int(intent.amount_sat),
       mints: intent.mints as string[],
     },
-    pending: json.pending === null ? null : payment(json.pending as Json),
-    unresolved: (json.unresolved as Json[]).map(payment),
+    pending: json.pending === null ? null : pendingPayment(json.pending as Json),
+    unresolved: (json.unresolved as Json[]).map(pendingPayment),
     blocked: json.blocked as string | null,
   };
 }
