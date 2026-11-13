@@ -25,6 +25,47 @@ const MAX_URL_BYTES: usize = 512;
 const MAX_TOKEN_BYTES: usize = 48 * 1024;
 const MAX_TEXT_BYTES: usize = 256;
 
+/// Names the paid unit by the hash that proves its delivery.
+///
+/// Hashtree blobs and BitTorrent v2 blocks are SHA-256; BitTorrent v1 pieces
+/// are SHA-1. On the wire the digest is `h` and any algorithm other than
+/// SHA-256 is named in `y`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ContentHash {
+    Sha256([u8; 32]),
+    Sha1([u8; 20]),
+}
+
+impl ContentHash {
+    pub fn digest(&self) -> &[u8] {
+        match self {
+            Self::Sha256(digest) => digest,
+            Self::Sha1(digest) => digest,
+        }
+    }
+
+    /// The Hashtree hash, when this names a SHA-256 unit.
+    pub fn sha256(&self) -> Option<Hash> {
+        match self {
+            Self::Sha256(digest) => Some(*digest),
+            Self::Sha1(_) => None,
+        }
+    }
+
+    fn algorithm(&self) -> Option<&'static str> {
+        match self {
+            Self::Sha256(_) => None,
+            Self::Sha1(_) => Some("sha1"),
+        }
+    }
+}
+
+impl From<Hash> for ContentHash {
+    fn from(digest: Hash) -> Self {
+        Self::Sha256(digest)
+    }
+}
+
 /// Bearer id of a prepaid balance held by one provider.
 pub type AccountId = [u8; 32];
 /// Client-chosen idempotency key of one payment.
@@ -38,7 +79,7 @@ pub struct MessageError(pub &'static str);
 pub enum Request {
     /// Fetch a blob, authorising a debit of at most `max_msat`.
     Get {
-        hash: Hash,
+        hash: ContentHash,
         account: AccountId,
         max_msat: u64,
     },
@@ -55,7 +96,7 @@ pub enum Request {
 /// The provider's terms for one blob: payment is required before delivery.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Quote {
-    pub hash: Hash,
+    pub hash: ContentHash,
     pub size: u64,
     pub price_msat: u64,
     pub balance_msat: i64,
@@ -118,7 +159,7 @@ impl ErrorCode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Reply {
     Data {
-        hash: Hash,
+        hash: ContentHash,
         charged_msat: u64,
         balance_msat: i64,
         /// A free repeat of a blob this account was already charged for.
@@ -128,7 +169,7 @@ pub enum Reply {
     Quote(Quote),
     /// This provider has no data for the hash. Not proof of absence.
     NoResult {
-        hash: Hash,
+        hash: ContentHash,
     },
     Paid {
         payment: PaymentId,
@@ -179,6 +220,14 @@ impl Fields {
 
     fn text(self, key: &str, value: &str) -> Self {
         self.bytes(key, value.as_bytes())
+    }
+
+    fn content(self, hash: &ContentHash) -> Self {
+        let fields = self.bytes("h", hash.digest());
+        match hash.algorithm() {
+            Some(algorithm) => fields.text("y", algorithm),
+            None => fields,
+        }
     }
 
     fn texts(self, key: &str, values: &[String]) -> Self {
@@ -235,6 +284,17 @@ impl Dict {
         text_value(self.get(key)?, max)
     }
 
+    /// SHA-256 has one encoding: `y` is absent, never spelled out.
+    fn content(&self) -> Result<ContentHash, MessageError> {
+        if !self.0.contains_key(&b"y"[..]) {
+            return Ok(ContentHash::Sha256(self.fixed("h")?));
+        }
+        match self.text("y", MAX_TEXT_BYTES)?.as_str() {
+            "sha1" => Ok(ContentHash::Sha1(self.fixed("h")?)),
+            _ => Err(MessageError("unsupported hash algorithm")),
+        }
+    }
+
     fn texts(&self, key: &'static str) -> Result<Vec<String>, MessageError> {
         let items = self
             .get(key)?
@@ -265,7 +325,7 @@ impl Request {
                 account,
                 max_msat,
             } => Fields::kind("get")
-                .bytes("h", hash)
+                .content(hash)
                 .bytes("a", account)
                 .uint("x", *max_msat)
                 .finish(0),
@@ -292,7 +352,7 @@ impl Request {
         }
         match dict.text("t", MAX_TEXT_BYTES)?.as_str() {
             "get" => Ok(Self::Get {
-                hash: dict.fixed("h")?,
+                hash: dict.content()?,
                 account: dict.fixed("a")?,
                 max_msat: dict.uint("x")?,
             }),
@@ -319,7 +379,7 @@ impl Reply {
                 data,
             } => {
                 let mut fields = Fields::kind("data")
-                    .bytes("h", hash)
+                    .content(hash)
                     .uint("n", data.len() as u64)
                     .uint("c", *charged_msat)
                     .int("b", *balance_msat);
@@ -331,7 +391,7 @@ impl Reply {
                 out
             }
             Self::Quote(quote) => Fields::kind("quote")
-                .bytes("h", &quote.hash)
+                .content(&quote.hash)
                 .uint("n", quote.size)
                 .uint("c", quote.price_msat)
                 .int("b", quote.balance_msat)
@@ -348,7 +408,7 @@ impl Reply {
                 .texts("k", &quote.methods)
                 .uint("u", quote.min_topup_sat)
                 .finish(0),
-            Self::NoResult { hash } => Fields::kind("none").bytes("h", hash).finish(0),
+            Self::NoResult { hash } => Fields::kind("none").content(hash).finish(0),
             Self::Paid {
                 payment,
                 credited_msat,
@@ -389,7 +449,7 @@ impl Reply {
                     return Err(MessageError("data length does not match its header"));
                 }
                 Ok(Self::Data {
-                    hash: dict.fixed("h")?,
+                    hash: dict.content()?,
                     charged_msat: dict.uint("c")?,
                     balance_msat: dict.int("b")?,
                     duplicate: dict.0.contains_key(&b"d"[..]) && dict.uint("d")? != 0,
@@ -409,7 +469,7 @@ impl Reply {
                     })
                     .ok_or(MessageError("the tariff is invalid"))?;
                 Ok(Self::Quote(Quote {
-                    hash: dict.fixed("h")?,
+                    hash: dict.content()?,
                     size: dict.uint("n")?,
                     price_msat: dict.uint("c")?,
                     balance_msat: dict.int("b")?,
@@ -424,7 +484,7 @@ impl Reply {
                 }))
             }
             "none" => Ok(Self::NoResult {
-                hash: dict.fixed("h")?,
+                hash: dict.content()?,
             }),
             "paid" => Ok(Self::Paid {
                 payment: dict.fixed("i")?,
@@ -451,7 +511,7 @@ mod tests {
     #[test]
     fn requests_round_trip_with_one_canonical_encoding() {
         let get = Request::Get {
-            hash: [7; 32],
+            hash: [7; 32].into(),
             account: [9; 32],
             max_msat: 16_384,
         };
@@ -473,7 +533,7 @@ mod tests {
     #[test]
     fn replies_round_trip_and_data_carries_raw_bytes_after_the_header() {
         let data = Reply::Data {
-            hash: [3; 32],
+            hash: [3; 32].into(),
             charged_msat: 12,
             balance_msat: -5,
             duplicate: true,
@@ -485,7 +545,7 @@ mod tests {
 
         let replies = [
             Reply::Quote(Quote {
-                hash: [4; 32],
+                hash: [4; 32].into(),
                 size: 2_097_152,
                 price_msat: 2_048,
                 balance_msat: 100,
@@ -498,7 +558,9 @@ mod tests {
                 methods: vec![METHOD_CASHU.into()],
                 min_topup_sat: 2,
             }),
-            Reply::NoResult { hash: [5; 32] },
+            Reply::NoResult {
+                hash: [5; 32].into(),
+            },
             Reply::Paid {
                 payment: [6; 16],
                 credited_msat: 3_000,
@@ -517,9 +579,41 @@ mod tests {
     }
 
     #[test]
+    fn the_hash_algorithm_is_named_on_the_wire() {
+        let piece = Request::Get {
+            hash: ContentHash::Sha1([b'B'; 20]),
+            account: [b'A'; 32],
+            max_msat: 1,
+        };
+        let encoded = piece.encode();
+        let wire = |hash: &str, algorithm: &str| {
+            format!(
+                "d1:a32:{}1:h{}:{hash}1:t3:get1:xi1e{algorithm}e",
+                "A".repeat(32),
+                hash.len()
+            )
+            .into_bytes()
+        };
+        assert_eq!(encoded, wire(&"B".repeat(20), "1:y4:sha1"));
+        assert_eq!(Request::decode(&encoded).unwrap(), piece);
+
+        let none = Reply::NoResult {
+            hash: ContentHash::Sha1([8; 20]),
+        };
+        assert_eq!(Reply::decode(&none.encode()).unwrap(), none);
+
+        // SHA-256 is the unnamed default and has no second spelling.
+        assert!(Request::decode(&wire(&"B".repeat(32), "")).is_ok());
+        assert!(Request::decode(&wire(&"B".repeat(32), "1:y6:sha256")).is_err());
+        assert!(Request::decode(&wire(&"B".repeat(20), "")).is_err());
+        assert!(Request::decode(&wire(&"B".repeat(32), "1:y4:sha1")).is_err());
+        assert!(Request::decode(&wire(&"B".repeat(20), "1:y3:md5")).is_err());
+    }
+
+    #[test]
     fn malformed_messages_are_rejected() {
         let mut data = Reply::Data {
-            hash: [3; 32],
+            hash: [3; 32].into(),
             charged_msat: 1,
             balance_msat: 0,
             duplicate: false,
@@ -530,7 +624,7 @@ mod tests {
         assert!(Reply::decode(&data).is_err());
 
         let mut get = Request::Get {
-            hash: [0; 32],
+            hash: [0; 32].into(),
             account: [0; 32],
             max_msat: 0,
         }

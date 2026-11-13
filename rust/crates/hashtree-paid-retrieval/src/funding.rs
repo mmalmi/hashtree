@@ -3,13 +3,13 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use hashtree_core::{StoreError, BLOB_MAX_BYTES};
+use hashtree_core::StoreError;
 
 use crate::account::PendingPayment;
-use crate::client::Inner;
+use crate::buyer::Inner;
 use crate::message::{ErrorCode, Quote, Reply, Request, METHOD_CASHU};
 use crate::price::sat_ceil;
-use crate::provider::normalize_mint;
+use crate::seller::normalize_mint;
 use crate::wallet::{PaymentRequest, WalletError};
 
 pub(crate) struct Funding;
@@ -44,14 +44,14 @@ impl Inner {
 
         let (balance_msat, terms) = {
             let mut state = self.state();
-            // Reads still in flight may explain part of a low balance, but
-            // never more than each of them authorised.
-            let authorised_msat = self.policy.max_tariff.price_msat(BLOB_MAX_BYTES as u64);
-            let in_flight_msat = authorised_msat.saturating_mul(state.gets_in_flight as u64);
+            // Requests still in flight may explain part of a low balance,
+            // but never more than they authorised.
+            let allowed_msat = self
+                .policy
+                .max_loss_msat
+                .saturating_add(state.in_flight_msat);
             let loss_msat = state.account.loss_msat();
-            if state.account.blocked.is_none()
-                && loss_msat > self.policy.max_loss_msat.saturating_add(in_flight_msat)
-            {
+            if state.account.blocked.is_none() && loss_msat > allowed_msat {
                 state.account.blocked = Some(format!(
                     "provider balance is {loss_msat} msat lower than verified deliveries explain"
                 ));

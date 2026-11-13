@@ -3,9 +3,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use hashtree_core::Hash;
-
-use crate::message::{AccountId, PaymentId};
+use crate::message::{AccountId, ContentHash, PaymentId};
 
 const MAX_PAYMENTS_PER_ACCOUNT: usize = 32;
 const MAX_RECENT_PER_ACCOUNT: usize = 64;
@@ -43,7 +41,7 @@ fn balance(paid_msat: u64, charged_msat: u64) -> i64 {
 }
 
 struct Recent {
-    hash: Hash,
+    hash: ContentHash,
     price_msat: u64,
     at: Instant,
     left: u8,
@@ -160,7 +158,7 @@ impl Ledger {
         &mut self,
         account: &AccountId,
         peer: Option<&str>,
-        hash: &Hash,
+        hash: &ContentHash,
         price_msat: u64,
         max_msat: u64,
         now: Instant,

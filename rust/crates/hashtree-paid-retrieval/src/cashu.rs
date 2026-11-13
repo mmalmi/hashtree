@@ -4,7 +4,7 @@
 use async_trait::async_trait;
 use cashu_service::CashuPaymentClient;
 
-use crate::provider::{normalize_mint, PaymentReceiver, ReceiveError};
+use crate::seller::{normalize_mint, PaymentReceiver, ReceiveError};
 use crate::wallet::{PaymentRequest, RetrievalWallet, WalletError, WalletPayment};
 
 fn failed(error: impl std::fmt::Display) -> WalletError {

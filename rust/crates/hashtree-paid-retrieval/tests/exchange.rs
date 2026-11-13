@@ -19,7 +19,7 @@ fn get(hash: Hash, max_msat: u64) -> Request {
 
 fn get_from(account: AccountId, hash: Hash, max_msat: u64) -> Request {
     Request::Get {
-        hash,
+        hash: hash.into(),
         account,
         max_msat,
     }
@@ -54,7 +54,7 @@ async fn quote_then_payment_then_delivery() {
     let Reply::Quote(quote) = seller.ask(get(hash, u64::MAX)).await else {
         panic!("an unpaid get must be answered with a quote");
     };
-    assert_eq!(quote.hash, hash);
+    assert_eq!(quote.hash, hash.into());
     assert_eq!(quote.size, TWO_MIB as u64);
     assert_eq!(quote.price_msat, 2_048);
     assert_eq!(quote.balance_msat, 0);
@@ -78,7 +78,7 @@ async fn quote_then_payment_then_delivery() {
     assert_eq!(
         delivered,
         Reply::Data {
-            hash,
+            hash: hash.into(),
             charged_msat: 2_048,
             balance_msat: 952,
             duplicate: false,
@@ -94,7 +94,9 @@ async fn unknown_blobs_and_malformed_requests_cost_nothing() {
     let missing = [9; 32];
     assert_eq!(
         seller.ask(get(missing, u64::MAX)).await,
-        Reply::NoResult { hash: missing }
+        Reply::NoResult {
+            hash: missing.into()
+        }
     );
     let reply = Reply::decode(&seller.provider.handle(None, b"not bencode").await).unwrap();
     assert_eq!(error_code(&reply), ErrorCode::Bad);

@@ -7,6 +7,9 @@ wallet interface for the application. The published `BlobRequest`/`BlobReply`
 wire, HTL and `BlobRouter` are unchanged; the paid exchange is its own service
 (`hashtree.paid-blob/1`).
 
+The payment exchange does not depend on Hashtree routing, on the carrier, or on
+the hash function that names what is sold; see [Reusable parts](#reusable-parts).
+
 ## What the retired design got wrong
 
 The 2026-03 DataQuote/DataPayment/DataChunk protocol (removed 2026-07-17) is not
@@ -48,7 +51,8 @@ client                                   provider
 | Key | Meaning |
 |---|---|
 | `t` | message type |
-| `h` | 32-byte SHA-256 of the blob |
+| `h` | digest that names the unit and proves its delivery |
+| `y` | hash function of `h` when it is not SHA-256; `sha1` today |
 | `a` | 32-byte account id |
 | `x` | largest debit in msat the client authorises for this blob |
 | `n` | blob size in bytes |
@@ -65,14 +69,19 @@ client                                   provider
 
 ### Unit and price
 
-The unit paid for is one blob, at most 16 MiB, identified by its hash. Its price
-is `max(f, ceil(n × msat / per_bytes))`. Cashu tokens are whole sats; a token of
+The unit paid for is one hash-named piece of data. On Hashtree that is one blob,
+at most 16 MiB, named by its SHA-256. Its price is
+`max(f, ceil(n × msat / per_bytes))`. Cashu tokens are whole sats; a token of
 `s` sat credits `1000 × s` msat, and the remainder stays on the account for
 later blobs. A provider with a zero tariff serves without an account.
 
 ### The hash is the delivery proof
 
-The client counts a charge only after `sha256(data) == h`. It keeps its own
+The client counts a charge only after the received bytes hash to `h`. The hash
+function belongs to the unit, not to the exchange: SHA-256 for Hashtree blobs
+and BitTorrent v2 blocks (the default, with `y` absent), SHA-1 for BitTorrent
+v1 pieces (`y` = `sha1`). Whoever fetches the unit verifies it; the exchange
+only carries the name. The client keeps its own
 ledger (credited, charged for verified blobs) and compares it with the balance
 the provider reports. A balance lower than delivered data explains is a loss;
 once losses pass `max_loss_msat` the route stops paying that provider. Wrong
@@ -157,12 +166,48 @@ one request and one reply:
 - **BitTorrent (BEP 10)**: advertise `ht_pay` in the extended handshake `m`
   dictionary; each message is the payload of one extended message, which
   already has the same length prefix. Two uses:
-  - *Blob mode*: `get`/`data` carry any SHA-256 addressed block. A BitTorrent v2
-    16 KiB leaf block has the same hash as the equal hashtree blob, so one
+  - *Blob mode*: `get`/`data` carry any hash-named block. A BitTorrent v2
+    16 KiB leaf block has the same SHA-256 as the equal hashtree blob, so one
     account serves both networks.
   - *Gate mode*: `quote`, `pay` and `paid` are sent as they are, while pieces
     travel in native `request`/`piece` messages. An unpaid peer stays choked,
-    `h` names the piece, and the piece hash is the delivery proof.
+    `h` names the piece (with `y` = `sha1` for a v1 piece, `n` its length), and
+    the piece hash check is the delivery proof.
+
+## Reusable parts
+
+The crate is split so that a later BitTorrent version reuses the payment
+exchange as it is and replaces only the glue.
+
+| Reusable as it is | What it does |
+|---|---|
+| `Request`, `Reply`, `Quote`, `ContentHash`, `bencode` | the messages and their one canonical encoding |
+| `PaidSeller` | prices, account balances, grace, free repeats, payment ids and token replay protection, redemption through a `PaymentReceiver` |
+| `PaidBuyer` | the client ledger, quote decisions, top-ups, pending-payment resend, loss detection and blocking |
+| `RetrievalWallet`, `LimitedWallet`, `SpendingLimit`, `CashuWallet`, `CashuReceiver` | the wallet boundary and the spending limit |
+| `PaidBlobTransport`, `StreamTransport`, `serve_stream` | one request and one reply over any carrier |
+
+Hashtree glue, about 300 lines: `PaidBlobProvider` (reads blobs from a
+`BlobRoute`, asks the seller, answers `get`) and `PaidBlobRoute` (asks the
+buyer, sends `get`, checks SHA-256). `tests/gate_mode.rs` drives the seller and
+buyer with SHA-1 names and no `BlobRoute` at all.
+
+A BitTorrent v1 implementation is better done as its own task. It would add:
+
+- A BEP 10 extension in the libtorrent bridge of `hashtree-bittorrent`, which
+  has no peer-plugin hooks today: advertise `ht_pay`, pass extended messages to
+  and from the seller and buyer.
+- Seeder glue: keep a peer choked until `PaidSeller::charge` says `Charged`,
+  with one account per connection. Charge per piece, not per 16 KiB request,
+  because SHA-1 verifies only whole pieces.
+- Downloader glue: answer a `quote` through `PaidBuyer`, call `delivered` when
+  a piece passes its hash check and `undelivered` when it fails. A v1 piece can
+  come from several peers, so a failed piece must be attributed to the peer
+  that sent the bad blocks before anyone is blamed.
+- A decision on account secrecy: BitTorrent connections are not authenticated,
+  so balances should stay small, with no grace.
+- Interoperability tests against an ordinary client that ignores the
+  extension.
 
 ## Shared with fips pay-to-relay
 
@@ -187,7 +232,7 @@ provider's durable ledger.
   `restore_accounts()` as the persistence seam. A provider must persist them
   before taking real money.
 - A FIPS carrier and capability advertisement, daemon and CLI configuration.
-- The TypeScript `BlobRouter` route, the BEP 10 extension, refunds of unused
+- The TypeScript `BlobRouter` route, the BitTorrent glue, refunds of unused
   balance, Spilman channel payments, and the Iris Drive wallet screen.
 
 ## Open decisions
