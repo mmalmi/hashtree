@@ -4083,6 +4083,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashtree-paid-retrieval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "cashu-service",
+ "hashtree-core",
+ "hashtree-network",
+ "rand 0.8.6",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "hashtree-resolver"
 version = "0.3.0"
 dependencies = [

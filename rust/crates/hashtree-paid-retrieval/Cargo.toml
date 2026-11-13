@@ -1,0 +1,31 @@
+[package]
+name = "hashtree-paid-retrieval"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+description = "Pay-to-retrieve blob route, provider and wallet interface for Hashtree"
+keywords = ["cashu", "hashtree", "payments", "storage"]
+readme = "README.md"
+# Unreleased: add to scripts/publish.sh when the protocol is accepted.
+publish = false
+
+[features]
+default = []
+# Adapters for the existing cashu-service payment client.
+cashu = ["dep:cashu-service"]
+
+[dependencies]
+hashtree-core.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "rt", "macros"] }
+rand = "0.8"
+cashu-service = { workspace = true, optional = true }
+
+[dev-dependencies]
+hashtree-network.workspace = true
+tokio = { version = "1", features = ["full"] }
+anyhow.workspace = true

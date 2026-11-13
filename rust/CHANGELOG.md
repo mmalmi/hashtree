@@ -36,6 +36,14 @@
   longer delays or loses relay subscriptions. The relay hostname is still used
   for TLS verification and SNI.
 
+### Added
+
+- Add the unpublished `hashtree-paid-retrieval` crate: a provider that serves
+  blobs against prepaid Cashu balances, the matching opaque `BlobRoute`, and a
+  wallet interface with a spending limit. The blob wire and `BlobRouter` are
+  unchanged and no daemon configures a paid route. See
+  `docs/paid-retrieval.md`.
+
 ## 0.4.6 - 2026-11-11
 
 Includes `git-remote-htree` 0.4.3.

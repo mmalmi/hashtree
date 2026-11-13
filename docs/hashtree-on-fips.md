@@ -112,10 +112,14 @@ helpers but, as of the 2026-07-17 native cleanup, configures no paid blob route.
 The obsolete quote/chunk policy fields are accepted as unknown legacy TOML and
 ignored.
 
-A future paid provider belongs behind one opaque `BlobRoute` and must own its
+A paid provider belongs behind one opaque `BlobRoute` and must own its
 quote, token transfer, replay protection, and recovery protocol. It must still
 return the unchanged `BlobReply`, leaving central size/hash verification to
 `BlobRouter`; it must not restore the deleted blob framing or peer selector.
+
+`hashtree-paid-retrieval` implements that route and its provider as a separate
+`hashtree.paid-blob/1` exchange; see [paid retrieval](paid-retrieval.md). It is
+unreleased: no daemon configures it and it has no FIPS carrier yet.
 
 ## Browser And Worker Providers
 

@@ -22,8 +22,10 @@ and carrier routes do not use it.
 The removed DataQuote/DataChunk protocol was never invoked by a production
 Hashtree read path; its only paid-retrieval caller was the simulator. Cashu
 wallet commands remain, but this crate deliberately configures no paid
-`BlobRoute`. A future paid provider must own negotiation and replay protection
-inside one opaque route without changing the published blob wire.
+`BlobRoute`. A paid provider must own negotiation and replay protection inside
+one opaque route without changing the published blob wire; the unreleased
+`hashtree-paid-retrieval` crate is that route. The router has no cost tier, so
+a paid route should be tried only after free routes returned nothing.
 
 FIPS owns transport addressing and `nostr-pubsub` owns Nostr event
 distribution.
