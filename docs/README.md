@@ -15,6 +15,7 @@
 - [Networking](NETWORKING.md): implemented discovery, routing, and blob protocol
 - [URL encoding](URL-ENCODING.md): routing with slash-containing tree names
 - [Ad hoc mesh configuration](ADHOC_MESH.md): relayless blob and Nostr paths
+- [Paid retrieval](paid-retrieval.md): paying a provider for blobs with Cashu (unreleased)
 - [Performance](PERFORMANCE.md): read/write and ingress notes
 
 ## Development and releases
