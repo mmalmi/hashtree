@@ -1,0 +1,47 @@
+{
+  "name": "@hashtree/paid-retrieval",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pay-to-retrieve blob route and wallet interface for Hashtree",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "lint": "eslint src tests --max-warnings 0",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "hashtree",
+    "cashu",
+    "payments",
+    "blob-route"
+  ],
+  "author": "Martti Malmi",
+  "license": "MIT",
+  "repository": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree",
+  "homepage": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree/ts/packages/hashtree-paid-retrieval",
+  "bugs": {
+    "url": "https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree?tab=issues"
+  },
+  "dependencies": {
+    "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.9/hashtree-core-0.3.2.tgz"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "vitest": "^4.1.10"
+  }
+}

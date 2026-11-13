@@ -277,6 +277,24 @@ its state. One directory is open in one provider at a time.
 Prices and balances stay in millisats. `LedgerStore` is two calls (`load`,
 `append`), so a daemon that prefers its own database can supply one.
 
+## TypeScript client
+
+`@hashtree/paid-retrieval` (`ts/packages/hashtree-paid-retrieval`) is the buying
+side for browsers and workers: the same messages, `PaidBuyer`, `PaidBlobRoute`,
+wallet interface, `SpendingLimit` and `LimitedWallet`, with a transport
+interface that carries one request and one reply. It has no selling side and is
+not in the worker's default route set.
+
+`test-vectors/paid-retrieval-vectors.json` holds the two codecs together. It is
+generated from the Rust encoder by `tests/vectors.rs` and checked by both
+languages: every message both ways, what each decoder accepts and rejects at
+every limit, and prices.
+
+The TypeScript buyer ignores the balance in a reply to a request that was sent
+before the latest acknowledged payment, because such a reply may predate the
+credit. The Rust buyer records it; on a carrier that runs exchanges
+concurrently a late quote can then look like a loss or cause a second top-up.
+
 ## Reusable parts
 
 The crate is split so that a later BitTorrent version reuses the payment
@@ -339,8 +357,9 @@ balance) without changing the other messages.
   to settle by hand.
 - Discovery of paid providers beyond the same host, and selection among
   several of them.
-- The TypeScript `BlobRouter` route, the BitTorrent glue, refunds of unused
-  balance, Spilman channel payments, and the Iris Drive wallet screen.
+- A TypeScript carrier and wiring into the worker's routes, the BitTorrent
+  glue, refunds of unused balance, Spilman channel payments, and the Iris
+  Drive wallet screen.
 
 ## Open decisions
 

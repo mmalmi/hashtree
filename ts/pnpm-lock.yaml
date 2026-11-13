@@ -274,6 +274,19 @@ importers:
         specifier: ^4.1.10
         version: 4.1.10(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.1)
 
+  packages/hashtree-paid-retrieval:
+    dependencies:
+      '@hashtree/core':
+        specifier: link:../hashtree
+        version: link:../hashtree
+    devDependencies:
+      typescript:
+        specifier: ^5.3.0
+        version: 5.9.3
+      vitest:
+        specifier: ^4.1.10
+        version: 4.1.10(@types/node@26.1.1)(esbuild@0.28.1)(jiti@2.7.0)(tsx@4.23.1)(yaml@2.9.1)
+
   packages/hashtree-worker:
     dependencies:
       '@hashtree/core':
