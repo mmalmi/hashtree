@@ -24,7 +24,11 @@ pub mod test_relay {
 
     impl TestRelay {
         pub fn new() -> Self {
-            let events = Arc::new(Mutex::new(Vec::new()));
+            Self::with_events(Vec::new())
+        }
+
+        pub fn with_events(events: Vec<Value>) -> Self {
+            let events = Arc::new(Mutex::new(events));
             let (shutdown, _) = broadcast::channel(1);
 
             let std_listener = TcpListener::bind("127.0.0.1:0").expect("bind relay listener");

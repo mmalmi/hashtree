@@ -10,6 +10,7 @@ mod directory;
 pub mod encryption;
 pub mod hash;
 pub mod hashtree;
+pub mod link_secret;
 #[doc(hidden)]
 pub mod lmdb_runtime;
 pub mod nhash;
@@ -66,6 +67,7 @@ pub use crypto::{
     encrypted_size_chk, generate_key, key_from_hex, key_to_hex, plaintext_size, CryptoError,
     EncryptionKey,
 };
+pub use link_secret::{LinkSecretError, LinkSecretRef};
 pub use visibility::{mask_object_key, xor_key_bytes, xor_keys, LinkKeyBytes, TreeVisibility};
 
 // Tree diff operations

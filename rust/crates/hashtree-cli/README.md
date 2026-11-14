@@ -43,6 +43,7 @@ htree push <hash>                       # Push to configured servers
 # Get/cat content
 htree get <hash>                        # Download to file
 htree cat <hash>                        # Print to stdout
+htree get 'htree://npub1.../photos#k=<hex>'  # Link-visible tree; key stays local (or --link-key)
 
 # Find public content and Git repositories through your social graph
 htree search iris-chat --git            # List explicit clone URLs

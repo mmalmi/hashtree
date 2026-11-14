@@ -398,6 +398,8 @@ struct RootEventData {
     root_hash: String,
     encryption_key: Option<String>,
     key_tag_name: Option<String>,
+    /// `keyId` of a link-visible root's secret, checked before unmasking.
+    key_id: Option<String>,
     self_encrypted_ciphertext: Option<String>,
     source: RootResolveSource,
     daemon_source: Option<String>,
@@ -870,11 +872,18 @@ impl NostrClient {
                 None
             })
             .unwrap_or((None, None, None));
+        let key_id = event
+            .tags
+            .iter()
+            .map(|t| t.as_slice())
+            .find(|t| t.len() >= 2 && t[0] == "keyId")
+            .map(|t| t[1].to_string());
 
         RootEventData {
             root_hash,
             encryption_key,
             key_tag_name,
+            key_id,
             self_encrypted_ciphertext,
             source: RootResolveSource::NostrEvent,
             daemon_source: None,
@@ -901,6 +910,7 @@ impl NostrClient {
             root_hash,
             encryption_key: parsed_cid.and_then(|cid| cid.key.map(|key| key.to_hex())),
             key_tag_name: None,
+            key_id: None,
             self_encrypted_ciphertext: None,
             source: RootResolveSource::LocalDaemon,
             daemon_source,
@@ -1167,9 +1177,7 @@ impl NostrClient {
             Some("encryptedKey") => {
                 // Link-visible: XOR the masked key with url_secret
                 if let (Some(masked), Some(secret)) = (encryption_key, self.url_secret) {
-                    let bytes =
-                        hashtree_core::xor_key_bytes(&hex::decode(masked)?, secret.as_ref())?;
-                    Some(ObjectKey::from_bytes(&bytes)?)
+                    Some(secret.unmask(&hex::decode(masked)?, root_data.key_id.as_deref())?)
                 } else {
                     anyhow::bail!(
                         "This repo is link-visible and requires a secret key.\n\

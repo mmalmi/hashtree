@@ -4,7 +4,7 @@ use hashtree_cli::storage::CachedRoot;
 use hashtree_cli::{
     HashtreeStore, NostrKeys, NostrResolverConfig, NostrRootResolver, RootResolver,
 };
-use hashtree_core::Cid;
+use hashtree_core::{Cid, LinkKeyBytes, LinkSecretRef};
 use hashtree_updater::UpdateRef;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -17,7 +17,7 @@ pub(crate) struct ResolvedCid {
 
 #[derive(Default, Clone)]
 pub(crate) struct ResolveOptions {
-    pub(crate) link_key: Option<hashtree_core::LinkKeyBytes>,
+    pub(crate) link_key: Option<LinkKeyBytes>,
     pub(crate) private: bool,
     pub(crate) relays: Option<Vec<String>>,
     pub(crate) secret_key: Option<NostrKeys>,
@@ -26,6 +26,19 @@ pub(crate) struct ResolveOptions {
 
 pub(crate) fn parse_published_target(input: &str) -> Option<UpdateRef> {
     UpdateRef::parse(input).ok()
+}
+
+/// Splits a read target from its link secret (`#k=`, local `?k=` or `--link-key`).
+/// Only the returned reference is resolved or fetched; the secret stays local.
+pub(crate) fn split_link_key<'a>(
+    input: &'a str,
+    link_key: Option<&str>,
+) -> Result<(&'a str, Option<LinkKeyBytes>)> {
+    let target = LinkSecretRef::parse(input)?.with_link_key(link_key)?;
+    if target.fragment.is_some() {
+        anyhow::bail!("Unsupported URL fragment; use #k=<link key>");
+    }
+    Ok((target.reference, target.link_key))
 }
 
 /// Resolve a CID input which can be:
@@ -38,10 +51,17 @@ pub(crate) async fn resolve_cid_input(input: &str) -> Result<ResolvedCid> {
     resolve_cid_input_with_opts(input, &ResolveOptions::default()).await
 }
 
-pub(crate) async fn resolve_get_input(input: &str) -> Result<ResolvedCid> {
+pub(crate) async fn resolve_get_input(
+    input: &str,
+    link_key: Option<LinkKeyBytes>,
+) -> Result<ResolvedCid> {
     // Immutable inputs return before configuration or network access is needed.
     let Some(target) = parse_published_target(input) else {
-        return resolve_cid_input(input).await;
+        let opts = ResolveOptions {
+            link_key,
+            ..ResolveOptions::default()
+        };
+        return resolve_cid_input_with_opts(input, &opts).await;
     };
     let key = target.resolver_key();
     eprintln!("Resolving {}...", key);
@@ -51,7 +71,15 @@ pub(crate) async fn resolve_get_input(input: &str) -> Result<ResolvedCid> {
     })
     .await
     .context("Failed to create nostr resolver")?;
-    let resolved = resolver.resolve_open(&key, Duration::from_secs(10)).await;
+    let window = Duration::from_secs(10);
+    let resolved = match link_key {
+        Some(link_key) => {
+            resolver
+                .resolve_open_shared(&key, link_key.as_ref(), window)
+                .await
+        }
+        None => resolver.resolve_open(&key, window).await,
+    };
     // Stop the owned connection on both success and resolution failure.
     let stopped = resolver.stop().await;
     let cid = resolved?;
@@ -70,6 +98,9 @@ pub(crate) async fn resolve_cid_input_with_opts(
     use hashtree_core::{is_nhash, nhash_decode, Cid};
 
     let normalized_input = input.strip_prefix("htree://").unwrap_or(input);
+    if opts.link_key.is_some() && parse_published_target(normalized_input).is_none() {
+        anyhow::bail!("A link key applies only to npub/tree references");
+    }
 
     // Check if it's an nhash (bech32-encoded) - gives us raw bytes directly
     // Support nhash1.../path/to/file format (path suffix after slash)

@@ -309,6 +309,7 @@ htree push <hash> -s https://blossom.example.com  # Push to specific server
 # Get/cat content
 htree get <hash>                        # Download to file
 htree cat <hash>                        # Print to stdout
+htree get 'htree://npub1.../photos#k=<hex>'  # Link-visible tree; key stays local (or --link-key)
 
 # Pins
 htree pins                              # List pinned content

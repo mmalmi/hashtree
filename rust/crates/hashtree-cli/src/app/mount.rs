@@ -32,29 +32,27 @@ pub(crate) struct MountFuseOptions {
     pub(crate) allow_other: bool,
 }
 
+/// `fragment` and `link_key` come from `LinkSecretRef`, which already merged
+/// a URL secret with `--link-key`.
 pub(crate) fn parse_mount_visibility(
     visibility: Option<String>,
-    link_key: Option<String>,
     private: bool,
     fragment: Option<&str>,
+    link_key: Option<hashtree_core::LinkKeyBytes>,
 ) -> Result<MountVisibility> {
     use hashtree_core::TreeVisibility;
 
-    let mut resolved_visibility: Option<TreeVisibility> = None;
-    let mut resolved_link_key: Option<hashtree_core::LinkKeyBytes> = None;
+    let mut resolved_visibility = match fragment {
+        Some("private") => Some(TreeVisibility::Private),
+        Some("link-visible") => Some(TreeVisibility::LinkVisible),
+        _ => None,
+    };
 
-    if let Some(fragment) = fragment {
-        if fragment == "private" {
-            resolved_visibility = Some(TreeVisibility::Private);
-        } else if fragment == "link-visible" {
-            resolved_visibility = Some(TreeVisibility::LinkVisible);
-        } else if let Some(hex_key) = fragment.strip_prefix("k=") {
-            resolved_visibility = Some(TreeVisibility::LinkVisible);
-            resolved_link_key = Some(
-                hashtree_core::LinkKeyBytes::from_hex(hex_key)
-                    .map_err(|e| anyhow::anyhow!("Invalid link key: {}", e))?,
-            );
+    if link_key.is_some() {
+        if resolved_visibility.is_some_and(|existing| existing != TreeVisibility::LinkVisible) {
+            anyhow::bail!("Link key only applies to link-visible trees");
         }
+        resolved_visibility = Some(TreeVisibility::LinkVisible);
     }
 
     if let Some(vis) = visibility {
@@ -68,23 +66,6 @@ pub(crate) fn parse_mount_visibility(
         resolved_visibility = Some(parsed);
     }
 
-    if let Some(link_key) = link_key {
-        let parsed = hashtree_core::LinkKeyBytes::from_hex(&link_key)
-            .map_err(|e| anyhow::anyhow!("Invalid link key: {}", e))?;
-        if let Some(existing) = resolved_link_key {
-            if existing != parsed {
-                anyhow::bail!("Conflicting link key options");
-            }
-        }
-        resolved_link_key = Some(parsed);
-        if let Some(existing) = resolved_visibility {
-            if existing != TreeVisibility::LinkVisible {
-                anyhow::bail!("Link key only applies to link-visible trees");
-            }
-        }
-        resolved_visibility = Some(TreeVisibility::LinkVisible);
-    }
-
     if private {
         if let Some(existing) = resolved_visibility {
             if existing != TreeVisibility::Private {
@@ -95,16 +76,16 @@ pub(crate) fn parse_mount_visibility(
     }
 
     let visibility = resolved_visibility.unwrap_or(TreeVisibility::Public);
-    if visibility == TreeVisibility::LinkVisible && resolved_link_key.is_none() {
+    if visibility == TreeVisibility::LinkVisible && link_key.is_none() {
         anyhow::bail!("Link-visible trees require a link key");
     }
-    if visibility == TreeVisibility::Private && resolved_link_key.is_some() {
+    if visibility == TreeVisibility::Private && link_key.is_some() {
         anyhow::bail!("Private trees cannot use a link key");
     }
 
     Ok(MountVisibility {
         visibility,
-        link_key: resolved_link_key,
+        link_key,
     })
 }
 
@@ -247,17 +228,14 @@ pub(crate) async fn mount_fuse(
     };
 
     let target = target.strip_prefix("htree://").unwrap_or(&target);
-    let (base, fragment) = match target.split_once('#') {
-        Some((base, fragment)) => (base, Some(fragment)),
-        None => (target, None),
-    };
-    let base = normalize_mount_target_for_resolution(base)?;
+    let target = hashtree_core::LinkSecretRef::parse(target)?.with_link_key(link_key.as_deref())?;
+    let base = normalize_mount_target_for_resolution(target.reference)?;
     let requested_target = base.clone();
 
     let MountVisibility {
         visibility: mount_visibility,
         link_key: mount_link_key,
-    } = parse_mount_visibility(visibility, link_key, private, fragment)?;
+    } = parse_mount_visibility(visibility, private, target.fragment, target.link_key)?;
 
     let config = Config::load().unwrap_or_default();
     let relays = if let Some(relays) = relays {

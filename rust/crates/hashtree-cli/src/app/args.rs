@@ -288,6 +288,9 @@ pub(crate) enum Commands {
         /// Print choices instead of prompting when a publisher must be selected
         #[arg(long)]
         non_interactive: bool,
+        /// Link key for link-visible trees (hex); a URL may carry it as #k=<hex>
+        #[arg(long)]
+        link_key: Option<String>,
     },
 
     /// Find public trees in your social graph without downloading
@@ -321,8 +324,11 @@ pub(crate) enum Commands {
 
     /// Output file content to stdout (like cat)
     Cat {
-        /// CID to read
+        /// CID, htree:// URL or publisher/tree/path to read
         cid: String,
+        /// Link key for link-visible trees (hex); a URL may carry it as #k=<hex>
+        #[arg(long)]
+        link_key: Option<String>,
     },
 
     /// Push content to file servers (Blossom)

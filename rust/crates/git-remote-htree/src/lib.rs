@@ -347,35 +347,24 @@ fn parse_htree_url(url: &str) -> Result<ParsedUrl> {
         .strip_prefix("htree://")
         .context("URL must start with htree://")?;
 
-    // Split off fragment (#k=secret, #link-visible, or #private) if present
-    let (url_path, secret_key, is_private, auto_generate_secret) = if let Some((path, fragment)) =
-        url.split_once('#')
-    {
-        if fragment == "private" {
-            // #private - self-only visibility
-            (path, None, true, false)
-        } else if fragment == "link-visible" {
-            // #link-visible - auto-generate key on push
-            (path, None, false, true)
-        } else if let Some(key_hex) = fragment.strip_prefix("k=") {
-            // #k=<hex> - link-visible with explicit key
-            let bytes = hex::decode(key_hex).context("Invalid secret key hex in URL fragment")?;
-            let key = hashtree_core::LinkKeyBytes::from_bytes(&bytes)
-                .context("Secret key must be 32 or 33 bytes")?;
-            (path, Some(key), false, false)
-        } else {
-            // Unknown fragment - error to prevent accidental public push
-            bail!(
-                "Unknown URL fragment '#{}'. Valid options:\n\
-                 - #k=<64-hex-chars>  Link-visible with explicit key\n\
-                 - #link-visible      Link-visible with auto-generated key\n\
-                 - #private           Author-only (NIP-44 encrypted)\n\
-                 - (no fragment)      Public",
-                fragment
-            );
-        }
-    } else {
-        (url, None, false, false)
+    // Take the link secret (#k=, or a local ?k=) and the visibility fragment
+    let parsed = hashtree_core::LinkSecretRef::parse(url)?;
+    let (url_path, secret_key) = (parsed.reference, parsed.link_key);
+    let (is_private, auto_generate_secret) = match parsed.fragment {
+        None => (false, false),
+        // #private - self-only visibility
+        Some("private") if secret_key.is_none() => (true, false),
+        // #link-visible - auto-generate key on push
+        Some("link-visible") if secret_key.is_none() => (false, true),
+        // Unknown fragment - error to prevent accidental public push
+        Some(fragment) => bail!(
+            "Unknown URL fragment '#{}'. Valid options:\n\
+             - #k=<64-hex-chars>  Link-visible with explicit key\n\
+             - #link-visible      Link-visible with auto-generated key\n\
+             - #private           Author-only (NIP-44 encrypted)\n\
+             - (no fragment)      Public",
+            fragment
+        ),
     };
 
     // Split on first /

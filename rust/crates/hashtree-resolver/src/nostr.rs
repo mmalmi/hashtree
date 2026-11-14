@@ -15,7 +15,7 @@ use tokio::task::JoinSet;
 
 mod open;
 
-use hashtree_core::{decrypt, mask_object_key, xor_key_bytes, ObjectKey};
+use hashtree_core::{decrypt, mask_object_key, LinkKeyBytes, LinkSecretError, ObjectKey};
 
 pub const HASHTREE_KIND: u16 = 30064;
 pub const HASHTREE_LEGACY_KIND: u16 = 30078;
@@ -54,6 +54,7 @@ const TAG_KEY: &str = "key";
 const TAG_ENCRYPTED_KEY: &str = "encryptedKey";
 const TAG_SELF_ENCRYPTED_KEY: &str = "selfEncryptedKey";
 const TAG_ENCRYPTED_KEY_LEGACY: &str = "encrypted_key";
+const TAG_KEY_ID: &str = "keyId";
 
 fn has_label(event: &Event, label: &str) -> bool {
     event.tags.iter().any(|tag| {
@@ -628,12 +629,17 @@ impl NostrRootResolver {
         Some(Cid { hash, key })
     }
 
-    /// Extract Cid from event with encrypted key decryption
-    fn cid_from_event_shared(event: &Event, share_secret: &[u8]) -> Option<Cid> {
+    /// Extract Cid from event with encrypted key decryption. `Ok(None)` means
+    /// the event has no usable root; a secret that does not fit is an error.
+    fn cid_from_event_shared(
+        event: &Event,
+        share_secret: &[u8],
+    ) -> Result<Option<Cid>, ResolverError> {
         let mut hash_hex: Option<String> = None;
         let mut key_hex: Option<String> = None;
         let mut encrypted_key_hex: Option<String> = None;
         let mut encrypted_key_legacy_hex: Option<String> = None;
+        let mut key_id: Option<String> = None;
 
         for tag in event.tags.iter() {
             let tag_vec = tag.as_slice();
@@ -643,6 +649,7 @@ impl NostrRootResolver {
                     "key" => key_hex = Some(tag_vec[1].clone()),
                     TAG_ENCRYPTED_KEY => encrypted_key_hex = Some(tag_vec[1].clone()),
                     TAG_ENCRYPTED_KEY_LEGACY => encrypted_key_legacy_hex = Some(tag_vec[1].clone()),
+                    TAG_KEY_ID => key_id = Some(tag_vec[1].clone()),
                     _ => {}
                 }
             }
@@ -654,21 +661,36 @@ impl NostrRootResolver {
             }
         }
 
-        let hash = from_hex(&hash_hex?).ok()?;
+        let Some(hash) = hash_hex.and_then(|hex| from_hex(&hex).ok()) else {
+            return Ok(None);
+        };
+        let mismatch = || ResolverError::InvalidKey(LinkSecretError::Mismatch.to_string());
 
         let key = if let Some(hex) = key_hex {
-            Some(ObjectKey::from_hex(&hex).ok()?)
+            let Ok(key) = ObjectKey::from_hex(&hex) else {
+                return Ok(None);
+            };
+            Some(key)
         } else if let Some(hex) = encrypted_key_hex {
-            let masked = hex::decode(hex).ok()?;
-            Some(ObjectKey::from_bytes(&xor_key_bytes(&masked, share_secret).ok()?).ok()?)
+            let secret = LinkKeyBytes::from_bytes(share_secret).map_err(|_| mismatch())?;
+            let masked = hex::decode(hex).map_err(|_| mismatch())?;
+            let key = secret
+                .unmask(&masked, key_id.as_deref())
+                .map_err(|_| mismatch())?;
+            Some(key)
         } else if let Some(hex) = encrypted_key_legacy_hex {
-            let bytes = decrypt(&hex::decode(hex).ok()?, share_secret.try_into().ok()?).ok()?;
-            Some(ObjectKey::from_bytes(&bytes).ok()?)
+            let key = hex::decode(hex)
+                .ok()
+                .zip(share_secret.try_into().ok())
+                .and_then(|(masked, secret)| decrypt(&masked, secret).ok())
+                .and_then(|bytes| ObjectKey::from_bytes(&bytes).ok())
+                .ok_or_else(mismatch)?;
+            Some(key)
         } else {
             None
         };
 
-        Some(Cid { hash, key })
+        Ok(Some(Cid { hash, key }))
     }
 
     /// Resolve a key, waiting indefinitely until found.
@@ -810,7 +832,7 @@ impl RootResolver for NostrRootResolver {
         );
 
         match latest_event {
-            Some(event) => Ok(Self::cid_from_event_shared(event.as_event(), share_secret)),
+            Some(event) => Self::cid_from_event_shared(event.as_event(), share_secret),
             None => Ok(None),
         }
     }
@@ -971,9 +993,15 @@ impl RootResolver for NostrRootResolver {
         if let Some(key) = cid.key {
             let masked = mask_object_key(&key, share_secret)
                 .map_err(|e| ResolverError::InvalidKey(e.to_string()))?;
+            let secret = LinkKeyBytes::from_bytes(share_secret)
+                .map_err(|e| ResolverError::InvalidKey(e.to_string()))?;
             tags.push(Tag::custom(
                 TagKind::Custom(TAG_ENCRYPTED_KEY.into()),
                 vec![hex::encode(masked)],
+            ));
+            tags.push(Tag::custom(
+                TagKind::Custom(TAG_KEY_ID.into()),
+                vec![secret.key_id()],
             ));
         }
 
@@ -1070,6 +1098,8 @@ mod tests {
     use tokio::net::TcpStream;
     use tokio::sync::broadcast;
     use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    mod link_visible;
 
     struct TestRelay {
         port: u16,

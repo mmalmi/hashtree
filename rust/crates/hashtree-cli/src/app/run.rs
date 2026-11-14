@@ -74,8 +74,8 @@ use super::pool_migration_receipt::{
 use super::pwa::run_export;
 use super::release::{publish_release_version, ReleasePublishOptions};
 use super::resolve::{
-    parse_published_target, resolve_cid_input, resolve_cid_input_with_opts, ResolveOptions,
-    ResolvedCid,
+    parse_published_target, resolve_cid_input, resolve_cid_input_with_opts, split_link_key,
+    ResolveOptions, ResolvedCid,
 };
 use super::socialgraph::{
     run_socialgraph_filter, run_socialgraph_publish_profile_indexes,
@@ -1051,13 +1051,14 @@ fn run_command(
             cid: cid_input,
             output,
             non_interactive,
+            link_key,
         } => command_future!({
             use hashtree_core::{to_hex, Cid};
 
             // Resolve to Cid (raw bytes, no hex conversion needed for nhash)
-            let target =
-                super::discovery::target(&cid_input, false, non_interactive, &data_dir).await?;
-            let resolved = super::resolve::resolve_get_input(&target).await?;
+            let (input, link_key) = split_link_key(&cid_input, link_key.as_deref())?;
+            let target = super::discovery::target(input, false, non_interactive, &data_dir).await?;
+            let resolved = super::resolve::resolve_get_input(&target, link_key).await?;
             let cid = resolved.cid.clone();
 
             let store = Arc::new(HashtreeStore::new(&data_dir)?);
@@ -1130,11 +1131,22 @@ fn run_command(
         } => command_future!({
             super::discovery::clone(&repository, directory, non_interactive, &data_dir).await?;
         }),
-        Commands::Cat { cid: cid_input } => command_future!({
+        Commands::Cat {
+            cid: cid_input,
+            link_key,
+        } => command_future!({
             use std::io::Write;
 
             // Resolve npub/repo or htree:// URLs to CID
-            let resolved = resolve_cid_input(&cid_input).await?;
+            let (input, link_key) = split_link_key(&cid_input, link_key.as_deref())?;
+            let opts = ResolveOptions {
+                link_key,
+                relays: Config::load()
+                    .ok()
+                    .map(|config| config.nostr.active_relays()),
+                ..ResolveOptions::default()
+            };
+            let resolved = resolve_cid_input_with_opts(input, &opts).await?;
 
             let store = Arc::new(HashtreeStore::new(&data_dir)?);
             let fetcher = Fetcher::new(FetchConfig::default());

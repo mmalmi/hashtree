@@ -7,14 +7,26 @@ impl NostrRootResolver {
     /// Unlike quick resolution, this does not use cached observations or a quorum
     /// shortcut. It closes only its own subscription before returning.
     pub async fn resolve_open(&self, key: &str, window: Duration) -> Result<Cid, ResolverError> {
-        self.observe_roots(key, window, false).await
+        self.observe_roots(key, window, false, None).await
+    }
+
+    /// `resolve_open` for a link-visible root: the newest root's key is unmasked
+    /// with `share_secret`, and a secret that does not fit is an error.
+    pub async fn resolve_open_shared(
+        &self,
+        key: &str,
+        share_secret: &[u8],
+        window: Duration,
+    ) -> Result<Cid, ResolverError> {
+        self.observe_roots(key, window, false, Some(share_secret))
+            .await
     }
 
     /// Return the first usable authenticated root without waiting for EOSE or
     /// a relay quorum. A quiet deadline is a timeout, never proof of absence.
     /// Closes this lookup's subscription before returning.
     pub async fn resolve_ready(&self, key: &str, timeout: Duration) -> Result<Cid, ResolverError> {
-        self.observe_roots(key, timeout, true).await
+        self.observe_roots(key, timeout, true, None).await
     }
 
     async fn observe_roots(
@@ -22,6 +34,7 @@ impl NostrRootResolver {
         key: &str,
         window: Duration,
         ready: bool,
+        share_secret: Option<&[u8]>,
     ) -> Result<Cid, ResolverError> {
         let (pubkey, tree_name) = Self::parse_key(key)?;
         if self.config.relays.is_empty() {
@@ -85,8 +98,15 @@ impl NostrRootResolver {
         if let Ok(result) = observed {
             result?;
         }
-        latest.map(|(_, cid)| cid).ok_or_else(|| {
+        let (event, cid) = latest.ok_or_else(|| {
             ResolverError::Network(format!("Timed out waiting for a signed root for {key}"))
-        })
+        })?;
+        match share_secret {
+            // This event already yielded a usable hash; only the key can differ.
+            Some(secret) => {
+                Ok(Self::cid_from_event_shared(event.as_event(), secret)?.unwrap_or(cid))
+            }
+            None => Ok(cid),
+        }
     }
 }

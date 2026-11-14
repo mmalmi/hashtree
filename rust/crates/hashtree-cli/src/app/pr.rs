@@ -381,10 +381,13 @@ fn parse_repo_target(repo: &str) -> Result<(String, String)> {
 }
 
 fn sanitize_repo_target_path(repo: &str) -> &str {
-    // htree URLs may include fragments (#k=..., #private). Those are not part of the
-    // repo name/address and must not leak into PR metadata tags.
+    // htree URLs may include fragments (#k=..., #private) or a local ?k= query. Those
+    // are not part of the repo name/address and must not leak into PR metadata tags.
     let repo = repo.strip_prefix("htree://").unwrap_or(repo);
-    repo.split('#').next().unwrap_or(repo).trim_end_matches('/')
+    repo.split(['#', '?'])
+        .next()
+        .unwrap_or(repo)
+        .trim_end_matches('/')
 }
 
 fn resolve_repo_target_input(repo: Option<&str>, source_branch: &str) -> Result<String> {
@@ -795,12 +798,15 @@ mod tests {
     fn parse_repo_target_strips_fragment_from_repo_name() {
         let keys = Keys::generate();
         let pubkey_hex = hex::encode(keys.public_key().to_bytes());
-        let input = format!("htree://{pubkey_hex}/repo-name#k=secret");
+        for input in [
+            format!("htree://{pubkey_hex}/repo-name#k=secret"),
+            format!("htree://{pubkey_hex}/repo-name?k=secret"),
+        ] {
+            let (parsed_pubkey, repo_name) = parse_repo_target(&input).expect("parse target");
 
-        let (parsed_pubkey, repo_name) = parse_repo_target(&input).expect("parse target");
-
-        assert_eq!(parsed_pubkey, pubkey_hex);
-        assert_eq!(repo_name, "repo-name");
+            assert_eq!(parsed_pubkey, pubkey_hex);
+            assert_eq!(repo_name, "repo-name");
+        }
     }
 
     #[test]
