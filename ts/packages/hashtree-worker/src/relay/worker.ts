@@ -430,7 +430,7 @@ async function configureGraphBootstrap() {
     if (!current()) return;
     socialGraph = fresh;
     notifySocialGraphVersionUpdate();
-  } catch { /* Configured-relay catch-up remains available without an HTTP seed. */ }
+  } catch { /* Configured-relay catch-up remains available when the signed snapshot is unavailable. */ }
   finally { if (graphBootstrapAbort === abort) graphBootstrapAbort = undefined; }
 }
 
