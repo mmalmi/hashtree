@@ -2,7 +2,28 @@ import fs from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {pathToFileURL} from 'node:url';
 const app=process.env.APP, out='/stage/evidence', wd='/stage/app';
-const {createReleasePlan,parseArgs}=await import(pathToFileURL(wd+'/scripts/release-site.mjs'));
+const release=await import(pathToFileURL(wd+'/scripts/release-site.mjs'));
+if(app==='social'){
+  const liveReleaseEnvironment={
+  "VITE_NOSTR_EVENT_INDEX": "npub1yscmnnadrmvape0mvgzfx9uyl267klnhzy8znsr6ysl8wtxngpqsnx6dm0/nostr-event-index",
+  "VITE_PROFILE_INDEX": "npub1yscmnnadrmvape0mvgzfx9uyl267klnhzy8znsr6ysl8wtxngpqsnx6dm0/profiles-by-pubkey",
+  "VITE_PROFILE_SEARCH_INDEX": "npub1yscmnnadrmvape0mvgzfx9uyl267klnhzy8znsr6ysl8wtxngpqsnx6dm0/profile-search",
+  "VITE_FIPS_PEERS": "",
+  "IRIS_ALLOW_UNCONFIGURED_POST_SEARCH": "1"
+};
+  Object.assign(process.env,liveReleaseEnvironment);
+  const config={
+    eventIndex:release.requireReleaseEventIndex(),
+    profiles:release.requireReleaseProfileIndexes(),
+    extraProfiles:release.requireOptionalReleaseTreeReferences('VITE_PROFILE_SEARCH_INDEXES'),
+    extraProfilesV3:release.requireOptionalReleaseTreeReferences('VITE_PROFILE_SEARCH_V3_INDEXES'),
+    postSearch:release.requireReleasePostSearchIndexes(),
+    catalogSet:release.requireReleaseCompleteCatalogIndexes(),
+    peers:release.requireReleaseFipsPeers(),
+  };
+  fs.writeFileSync(out+'/site-config.json',JSON.stringify(config,null,2)+'\n');
+}
+const {createReleasePlan,parseArgs}=release;
 const args=app==='contacts'?['contacts','--dry-run','--skip-cloudflare']:['--dry-run','--skip-cloudflare'];
 const {steps}=createReleasePlan(parseArgs(args));
 const allowed=steps.filter(s=>s.id==='build'||s.id.startsWith('test-'));
