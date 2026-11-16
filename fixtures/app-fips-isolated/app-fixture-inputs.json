@@ -5,7 +5,7 @@
   },
   "calendar": {
     "path": "e2e/fixtures.ts",
-    "beforeSha256": "1806469eba3151164bb05fe4649b9233b1c30b7d62311e849cbf7228d27c73fa"
+    "beforeSha256": "373c996e1a19f1fef8d1d1787a1c01cda84e5ebe56f120911d11844a23f39b75"
   },
   "boards": {
     "path": "e2e/fixtures.ts",
