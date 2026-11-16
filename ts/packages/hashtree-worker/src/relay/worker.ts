@@ -891,6 +891,7 @@ async function handleInit(id: string, cfg: WorkerConfig, hasP2PProvider: boolean
       store,
       storeName,
       reconciliation: cfg.reconciliation,
+      indexedEventCache: cfg.indexedEventCache,
       onStorePersisted: runEvictionCheck,
     });
     if (!current()) return;

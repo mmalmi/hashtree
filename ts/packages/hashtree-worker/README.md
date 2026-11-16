@@ -257,6 +257,14 @@ Behavior:
 
 `RelayWorkerClient.setStorageMaxBytes(bytes)` sets the shared block cache budget (default 1 GiB). Eviction checks run after initialization and persisted event/index changes as well as blob writes, coalesced over five seconds. Superseded index blocks and disposable cached files can be reclaimed; blocks reachable from current event and pending-publication roots remain protected, so durable data can exceed the budget.
 
+Set `WorkerConfig.indexedEventCache` to `true` for browsing clients that need a
+local relay cache. The worker stores signed events and their time, author, kind
+and tag indexes in IndexedDB. Queries also include events retained by previous
+versions. Deletions and replacements cover both stores, and pending publications
+continue to use their portable outbox. The local event history is durable and
+separate from the disposable file-block budget. The default event store uses
+the portable Hashtree indexes.
+
 ## Service Worker Client Keys
 
 If your service worker intercepts `/htree/...` media requests and forwards them to a worker over `MessagePort`, use a stable per-tab client key:

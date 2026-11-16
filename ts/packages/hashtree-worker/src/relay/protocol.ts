@@ -178,6 +178,8 @@ export interface WorkerConfig {
   blossomServers?: BlossomServerConfig[];  // Blossom servers with read/write config
   pubkey: string;  // User's pubkey (required - user always logged in)
   nsec?: string;  // Hex-encoded secret key (only for nsec login, not extension)
+  /** Keep incoming events in local IndexedDB indexes; existing portable history and the outbox stay readable. */
+  indexedEventCache?: boolean;
   storeName?: string;  // IndexedDB database name, defaults to 'hashtree-worker'
   /** Set false to disable bounded public follow/mute catch-up on the configured relays. */
   graphReconciliation?: boolean;

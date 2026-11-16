@@ -3656,3 +3656,13 @@ checks with the transactional counter returned zero payload bytes. Both runs
 kept 256 blocks at the first limit and 192 at the second. This measures quota
 accounting and eviction on a disposable block cache. Walking protected event
 indexes and admitting new relay events have separate costs.
+
+### Browser relay event indexing (2026-11-16)
+
+In a fresh Chrome database, the worker ingested the same 200 signed video
+events through the relay runtime, then queried all 200 in timestamp order.
+The portable index took 5,398 ms and issued 6,468 file-block writes. The
+opt-in IndexedDB event cache took 373 ms and issued zero file-block writes.
+Neither timing includes fixture signing or the final query. With an existing
+portable index, a separate run read back 80 old events together with 120
+new arrivals without rewriting the old index.

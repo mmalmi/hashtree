@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.47 - 2026-11-16
+
+- Worker 0.4.29 adds an opt-in IndexedDB relay event cache for browsing clients.
+  It reads previous portable history and preserves pending publications while
+  avoiding per-event rewrites of the portable search tree.
+
 ## TypeScript runtime 0.5.46 - 2026-11-16
 
 - Dexie 0.1.15 tracks cached bytes as blocks are written and removed. Quota
