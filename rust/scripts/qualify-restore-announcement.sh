@@ -3,7 +3,7 @@ set -euo pipefail
 destination="$RUNNER_TEMP/qualified"
 mkdir -p "$destination"
 git rev-parse HEAD > "$destination/source.txt"
-git rev-parse HEAD^ > "$destination/base.txt"
+git rev-parse HEAD~2 > "$destination/base.txt"
 rustc -vV > "$destination/rustc.txt"
 cargo -V > "$destination/cargo.txt"
 sw_vers > "$destination/platform.txt"

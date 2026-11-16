@@ -15,11 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
       - name: Verify source and install Rust
         run: |
-          test "$(git rev-parse HEAD^)" = 6058c7b3e3807d11b828459fa1d39c2e702e69bd
+          test "$(git rev-parse HEAD^)" = 79b1d28b5a963f86a92e13be8697d121b178f23d
+          test "$(git rev-parse HEAD~2)" = 6058c7b3e3807d11b828459fa1d39c2e702e69bd
           test "$(uname -m)" = arm64
           archive="$RUNNER_TEMP/rust-1.99.1-aarch64-apple-darwin.tar.xz"
           curl --fail --location --output "$archive" https://static.rust-lang.org/dist/2026-10-15/rust-1.99.1-aarch64-apple-darwin.tar.xz

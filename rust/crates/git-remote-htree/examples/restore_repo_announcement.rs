@@ -2,10 +2,10 @@ use anyhow::{ensure, Context, Result};
 use futures::future::try_join_all;
 use git_remote_htree::nostr_client::{resolve_identity, KIND_REPO_ANNOUNCEMENT};
 use hashtree_config::{resolve_relays, Config};
-use nostr_relay_pool::relay::options::ReqExitPolicy;
+use nostr_relay_pool::{RelayNotification, SubscribeOptions};
 use nostr_sdk::prelude::*;
 use serde::Deserialize;
-use std::time::Duration;
+use std::{cmp::Reverse, time::Duration};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -113,23 +113,42 @@ async fn restore(request: Request) -> Result<()> {
         let name = &request.repository;
         async move {
             client.try_connect_relay(url, wait).await?;
-            let events = client
-                .relay(url)
-                .await?
-                .fetch_events(filter, wait, ReqExitPolicy::ExitOnEOSE)
-                .await?;
-            let mut winner: Option<&Event> = None;
-            for event in events.iter() {
-                validate_announcement(event, owner, name)?;
-                if winner.is_none_or(|best| {
-                    event.created_at > best.created_at
-                        || (event.created_at == best.created_at && event.id < best.id)
-                }) {
-                    winner = Some(event);
+            let relay = client.relay(url).await?;
+            let mut notifications = relay.notifications();
+            let id = relay.subscribe(filter, SubscribeOptions::default()).await?;
+            let winner = tokio::time::timeout(wait, async {
+                let mut latest = None;
+                loop {
+                    let RelayNotification::Message { message } = notifications.recv().await? else {
+                        continue;
+                    };
+                    match message {
+                        RelayMessage::Event {
+                            subscription_id,
+                            event,
+                        } if subscription_id.as_ref() == &id => {
+                            validate_announcement(event.as_ref(), owner, name)?;
+                            latest = latest.max(Some((event.created_at, Reverse(event.id))));
+                        }
+                        RelayMessage::EndOfStoredEvents(subscription_id)
+                            if subscription_id.as_ref() == &id =>
+                        {
+                            return Ok::<_, anyhow::Error>(latest);
+                        }
+                        RelayMessage::Closed {
+                            subscription_id, ..
+                        } if subscription_id.as_ref() == &id => {
+                            anyhow::bail!("announcement query closed before EOSE on {url}");
+                        }
+                        _ => {}
+                    }
                 }
-            }
+            })
+            .await
+            .context("relay did not finish announcement query")??;
+            relay.unsubscribe(&id).await?;
             ensure!(
-                winner.is_some_and(|best| best.id == current.id),
+                winner.is_some_and(|(_, id)| id.0 == current.id),
                 "live predecessor differs or is absent on {url}"
             );
             Ok::<(), anyhow::Error>(())
