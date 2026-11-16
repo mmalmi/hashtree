@@ -7,6 +7,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium, type Browser, type Page } from '@playwright/test';
 import { WebSocketServer } from 'ws';
+import { serveSignedGraph } from './namedGraphFixture.js';
 import { SocialGraph } from 'nostr-social-graph';
 import { finalizeEvent, getPublicKey } from 'nostr-tools/pure';
 import { afterAll, beforeAll, expect, it } from 'vitest';
@@ -30,7 +31,12 @@ beforeAll(async () => {
     worker: { format: 'iife', plugins: () => [{ name: 'readonly-graph-fixture-observer', transform(source: string, id: string) {
       if (id !== fileURLToPath(new URL('../src/relay/worker.ts', import.meta.url))) return;
       // Test-only observation of the actual live instance. No production API or lifecycle changes.
-      return source + `\nself.addEventListener('message', event => {
+      const call = 'loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY';
+      if (!source.includes(call)) throw new Error('Missing worker graph bootstrap call');
+      // Only the fixture signer and relay differ from the default signed reader.
+      const observed = source.replace(call,
+        "loadGraphBootstrap({ snapshot: JSON.parse(new URL(self.location.href).searchParams.get('snapshot')), root: DEFAULT_BOOTSTRAP_PUBKEY");
+      return observed + `\nself.addEventListener('message', event => {
         if (event.data.type !== 'fixtureGraphState') return;
         const { id, pubkey } = event.data;
         self.postMessage({ type: 'fixtureGraphState', id,
@@ -42,8 +48,9 @@ beforeAll(async () => {
   const asset = outputs.find(output => output.type === 'asset' && String(output.source).includes('NEG-OPEN'));
   if (!asset || asset.type !== 'asset') throw new Error('Production worker bundle missing');
   server = createServer((request, response) => {
-    response.setHeader('Content-Type', request.url === '/worker.js' ? 'application/javascript' : 'text/html');
-    response.end(request.url === '/worker.js' ? asset.source : '<!doctype html><title>Worker policy fixture</title>');
+    const worker = request.url?.split('?')[0] === '/worker.js';
+    response.setHeader('Content-Type', worker ? 'application/javascript' : 'text/html');
+    response.end(worker ? asset.source : '<!doctype html><title>Worker policy fixture</title>');
   }).listen(0, '127.0.0.1');
   await once(server, 'listening');
   const address = server.address();
@@ -123,15 +130,10 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
     const seed = new SocialGraph(DEFAULT_BOOTSTRAP_PUBKEY);
     seed.addFollower(DEFAULT_BOOTSTRAP_PUBKEY, owner); seed.handleEvent([seedFollow, seedMute], true);
     const seedBytes = await seed.toBinary();
-    let httpRequests = 0, abortedHttp = 0;
-    let releaseHttp: (() => void) | undefined;
-    const pendingHttp = new Promise<void>(resolve => { releaseHttp = resolve; });
-    context.on('requestfailed', request => { if (request.url().startsWith('https://graph-api.iris.to/')) abortedHttp++; });
-    await context.route('https://graph-api.iris.to/**', async route => {
-      httpRequests++;
-      if (mode === 'switch-to-custom' || mode === 'other-tab' || mode === 'pending-root-switch' || mode === 'pending-identity-switch' || mode === 'unchanged-root') await pendingHttp;
-      await route.fulfill({ body: Buffer.from(seedBytes), contentType: 'application/octet-stream', headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'x-graph-root', 'x-graph-root': DEFAULT_BOOTSTRAP_PUBKEY } }).catch(() => {});
-    });
+    let releaseDirectory!: () => void;
+    const pendingDirectory = new Promise<void>(resolve => { releaseDirectory = resolve; });
+    const delay = ['switch-to-custom', 'other-tab', 'pending-root-switch', 'pending-identity-switch', 'unchanged-root'].includes(mode);
+    const snapshot = await serveSignedGraph(context, DEFAULT_BOOTSTRAP_PUBKEY, seedBytes, delay ? pendingDirectory : undefined);
     const handoff = mode === 'root-switch' || mode === 'pending-root-switch' || mode === 'pending-identity-switch';
     const negotiations: any[] = [], negotiationPaths: string[] = [];
     const active = new Map<any, Map<string, any[]>>(), negSockets = new Set<any>();
@@ -164,41 +166,41 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
         await retain(page, await local.toBinary());
       }
       if (mode === 'invalid-cache') await retain(page, new Uint8Array([0, 1, 2]));
-      await page.evaluate(() => {
-        const win = window as any; win.policyVersions = []; win.policyWorker = new Worker('/worker.js');
+      await page.evaluate(workerUrl => {
+        const win = window as any; win.policyVersions = []; win.policyWorker = new Worker(workerUrl);
         win.policyWorker.addEventListener('message', (event: MessageEvent) => { if (event.data.type === 'socialGraphVersion') win.policyVersions.push(event.data.version); });
-      });
+      }, snapshot.workerUrl);
       await request(page, { type: 'init', config: { pubkey: handoff ? muted : owner, storeName: `policy-${mode}`, relays: [`ws://127.0.0.1:${address.port}/initial`],
         ...(mode !== 'custom-default' && mode !== 'root-switch' ? { graphBootstrap: true } : {}), blossomServers: [] } });
       if (mode === 'switch-to-custom') {
-        await expect.poll(() => httpRequests).toBe(1);
+        await expect.poll(() => snapshot.counts.directories).toBe(1);
         // Omitting the update policy must revoke the earlier explicit permission.
         await request(page, { type: 'setRelays', relays: [`ws://127.0.0.1:${address.port}/custom`] });
-        await expect.poll(() => abortedHttp).toBe(1);
-        releaseHttp!();
+        await expect.poll(() => snapshot.counts.aborted).toBe(1);
+        releaseDirectory();
       }
       if (mode === 'unchanged-root') {
-        await expect.poll(() => httpRequests).toBe(1);
+        await expect.poll(() => snapshot.counts.directories).toBe(1);
         await request(page, { type: 'setSocialGraphRoot', pubkey: owner });
-        expect(abortedHttp).toBe(0); releaseHttp!();
+        expect(snapshot.counts.aborted).toBe(0); releaseDirectory();
       }
       if (handoff) {
         if (mode === 'root-switch') await expect.poll(() => negotiations.some(filter => filter.authors?.includes(muted))).toBe(true);
-        else await expect.poll(() => httpRequests).toBe(1);
+        else await expect.poll(() => snapshot.counts.directories).toBe(1);
         await request(page, { type: mode === 'pending-identity-switch' ? 'setIdentity' : 'setSocialGraphRoot', pubkey: owner });
         if (mode !== 'root-switch') {
-          await expect.poll(() => abortedHttp).toBe(1); releaseHttp!();
+          await expect.poll(() => snapshot.counts.aborted).toBe(1); releaseDirectory();
         }
         await expect.poll(() => negotiations.some(filter => filter.authors?.includes(owner)), { timeout: 5000 }).toBe(true);
       }
       if (mode === 'other-tab' || mode === 'invalid-cache') {
         let bytes: Uint8Array;
         if (mode === 'other-tab') {
-          await expect.poll(() => httpRequests).toBe(1);
+          await expect.poll(() => snapshot.counts.directories).toBe(1);
           const otherTab = await context.newPage(); await otherTab.goto(origin);
           const local = new SocialGraph(owner); local.handleEvent([localFollow, localMute], true); local.markListIncomplete(owner, 3);
           bytes = await local.toBinary(); await retain(otherTab, bytes); await otherTab.close();
-          releaseHttp!();
+          releaseDirectory();
           await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: owner })).pubkeys).toEqual([friend]);
         } else bytes = new Uint8Array([0, 1, 2]);
         // Exercise the real five-second persistence debounce, then a later update
@@ -211,7 +213,7 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
         await expectIngestedLists(page, follow(500), mute(490));
         await request(page, { type: 'close' });
         expect(await retainedBytes(page)).toEqual([...bytes]);
-        expect(httpRequests).toBe(mode === 'other-tab' ? 1 : 0);
+        expect(snapshot.counts.directories).toBe(mode === 'other-tab' ? 1 : 0);
         expect(errors).toEqual([]);
         return;
       }
@@ -250,21 +252,24 @@ for (const mode of ['custom-default', 'explicit-bootstrap', 'retained-partial', 
       }
       await request(page, { type: 'close' });
       const graph = await saved(page);
-      expect(httpRequests).toBe((mode === 'explicit-bootstrap' || mode === 'unchanged-root') || mode === 'switch-to-custom' || mode === 'pending-root-switch' || mode === 'pending-identity-switch' ? 1 : 0);
+      expect(snapshot.counts.directories).toBe((mode === 'explicit-bootstrap' || mode === 'unchanged-root') || mode === 'switch-to-custom' || mode === 'pending-root-switch' || mode === 'pending-identity-switch' ? 1 : 0);
       expect(graph.getListRevision(owner, 3)).toMatchObject({ id: lateFollow?.id ?? ((mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? seedFollow.id : localFollow.id),
         created_at: lateFollow?.created_at ?? ((mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? 100 : 300), complete: mode !== 'retained-partial' });
       expect(graph.getListRevision(owner, 10000)).toMatchObject({ id: lateMute?.id ?? ((mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? seedMute.id : localMute.id),
         created_at: lateMute?.created_at ?? ((mode === 'explicit-bootstrap' || mode === 'unchanged-root') ? 90 : 270), complete: true });
       expect([...graph.getMutedByUser(owner)]).toEqual([handoff ? friend : muted]); expect(errors).toEqual([]);
     } finally {
-      releaseHttp?.();
+      releaseDirectory();
+      await snapshot.close();
       await context.close(); for (const socket of relay.clients) socket.terminate();
       await new Promise<void>(resolve => relay.close(() => resolve()));
+      expect(snapshot.counts.legacy).toBe(0);
+      expect(snapshot.counts.names).toBe(snapshot.counts.directories);
     }
   }, 20000);
 }
 
-for (const phase of ['pending-http', 'pending-idb', 'catchup', 'changed-signer', 'changed-account'] as const) {
+for (const phase of ['pending-snapshot', 'pending-idb', 'catchup', 'changed-signer', 'changed-account'] as const) {
   it(`keeps redundant identity idempotent during ${phase}`, async () => {
     const context = await browser.newContext({ serviceWorkers: 'block' });
     const page = await context.newPage();
@@ -275,18 +280,12 @@ for (const phase of ['pending-http', 'pending-idb', 'catchup', 'changed-signer',
     seed.handleEvent([seedFollow, seedMute], true); const seedBytes = await seed.toBinary();
     const require = createRequire(import.meta.url);
     const codec = await import(pathToFileURL(path.join(path.dirname(require.resolve('nostr-social-graph/package.json')), 'src/vendor/negentropy.js')).href);
-    let http = 0, aborted = 0, releaseHttp!: () => void, releaseNeg!: () => void;
-    const pendingHttp = new Promise<void>(resolve => { releaseHttp = resolve; });
+    let releaseDirectory!: () => void, releaseNeg!: () => void;
+    const pendingDirectory = new Promise<void>(resolve => { releaseDirectory = resolve; });
     const pendingNeg = new Promise<void>(resolve => { releaseNeg = resolve; });
     const negotiations: Array<{ socket: any; filter: any; closed: boolean; requests: any[]; ids: string[] }> = [];
     const errors: string[] = [];
-    context.on('requestfailed', request => { if (request.url().startsWith('https://graph-api.iris.to/')) aborted++; });
-    await context.route('https://graph-api.iris.to/**', async route => {
-      http++; await pendingHttp;
-      await route.fulfill({ body: Buffer.from(seedBytes), contentType: 'application/octet-stream', headers: {
-        'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'x-graph-root', 'x-graph-root': DEFAULT_BOOTSTRAP_PUBKEY,
-      } }).catch(() => {});
-    });
+    const snapshot = await serveSignedGraph(context, DEFAULT_BOOTSTRAP_PUBKEY, seedBytes, pendingDirectory);
     relay.on('connection', socket => {
       let record: typeof negotiations[number] | undefined, queue = Promise.resolve();
       const sessions = new Map<string, any>();
@@ -335,13 +334,13 @@ for (const phase of ['pending-http', 'pending-idb', 'catchup', 'changed-signer',
         keep(); (window as any).releaseIdentityRead = () => { held = false; };
         tx.oncomplete = () => db.close();
       });
-      await page.evaluate(() => { (window as any).policyWorker = new Worker('/worker.js'); });
+      await page.evaluate(workerUrl => { (window as any).policyWorker = new Worker(workerUrl); }, snapshot.workerUrl);
       const nsec = Buffer.from(key).toString('hex');
       await request(page, { type: 'init', config: { pubkey: owner, nsec, storeName: `identity-${phase}`,
         relays: [`ws://127.0.0.1:${address.port}`], graphBootstrap: phase !== 'catchup', blossomServers: [] } });
       if (phase === 'pending-idb') {
         const repeated = request(page, { type: 'setIdentity', pubkey: owner, nsec });
-        await page.waitForTimeout(150); expect(http).toBe(0);
+        await page.waitForTimeout(150); expect(snapshot.counts.directories).toBe(0);
         await page.evaluate(() => (window as any).releaseIdentityRead()); await repeated;
       } else if (phase === 'catchup') {
         await expect.poll(() => negotiations.length).toBe(1);
@@ -350,13 +349,13 @@ for (const phase of ['pending-http', 'pending-idb', 'catchup', 'changed-signer',
         expect(negotiations).toHaveLength(1); expect(negotiations[0].closed).toBe(false);
         releaseNeg();
       } else {
-        await expect.poll(() => http).toBe(1);
+        await expect.poll(() => snapshot.counts.directories).toBe(1);
         await request(page, { type: 'setIdentity', pubkey: phase === 'changed-account' ? muted : owner,
           ...(phase === 'changed-signer' ? {} : { nsec: phase === 'changed-account' ? Buffer.from(new Uint8Array(32).fill(44)).toString('hex') : nsec }) });
       }
       const changed = phase === 'changed-signer' || phase === 'changed-account';
       if (changed) {
-        await expect.poll(() => aborted).toBe(1); releaseHttp();
+        await expect.poll(() => snapshot.counts.aborted).toBe(1); releaseDirectory();
         await expect.poll(() => negotiations.length).toBeGreaterThan(0);
         const activeRoot = phase === 'changed-account' ? muted : owner;
         expect(negotiations.some(record => record.filter.authors.includes(activeRoot))).toBe(true);
@@ -364,7 +363,7 @@ for (const phase of ['pending-http', 'pending-idb', 'catchup', 'changed-signer',
         const graph = await saved(page); expect(graph.getListRevision(owner, 3)).toBeUndefined();
         expect(graph.getListRevision(owner, 10000)).toBeUndefined();
       } else {
-        if (phase !== 'catchup') { await expect.poll(() => http).toBe(1); expect(aborted).toBe(0); releaseHttp(); }
+        if (phase !== 'catchup') { await expect.poll(() => snapshot.counts.directories).toBe(1); expect(snapshot.counts.aborted).toBe(0); releaseDirectory(); }
         await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: owner })).pubkeys).toEqual([friend]);
         await expect.poll(() => negotiations.length).toBeGreaterThan(0);
         await expect.poll(() => negotiations.every(record => record.closed)).toBe(true);
@@ -374,12 +373,14 @@ for (const phase of ['pending-http', 'pending-idb', 'catchup', 'changed-signer',
         expect(graph.getListRevision(owner, 10000)).toMatchObject({ id: phase === 'catchup' ? nextMute.id : seedMute.id, complete: true });
         expect([...graph.getMutedByUser(owner)]).toEqual([muted]);
         if (phase === 'catchup') expect(negotiations.flatMap(record => record.ids).sort()).toEqual([nextFollow.id, nextMute.id].sort());
-        expect(http).toBe(phase === 'catchup' ? 0 : 1); expect(aborted).toBe(0);
+        expect(snapshot.counts.directories).toBe(phase === 'catchup' ? 0 : 1); expect(snapshot.counts.aborted).toBe(0);
       }
       expect(errors).toEqual([]);
     } finally {
-      releaseHttp(); releaseNeg(); await context.close();
+      releaseDirectory(); releaseNeg(); await snapshot.close(); await context.close();
       for (const socket of relay.clients) socket.terminate(); await new Promise<void>(resolve => relay.close(() => resolve()));
+      expect(snapshot.counts.legacy).toBe(0);
+      expect(snapshot.counts.names).toBe(snapshot.counts.directories);
     }
   }, 15000);
 }
