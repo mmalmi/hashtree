@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "git",
-      "commit": "0384e0e994042a01606ebf663ff58d93d75044e4",
+      "commit": "a4d91cff29a282bede60628e462951589170aad6",
       "archive": "archives/git-source.tar.gz",
-      "archiveSha256": "bd5988869dc7c73331a5a523374e0479ebd7e576ae698c8fd465866520042e0d",
-      "archiveBytes": 6435687,
+      "archiveSha256": "46869eedcdadaf1728502c215885985a9004719b2c6300b15fddc990325cf157",
+      "archiveBytes": 6436424,
       "lockSha256": "4d80958bc36facee9c33cc77d9a5f6ef40b7f7aced2b83e71b87f5d04bdad9ee",
       "packageSha256": "5c94658ab18e18c98904b03a25afbcd5d679def489bf3589d4a5f5851fc38163",
       "distDir": "iris-git",
@@ -48,7 +48,7 @@
         "e2e/git-favorites.spec.ts": "706f412a8562bed52981c50b35d508e5bba80eee65079eae4c28dcd9406cd0d5",
         "e2e/git-file-bar.helpers.ts": "76a3ee585fe228e29f790e4c3d40ad1065e459b3a02c20c91a1207eb9fef408c",
         "e2e/git-file-bar.spec.ts": "d97d54c674e2651ec6a049a43042539aebac900e6f8c6d78b3e3f5c4f97f6d5c",
-        "e2e/git-fips-provider-bridge.spec.ts": "ea8d785539319537a2100898c747eb123d4b20a4a82f0a75468012922cf2074a",
+        "e2e/git-fips-provider-bridge.spec.ts": "e87e34d2389e6654c93104beb33479465db4130395e32030319e7d61ffc6518b",
         "e2e/git-fork-pr.spec.ts": "fb0f3b05ae4c983e83e89187cdddf92a6cab589676aaf56147fb89ca5b211909",
         "e2e/git-forks.spec.ts": "e968c23dd547dfc4584e6f198906a6201f86697e86cd3990057b254ed7a1868c",
         "e2e/git-history-cache.spec.ts": "aa36ada8f39cb1e46260539bb4b68b7afdcfcfa080354677675fc879c74439ac",
@@ -149,7 +149,7 @@
           "expectedStatus": "passed"
         }
       },
-      "sourceTree": "3a394f27d0dd9323e8aa37bf1999f023b21a97df",
+      "sourceTree": "fa8349f751c5af615adf73aad85de002f1d629d7",
       "configSha256": "2381140a235c1dbd0d48b5800fcf46b854e0ea63dbccc3f52f73d05d4b4eb680"
     }
   ]
