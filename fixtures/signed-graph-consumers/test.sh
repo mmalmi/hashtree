@@ -10,7 +10,7 @@ container=$(docker run -d --init --network none --cap-drop ALL --shm-size=1g --c
 trap 'docker rm -f "$container" >/dev/null' EXIT
 # A local-only dummy lets browsers exercise online graph sync and WebRTC; there
 # is no path to another host. Reuse the accepted independent route and child checks.
-sudo python3 fixtures/signed-graph-consumers/namespace-setup.py "$container" "$name" "$id" "$uid" > "$STAGE/evidence/namespace.json"
+sudo python3 fixtures/signed-graph-consumers/namespace-setup.py "$container" "$name" "$id" "$uid" | sudo tee "$STAGE/evidence/namespace.json" >/dev/null
 docker exec "$container" python3 /stage/network-proof.py /stage/evidence/network.json
 docker exec "$container" bash -ec '
  export PATH=/stage/tools:$PATH
