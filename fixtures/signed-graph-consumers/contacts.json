@@ -1,0 +1,21 @@
+{
+  "source": "bf0fa40c1815d59877112a8120e105a71a2066c4",
+  "archiveSha256": "4c4a8b7d63232a3f5a850ef691c794284d8bd4580561068f640b544728403f38",
+  "archiveBytes": 165107,
+  "priorToolchain": "0a82ca9d33472282b1e892dcce87bcebdec66f68",
+  "pnpm": {
+    "url": "https://registry.npmjs.org/pnpm/-/pnpm-10.23.0.tgz",
+    "sha256": "a1cdd7b468386a9d78a081da05d6049d7e598db62a299db92df21a7062a4b183"
+  },
+  "image": "mcr.microsoft.com/playwright@sha256:feae0b1581609d3dc2ba22567b4703dd6a3e7a219984bb86a19ed35007148a91",
+  "native": {
+    "url": "https://github.com/mmalmi/hashtree/releases/download/v0.2.142/hashtree-x86_64-unknown-linux-musl.tar.gz",
+    "sha256": "2336992365786de9c017c1ded3a0cb3a52f80b4c000878e4e3b807642e809b4a",
+    "sourceCommit": "bf132d40a71f28a171a1eab3defa2c874539bf1b",
+    "executables": {
+      "htree": "a7ec2b2dce1c918865eb276e0258af176ec5a6240cab2babdbba343db89dcd17",
+      "git-remote-htree": "535495828505212bdeca74478f52bb77c06e861f9195c84e737ed7ac48bc1b49"
+    },
+    "provenance": "Accepted release binding plus exact public GitHub asset digest; old release has no SLSA attestation"
+  }
+}

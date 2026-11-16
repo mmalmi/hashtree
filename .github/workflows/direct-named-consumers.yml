@@ -1,0 +1,35 @@
+name: Direct signed graph application qualification
+on:
+  push:
+    branches: [codex/direct-named-graph-browser-ci]
+permissions:
+  contents: read
+jobs:
+  apps:
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [chat, contacts, social]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      APP: ${{ matrix.app }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check runner disk and reserve a private build directory
+        run: |
+          set -eu
+          test "$(df -PB1 .|awk 'END{print $4}')" -gt 26843545600
+          echo "STAGE=$RUNNER_TEMP/direct-signed-$APP" >> "$GITHUB_ENV"
+      - name: Fetch pinned source, SDK, tools and browser image
+        run: bash fixtures/signed-graph-consumers/prepare.sh
+      - name: Run the actual app release gates with only loopback available
+        run: bash fixtures/signed-graph-consumers/test.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ${{ matrix.app }}-${{ github.sha }}
+          path: ${{ runner.temp }}/direct-signed-${{ matrix.app }}/evidence
+          retention-days: 14
