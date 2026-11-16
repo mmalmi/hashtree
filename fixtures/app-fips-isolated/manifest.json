@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "maps",
-      "commit": "75800c54138ba213b39cbacb88f457b6db6f726b",
+      "commit": "dd617db20e99106e97292cf68831695c203fbfb1",
       "archive": "archives/maps-source.tar.gz",
-      "archiveSha256": "4930b39a5e3a0acfb829a77cef9b56db3504e946f6941aea721f8528b6903bed",
-      "archiveBytes": 2773022,
+      "archiveSha256": "3480c9df1c2f991d64746db81887d72369024ce970d0a49f627776fa51cb0fbb",
+      "archiveBytes": 2773094,
       "lockSha256": "ea78f09b79052589ed4424af4245dc17266f9fbd831294ee1af5aee0ba725c25",
       "packageSha256": "db1cbb022f4b954e1ba47dca9378245113f2e32553caca46892e606a740a419a",
       "distDir": "dist-maps",
@@ -54,7 +54,7 @@
         "e2e/fips-discovery.spec.ts"
       ],
       "requiredPermissionContexts": 1,
-      "sourceTree": "29c048730e817e518e84011805dac7f97eb73a52",
+      "sourceTree": "c5a4b625a72aceac6e608df83673f7bce001a232",
       "version": "0.1.24",
       "configSha256": "d8cb0246f6fa8907d60b4e6f0e4120b42a6e67847b1088dedd07fcedd98494a5",
       "expectedBrowserReports": 1,
