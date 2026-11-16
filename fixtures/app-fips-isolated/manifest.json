@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "video",
-      "commit": "b03ea97a6c68f5e5e5dab16445c1b08a18a08cbe",
+      "commit": "22a529ec4d434ad5ae31149f80a3373e4ada47a8",
       "archive": "archives/video-source.tar.gz",
-      "archiveSha256": "c643c13454ba77b7fb8eb29f0c1daa2ded732e3f56d7e0b41c98160bb69d89b8",
-      "archiveBytes": 48261462,
+      "archiveSha256": "86344051b97b1706555f2bac27ef1f1b2ff0c64604c6aa3c3a1596a020ff7403",
+      "archiveBytes": 48261619,
       "lockSha256": "26467e43a71c3d967c16167e562bc57de2592f3d8467e27d2b3d24482539ff0a",
       "packageSha256": "86696ce447565d94a638c0ea484927b0f9b7e7eac34c53dc61fface0d8939cab",
       "distDir": "dist-video",
@@ -65,7 +65,7 @@
         "e2e/users-page.spec.ts": "957c45e52869d8bb977674d66fc03a205676e0cc1d9eb40eaa7f6b0ad8a6543c",
         "e2e/video-app.spec.ts": "952bcf3f02fa3b9fab14785bbea4f234bbd8bb81fd301b419ff5f905cbc2b301",
         "e2e/video-direct-nav.spec.ts": "edc275ce8a1aab0dd5cbe6fefa7bfaf11bd144b393d3f396169828078724bd7a",
-        "e2e/video-events.spec.ts": "95f156efaf81b412df851710684f022bcfa2c4714464987a133e7f529cec945b",
+        "e2e/video-events.spec.ts": "c90456ca88005cecd5d3b09b30b36c36c7fc3ff87b43801c710458cae3069976",
         "e2e/video-feed-follows.spec.ts": "83e2b4631ed4274fa738f052f33479d9329797f462c7b0ba4fae52420bbbcefc",
         "e2e/video-remote-signer.spec.ts": "37e63f4be8d798afd2936309034d7ee05f78317eae281a9ce78f2bbb66d77cf4",
         "e2e/video-search.spec.ts": "c575ee3e3fc49da1a4323bfffd2d1afa58658aac22ea2b8db9847620c66c5084",
@@ -91,7 +91,7 @@
         "e2e/fips-discovery.spec.ts"
       ],
       "requiredPermissionContexts": 1,
-      "sourceTree": "9758257d1db86e8fd65d2941fd715fea17dbc1c1",
+      "sourceTree": "7c3e70fd77f857bfccfbeefef6048fdccf0fd903",
       "version": "0.1.13",
       "configSha256": "78acbe216fa472e0b153df37988331dce41a6202152498fcec03dfd921a97a5b",
       "expectedBrowserReports": 1,
