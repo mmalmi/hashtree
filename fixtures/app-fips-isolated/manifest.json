@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "calendar",
-      "commit": "96c43efcfe90e693b52f08f2f181c5410d685aab",
+      "commit": "976bba88bd4028d284661f4b55124e3952452a35",
       "archive": "archives/calendar-source.tar.gz",
-      "archiveSha256": "70cf823983ab6fa16d64dff346a419d794365f07e78a5e27dc496af49dfe2a2a",
-      "archiveBytes": 573646,
+      "archiveSha256": "d49661cd4de257277781b5e62689f0607c2ddf7aa1aa85995fcadc38b68011fe",
+      "archiveBytes": 573706,
       "lockSha256": "1be2c06586e1b3a23390a021930799724befa39dc7ce1bd5897ebb147c1f5adc",
       "packageSha256": "291ea01719fdb1dc4d68bcfffd928ccaf7f5e69d804a8db7087b79e33cb77c80",
       "distDir": "dist-calendar",
@@ -56,7 +56,7 @@
         "e2e/fips-discovery.spec.ts"
       ],
       "requiredPermissionContexts": 1,
-      "sourceTree": "1eecf472305bd2a63707603a4060b9f5c8136285",
+      "sourceTree": "8633ceb089bd9fffbe0db241a4765a3b28c0f691",
       "version": "0.1.21",
       "configSha256": "cadd472832b210d4ae6976634c00b99265de95ced9867907a79f4174faa10bf8",
       "expectedBrowserReports": 2,
