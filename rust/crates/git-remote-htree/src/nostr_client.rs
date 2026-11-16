@@ -1258,6 +1258,16 @@ impl NostrClient {
         decode_tree_node(data_to_decode).context("Failed to decode tree node")
     }
 
+    /// Inspect an already-uploaded immutable Git root with the normal native decoder.
+    pub fn prebuilt_git_refs(&self, hash: &str, key: &ObjectKey) -> Result<HashMap<String, String>> {
+        block_on_result(self.fetch_refs_from_hashtree(hash, Some(key)))
+    }
+
+    /// Re-read the named root from the configured Nostr relays before a conditional publication.
+    pub fn uncached_signed_git_refs(&mut self, name: &str) -> Result<FetchedRefs> {
+        self.refetch_refs_without_local_daemon(name, 10)
+    }
+
     /// Fetch git refs from hashtree structure
     /// Structure: root -> .git/ -> refs/ -> heads/main -> <sha>
     pub(crate) async fn fetch_refs_from_hashtree(

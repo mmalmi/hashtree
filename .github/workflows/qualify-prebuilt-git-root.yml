@@ -1,0 +1,38 @@
+name: Qualify prebuilt Git root publisher
+on:
+  push:
+    branches: ["codex/qualify-prebuilt-git-root-20261116"]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 55
+    env:
+      CARGO_BUILD_JOBS: 3
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: 0
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify source and install Rust
+        run: |
+          test "$(git rev-parse HEAD^)" = 6058c7b3e3807d11b828459fa1d39c2e702e69bd
+          test "$(uname -m)" = arm64
+          archive="$RUNNER_TEMP/rust-1.99.1-aarch64-apple-darwin.tar.xz"
+          curl --fail --location --output "$archive" https://static.rust-lang.org/dist/2026-10-15/rust-1.99.1-aarch64-apple-darwin.tar.xz
+          echo "30976378b6aaefd1861ba475905c6ba22a44c981418ce52285006af26337f98c  $archive" | shasum -a 256 --check
+          tar -xJf "$archive" -C "$RUNNER_TEMP"
+          "$RUNNER_TEMP/rust-1.99.1-aarch64-apple-darwin/install.sh" --prefix="$RUNNER_TEMP/rust-toolchain" --components=rustc,cargo,rust-std-aarch64-apple-darwin --disable-ldconfig
+          echo "$RUNNER_TEMP/rust-toolchain/bin" >> "$GITHUB_PATH"
+          echo "RUSTC=$RUNNER_TEMP/rust-toolchain/bin/rustc" >> "$GITHUB_ENV"
+      - name: Build from the frozen dependency closure
+        run: bash rust/scripts/qualify-prebuilt-git-root.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: prebuilt-git-root-macos-arm64
+          path: ${{ runner.temp }}/qualified/
+          if-no-files-found: error
+          retention-days: 5
