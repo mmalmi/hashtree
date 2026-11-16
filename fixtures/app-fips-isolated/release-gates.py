@@ -14,7 +14,7 @@ steps.append({'name':'dry-run','command':['node','scripts/release-site.mjs',app,
 if app=='git':
     original=next(s for s in steps if s['command']==['pnpm','run','test:e2e:git'])
     position=steps.index(original)
-    steps=[steps[0],dict(original,name='restored-peer',command=original['command']+['--grep','connected Git browsers exchange events and cached files on the same peer connection'],gitShard=1),*steps[position+1:]]
+    steps=[steps[0],dict(original,name='restored-peer',command=original['command']+['--grep','connected Git browsers exchange events and cached files on the same peer connection'],gitShard=1),dict(original,name='comment-refresh',command=original['command']+['--grep','issue comments remain visible after refresh','--repeat-each','3'],gitShard=1),*steps[position+1:]]
 checks=runpy.run_path('/stage/procedure/browser-results.py')
 result={'allAppGatesFromCurrentRun':True,'reusedAppScopes':[],'source':spec['commit'],'profileSha256':sha(root/spec['releaseProfilePath']),'steps':[],'passed':False};cache=None
 (evidence/'release-plan.json').write_text(json.dumps({'profile':profile,'steps':steps},indent=2)+'\n')

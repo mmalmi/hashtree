@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "git",
-      "commit": "1590d4e09dc6e359eb0a4f073252b9a48c4b3b0a",
+      "commit": "95aa84aed712d25eede00d7449ad9bfe19aa18c0",
       "archive": "archives/git-source.tar.gz",
-      "archiveSha256": "71448b90610981421e1e23dd82206ca0309daeed2206ec5e7d9e27f9b58ba14f",
-      "archiveBytes": 6436523,
+      "archiveSha256": "3905561112b973b5d21672d199f545e26c4e32a243b2492df7cbfa311d970be9",
+      "archiveBytes": 6436949,
       "lockSha256": "4d80958bc36facee9c33cc77d9a5f6ef40b7f7aced2b83e71b87f5d04bdad9ee",
       "packageSha256": "bf26000c08c6620e4ad387102a4a559ddd88a4df5729f94b624a024c15697ffd",
       "distDir": "iris-git",
@@ -149,7 +149,7 @@
           "expectedStatus": "passed"
         }
       },
-      "sourceTree": "3df9bbdc177cd4f3fd50180502956af9a0fb1bdf",
+      "sourceTree": "7c5af2321150187b42c243a7609bccbcf0b49876",
       "configSha256": "2381140a235c1dbd0d48b5800fcf46b854e0ea63dbccc3f52f73d05d4b4eb680"
     }
   ]
