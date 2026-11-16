@@ -20,12 +20,12 @@
   "apps": [
     {
       "id": "video",
-      "commit": "252c70623acdc8ceee8d9e97491b2003be48039d",
+      "commit": "b03ea97a6c68f5e5e5dab16445c1b08a18a08cbe",
       "archive": "archives/video-source.tar.gz",
-      "archiveSha256": "5c45f0ae4ef0f227d404f0664ffb4bf5ac1308c21fe3ae26b89d73ef99bad3b8",
-      "archiveBytes": 48260347,
-      "lockSha256": "4a004664b5a43c415ecc58d4cc34d2b0ecde668bfe569678d950ed0f3ea0e3b7",
-      "packageSha256": "c944d45239ac990767ec1e746523494f9e70083326d589bcc02e0010caec8f0a",
+      "archiveSha256": "c643c13454ba77b7fb8eb29f0c1daa2ded732e3f56d7e0b41c98160bb69d89b8",
+      "archiveBytes": 48261462,
+      "lockSha256": "26467e43a71c3d967c16167e562bc57de2592f3d8467e27d2b3d24482539ff0a",
+      "packageSha256": "86696ce447565d94a638c0ea484927b0f9b7e7eac34c53dc61fface0d8939cab",
       "distDir": "dist-video",
       "buildFromSource": true,
       "releaseProfilePath": "scripts/release-site.mjs",
@@ -65,7 +65,7 @@
         "e2e/users-page.spec.ts": "957c45e52869d8bb977674d66fc03a205676e0cc1d9eb40eaa7f6b0ad8a6543c",
         "e2e/video-app.spec.ts": "952bcf3f02fa3b9fab14785bbea4f234bbd8bb81fd301b419ff5f905cbc2b301",
         "e2e/video-direct-nav.spec.ts": "edc275ce8a1aab0dd5cbe6fefa7bfaf11bd144b393d3f396169828078724bd7a",
-        "e2e/video-events.spec.ts": "452617e55305f223dfffac77181bd446e742472568e2d35a20172d75081b253b",
+        "e2e/video-events.spec.ts": "95f156efaf81b412df851710684f022bcfa2c4714464987a133e7f529cec945b",
         "e2e/video-feed-follows.spec.ts": "83e2b4631ed4274fa738f052f33479d9329797f462c7b0ba4fae52420bbbcefc",
         "e2e/video-remote-signer.spec.ts": "37e63f4be8d798afd2936309034d7ee05f78317eae281a9ce78f2bbb66d77cf4",
         "e2e/video-search.spec.ts": "c575ee3e3fc49da1a4323bfffd2d1afa58658aac22ea2b8db9847620c66c5084",
@@ -91,7 +91,7 @@
         "e2e/fips-discovery.spec.ts"
       ],
       "requiredPermissionContexts": 1,
-      "sourceTree": "ba816f701d99abe02082d57b1c63a78f70136723",
+      "sourceTree": "9758257d1db86e8fd65d2941fd715fea17dbc1c1",
       "version": "0.1.13",
       "configSha256": "78acbe216fa472e0b153df37988331dce41a6202152498fcec03dfd921a97a5b",
       "expectedBrowserReports": 1,
@@ -134,9 +134,9 @@
         },
         {
           "package": "@hashtree/worker",
-          "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.41/hashtree-worker-0.4.25.tgz",
-          "version": "0.4.25",
-          "integrity": null
+          "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.47/hashtree-worker-0.4.29.tgz",
+          "version": "0.4.29",
+          "integrity": "sha512-IlrgDIp2ZQjHCqZV0+0A+AKbj0fhZ9naerM207jJYZA34ZHFSXzQWr6Tgo7VLHZEXKroOdFSIMiVNPQx2hU/rw=="
         }
       ]
     }
