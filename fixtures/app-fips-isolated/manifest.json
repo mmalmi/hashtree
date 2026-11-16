@@ -107,7 +107,7 @@
       "composedBrowserProfile": {
         "sourceScripts": {
           "test:e2e:release": "PW_WORKERS=${PW_WORKERS:-2} pnpm run test:e2e:calendar && PW_WORKERS=1 pnpm run test:e2e:fips",
-          "test:e2e:calendar": "playwright test e2e/public-follow.spec.ts e2e/calendar-booking.spec.ts e2e/calendar-events.spec.ts e2e/calendar-layout.spec.ts --project=chromium",
+          "test:e2e:calendar": "playwright test e2e/public-follow.spec.ts e2e/calendar-booking.spec.ts e2e/calendar-sharing.spec.ts e2e/calendar-events.spec.ts e2e/calendar-layout.spec.ts --project=chromium",
           "test:e2e:fips": "playwright test e2e/fips-provider-bridge.spec.ts e2e/fips-discovery.spec.ts --project=chromium"
         },
         "phases": [
