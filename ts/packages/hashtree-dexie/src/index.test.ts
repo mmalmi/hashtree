@@ -2,6 +2,7 @@
  * Unit tests for DexieStore
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import Dexie from 'dexie';
 import { toHex } from '@hashtree/core';
 import { DexieStore } from './index.js';
 
@@ -30,6 +31,54 @@ describe('DexieStore', () => {
   afterEach(async () => {
     store.close();
     await DexieStore.deleteDatabase(TEST_DB_NAME);
+  });
+
+  it('backfills an existing v3 cache and preserves its most recent reads', async () => {
+    const old = new Dexie(TEST_DB_NAME);
+    old.version(3).stores({ blobs: '&hashHex, lastAccess', accesses: '&hashHex, lastAccess' });
+    const a = makeHash(Uint8Array.of(1)), b = makeHash(Uint8Array.of(2));
+    await old.table('blobs').bulkPut([
+      { hashHex: toHex(a), data: new Uint8Array(10), lastAccess: 1 },
+      { hashHex: toHex(b), data: new Uint8Array(20), lastAccess: 2 },
+    ]);
+    await old.table('accesses').put({ hashHex: toHex(a), lastAccess: 3 });
+    old.close();
+    expect(await store.totalBytes()).toBe(30);
+    expect(await store.evict(10)).toBe(1);
+    expect(await store.has(a)).toBe(true);
+    expect(await store.totalBytes()).toBe(10);
+  });
+
+  it.each([1, 2])('upgrades a v%i cache that predates the access table', async (version) => {
+    const old = new Dexie(TEST_DB_NAME);
+    old.version(version).stores({ blobs: version === 1 ? '&hashHex' : '&hashHex, lastAccess' });
+    const hash = makeHash(Uint8Array.of(1));
+    await old.table('blobs').put({ hashHex: toHex(hash), data: new Uint8Array(11),
+      ...(version === 2 ? { lastAccess: 2 } : {}) });
+    old.close();
+    expect(await store.totalBytes()).toBe(11);
+    expect(await store.get(hash)).toEqual(new Uint8Array(11));
+    expect(await store.evict(0)).toBe(1);
+    expect(await store.totalBytes()).toBe(0);
+  });
+
+  it('shares exact accounting across writes, replacements, late touches and clears', async () => {
+    const other = new DexieStore(TEST_DB_NAME);
+    const a = makeHash(Uint8Array.of(1)), b = makeHash(Uint8Array.of(2));
+    try {
+      await Promise.all([store.put(a, new Uint8Array(10)), other.put(b, new Uint8Array(20))]);
+      expect(await store.totalBytes()).toBe(30);
+      await other.putMany([{hash: a, data: new Uint8Array(4)}, {hash: a, data: new Uint8Array(1)}]);
+      expect(await store.totalBytes()).toBe(21);
+      await store.get(b);
+      expect(await other.delete(b)).toBe(true);
+      // Flush this connection's earlier read after the deletion on the other connection.
+      await store.put(a, new Uint8Array(7));
+      expect(await store.delete(b)).toBe(false);
+      expect(await other.totalBytes()).toBe(7);
+      await other.clear();
+      expect(await store.totalBytes()).toBe(0);
+    } finally { other.close(); }
   });
 
   describe('putMany', () => {
@@ -362,10 +411,10 @@ describe('DexieStore', () => {
       const accessDeletes = vi.spyOn(db.accesses, 'bulkDelete');
       try {
         expect(await store.totalBytes()).toBe(26175);
-        expect(getAll.mock.calls.filter(call => call[1] === 64 || (call[0] as { count?: number })?.count === 64).length).toBeGreaterThan(1);
+        expect(getAll).not.toHaveBeenCalled();
         expect(await store.evict(0, protectedHashes)).toBe(100);
-        expect(bulkGet.mock.calls.length).toBeGreaterThan(1);
-        expect(bulkGet.mock.calls.every(([keys]) => (keys as string[]).length <= 64)).toBe(true);
+        expect(bulkGet).not.toHaveBeenCalled();
+        expect(getAll.mock.contexts.some(table => (table as IDBObjectStore).name === 'blobs')).toBe(false);
         expect(blobDeletes.mock.calls.length).toBeLessThan(10);
         expect(blobDeletes.mock.calls).toEqual(accessDeletes.mock.calls);
         expect(await db.accesses.count()).toBe(50);
@@ -378,8 +427,11 @@ describe('DexieStore', () => {
         const data = new Uint8Array(100); data[0] = index;
         await store.put(makeHash(data), data);
       }
-      const removed = await Promise.all([store.evict(100), store.evict(100)]);
-      expect(removed.reduce((total, count) => total + count, 0)).toBe(129);
+      const other = new DexieStore(TEST_DB_NAME);
+      try {
+        const removed = await Promise.all([store.evict(100), other.evict(100)]);
+        expect(removed.reduce((total, count) => total + count, 0)).toBe(129);
+      } finally { other.close(); }
       expect(await store.count()).toBe(1);
       expect(await store.totalBytes()).toBe(100);
     });
@@ -392,6 +444,7 @@ describe('DexieStore', () => {
       try {
         expect(await store.evict(0)).toBe(0);
         expect(await db.accesses.count()).toBe(2);
+        expect(await store.totalBytes()).toBe(200);
         for (const hash of hashes) expect(await store.has(hash)).toBe(true);
       } finally { failed.mockRestore(); }
     });

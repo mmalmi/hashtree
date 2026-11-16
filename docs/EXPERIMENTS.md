@@ -3646,3 +3646,13 @@ tests passed; the production CLI library passes strict Clippy with dependency
 linting excluded. Strict all-target lint remains blocked by unrelated existing
 vendored-Heed, storage-test and pool-migration warnings; those were left outside
 this routing change.
+
+### Browser cache byte accounting (2026-11-16)
+
+A fresh Chrome profile stored 256 blocks of 128 KiB each. The worker checked
+a 64 MiB limit and then a 24 MiB limit. Counting the payload bytes returned by
+IndexedDB during each check gave 32 MiB and 72 MiB with Dexie 0.1.13. The same
+checks with the transactional counter returned zero payload bytes. Both runs
+kept 256 blocks at the first limit and 192 at the second. This measures quota
+accounting and eviction on a disposable block cache. Walking protected event
+indexes and admitting new relay events have separate costs.

@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.46 - 2026-11-16
+
+- Dexie 0.1.15 tracks cached bytes as blocks are written and removed. Quota
+  checks read a single counter. Eviction reads sizes and access times without
+  loading block contents. Existing caches are indexed once on upgrade.
+
 ## TypeScript runtime 0.5.44 - 2026-11-11
 
 - Worker 0.4.28 recomputes follow distances one second after follow-list
