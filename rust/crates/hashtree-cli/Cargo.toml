@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-cli"
-version = "0.4.5"
+version = "0.4.6"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -130,7 +130,7 @@ experimental-decentralized-pubsub = []
 public-provider-stress = []
 
 [dev-dependencies]
-nvpn-fips-core = "=0.4.119"
+nvpn-fips-core = "=0.4.123"
 tempfile.workspace = true
 walkdir = "2"
 nostr.workspace = true

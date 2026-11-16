@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.6 - 2026-11-16
+
+### Compatibility
+
+- Use `nostr-pubsub-fips` 0.6.6 and FIPS core 0.4.123. The FIPS pubsub client
+  gains public peer feeds with Negentropy catch-up, wire-compatible with the
+  TypeScript client; the CLI's own pubsub behavior is unchanged. Applications
+  embedding the CLI crate, such as Iris Drive, can then use those feeds.
+
 ## 0.4.5 - 2026-11-11
 
 Includes `git-remote-htree` 0.4.2.
