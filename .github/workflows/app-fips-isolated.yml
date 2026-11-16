@@ -16,7 +16,7 @@ jobs:
       FIPS_APPS: ${{ matrix.app }}
     steps:
       - name: Set task-exclusive stage
-        run: echo "FIPS_STAGE=$RUNNER_TEMP/app-runtime61-${{ matrix.app }}" >> "$GITHUB_ENV"
+        run: echo "FIPS_STAGE=$RUNNER_TEMP/app-direct-graph-${{ matrix.app }}" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
@@ -28,7 +28,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: app-runtime61-${{ matrix.app }}-${{ github.sha }}
-          path: ${{ runner.temp }}/app-runtime61-${{ matrix.app }}/evidence
+          name: app-direct-graph-${{ matrix.app }}-${{ github.sha }}
+          path: ${{ runner.temp }}/app-direct-graph-${{ matrix.app }}/evidence
           if-no-files-found: error
           retention-days: 7
