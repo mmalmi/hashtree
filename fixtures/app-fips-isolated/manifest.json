@@ -20,12 +20,12 @@
   "apps": [
     {
       "id": "git",
-      "commit": "a4d91cff29a282bede60628e462951589170aad6",
+      "commit": "367d7c76c776461461b2a9268b89000823728690",
       "archive": "archives/git-source.tar.gz",
-      "archiveSha256": "46869eedcdadaf1728502c215885985a9004719b2c6300b15fddc990325cf157",
-      "archiveBytes": 6436424,
+      "archiveSha256": "dae93380d7347d704e1e1d58324beda04163262c037a34a46adf742416d89064",
+      "archiveBytes": 6436434,
       "lockSha256": "4d80958bc36facee9c33cc77d9a5f6ef40b7f7aced2b83e71b87f5d04bdad9ee",
-      "packageSha256": "5c94658ab18e18c98904b03a25afbcd5d679def489bf3589d4a5f5851fc38163",
+      "packageSha256": "bf26000c08c6620e4ad387102a4a559ddd88a4df5729f94b624a024c15697ffd",
       "distDir": "iris-git",
       "buildFromSource": true,
       "releaseProfilePath": "scripts/release-profiles.mjs",
@@ -149,7 +149,7 @@
           "expectedStatus": "passed"
         }
       },
-      "sourceTree": "fa8349f751c5af615adf73aad85de002f1d629d7",
+      "sourceTree": "f6b2dab30d181ae815d3a00dd6e4dc3b406d5845",
       "configSha256": "2381140a235c1dbd0d48b5800fcf46b854e0ea63dbccc3f52f73d05d4b4eb680"
     }
   ]
