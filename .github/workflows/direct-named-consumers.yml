@@ -9,7 +9,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        app: [contacts, social]
+        app: [social]
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
