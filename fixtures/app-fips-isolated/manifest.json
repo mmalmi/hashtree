@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Fresh exact-source runtime61 maps full release profile and both-endpoint browser recovery; no historical build or result reuse",
+  "purpose": "Qualify signed mobile graph updates against the complete app release profile.",
   "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
   "imageTagForProvenance": "v1.60.0-noble",
   "pnpm": {
@@ -20,12 +20,12 @@
   "apps": [
     {
       "id": "maps",
-      "commit": "d4f412740595adda716d7f0e4faa0d33c436a20a",
+      "commit": "75800c54138ba213b39cbacb88f457b6db6f726b",
       "archive": "archives/maps-source.tar.gz",
-      "archiveSha256": "22d2a0dbac0efab18a057e47ef3dcde2772e2a3796979e0776b71cd51b7277f1",
-      "archiveBytes": 2765631,
-      "lockSha256": "9c596612ef3471ab09f04422dddcdce91c2b68c8e982b7114195524d1e72eb13",
-      "packageSha256": "3c695642a00a7c9f0f7fad542e5e46cffc1f598b4ca583b935c754736c9134dd",
+      "archiveSha256": "4930b39a5e3a0acfb829a77cef9b56db3504e946f6941aea721f8528b6903bed",
+      "archiveBytes": 2773022,
+      "lockSha256": "ea78f09b79052589ed4424af4245dc17266f9fbd831294ee1af5aee0ba725c25",
+      "packageSha256": "db1cbb022f4b954e1ba47dca9378245113f2e32553caca46892e606a740a419a",
       "distDir": "dist-maps",
       "buildFromSource": true,
       "releaseProfilePath": "scripts/release-profiles.mjs",
@@ -38,7 +38,7 @@
         "e2e/fixtures.ts": "1806469eba3151164bb05fe4649b9233b1c30b7d62311e849cbf7228d27c73fa",
         "e2e/fixtures/localFipsWebSocketSeed.ts": "9ab30a2f14107808705b45fc3bc3bcecd4470c2c56c113ee516cc6daabbcf07d",
         "e2e/htree-blossom.sh": "46f97c8169592d16471342c3330bf739c78395f7c2e40cacc51df9c4a6c92087",
-        "e2e/maps-active-place.spec.ts": "8b7a0bf2652a57eaa400f83a1cbd8a2710eef9915b3b545880fa0d63dd70def0",
+        "e2e/maps-active-place.spec.ts": "0e4e0844b06bdb175c4972a2b9f17b1e0a69fd8401543403c7a344d5884a49a6",
         "e2e/maps-app.spec.ts": "0d703e84753a730b219eaf5425cb6187b39512ad1d9aef9bde3b562bec5f495b",
         "e2e/maps-pins.spec.ts": "b296ada44fd07d3f761471fffee637739ad4e8b875774c436f36f453611e2fbf",
         "e2e/nostr-test-keys.ts": "37d4f7a1ddf1d0ab9395895973123265ac36a562c713f1c9aed34b04813a6288",
@@ -54,132 +54,52 @@
         "e2e/fips-discovery.spec.ts"
       ],
       "requiredPermissionContexts": 1,
-      "sourceTree": "8c3d29a919b93c37120b41ad360bac9111394124",
-      "version": "0.1.23",
+      "sourceTree": "29c048730e817e518e84011805dac7f97eb73a52",
+      "version": "0.1.24",
       "configSha256": "d8cb0246f6fa8907d60b4e6f0e4120b42a6e67847b1088dedd07fcedd98494a5",
       "expectedBrowserReports": 1,
       "expectedReloadProofGroups": 1,
       "acceptedDependencyRelease": {
-        "tag": "runtime-v0.0.61",
-        "source": "d1f7dba4bfbfc6742ee2f597db0432866c1cf3ce",
-        "receiptSha256": "cf8f626a11c5d1f7f82ae81afcd3f00cb065330fc1fc8cfff3d4718105ceba0c",
-        "packages": [
-          {
-            "package": "@fips/core",
-            "version": "0.0.56",
-            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-core-0.0.56.tgz",
-            "integrity": "sha512-vXfPsXWlXIEZFFl6K+x9YCwOhRPQr4gjw+GfWOfuyI1RW1O1tcdKQBcDbIszByNWVCt/Rs8UOAzv+k+iXNlIOQ==",
-            "sha256": "0b044cb417a01a7d495a1675dc4e650af2fec19224c89fe9beb8ccb56d6fc0a0",
-            "bytes": 208695,
-            "manifestSha256": "1be5a1c96bbca8a8df37d2e5248eb736b1e1a6c69c12c35aa23367b602fda308"
-          },
-          {
-            "package": "@fips/browser",
-            "version": "0.0.21",
-            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-browser-0.0.21.tgz",
-            "integrity": "sha512-2kg5ffZ2QFufI8Zq9il8DpZYtVHkIVvl4e262hC7Nsqq5prxeIBjMi7lfuyANjiftX0D3Cre75JhlxjO0jmXIg==",
-            "sha256": "3ea2f7e33857e65bf379fd9896a9df8867292cfc31c23567e598abc02c096208",
-            "bytes": 6647,
-            "manifestSha256": "9642f77c0dfd15a888f28b2da2ab21ef122acfcab1b62dc25bd53e78ecf53b4e"
-          },
-          {
-            "package": "@fips/transport-webrtc",
-            "version": "0.0.60",
-            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-webrtc-0.0.60.tgz",
-            "integrity": "sha512-te9hazkbDXnV4hBYX4pIX594WDY5XVClh9tZCVAm5GzE8bHyoFEAhIpyWiUpbciawaYdRLubkcar3D8A7bViYA==",
-            "sha256": "646d05f2b89336a8a9d38f1d5155d3374ecef27a0bdcb28690c17c04e9a75b12",
-            "bytes": 59924,
-            "manifestSha256": "b655179fecdf3a6ae2806589648145d9f601d5580ad787de3b7d5ab5c46e570d"
-          },
-          {
-            "package": "@fips/transport-websocket",
-            "version": "0.0.14",
-            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-websocket-0.0.14.tgz",
-            "integrity": "sha512-B+CUOBXuMwfDzLCnr+QfLf/MuA4wcV+36mqwH+RS0DNRYFcoGgM60MZiwcjFVCb6xzl0ZTUYe9Sla+VJ2MJBnQ==",
-            "sha256": "dd1abad3b581b7326c4506ce6d66902fd05b6bb030b248d259f9e6a479637fb7",
-            "bytes": 17462,
-            "manifestSha256": "48a827d454cf0f79e526a2ac730213e6e0e37d76d77e9003026ffbe01e923f60"
-          }
-        ],
-        "closedReleasePackages": [
-          {
-            "package": "@fips/core",
-            "version": "0.0.56",
-            "bytes": 208695,
-            "sha256": "0b044cb417a01a7d495a1675dc4e650af2fec19224c89fe9beb8ccb56d6fc0a0",
-            "integrity": "sha512-vXfPsXWlXIEZFFl6K+x9YCwOhRPQr4gjw+GfWOfuyI1RW1O1tcdKQBcDbIszByNWVCt/Rs8UOAzv+k+iXNlIOQ==",
-            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-core-0.0.56.tgz"
-          },
-          {
-            "package": "@fips/browser",
-            "version": "0.0.21",
-            "bytes": 6647,
-            "sha256": "3ea2f7e33857e65bf379fd9896a9df8867292cfc31c23567e598abc02c096208",
-            "integrity": "sha512-2kg5ffZ2QFufI8Zq9il8DpZYtVHkIVvl4e262hC7Nsqq5prxeIBjMi7lfuyANjiftX0D3Cre75JhlxjO0jmXIg==",
-            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-browser-0.0.21.tgz"
-          },
-          {
-            "package": "@fips/transport-ethernet",
-            "version": "0.0.38",
-            "bytes": 11453,
-            "sha256": "28423a6e75b249cfd3d1c28a30abad4b1fb44a7a61878be8fe8753e9a21598fa",
-            "integrity": "sha512-7JRTv4PeRPyJV7ZIdkXwFPlWmxfU7CcissrQ8mZYzi3kM6AQ9H4F43nOA7Roy3bWP0y/lUgpRZMBv0ovBQ7UWw==",
-            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-ethernet-0.0.38.tgz"
-          },
-          {
-            "package": "@fips/transport-memory",
-            "version": "0.0.16",
-            "bytes": 4215,
-            "sha256": "fd160c62ba8edb2ec2032af966e7d6b24b6ca991d32fd72eb00a626fff8216ef",
-            "integrity": "sha512-Yk68SecjBFCgffhN7qyfgEdkB3C86sUhU57dUrx7knyGtzEUTFw12K3qGY8F6wkrQ9wVlZ2PHBkPV0fY86QOdQ==",
-            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-memory-0.0.16.tgz"
-          },
-          {
-            "package": "@fips/transport-webrtc",
-            "version": "0.0.60",
-            "bytes": 59924,
-            "sha256": "646d05f2b89336a8a9d38f1d5155d3374ecef27a0bdcb28690c17c04e9a75b12",
-            "integrity": "sha512-te9hazkbDXnV4hBYX4pIX594WDY5XVClh9tZCVAm5GzE8bHyoFEAhIpyWiUpbciawaYdRLubkcar3D8A7bViYA==",
-            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-webrtc-0.0.60.tgz"
-          },
-          {
-            "package": "@fips/transport-websocket",
-            "version": "0.0.14",
-            "bytes": 17462,
-            "sha256": "dd1abad3b581b7326c4506ce6d66902fd05b6bb030b248d259f9e6a479637fb7",
-            "integrity": "sha512-B+CUOBXuMwfDzLCnr+QfLf/MuA4wcV+36mqwH+RS0DNRYFcoGgM60MZiwcjFVCb6xzl0ZTUYe9Sla+VJ2MJBnQ==",
-            "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-websocket-0.0.14.tgz"
-          }
-        ]
+        "tag": "v4.2.0",
+        "source": "a01737b3035880eb5aeb3fc6fe5381c6c50c39c8",
+        "receiptSha256": "158b105ecccb6d5049e4d9944f40c59ea66ac504a9539e11948f33c5bad66f03"
       },
       "installedRuntimeExpectations": [
         {
           "package": "@fips/core",
-          "version": "0.0.56",
-          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-core-0.0.56.tgz",
-          "integrity": "sha512-vXfPsXWlXIEZFFl6K+x9YCwOhRPQr4gjw+GfWOfuyI1RW1O1tcdKQBcDbIszByNWVCt/Rs8UOAzv+k+iXNlIOQ==",
-          "manifestSha256": "1be5a1c96bbca8a8df37d2e5248eb736b1e1a6c69c12c35aa23367b602fda308"
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.62/fips-core-0.0.57.tgz",
+          "version": "0.0.57",
+          "integrity": "sha512-POUsLcusLEBc8gNXRrqP9FPYSUUbaxX3DzvtejEg6rNBaleVCPt3K445DUUj3p6J6vZDag+zolD4bZ9HFoxPHw=="
         },
         {
           "package": "@fips/browser",
-          "version": "0.0.21",
-          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-browser-0.0.21.tgz",
-          "integrity": "sha512-2kg5ffZ2QFufI8Zq9il8DpZYtVHkIVvl4e262hC7Nsqq5prxeIBjMi7lfuyANjiftX0D3Cre75JhlxjO0jmXIg==",
-          "manifestSha256": "9642f77c0dfd15a888f28b2da2ab21ef122acfcab1b62dc25bd53e78ecf53b4e"
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.62/fips-browser-0.0.22.tgz",
+          "version": "0.0.22",
+          "integrity": "sha512-/bCzxQoLHE7sOaHKj+beKGZNej6ja5nifG1+enn8PKFqm7KfjmhzZp8RqIgafIkT6MRoQVuIOzv8CMM9WuOmKQ=="
         },
         {
           "package": "@fips/transport-webrtc",
-          "version": "0.0.60",
-          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-webrtc-0.0.60.tgz",
-          "integrity": "sha512-te9hazkbDXnV4hBYX4pIX594WDY5XVClh9tZCVAm5GzE8bHyoFEAhIpyWiUpbciawaYdRLubkcar3D8A7bViYA==",
-          "manifestSha256": "b655179fecdf3a6ae2806589648145d9f601d5580ad787de3b7d5ab5c46e570d"
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.62/fips-transport-webrtc-0.0.61.tgz",
+          "version": "0.0.61",
+          "integrity": "sha512-/peMttxBn/uvNfZjMxNf4IRHCs1SawCnIhu6XrGnyMc093acToT7C8R480eCPkNqRq8Q+QTD3J7CE4bR6Tz0OA=="
         },
         {
           "package": "@fips/transport-websocket",
-          "version": "0.0.14",
-          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.61/fips-transport-websocket-0.0.14.tgz",
-          "integrity": "sha512-B+CUOBXuMwfDzLCnr+QfLf/MuA4wcV+36mqwH+RS0DNRYFcoGgM60MZiwcjFVCb6xzl0ZTUYe9Sla+VJ2MJBnQ==",
-          "manifestSha256": "48a827d454cf0f79e526a2ac730213e6e0e37d76d77e9003026ffbe01e923f60"
+          "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.62/fips-transport-websocket-0.0.15.tgz",
+          "version": "0.0.15",
+          "integrity": "sha512-lIY8SHl7ebkQnIHH+kW3Dlh/E1HU1QU0rCs5oB2SneGRm+7fZ6uy8L9FFoJ6/QGwuBERmEetvkZAfBD89EXJyQ=="
+        },
+        {
+          "package": "nostr-social-graph",
+          "url": "https://github.com/mmalmi/nostr-social-graph/releases/download/v4.2.0/nostr-social-graph-4.2.0.tgz",
+          "version": "4.2.0",
+          "integrity": "sha512-DUFZNJ2jGreQgqsvxvn8UwMucM48h6dvB3AyUuql2ber0pRBJA8a0R20rLqYuT2FNbfhDyQyEMQLRxQVQK0Ebg=="
+        },
+        {
+          "package": "@hashtree/worker",
+          "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.44/hashtree-worker-0.4.28.tgz",
+          "version": "0.4.28",
+          "integrity": "sha512-VnQFGoeu/uEVWFVCIlcpEGW0SRrFt0lXr9fCMFEHdF3h4fKAPDgtyXF+nRls71zYbKQi5I60814knHFEolrHvw=="
         }
       ]
     }
