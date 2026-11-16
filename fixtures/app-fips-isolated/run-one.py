@@ -14,7 +14,12 @@ assert versions['node']==json.loads((base/'evidence/image-toolchain.json').read_
 assert versions['pnpm']=='10.23.0' and versions['htree']=='htree 0.2.142'
 (evidence/'inputs.json').write_text(json.dumps(versions,indent=2)+'\n')
 budget=json.loads((base/'procedure/app-budgets.json').read_text())[app]
-try:subprocess.run(versions['command'],env=env,check=True,timeout=budget)
+try:
+    with subprocess.Popen(['python3','/stage/procedure/loopback-stun.py'],stdout=subprocess.PIPE,text=True) as stun:
+        try:
+            assert stun.stdout.readline().strip()=='ready'
+            subprocess.run(versions['command'],env=env,check=True,timeout=budget)
+        finally:stun.terminate()
 finally:subprocess.run(['python3','/stage/procedure/network-proof.py',str(evidence/'network-after-attempt.json')],env=env,check=True,timeout=15)
 contexts=[json.loads(line) for line in (evidence/'context-permissions.jsonl').read_text().splitlines()]
 assert len(contexts)>=spec['requiredPermissionContexts']
