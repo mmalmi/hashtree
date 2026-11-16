@@ -20,10 +20,10 @@
   "apps": [
     {
       "id": "git",
-      "commit": "1132686bee118ae8edc01a8ce05835274d44992e",
+      "commit": "e533c5c81a3799a254a0039519cf532d6989dad7",
       "archive": "archives/git-source.tar.gz",
-      "archiveSha256": "7985bd60702e7149973459856f84f6905f72373ab698baa6c977b60b9c43f93f",
-      "archiveBytes": 6434639,
+      "archiveSha256": "21119fc6d99203531ff7df0164c2a86da2811c109ae1560ebf435d36cbd626cf",
+      "archiveBytes": 6435367,
       "lockSha256": "4d80958bc36facee9c33cc77d9a5f6ef40b7f7aced2b83e71b87f5d04bdad9ee",
       "packageSha256": "5c94658ab18e18c98904b03a25afbcd5d679def489bf3589d4a5f5851fc38163",
       "distDir": "iris-git",
@@ -75,7 +75,7 @@
         "e2e/relay/index.js": "6a521d8f52da23442ba67f7bc5479a4db4ac366d90d96bc5b2975e9db6d3bd7e",
         "e2e/renderLoopGuard.ts": "23ed428dce812fbfe4d0a3dcc1bbbbc08a61627980a1e57054cfebcd76331d02",
         "e2e/test-utils.ts": "81f1689db92f37b863595006405af6749e881dfc3488300b3495e32ab807bf91",
-        "e2e/test-utils/core.ts": "d4614561407baf536bc3dfa102ddf0fcf662050fb4b44884cc823ccb1ec77470",
+        "e2e/test-utils/core.ts": "299eb26e5d111fdaed830c2cc75bfeeeb0e96bee4c09feece96c7cd4feae4bc6",
         "e2e/test-utils/git.ts": "0d1742bbf4cfe513e66000c39fe759875a72d5ee593dd72bb718349adcc3a9a3",
         "e2e/test-utils/gitForkReadiness.ts": "e5b32864dda75326a514e477c9962ffe36cf0f2068c9d355a79e3ca1301e3838",
         "e2e/test-utils/navigation.ts": "35cfcbb9f2dc3e0605026efd605f038425dbed74a2a002249f3ef474e912ad29",
@@ -149,7 +149,7 @@
           "expectedStatus": "passed"
         }
       },
-      "sourceTree": "ae5c177e721af9ee92b011b3baa3b3f4828f993b",
+      "sourceTree": "c552e20b38bb6f9527403c905190adda3dff0f69",
       "configSha256": "2381140a235c1dbd0d48b5800fcf46b854e0ea63dbccc3f52f73d05d4b4eb680"
     }
   ]
