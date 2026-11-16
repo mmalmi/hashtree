@@ -27,6 +27,21 @@ export default {...originalRuntimeConfig, use:{...originalRuntimeConfig.use, lau
 `);
    Object.assign(environment,{NODE_OPTIONS:'--import=/stage/procedure/deny-browser-preload.mts',FIPS_APP_EVIDENCE:out,FIPS_PERMISSION_ORIGIN:'http://127.0.0.1:49314',BROWSER_BOUNDARY_RECEIPT:out+'/peer-browser.jsonl',PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK:'1'});
  }
+ if(app==='social' && s.command.includes('tests/fips-p2p.spec.ts')) {
+   const origin=`http://127.0.0.1:${environment.PLAYWRIGHT_PORT}`;
+   const config=wd+'/playwright.config.ts',original=fs.readFileSync(config,'utf8');
+   fs.writeFileSync(config,original.replace('export default defineConfig(', 'const originalBrowserConfig=defineConfig(')+`
+export default {...originalBrowserConfig, use:{...originalBrowserConfig.use, launchOptions:{channel:'chromium',args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}}};
+`);
+   const file=wd+'/tests/fips-p2p.spec.ts',all=fs.readFileSync(file,'utf8');
+   const split=all.indexOf("test('automatically exchanges live events");if(split<0)throw Error('Missing the FIPS peer check');
+   let test=all.slice(split);
+   for(const [line,context] of [["  await page.goto('/');",'page.context()'],['  const secondPage = await secondContext.newPage();','secondContext']]){
+    if(test.split(line).length!==2)throw Error('Unknown FIPS test fixture');
+    test=test.replace(line,`  await ${context}.grantPermissions(['microphone'], { origin: ${JSON.stringify(origin)} });\n`+line);
+   }
+   fs.writeFileSync(file,all.slice(0,split)+test);
+ }
  const r=spawnSync(command,argv,{cwd:wd,env:environment,stdio:['ignore',fd,fd]});fs.closeSync(fd);
  const report={id:s.id,command:s.command,status:r.status,signal:r.signal,error:r.error?.message};
  console.log(JSON.stringify(report));fs.appendFileSync(out+'/gates.jsonl',JSON.stringify(report)+'\n');

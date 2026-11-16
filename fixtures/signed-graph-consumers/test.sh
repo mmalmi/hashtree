@@ -5,6 +5,7 @@ uid=1000
 name=iris-direct-test-$APP
 id=$(docker image inspect "$image" --format '{{.Id}}')
 mkdir -p "$STAGE/procedure"
+printf '%s\n' '{"private":true,"type":"module"}' > "$STAGE/procedure/package.json"
 cp fixtures/signed-graph-consumers/{network-proof.py,permission-context.ts,standalone-browser-boundary.ts,deny-browser-preload.mts} "$STAGE/procedure/"
 sudo chown -R "$uid:$uid" "$STAGE"
 container=$(docker run -d --init --network none --cap-drop ALL --shm-size=1g --cpus=3 --memory=10g --label iris.task=app-fips-isolated --user "$uid:$uid" --name "$name" -v "$STAGE:/stage" -w /stage/app -e APP="$APP" -e CI=1 -e PW_WORKERS=2 -e FIPS_DUMMY=1 -e PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright "$image" sleep 4800)
