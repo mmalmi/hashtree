@@ -82,6 +82,8 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
     if dummy:command=['python3','/stage/procedure/await-start.py',name,*command]
     command=['timeout','--signal=TERM','--kill-after=5s',str(seconds-10)+'s',*command]
     args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--memory','4g','--memory-swap','4g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,'--env','FIPS_MEDIA_PERMISSION='+str(int(name=='iris-fips-diagnostic-docs-permission' or name in APP_CONTAINERS)),IMAGE,*command]
+    if name=='iris-fips-test-git' and network=='none':
+        args[2:2]=[v for name in ['stun.l.google.com','stun.cloudflare.com','global.stun.twilio.com'] for v in ['--add-host',name+':127.0.0.1']]
     CONTAINERS.add(name)
     run(args,name+'-create.log',30)
     inspect=json.loads(subprocess.check_output(['docker','inspect',name],env=SAFE_ENV,text=True,timeout=5))[0]
