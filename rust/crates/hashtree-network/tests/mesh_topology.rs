@@ -2,6 +2,7 @@
 //! Only the carrier is simulated; byte counters exclude FIPS/TCP/underlay overhead.
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use hashtree_core::{
@@ -20,6 +21,25 @@ struct Link {
     remote: Weak<BlobRouter>,
     traffic: Arc<Traffic>,
     corrupt: bool,
+}
+
+struct StalledLink(Arc<Traffic>);
+
+#[async_trait]
+impl BlobRoute for StalledLink {
+    async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        self.0.record_request(&request);
+        std::future::pending().await
+    }
+}
+
+impl Traffic {
+    fn record_request(&self, request: &BlobRequest) -> BlobRequest {
+        let wire = encode_blob_request(request);
+        self.bytes.fetch_add(wire.len(), Ordering::SeqCst);
+        self.htls.lock().unwrap().push(request.htl);
+        decode_blob_request(&wire).unwrap()
+    }
 }
 
 #[async_trait]
@@ -43,10 +63,7 @@ impl Link {
         request: BlobRequest,
         context: Option<BlobRouteContext>,
     ) -> Result<BlobReply, StoreError> {
-        let wire = encode_blob_request(&request);
-        self.traffic.bytes.fetch_add(wire.len(), Ordering::SeqCst);
-        self.traffic.htls.lock().unwrap().push(request.htl);
-        let request = decode_blob_request(&wire).unwrap();
+        let request = self.traffic.record_request(&request);
         let remote = self
             .remote
             .upgrade()
@@ -240,4 +257,75 @@ async fn cyclic_diamond_rejects_corruption_and_recovers_from_provider_churn() {
     );
     assert_eq!(traffic.bytes.load(Ordering::SeqCst) - before, 4096 + 43);
     println!("cyclic_diamond: delivery=1/1 link_attempts=4 cold_blob_wire_bytes=12460 churn_recovery_bytes=4139");
+}
+
+#[tokio::test]
+async fn exploration_reaches_new_peers_without_losing_deliveries_to_stalled_links() {
+    let data = vec![31; 4096];
+    let hash = sha256(&data);
+    let traffic: [_; 4] = std::array::from_fn(|_| Arc::new(Traffic::default()));
+    let provider = Node::new();
+    provider.store.put(hash, data.clone()).await.unwrap();
+    let routes = ["a-stalled", "b-stalled", "c-new", "d-known"]
+        .into_iter()
+        .zip(&traffic)
+        .map(|(id, traffic)| {
+            let link: Arc<dyn BlobRoute> = if id.ends_with("stalled") {
+                Arc::new(StalledLink(traffic.clone()))
+            } else {
+                Arc::new(Link {
+                    remote: Arc::downgrade(&provider.router),
+                    traffic: traffic.clone(),
+                    corrupt: false,
+                })
+            };
+            BlobRouteEntry::new(id, link)
+        })
+        .collect();
+    let router = BlobRouter::new(
+        routes,
+        None,
+        BlobRouterConfig {
+            request_timeout: Duration::from_millis(250),
+            hedge_delay: Duration::from_millis(5),
+            exploration_interval: 1,
+            ..BlobRouterConfig::default()
+        },
+    )
+    .unwrap();
+    // Train the incumbent, then count only the exploration workload.
+    assert_eq!(
+        router.get(&hash, Some(&["d-known".into()])).await.unwrap(),
+        Some(data.clone())
+    );
+    traffic[3].htls.lock().unwrap().clear();
+    traffic[3].bytes.store(0, Ordering::SeqCst);
+
+    let mut deliveries = 0;
+    let mut timeouts = 0;
+    for _ in 0..12 {
+        match router.get(&hash, None).await {
+            Ok(Some(received)) => {
+                assert_eq!(received, data);
+                deliveries += 1;
+            }
+            Err(error) if error.to_string().contains("deadline expired") => timeouts += 1,
+            unexpected => panic!("unexpected exploration result {unexpected:?}"),
+        }
+    }
+    let attempts = traffic
+        .each_ref()
+        .map(|link| link.htls.lock().unwrap().len());
+    let bytes: usize = traffic
+        .iter()
+        .map(|link| link.bytes.load(Ordering::SeqCst))
+        .sum();
+    println!("exploration: delivery={deliveries}/12 timeouts={timeouts} link_attempts={attempts:?} blob_wire_bytes={bytes}");
+    assert_eq!(deliveries, 12);
+    assert!(attempts.iter().all(|&count| count > 0));
+    assert!(router
+        .outcomes()
+        .await
+        .values()
+        .all(|route| route.timeout_weight == 0.0 && route.failure_weight == 0.0));
 }

@@ -2,6 +2,27 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-18 - Mesh route exploration with stalled links
+
+The `mesh_topology` probe uses the production `BlobRouter` and blob codec.
+It trains one known provider, then makes 12 uncached 4 KiB reads through two
+stalled links and two healthy links. Both runs use two in-flight slots and a
+5 ms hedge delay. Exploration runs on every read to stress the policy.
+
+| Metric | Previous router | Updated router |
+| --- | ---: | ---: |
+| Verified deliveries | 8/12 | 12/12 |
+| Request deadlines expired | 4 | 0 |
+| Link attempts | 16 | 20 |
+| Link attempts per delivery | 2.00 | 1.67 |
+| Blob-wire bytes | 33,400 | 49,956 |
+
+Exploration now promotes one candidate and keeps the usual ranking for backups.
+Recording actual starts lets the probe advance past a stalled request that was
+cancelled when a hedge won. All four links were sampled. Each run sent eight
+requests to stalled links. The extra bytes are the four additional verified
+replies and their requests. These counts exclude carrier overhead.
+
 ## 2026-10-06 - Automatic ARM Crypto Acceleration
 
 The core's previous SHA2 0.10 and AES-GCM 0.10 dependencies selected software
