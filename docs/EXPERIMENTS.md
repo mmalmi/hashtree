@@ -2,6 +2,80 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-18 - Sparse blob retrieval at 100 and 1,000 nodes
+
+Run the workload from the `rust/` directory.
+
+```sh
+cargo test --locked -p hashtree-fips-transport --lib \
+  provider_route::mesh_scale:: -- --nocapture --test-threads=1
+```
+
+The fixture builds sparse overlays of 100 and 1,000 nodes. For each size it
+runs seeds 17 and 29 under three profiles: steady links, slow/stalled links
+with peer departures halfway through, and adversarial replies. In the last
+profile, a seeded subset of about 20% of nodes either declines every request
+or replies with a corrupt 4 KiB blob. Each case makes 64 reads in batches of
+eight, including bursts for one shared hash, single-copy and three-copy blobs,
+and absent hashes. The topology, placement, and faults are paired across revisions.
+
+Each node uses the production router, forwarding and provider selection,
+using explicit peer rosters and an in-memory carrier. Requests use a 700 ms
+search deadline, five Hashtree hops and four provider attempts per window.
+Graph reachability counts paths through live, honest nodes to an original
+holder within five hops, before considering attempt and time budgets. The
+carrier uses the production TCP/FIPS hash check on received data. Adversarial
+cases verify the contents of every cached blob as well as all delivered blobs.
+
+`Ordinary` combines the steady and churn profiles. Latencies are per-case
+percentiles of verified reads, shown as a range across cases. Bandwidth is
+aggregate blob-wire bytes divided by summed simulated durations, in Mbps.
+It includes corrupt payloads and excludes transport framing and retransmits.
+
+| Nodes | Workload | Verified / reachable | p50 latency, ms | p95 latency, ms | Mean aggregate Mbps |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 100 | Ordinary | 151/223 → 200/223 | 314–490 → 220–377 | 632–656 → 392–590 | 1.19 → 1.77 |
+| 100 | Adversarial | 48/99 → 82/99 | 426–450 → 290–316 | 636–659 → 470–526 | 2.30 → 3.74 |
+| 1,000 | Ordinary | 28/195 → 75/195 | 460–568 → 369–526 | 624–688 → 587–661 | 0.80 → 1.64 |
+| 1,000 | Adversarial | 8/72 → 17/72 | 440–460 → 363–378 | 568–686 → 629–674 | 3.62 → 6.82 |
+
+| Nodes | Workload | Deadlines | Other incomplete | Link attempts | Blob-wire bytes |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 100 | Ordinary | 105 → 53 | 0 → 3 | 18,421 → 26,927 | 3,214,212 → 4,499,418 |
+| 100 | Adversarial | 80 → 8 | 0 → 38 | 6,362 → 9,537 | 3,166,221 → 4,703,628 |
+| 1,000 | Ordinary | 228 → 164 | 0 → 17 | 41,762 → 77,634 | 2,235,658 → 4,514,991 |
+| 1,000 | Adversarial | 112 → 29 | 8 → 82 | 11,704 → 20,874 | 4,910,428 → 8,760,574 |
+
+An idle search now starts its next candidate as soon as the previous
+attempt finishes without data. While a candidate is pending, a hedge starts
+after 50–100 ms, with pace based on time left, candidates and remaining hops.
+At 1,000 nodes link attempts per verified delivery fell from 1,492 to 1,035,
+alongside the increase in total traffic.
+The ordinary workload still leaves 120 of 195 graph-reachable reads
+unresolved at 1,000 nodes. The updated adversarial runs at that size rejected
+1,839 corrupt replies, and all returned and cached bytes verified.
+
+Advancing idle searches alone with 100 ms hedges delivered 39/195 at 1,000
+nodes. Fixed 50 ms and 25 ms hedges delivered 77/195 and 78/195, at 78,347
+and 79,774 link attempts. Deadline-aware pacing keeps the longer interval
+when the budget permits it. Across the listed cases the remaining root
+results were deadlines or incomplete-search errors, with zero explicit
+misses observed.
+
+Process CPU time includes the entire simulator workload at each size, with
+all three profiles. On macOS ARM64 the median user plus system CPU time was
+1.49 → 1.91 seconds at 100 nodes and 4.71 → 6.10 seconds at 1,000 nodes.
+Two samples per build ran serially in baseline, candidate, candidate, baseline
+order. All modeled counters and latency percentiles repeated exactly.
+Build the library tests with `cargo test --locked -p hashtree-fips-transport
+--lib --no-run` at the harness-only revision and the scheduler revision.
+Run each printed debug binary directly to exclude Cargo and compilation.
+
+```sh
+/usr/bin/time -p "$test_binary" provider_route::mesh_scale::mesh_1000_nodes \
+  --exact --nocapture --test-threads=1
+```
+
 ## 2026-11-18 - Mesh route exploration with stalled links
 
 The `mesh_topology` probe uses the production `BlobRouter` and blob codec.
