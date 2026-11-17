@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
-use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::sync::{Arc, Weak};
 
 use async_trait::async_trait;
 use fips_core::Identity;
@@ -13,7 +13,8 @@ use tokio::time::{sleep, Duration};
 
 use super::super::{race_providers, FipsBlobRoute, PeerIdentity};
 use super::PAYLOAD_BYTES;
-use crate::tcp_blob::verify_hash;
+use crate::tcp_blob::{verify_hash, INBOUND_BLOB_PEER};
+use crate::TcpBlobTransportError;
 
 pub(super) const HOP_LIMIT: u8 = 5;
 pub(super) const SEARCH_DEADLINE: Duration = Duration::from_millis(700);
@@ -49,6 +50,7 @@ impl Node {
 
 #[derive(Clone)]
 struct Link {
+    source: PeerIdentity,
     node: Weak<BlobRouter>,
     online: Arc<AtomicBool>,
     traffic: Arc<Traffic>,
@@ -58,7 +60,7 @@ struct Link {
 }
 
 impl Link {
-    async fn fetch(self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+    async fn fetch(self, request: BlobRequest) -> Result<BlobReply, TcpBlobTransportError> {
         let wire = encode_blob_request(&request);
         self.traffic.attempts.fetch_add(1, Relaxed);
         self.traffic.bytes.fetch_add(wire.len(), Relaxed);
@@ -75,8 +77,11 @@ impl Link {
         let reply = match self.behavior {
             Behavior::FalseMiss => BlobReply::NoResult,
             Behavior::Corrupt => BlobReply::Data(vec![255; PAYLOAD_BYTES]),
-            Behavior::Honest => match router
-                .get_request(request, Some(&["store".into()]), None)
+            Behavior::Honest => match INBOUND_BLOB_PEER
+                .scope(
+                    (request, self.source),
+                    router.get_request(request, Some(&["store".into()]), None),
+                )
                 .await?
             {
                 Some(data) => BlobReply::Data(data),
@@ -95,9 +100,7 @@ impl Link {
         }
         if matches!(&reply, BlobReply::Data(data) if !verify_hash(data, &request.hash)) {
             self.traffic.corrupt_rejected.fetch_add(1, Relaxed);
-            return Err(StoreError::Other(
-                "simulated TCP/FIPS blob hash mismatch".into(),
-            ));
+            return Err(TcpBlobTransportError::HashMismatch);
         }
         Ok(reply)
     }
@@ -117,7 +120,9 @@ impl SimulatedProviderRoute {
         let budget = context.map_or(PROVIDER_ATTEMPTS, |context| context.attempt_budget);
         let (peers, untried) = self.policy.provider_attempts(request.hash, budget)?;
         race_providers(peers, untried, request.htl, context, |peer| {
-            self.links[&peer.npub()].clone().fetch(request)
+            let link = self.links[&peer.npub()].clone();
+            let integrity = self.policy.integrity.clone();
+            async move { integrity.check_reply(peer, link.fetch(request).await) }
         })
         .await
     }
@@ -181,7 +186,7 @@ impl Network {
             })
             .collect::<Vec<_>>();
         let edges = topology(size, seed, disturbances);
-        for (node, edges) in nodes.iter().zip(&edges) {
+        for ((source, node), edges) in identities.iter().zip(&nodes).zip(&edges) {
             let peers = edges.iter().map(|edge| identities[edge.to]).collect();
             let links = edges
                 .iter()
@@ -190,6 +195,7 @@ impl Network {
                     (
                         identities[edge.to].npub(),
                         Link {
+                            source: *source,
                             node: Arc::downgrade(&remote.router),
                             online: remote.online.clone(),
                             traffic: traffic.clone(),
@@ -200,13 +206,7 @@ impl Network {
                     )
                 })
                 .collect();
-            let policy = FipsBlobRoute {
-                discovery: None,
-                explicit: RwLock::new(peers),
-                transport: Weak::new(),
-                max_provider_attempts: PROVIDER_ATTEMPTS,
-                retry_windows: Mutex::default(),
-            };
+            let policy = FipsBlobRoute::new(None, Weak::new(), peers, PROVIDER_ATTEMPTS).unwrap();
             let mesh = MeshForwardingRoute::new(Arc::new(SimulatedProviderRoute { policy, links }));
             node.router
                 .set_routes(vec![
