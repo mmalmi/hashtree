@@ -35,6 +35,22 @@ describe('Hashtree runtime event persistence', () => {
     expect(await db.open().query([{ ids: [signed.id] }])).toHaveLength(1);
   });
 
+  it('preserves independent delivery scopes across updates and reopening', async () => {
+    const db = fixture();
+    const first = db.open();
+    const signed = event(10);
+    await first.putPending({ event: signed, relays: ['wss://one.example'], attempts: 1, updatedAt: 10 });
+    await Promise.all(['two', 'three'].map(source => first.updatePending(signed.id, row => ({
+      ...row!, additionalScopes: [...(row!.additionalScopes ?? []), { sources: [source], attempts: 1, updatedAt: 20 }],
+    }))));
+    const reopened = db.open();
+    const [entry] = await reopened.listPending();
+    expect(entry?.relays).toEqual(['wss://one.example']);
+    expect(entry?.additionalScopes?.map(scope => scope.sources)).toEqual([['two'], ['three']]);
+    await reopened.updatePending(signed.id, () => undefined);
+    expect(await db.open().listPending()).toEqual([]);
+  });
+
   it('retains duplicate relay history and updates retry metadata after reopening', async () => {
     const db = fixture();
     const signed = event(10, 7368);
