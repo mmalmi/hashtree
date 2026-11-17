@@ -175,23 +175,24 @@ enum AttemptOutcome {
     },
 }
 
-type AttemptFuture = Pin<Box<dyn Future<Output = AttemptOutcome> + Send>>;
+type AttemptFuture<'a> = Pin<Box<dyn Future<Output = AttemptOutcome> + Send + 'a>>;
 
-fn launch_attempt(
+fn launch_attempt<'a>(
+    router: &'a BlobRouter,
     ordered: &[BlobRouteEntry],
-    next_route: &mut usize,
     attempted: &mut usize,
-    pending: &mut FuturesUnordered<AttemptFuture>,
+    pending: &mut FuturesUnordered<AttemptFuture<'a>>,
     pending_identities: &mut HashSet<BlobRouteIdentity>,
     request: BlobRequest,
     route_context: BlobRouteContext,
 ) {
-    let entry = ordered[*next_route].clone();
-    *next_route += 1;
+    let entry = ordered[*attempted].clone();
     *attempted += 1;
     pending_identities.insert(entry.identity.clone());
     pending.push(
         async move {
+            // A later hedge can win before this attempt produces an outcome.
+            router.record_attempt(&entry).await;
             let started = Instant::now();
             let result = AssertUnwindSafe(entry.route.route_with_context(request, route_context))
                 .catch_unwind()
@@ -224,7 +225,6 @@ fn launch_attempt(
 /// free routes sort first, so by then every free route has finished.
 fn may_launch(
     ordered: &[BlobRouteEntry],
-    next_route: usize,
     attempted: usize,
     max_attempts: usize,
     in_flight: usize,
@@ -233,7 +233,7 @@ fn may_launch(
     if attempted >= max_attempts {
         return false;
     }
-    match ordered.get(next_route).map(|entry| entry.cost) {
+    match ordered.get(attempted).map(|entry| entry.cost) {
         Some(BlobRouteCost::Free) => in_flight < max_in_flight,
         Some(BlobRouteCost::Paid) => in_flight == 0,
         None => false,
@@ -427,14 +427,13 @@ impl BlobRouter {
             attempt_budget: self.config.route_attempt_budget.min(outer_budget).max(1),
         };
 
-        let mut pending: FuturesUnordered<AttemptFuture> = FuturesUnordered::new();
+        let mut pending = FuturesUnordered::new();
         let mut pending_identities = HashSet::new();
-        let mut next_route = 0usize;
         let mut attempted = 0usize;
         let mut failures = Vec::new();
         launch_attempt(
+            self,
             &ordered,
-            &mut next_route,
             &mut attempted,
             &mut pending,
             &mut pending_identities,
@@ -449,8 +448,8 @@ impl BlobRouter {
             if pending.is_empty() {
                 if attempted < max_attempts {
                     launch_attempt(
+                        self,
                         &ordered,
-                        &mut next_route,
                         &mut attempted,
                         &mut pending,
                         &mut pending_identities,
@@ -514,10 +513,10 @@ impl BlobRouter {
                             failures.push(format!("route {}: {message}", identity.as_str()));
                         }
                     }
-                    if may_launch(&ordered, next_route, attempted, max_attempts, pending.len(), max_in_flight) {
+                    if may_launch(&ordered, attempted, max_attempts, pending.len(), max_in_flight) {
                         launch_attempt(
+                            self,
                             &ordered,
-                            &mut next_route,
                             &mut attempted,
                             &mut pending,
                             &mut pending_identities,
@@ -527,10 +526,10 @@ impl BlobRouter {
                         next_hedge = Instant::now() + self.config.hedge_delay;
                     }
                 }
-                _ = tokio::time::sleep_until(hedge_at), if may_launch(&ordered, next_route, attempted, max_attempts, pending.len(), max_in_flight) => {
+                _ = tokio::time::sleep_until(hedge_at), if may_launch(&ordered, attempted, max_attempts, pending.len(), max_in_flight) => {
                     launch_attempt(
+                        self,
                         &ordered,
-                        &mut next_route,
                         &mut attempted,
                         &mut pending,
                         &mut pending_identities,
@@ -602,12 +601,6 @@ impl BlobRouter {
                 .get(&right.identity)
                 .cloned()
                 .unwrap_or_default();
-            if explore {
-                return left_stats
-                    .last_attempt
-                    .cmp(&right_stats.last_attempt)
-                    .then_with(|| left.identity.cmp(&right.identity));
-            }
             let left_cooling = left_stats.cooldown_until.is_some_and(|until| until > now);
             let right_cooling = right_stats.cooldown_until.is_some_and(|until| until > now);
             left_cooling
@@ -621,7 +614,36 @@ impl BlobRouter {
                 .then_with(|| left_stats.last_attempt.cmp(&right_stats.last_attempt))
                 .then_with(|| left.identity.cmp(&right.identity))
         });
+        if explore {
+            // Promote one probe per tier, keeping the usual ranking for its backups.
+            for tier in ordered.chunk_by_mut(|left, right| left.cost == right.cost) {
+                let first =
+                    tier.partition_point(|entry| preferred_order.contains_key(&entry.identity));
+                let candidates = &mut tier[first..];
+                if let Some((probe, _)) = candidates.iter().enumerate().min_by_key(|(_, entry)| {
+                    let last_attempt = state
+                        .outcomes
+                        .get(&entry.identity)
+                        .and_then(|stats| stats.last_attempt);
+                    (last_attempt, &entry.identity)
+                }) {
+                    candidates[..=probe].rotate_right(1);
+                }
+            }
+        }
         ordered
+    }
+
+    async fn record_attempt(&self, entry: &BlobRouteEntry) {
+        let routes = self.routes.read().await;
+        if !routes.iter().any(|current| {
+            current.identity == entry.identity && Arc::ptr_eq(&current.route, &entry.route)
+        }) {
+            return;
+        }
+        if let Some(outcome) = self.state.lock().await.outcomes.get_mut(&entry.identity) {
+            outcome.last_attempt = Some(Instant::now());
+        }
     }
 
     async fn record_success(&self, identity: &BlobRouteIdentity, elapsed: Duration) {
@@ -638,7 +660,6 @@ impl BlobRouter {
         );
         outcome.consecutive_failures = 0;
         outcome.cooldown_until = None;
-        outcome.last_attempt = Some(Instant::now());
     }
 
     async fn record_no_result(&self, identity: &BlobRouteIdentity) {
@@ -647,7 +668,6 @@ impl BlobRouter {
         outcome.decay();
         outcome.consecutive_failures = 0;
         outcome.cooldown_until = None;
-        outcome.last_attempt = Some(Instant::now());
     }
 
     async fn record_failure(&self, identity: &BlobRouteIdentity) {
@@ -675,9 +695,7 @@ impl BlobRouter {
             .initial_cooldown
             .saturating_mul(multiplier)
             .min(self.config.max_cooldown);
-        let now = Instant::now();
-        outcome.cooldown_until = Some(now + cooldown);
-        outcome.last_attempt = Some(now);
+        outcome.cooldown_until = Some(Instant::now() + cooldown);
     }
 }
 

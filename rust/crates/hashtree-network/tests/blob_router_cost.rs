@@ -117,16 +117,24 @@ async fn a_paid_route_waits_until_every_free_route_finished_without_data() {
 }
 
 #[tokio::test]
-async fn a_slow_free_route_is_not_hedged_with_a_paid_one() {
+async fn exploration_keeps_a_slow_free_route_ahead_of_a_paid_one() {
     let (hash, data) = blob("free, only slow");
     let log = Log::default();
     // Far longer than the hedge delay, well inside the deadline.
     let slow = Probe::new("slow", Answer::Data(data.clone()), SHORT * 4, &log);
     let paid = Probe::new("paid", Answer::Data(data.clone()), Duration::ZERO, &log);
-    let router = router(vec![
-        BlobRouteEntry::paid("paid", paid.clone()),
-        BlobRouteEntry::new("slow", slow.clone()),
-    ]);
+    let router = BlobRouter::new(
+        vec![
+            BlobRouteEntry::paid("paid", paid.clone()),
+            BlobRouteEntry::new("slow", slow.clone()),
+        ],
+        None,
+        BlobRouterConfig {
+            exploration_interval: 1,
+            ..config()
+        },
+    )
+    .unwrap();
 
     assert_eq!(router.get(&hash, None).await.unwrap(), Some(data));
     assert_eq!(paid.calls(), 0);
