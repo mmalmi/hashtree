@@ -43,7 +43,7 @@ impl ForwardOwnerGuard {
             Err(_)
                 if self
                     .deadline
-                    .is_some_and(|deadline| deadline <= Instant::now()) =>
+                    .is_some_and(|deadline| deadline <= tokio::time::Instant::now().into_std()) =>
             {
                 ForwardResult::Retry
             }
@@ -182,7 +182,9 @@ impl MeshForwardingRoute {
             return Ok(BlobReply::NoResult);
         };
         loop {
-            if context.is_some_and(|context| context.deadline <= Instant::now()) {
+            if context
+                .is_some_and(|context| context.deadline <= tokio::time::Instant::now().into_std())
+            {
                 return Err(StoreError::Other(
                     "mesh forwarding deadline expired".to_string(),
                 ));

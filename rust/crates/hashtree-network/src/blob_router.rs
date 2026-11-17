@@ -6,7 +6,7 @@ use std::ops::RangeInclusive;
 use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{stream::FuturesUnordered, FutureExt, StreamExt};
@@ -15,6 +15,7 @@ use hashtree_core::{
     BLOB_MAX_BYTES, BLOB_MAX_HTL,
 };
 use tokio::sync::{Mutex, RwLock};
+use tokio::time::Instant;
 
 const OUTCOME_DECAY: f64 = 0.875;
 
@@ -399,7 +400,7 @@ impl BlobRouter {
         let now = Instant::now();
         let own_deadline = now + self.config.request_timeout;
         let deadline = outer_context
-            .map(|context| context.deadline.min(own_deadline))
+            .map(|context| Instant::from_std(context.deadline).min(own_deadline))
             .unwrap_or(own_deadline);
         if deadline <= now {
             return Err(StoreError::Other(
@@ -423,7 +424,7 @@ impl BlobRouter {
         let max_attempts = max_attempts.min(ordered.len());
         let max_in_flight = self.config.max_in_flight.max(1).min(max_attempts);
         let route_context = BlobRouteContext {
-            deadline,
+            deadline: deadline.into_std(),
             attempt_budget: self.config.route_attempt_budget.min(outer_budget).max(1),
         };
 
@@ -441,7 +442,7 @@ impl BlobRouter {
             route_context,
         );
         let mut next_hedge = Instant::now() + self.config.hedge_delay;
-        let deadline_sleep = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline));
+        let deadline_sleep = tokio::time::sleep_until(deadline);
         tokio::pin!(deadline_sleep);
 
         loop {
@@ -462,7 +463,7 @@ impl BlobRouter {
                 }
             }
 
-            let hedge_at = tokio::time::Instant::from_std(next_hedge.min(deadline));
+            let hedge_at = next_hedge.min(deadline);
             tokio::select! {
                 _ = &mut deadline_sleep => {
                     for identity in pending_identities.drain() {

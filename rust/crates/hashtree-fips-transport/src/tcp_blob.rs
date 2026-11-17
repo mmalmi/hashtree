@@ -1147,7 +1147,7 @@ fn codec_error(error: BlobCodecError) -> TcpBlobTransportError {
     }
 }
 
-fn verify_hash(data: &[u8], expected: &Hash) -> bool {
+pub(super) fn verify_hash(data: &[u8], expected: &Hash) -> bool {
     Sha256::digest(data).as_slice() == expected
 }
 

@@ -30,6 +30,7 @@ tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 tracing.workspace = true
 
 [dev-dependencies]
+hashtree-network.workspace = true
 hex.workspace = true
 tokio = { version = "1", features = ["sync", "time", "rt", "macros", "test-util"] }
 

@@ -3903,6 +3903,7 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "hashtree-core",
+ "hashtree-network",
  "hex",
  "nvpn-fips-core",
  "nvpn-fips-tcp",

@@ -6,13 +6,14 @@ use fips_core::discovery::local::rank_capability_providers;
 use fips_core::{FipsEndpoint, PeerIdentity};
 use hashtree_core::{BlobReply, BlobRequest, BlobRoute, BlobRouteContext, Hash, Store, StoreError};
 use thiserror::Error;
-use tokio::task::JoinSet;
-use tokio::time::Duration;
 
 use crate::tcp_blob::MAX_OUTBOUND_GETS;
 use crate::{TcpBlobTransport, TCP_BLOB_CAPABILITY, TCP_BLOB_SERVICE_PORT};
 
-const PROVIDER_HEDGE_DELAY: Duration = Duration::from_millis(100);
+mod schedule;
+
+use self::schedule::race_providers;
+
 const MAX_RETAINED_RETRY_WINDOWS: usize = 256;
 
 #[derive(Debug, Error)]
@@ -194,58 +195,11 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
             .transport
             .upgrade()
             .ok_or_else(|| StoreError::Other("TCP/FIPS blob transport is closed".to_string()))?;
-
-        let mut attempts = JoinSet::new();
-        for (index, peer) in peers.into_iter().enumerate() {
+        race_providers(peers, untried, request.htl, context, |peer| {
             let route = transport.route_to(peer);
-            attempts.spawn(async move {
-                let delay = PROVIDER_HEDGE_DELAY.saturating_mul(index as u32);
-                if !delay.is_zero() {
-                    tokio::time::sleep(delay).await;
-                }
-                route.route(request).await
-            });
-        }
-
-        let mut first_error = None;
-        loop {
-            let joined = if let Some(context) = context {
-                let deadline = tokio::time::Instant::from_std(context.deadline);
-                match tokio::time::timeout_at(deadline, attempts.join_next()).await {
-                    Ok(joined) => joined,
-                    Err(_) => {
-                        attempts.abort_all();
-                        return Err(StoreError::Other(
-                            "FIPS blob provider-set deadline expired".to_string(),
-                        ));
-                    }
-                }
-            } else {
-                attempts.join_next().await
-            };
-            let Some(joined) = joined else {
-                break;
-            };
-            match joined {
-                Ok(Ok(BlobReply::Data(data))) => {
-                    attempts.abort_all();
-                    return Ok(BlobReply::Data(data));
-                }
-                Ok(Ok(BlobReply::NoResult)) => {}
-                Ok(Err(error)) => {
-                    first_error.get_or_insert_with(|| error.to_string());
-                }
-                Err(error) => {
-                    first_error.get_or_insert_with(|| error.to_string());
-                }
-            }
-        }
-        match first_error {
-            Some(error) => Err(StoreError::Other(format!(
-                "FIPS blob provider set was incomplete: {error}"
-            ))),
-            None => completed_misses(untried),
-        }
+            async move { route.route(request).await }
+        })
+        .await
     }
 }
 
@@ -317,6 +271,9 @@ fn ordered_provider_peers(
     }
     selected
 }
+
+#[cfg(test)]
+mod mesh_scale;
 
 #[cfg(test)]
 mod tests {

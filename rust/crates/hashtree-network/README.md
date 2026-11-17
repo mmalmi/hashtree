@@ -45,3 +45,12 @@ The probes cover 1–10 hops, hop exhaustion, cycles, corruption, provider churn
 verified caches and coalesced-reader cancellation. Byte counts include the blob
 wire only; real FIPS carrier coverage lives in `hashtree-fips-transport` and the
 CLI daemon's `daemon_mesh_forwarding_observes_two_one_zero_and_exhaustion` test.
+
+The 100- and 1,000-node retrieval simulation adds the production FIPS provider
+policy over simulated links. It measures sparse retrieval, deadline exhaustion,
+and traffic under provider churn. Run it from the `rust/` directory.
+
+```sh
+cargo test --locked -p hashtree-fips-transport --lib \
+  provider_route::mesh_scale:: -- --nocapture --test-threads=1
+```
