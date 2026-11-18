@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 4
+          fetch-depth: 0
           persist-credentials: false
       - name: Build and exercise the actual bundled worker on an isolated network
         run: bash fixtures/worker-named/qualify.sh
