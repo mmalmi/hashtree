@@ -1,0 +1,21 @@
+{
+  "source": "fcae1896e77da2905b477664a9cc53e18c591c6e",
+  "previewRun": 44369107349,
+  "archives": {
+    "hashtree-nostr-pubsub-0.1.10.tgz": {
+      "sha256": "50a16d6b80105acdc9a83cd796640071b6fd914be99462733c1055ad7146d4f8",
+      "integrity": "sha512-AXX0MjWUD9sTK64B3uVgwheasoxDnVAete+FSTsXJYPZMjxPyb/EfgAZok+xHZ2U8igbn3LM8TOfsJDY13ReUQ==",
+      "bytes": 28999
+    },
+    "hashtree-worker-0.4.32.tgz": {
+      "bytes": 279111,
+      "sha256": "480893af900e1e496c3aa4d2c2636f483a0d2ffbc7115fe9152b9da5176f8cf6",
+      "integrity": "sha512-eV4d4F78dIWdGbkdbOVSV2gZ3gMgCaRcDqvysIELUEzct8LNtFOtAa7M6UTXq/5SufTNq25J5LrZcJNNUVMv+w=="
+    }
+  },
+  "normalization": "Unmodified published npm packages and registry dependency closure; no file overrides or workspace links.",
+  "tests": 9,
+  "workspaceSourcesUsed": false,
+  "registryInstall": true,
+  "publicationRun": 44370390590
+}

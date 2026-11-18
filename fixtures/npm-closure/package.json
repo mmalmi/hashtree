@@ -1,0 +1,20 @@
+{
+  "name": "qualified-npm-worker-closure",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.23.0",
+  "dependencies": {
+    "@hashtree/worker": "0.4.32",
+    "@hashtree/nostr-pubsub": "0.1.10",
+    "@hashtree/core": "0.4.2",
+    "@hashtree/dexie": "0.1.15",
+    "dexie": "4.4.2",
+    "nostr-tools": "2.26.1",
+    "nostr-pubsub": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.32/nostr-pubsub-0.5.32.tgz"
+  },
+  "devDependencies": {
+    "vitest": "4.1.12",
+    "fake-indexeddb": "6.2.8",
+    "typescript": "5.9.3"
+  }
+}
