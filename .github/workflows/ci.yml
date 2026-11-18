@@ -281,6 +281,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Test Haps release payload fixtures
+        run: python -B -m unittest -v scripts.test_build_haps_payload
+
       - name: Setup Rust toolchain
         id: rust_toolchain
         uses: dtolnay/rust-toolchain@stable

@@ -1,7 +1,7 @@
 # https://haps.hashtree.cc
 [package]
 name = "hashtree"
-version = "0.4.6"
+version = "0.5.0"
 target = "host"
 description = "Hashtree command-line tools"
 
@@ -10,12 +10,12 @@ htree = "htree{exe}"
 git-remote-htree = "git-remote-htree{exe}"
 htree-cashu = "htree-cashu{exe}"
 
+# Reuses the official release inputs, builders and complete mapped payload.
+# Native builds require the OS/SDK recorded in rust/release-inputs.json;
+# Linux builds require Docker. Haps must be explicitly allowed a host build.
 [build]
-commands = [
-  ["cargo", "build", "--manifest-path", "rust/Cargo.toml", "--release", "--locked", "--target", "{target}", "--target-dir", "target/haps", "-p", "hashtree-cli", "-p", "git-remote-htree", "-p", "hashtree-cashu-cli", "--features", "hashtree-cli/fips-webrtc"],
-]
+commands = [["python3", "rust/scripts/build_haps_payload.py", "--target", "{target}"]]
+artifacts = { "." = "target/haps-payload" }
 
-[build.artifacts]
-"htree{exe}" = "target/haps/{target}/release/htree{exe}"
-"git-remote-htree{exe}" = "target/haps/{target}/release/git-remote-htree{exe}"
-"htree-cashu{exe}" = "target/haps/{target}/release/htree-cashu{exe}"
+[targets.x86_64-pc-windows-msvc.build]
+commands = [["python", "rust/scripts/build_haps_payload.py", "--target", "{target}"]]
