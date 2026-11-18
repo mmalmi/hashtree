@@ -30,6 +30,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};
 use tower::ServiceExt;
 
+mod cache_read;
 mod cid_range_stream;
 mod daemon_status_access;
 
@@ -1429,7 +1430,8 @@ async fn get_cid_with_fetch_prefetches_missing_file_chunks_concurrently() {
         local_store.clone(),
         vec![format!("http://{}", upstream_addr)],
     );
-    let local_tree = HashTree::new(HashTreeConfig::new(local_store.store_arc()).public());
+    let local_tree =
+        HashTree::new(HashTreeConfig::new(Arc::new(PooledReadStore::new(state.clone()))).public());
 
     let fetched = get_cid_with_fetch(&state, &local_tree, &cid)
         .await
@@ -1479,7 +1481,14 @@ async fn get_cid_with_fetch_uses_upstream_blob_batch_for_missing_file_chunks() {
         tokio::spawn(async move { axum::serve(listener, upstream_router).await.unwrap() });
 
     let local_dir = TempDir::new().unwrap();
-    let local_store = Arc::new(HashtreeStore::new(local_dir.path().join("local-db")).unwrap());
+    let local_store = Arc::new(
+        HashtreeStore::new_with_backend(
+            local_dir.path().join("local-db"),
+            hashtree_config::StorageBackend::Fs,
+            1,
+        )
+        .unwrap(),
+    );
     let encrypted_file_node = source_store
         .get_blob(&cid.hash)
         .unwrap()
@@ -1490,7 +1499,8 @@ async fn get_cid_with_fetch_uses_upstream_blob_batch_for_missing_file_chunks() {
         local_store.clone(),
         vec![format!("http://{}", upstream_addr)],
     );
-    let local_tree = HashTree::new(HashTreeConfig::new(local_store.store_arc()).public());
+    let local_tree =
+        HashTree::new(HashTreeConfig::new(Arc::new(PooledReadStore::new(state.clone()))).public());
 
     let fetched = get_cid_with_fetch(&state, &local_tree, &cid)
         .await

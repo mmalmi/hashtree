@@ -1,54 +1,50 @@
-//! Store adapter that keeps blob reads off the async workers.
-//!
-//! `StorageRouter` reads are synchronous (LMDB, optionally an S3 fallback).
-//! Driving a `HashTree` over it directly runs that I/O on a tokio worker.
-//! This adapter sends each read through the same bounded blocking pool the
-//! raw blob routes use, so tree reads obey the same admission limits.
+//! Read-through store for HTTP tree requests. Local and upstream reads use
+//! the same bounded storage pool and verified blob path as raw HTTP reads.
 
-use super::blob_read::{run_blob_metadata_read, run_blob_read, BlobIoTaskError, BLOB_READ_BUSY};
-use crate::storage::StorageRouter;
+use super::auth::AppState;
+use super::handlers::{
+    fetch_blob_for_tree, get_blob_range_without_blocking_runtime,
+    get_blob_size_without_blocking_runtime, get_blob_without_blocking_runtime,
+};
 use async_trait::async_trait;
-use futures::executor::block_on;
-use hashtree_core::{Hash, Store, StoreError};
-use std::sync::Arc;
+use bytes::Bytes;
+use hashtree_core::{store::slice_blob_range, Hash, Store, StoreError};
 
 #[derive(Clone)]
 pub(super) struct PooledReadStore {
-    inner: Arc<StorageRouter>,
+    state: AppState,
 }
 
 impl PooledReadStore {
-    pub(super) fn new(inner: Arc<StorageRouter>) -> Self {
-        Self { inner }
+    pub(super) fn new(state: AppState) -> Self {
+        Self { state }
+    }
+
+    async fn read_upstream(&self, hash: &Hash) -> Result<Option<Bytes>, StoreError> {
+        fetch_blob_for_tree(&self.state, hash)
+            .await
+            .map_err(StoreError::Other)
     }
 }
 
-fn pooled<T>(result: Result<Result<T, StoreError>, BlobIoTaskError>) -> Result<T, StoreError> {
-    match result {
-        Ok(result) => result,
-        Err(error) if error.is_busy() => Err(StoreError::Other(BLOB_READ_BUSY.to_string())),
-        Err(error) if error.is_timeout() => {
-            Err(StoreError::Other(format!("blob read timed out: {error}")))
-        }
-        Err(error) => Err(StoreError::Other(format!("blob read task failed: {error}"))),
-    }
-}
-
-// The router's async methods finish without yielding, so `block_on` inside the
-// blocking task only supplies the executor they nominally need.
 #[async_trait]
 impl Store for PooledReadStore {
     async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
-        self.inner.put(hash, data).await
+        self.state.store.store_arc().put(hash, data).await
     }
 
     async fn put_many(&self, items: Vec<(Hash, Vec<u8>)>) -> Result<usize, StoreError> {
-        self.inner.put_many(items).await
+        self.state.store.store_arc().put_many(items).await
     }
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
-        let (inner, hash) = (Arc::clone(&self.inner), *hash);
-        pooled(run_blob_read(move || block_on(inner.get(&hash))).await)
+        if let Some(data) = get_blob_without_blocking_runtime(&self.state, *hash)
+            .await
+            .map_err(StoreError::Other)?
+        {
+            return Ok(Some(data));
+        }
+        Ok(self.read_upstream(hash).await?.map(|data| data.to_vec()))
     }
 
     async fn get_range(
@@ -57,21 +53,37 @@ impl Store for PooledReadStore {
         start: u64,
         end_inclusive: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let (inner, hash) = (Arc::clone(&self.inner), *hash);
-        pooled(run_blob_read(move || block_on(inner.get_range(&hash, start, end_inclusive))).await)
+        if let Some(data) =
+            get_blob_range_without_blocking_runtime(&self.state, *hash, start, end_inclusive)
+                .await
+                .map_err(StoreError::Other)?
+        {
+            return Ok(Some(data));
+        }
+        self.read_upstream(hash)
+            .await?
+            .map(|data| slice_blob_range(&data, start, end_inclusive))
+            .transpose()
     }
 
     async fn blob_size(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
-        let (inner, hash) = (Arc::clone(&self.inner), *hash);
-        pooled(run_blob_metadata_read(move || block_on(inner.blob_size(&hash))).await)
+        if let Some(size) = get_blob_size_without_blocking_runtime(&self.state, *hash)
+            .await
+            .map_err(StoreError::Other)?
+        {
+            return Ok(Some(size));
+        }
+        Ok(self
+            .read_upstream(hash)
+            .await?
+            .map(|data| data.len() as u64))
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
-        let (inner, hash) = (Arc::clone(&self.inner), *hash);
-        pooled(run_blob_metadata_read(move || block_on(inner.has(&hash))).await)
+        Ok(self.blob_size(hash).await?.is_some())
     }
 
     async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
-        self.inner.delete(hash).await
+        self.state.store.store_arc().delete(hash).await
     }
 }

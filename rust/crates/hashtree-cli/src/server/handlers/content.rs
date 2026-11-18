@@ -1,7 +1,8 @@
 use super::*;
 use crate::fips_transport::{read_daemon_blob, DaemonBlobResolver};
 use crate::server::blob_read::{
-    run_blob_metadata_read, run_blob_read, run_blob_write, BlobIoTaskError, BLOB_READ_BUSY,
+    run_blob_metadata_read, run_blob_read, run_blob_write, run_optional_blob_write,
+    BlobIoTaskError, BLOB_READ_BUSY,
 };
 use crate::server::pooled_store::PooledReadStore;
 use hashtree_core::{Link, TreeNode};
@@ -19,6 +20,7 @@ const BLOB_BATCH_DOWNLOAD_MAX_HASHES_ENV: &str = "HTREE_BLOB_BATCH_DOWNLOAD_MAX_
 const BLOB_BATCH_DOWNLOAD_MAX_BYTES_ENV: &str = "HTREE_BLOB_BATCH_DOWNLOAD_MAX_BYTES";
 const UPSTREAM_BLOSSOM_MISS_TTL: Duration = Duration::from_secs(10);
 
+#[cfg(test)]
 pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> Result<bool, String> {
     fetch_and_cache_blob_with_source(state, hash)
         .await
@@ -28,7 +30,7 @@ pub(super) async fn fetch_and_cache_blob(state: &AppState, hash: &[u8]) -> Resul
 pub(super) async fn fetch_and_cache_blob_with_source(
     state: &AppState,
     hash: &[u8],
-) -> Result<Option<BlobSource>, String> {
+) -> Result<Option<(BlobSource, Bytes)>, String> {
     if !state.hash_get_enabled {
         return Ok(None);
     }
@@ -151,35 +153,56 @@ pub(super) async fn fetch_and_cache_blob_with_source(
         },
     };
     if let Some(result) = found {
-        match result {
-            FetchResult::Fips { data } => {
-                tracing::info!(
-                    "[htree-fetch] Got {} bytes from FIPS peers for {}",
-                    data.len(),
-                    &hash_hex[..16.min(hash_hex.len())]
-                );
-                let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
-                if let Err(e) = result {
-                    tracing::warn!("[htree-fetch] Failed to cache FIPS peer data: {}", e);
-                    return Err(format!("failed to cache FIPS peer data: {e}"));
-                }
-                return Ok(Some(BlobSource::Fips));
-            }
-            FetchResult::Upstream { data, server } => {
-                tracing::info!(
-                    "[htree-fetch] Got {} bytes from upstream {} for {}",
-                    data.len(),
-                    server,
-                    &hash_hex[..16.min(hash_hex.len())]
-                );
-                let (_data, result) = put_cached_blob_without_blocking_runtime(state, data).await;
-                if let Err(e) = result {
-                    tracing::warn!("[htree-fetch] Failed to cache upstream data: {}", e);
-                    return Err(format!("failed to cache upstream data: {e}"));
-                }
-                return Ok(Some(BlobSource::Upstream(server)));
-            }
+        let (source, data) = match result {
+            FetchResult::Fips { data } => (BlobSource::Fips, data),
+            FetchResult::Upstream { data, server } => (BlobSource::Upstream(server), data),
+        };
+        if sha256(&data).as_slice() != hash {
+            return Err("fetched blob does not match its requested hash".to_string());
         }
+        if let Err(rejection) = crate::server::ingest_filter::validate_untrusted_blob(
+            &data,
+            state.require_random_untrusted_ingest,
+        ) {
+            return Err(rejection.reason);
+        }
+        tracing::info!(
+            "[htree-fetch] Got {} bytes from {} for {}",
+            data.len(),
+            source.to_header_value(),
+            &hash_hex[..16.min(hash_hex.len())]
+        );
+
+        let data = Bytes::from(data);
+        let store = state.store.clone();
+        let for_store = data.clone();
+        let write = move || store.put_cached_blob(&for_store);
+        // With paid reads enabled, keep verified blobs available to later
+        // tree lookups before returning. A cache miss must not buy a blob twice.
+        let cached = if state.paid_reads.is_some() {
+            run_blob_write(write)
+                .await
+                .map_err(|error| format!("cached blob write task failed: {error}"))?
+                .map_err(|error| format!("failed to cache blob: {error}"))?;
+            true
+        } else {
+            match run_optional_blob_write(write).await {
+                Ok(Ok(_)) => true,
+                Ok(Err(error)) => {
+                    tracing::warn!("[htree-fetch] Failed to cache blob: {error}");
+                    false
+                }
+                Err(error) => {
+                    tracing::debug!("[htree-fetch] Skipped optional cache write: {error}");
+                    false
+                }
+            }
+        };
+        state.blob_cache.put_body(hash_hex.clone(), &data);
+        if cached {
+            state.blob_cache.put_size(hash_hex, Some(data.len() as u64));
+        }
+        return Ok(Some((source, data)));
     }
 
     if !state.upstream_blossom.is_empty() {
@@ -368,6 +391,9 @@ async fn fetch_and_cache_blobs_from_upstream_batch(state: &AppState, hashes: &[[
 
     let mut missing = Vec::new();
     for hash in hashes {
+        if state.blob_cache.get_body_size(&to_hex(hash)).is_some() {
+            continue;
+        }
         match blob_exists_without_blocking_runtime(state, *hash).await {
             Ok(false) => missing.push(*hash),
             Ok(true) => {}
@@ -441,58 +467,39 @@ async fn put_cached_blobs_without_blocking_runtime(
 
     let store = state.store.clone();
     let blob_cache = state.blob_cache.clone();
-    match run_blob_write(move || {
+    let cache_required = state.paid_reads.is_some();
+    if !cache_required {
+        for (hash, data) in &items {
+            blob_cache.put_body(to_hex(hash), data);
+        }
+    }
+    let write = move || {
         let result = store
             .put_cached_blobs_report(&items)
             .map_err(|e| e.to_string());
         if result.is_ok() {
             for (hash, data) in &items {
                 let hash_hex = to_hex(hash);
-                blob_cache.put_size(hash_hex.clone(), Some(data.len() as u64));
-                blob_cache.put_body(hash_hex, data);
+                if cache_required {
+                    blob_cache.put_body(hash_hex.clone(), data);
+                }
+                blob_cache.put_size(hash_hex, Some(data.len() as u64));
             }
         }
         result.map(|report| report.inserted_hashes.len())
-    })
-    .await
-    {
+    };
+    let result = if cache_required {
+        run_blob_write(write).await
+    } else {
+        run_optional_blob_write(write).await
+    };
+    match result {
         Ok(result) => result,
         Err(err) => Err(format!("cached blob batch write task failed: {}", err)),
     }
 }
 
-pub(super) async fn put_cached_blob_without_blocking_runtime(
-    state: &AppState,
-    data: Vec<u8>,
-) -> (Vec<u8>, Result<String, String>) {
-    if let Err(rejection) = crate::server::ingest_filter::validate_untrusted_blob(
-        &data,
-        state.require_random_untrusted_ingest,
-    ) {
-        return (data, Err(rejection.reason));
-    }
-
-    let store = state.store.clone();
-    let blob_cache = state.blob_cache.clone();
-    match run_blob_write(move || {
-        let result = store.put_cached_blob(&data).map_err(|e| e.to_string());
-        if let Ok(hash_hex) = &result {
-            blob_cache.put_size(hash_hex.clone(), Some(data.len() as u64));
-            blob_cache.put_body(hash_hex.clone(), &data);
-        }
-        (data, result)
-    })
-    .await
-    {
-        Ok(result) => result,
-        Err(err) => (
-            Vec::new(),
-            Err(format!("cached blob write task failed: {}", err)),
-        ),
-    }
-}
-
-pub(super) async fn get_blob_without_blocking_runtime(
+pub(in crate::server) async fn get_blob_without_blocking_runtime(
     state: &AppState,
     hash: [u8; 32],
 ) -> Result<Option<Vec<u8>>, String> {
@@ -528,11 +535,14 @@ pub(super) async fn get_blob_without_blocking_runtime(
     read.await
 }
 
-pub(super) async fn get_blob_size_without_blocking_runtime(
+pub(in crate::server) async fn get_blob_size_without_blocking_runtime(
     state: &AppState,
     hash: [u8; 32],
 ) -> Result<Option<u64>, String> {
     let hash_hex = to_hex(&hash);
+    if let Some(size) = state.blob_cache.get_body_size(&hash_hex) {
+        return Ok(Some(size));
+    }
     if let Some(size) = state.blob_cache.get_size(&hash_hex) {
         return Ok(size);
     }
@@ -549,12 +559,17 @@ pub(super) async fn get_blob_size_without_blocking_runtime(
     }
 }
 
-pub(super) async fn get_blob_range_without_blocking_runtime(
+pub(in crate::server) async fn get_blob_range_without_blocking_runtime(
     state: &AppState,
     hash: [u8; 32],
     start: u64,
     end_inclusive: u64,
 ) -> Result<Option<Vec<u8>>, String> {
+    if let Some(data) = state.blob_cache.get_body(&to_hex(&hash)) {
+        return hashtree_core::store::slice_blob_range(&data, start, end_inclusive)
+            .map(Some)
+            .map_err(|error| error.to_string());
+    }
     let store = state.store.clone();
     match run_blob_read(move || {
         store
@@ -671,10 +686,23 @@ pub(super) async fn ensure_blob_available(
     state: &AppState,
     hash: &[u8; 32],
 ) -> Result<bool, String> {
-    if blob_exists_without_blocking_runtime(state, *hash).await? {
+    if state.blob_cache.get_body_size(&to_hex(hash)).is_some()
+        || blob_exists_without_blocking_runtime(state, *hash).await?
+    {
         return Ok(true);
     }
 
+    if fetch_blob_for_tree(state, hash).await?.is_some() {
+        return Ok(true);
+    }
+
+    blob_exists_without_blocking_runtime(state, *hash).await
+}
+
+pub(in crate::server) async fn fetch_blob_for_tree(
+    state: &AppState,
+    hash: &[u8; 32],
+) -> Result<Option<Bytes>, String> {
     let hash_hex = to_hex(hash);
     let fetch = {
         let mut inflight = state.inflight_blob_fetches.lock().await;
@@ -685,7 +713,9 @@ pub(super) async fn ensure_blob_available(
             let hash_bytes = *hash;
             let hash_hex_for_task = hash_hex.clone();
             let fetch = async move {
-                let fetched = fetch_and_cache_blob(&state, &hash_bytes).await;
+                let fetched = fetch_and_cache_blob_with_source(&state, &hash_bytes)
+                    .await
+                    .map(|found| found.map(|(_, data)| data));
                 state
                     .inflight_blob_fetches
                     .lock()
@@ -700,11 +730,7 @@ pub(super) async fn ensure_blob_available(
         }
     };
 
-    if fetch.await? {
-        return Ok(true);
-    }
-
-    blob_exists_without_blocking_runtime(state, *hash).await
+    fetch.await
 }
 
 pub(super) async fn fetch_missing_chunk(
@@ -1132,9 +1158,8 @@ pub(super) fn stream_file_range_cid_with_fetch(
     start: u64,
     end_inclusive: u64,
 ) -> impl futures::Stream<Item = Result<Bytes, std::io::Error>> {
-    let tree = HashTree::new(
-        HashTreeConfig::new(Arc::new(PooledReadStore::new(state.store.store_arc()))).public(),
-    );
+    let tree =
+        HashTree::new(HashTreeConfig::new(Arc::new(PooledReadStore::new(state.clone()))).public());
     let cursor = CidRangeCursor {
         state,
         tree,
