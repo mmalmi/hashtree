@@ -16,7 +16,7 @@ trap 'docker rm -f "$c" >/dev/null' EXIT
 sudo python3 "$base/procedure/namespace-setup.py" "$c" signed-graph-worker "$id" 1000 | sudo tee "$base/evidence/namespace.json" >/dev/null
 docker exec "$c" python3 /stage/procedure/network-proof.py /stage/evidence/network.json
 docker exec "$c" bash -ec 'node --version > /stage/evidence/node-version.txt; npm --version > /stage/evidence/npm-version.txt; npm pack --ignore-scripts --pack-destination /stage/evidence > /stage/evidence/helper-pack.log 2>&1'
-python3 - "$base" <<'VERIFY'
+sudo python3 - "$base" <<'VERIFY'
 from pathlib import Path
 import json,tarfile,hashlib,sys
 root=Path(sys.argv[1]); expected=json.loads((root/'evidence/expected-helper-files.json').read_text())
