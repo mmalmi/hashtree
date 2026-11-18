@@ -1,4 +1,7 @@
 #[cfg(target_os = "linux")]
+mod fd_census;
+
+#[cfg(target_os = "linux")]
 use anyhow::Context;
 use anyhow::{bail, Result};
 #[cfg(target_os = "linux")]
@@ -6934,37 +6937,18 @@ HTREE_POOL_LIMIT_ARGS={limit}\n",
                         .with_context(|| format!("enumerate process fd beneath {directory}"));
                 }
             };
-            let metadata = match std::fs::metadata(entry.path()) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(error)
-                        .with_context(|| format!("inspect process fd {}", entry.path().display()));
-                }
-            };
-            if !metadata.file_type().is_file() && !metadata.file_type().is_dir() {
-                continue;
-            }
-            let after = match std::fs::metadata(entry.path()) {
-                Ok(metadata) => metadata,
-                Err(error) if error.kind() == ErrorKind::NotFound => continue,
-                Err(error) => {
-                    return Err(error).with_context(|| {
-                        format!("reinspect process fd {}", entry.path().display())
-                    });
-                }
-            };
-            if census_identity_key(&metadata) != census_identity_key(&after) {
-                bail!(
-                    "process {pid} fd {} changed identity during final handle census",
-                    entry.file_name().to_string_lossy()
-                );
-            }
-            record_live_process_authority(
-                live,
-                census_identity_key(&metadata),
-                format!("process {pid} fd {}", entry.file_name().to_string_lossy()),
-            );
+            let path = entry.path();
+            super::fd_census::collect_fd(
+                || std::fs::metadata(&path),
+                |metadata| {
+                    record_live_process_authority(
+                        live,
+                        census_identity_key(metadata),
+                        format!("process {pid} fd {}", entry.file_name().to_string_lossy()),
+                    );
+                },
+            )
+            .with_context(|| format!("inspect {} during final handle census", path.display()))?;
         }
         Ok(())
     }
