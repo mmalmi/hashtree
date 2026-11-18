@@ -191,3 +191,57 @@ async fn optional_cache_write_honors_the_queue_deadline_without_leaking_permits(
     assert_eq!(admission.run_optional_write(|| 42).await.unwrap(), 42);
     assert_eq!(admission.snapshot().write_in_use, 0);
 }
+
+#[tokio::test]
+async fn cancelling_the_last_blob_waiter_releases_partial_admission() {
+    let admission = Arc::new(BlobIoAdmission::new_for_test(
+        BlobIoLimits::derive(8, 1, Some(1), Some(1)),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+    ));
+    let bulk = admission.bulk.clone().acquire_owned().await.unwrap();
+    let inflight = crate::server::inflight::InFlight::default();
+    let first = admission.clone();
+    let mut cancelled = Box::pin(inflight.run([1; 32], || async move {
+        first
+            .run_optional_write(|| 17)
+            .await
+            .map_err(|e| e.to_string())
+    }));
+
+    assert!(futures::poll!(&mut cancelled).is_pending());
+    assert_eq!(admission.snapshot().write_in_use, 1);
+    drop(cancelled);
+    assert_eq!(admission.snapshot().write_in_use, 0);
+    drop(bulk);
+
+    let another = admission.clone();
+    assert_eq!(
+        inflight
+            .run([2; 32], || async move {
+                another
+                    .run_optional_write(|| 42)
+                    .await
+                    .map_err(|e| e.to_string())
+            })
+            .await
+            .unwrap(),
+        42
+    );
+}
+
+#[tokio::test]
+async fn cancelling_one_blob_waiter_keeps_the_same_work_for_the_other() {
+    let inflight = crate::server::inflight::InFlight::default();
+    let (release, blocked) = tokio::sync::oneshot::channel();
+    let mut first = Box::pin(inflight.run([1; 32], || async move { blocked.await.unwrap() }));
+    let mut second = Box::pin(inflight.run([1; 32], || async { panic!("duplicate work") }));
+    assert!(futures::poll!(&mut first).is_pending());
+    assert!(futures::poll!(&mut second).is_pending());
+
+    drop(first);
+    release.send(42).unwrap();
+    assert_eq!(second.await, 42);
+    assert_eq!(inflight.run([1; 32], || async { 43 }).await, 43);
+}

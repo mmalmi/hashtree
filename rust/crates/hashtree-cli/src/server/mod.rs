@@ -3,6 +3,7 @@ mod blob_read;
 pub(crate) use blob_read::run_blob_read;
 pub mod blossom;
 mod handlers;
+mod inflight;
 mod ingest_filter;
 mod mime;
 mod nostr_query;
@@ -237,12 +238,8 @@ impl HashtreeServer {
                 nostr_event_transport: None,
                 nostr_relay_urls: Vec::new(),
                 tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-                inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(
-                    std::collections::HashMap::new(),
-                )),
-                inflight_blob_reads: Arc::new(tokio::sync::Mutex::new(
-                    std::collections::HashMap::new(),
-                )),
+                inflight_blob_fetches: Default::default(),
+                inflight_blob_reads: Default::default(),
                 blob_cache: Arc::new(crate::blob_cache::BlobCache::from_env()),
                 directory_listing_cache: Arc::new(std::sync::Mutex::new(new_lookup_cache())),
                 resolved_path_cache: Arc::new(std::sync::Mutex::new(new_lookup_cache())),

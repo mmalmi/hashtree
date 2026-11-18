@@ -1,3 +1,4 @@
+use super::inflight::InFlight;
 use crate::blob_cache::BlobCache;
 use crate::fips_transport::DaemonBlobResolver;
 use crate::nostr_relay::NostrRelay;
@@ -11,7 +12,6 @@ use axum::{
     http::{header, HeaderMap, Request, Response, StatusCode},
     middleware::Next,
 };
-use futures::future::{BoxFuture, Shared};
 use hashtree_core::{Cid, LinkType, TreeEntry};
 use lru::LruCache;
 use nostr::Keys;
@@ -123,9 +123,6 @@ pub struct CachedTreeRootEntry {
     pub event: Option<nostr::Event>,
     pub cached_at: Instant,
 }
-
-pub type SharedBlobFetch = Shared<BoxFuture<'static, Result<Option<bytes::Bytes>, String>>>;
-pub type SharedBlobRead = Shared<BoxFuture<'static, Result<Option<Vec<u8>>, String>>>;
 
 pub struct UpstreamNostrSubscription {
     pub close_tx: watch::Sender<bool>,
@@ -317,10 +314,10 @@ pub struct AppState {
     /// In-process cache for resolved mutable tree roots, keyed by npub/tree(+key)
     pub tree_root_cache: Arc<StdMutex<HashMap<String, CachedTreeRootEntry>>>,
     /// Shared in-flight blob fetches so concurrent misses only hit upstream once per hash
-    pub inflight_blob_fetches: Arc<Mutex<HashMap<String, SharedBlobFetch>>>,
+    pub(super) inflight_blob_fetches: InFlight<Result<Option<bytes::Bytes>, String>>,
     /// Shared in-flight local blob reads so request bursts for the same hash
     /// only spend one blocking storage read.
-    pub inflight_blob_reads: Arc<Mutex<HashMap<String, SharedBlobRead>>>,
+    pub(super) inflight_blob_reads: InFlight<Result<Option<Vec<u8>>, String>>,
     /// Bounded hot cache for immutable blob bodies and metadata probes.
     pub(super) blob_cache: Arc<BlobCache>,
     /// Immutable directory listings keyed by CID

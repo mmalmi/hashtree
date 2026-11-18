@@ -461,31 +461,13 @@ pub(in crate::server) async fn get_blob_without_blocking_runtime(
         return Ok(Some(data));
     }
 
-    let read = {
-        let mut inflight = state.inflight_blob_reads.lock().await;
-        if let Some(existing) = inflight.get(&hash_hex) {
-            existing.clone()
-        } else {
+    state
+        .inflight_blob_reads
+        .run(hash, || {
             let state = state.clone();
-            let hash_for_read = hash;
-            let hash_hex_for_task = hash_hex.clone();
-            let read = async move {
-                let result = get_blob_once_without_blocking_runtime(&state, hash_for_read).await;
-                state
-                    .inflight_blob_reads
-                    .lock()
-                    .await
-                    .remove(&hash_hex_for_task);
-                result
-            }
-            .boxed()
-            .shared();
-            inflight.insert(hash_hex, read.clone());
-            read
-        }
-    };
-
-    read.await
+            async move { get_blob_once_without_blocking_runtime(&state, hash).await }
+        })
+        .await
 }
 
 pub(in crate::server) async fn get_blob_size_without_blocking_runtime(
@@ -656,34 +638,18 @@ pub(in crate::server) async fn fetch_blob_for_tree(
     state: &AppState,
     hash: &[u8; 32],
 ) -> Result<Option<Bytes>, String> {
-    let hash_hex = to_hex(hash);
-    let fetch = {
-        let mut inflight = state.inflight_blob_fetches.lock().await;
-        if let Some(existing) = inflight.get(&hash_hex) {
-            existing.clone()
-        } else {
+    let hash = *hash;
+    state
+        .inflight_blob_fetches
+        .run(hash, || {
             let state = state.clone();
-            let hash_bytes = *hash;
-            let hash_hex_for_task = hash_hex.clone();
-            let fetch = async move {
-                let fetched = fetch_and_cache_blob_with_source(&state, &hash_bytes)
+            async move {
+                fetch_and_cache_blob_with_source(&state, &hash)
                     .await
-                    .map(|found| found.map(|(_, data)| data));
-                state
-                    .inflight_blob_fetches
-                    .lock()
-                    .await
-                    .remove(&hash_hex_for_task);
-                fetched
+                    .map(|found| found.map(|(_, data)| data))
             }
-            .boxed()
-            .shared();
-            inflight.insert(hash_hex.clone(), fetch.clone());
-            fetch
-        }
-    };
-
-    fetch.await
+        })
+        .await
 }
 
 pub(super) async fn fetch_missing_chunk(
