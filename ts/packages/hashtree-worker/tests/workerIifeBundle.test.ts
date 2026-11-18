@@ -21,6 +21,14 @@ it('starts real graph reconciliation from a default IIFE consumer worker', async
   const address = relay.address();
   if (!address || typeof address === 'string') throw new Error('Local relay missing');
   const owner = getPublicKey(new Uint8Array(32).fill(42));
+  const clientSockets = new Set<WebSocket>();
+  class FixtureWebSocket extends WebSocket {
+    constructor(address: string, protocols?: string | string[]) {
+      super(address, protocols);
+      clientSockets.add(this);
+      this.once('close', () => clientSockets.delete(this));
+    }
+  }
   let scope: any;
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -45,7 +53,7 @@ it('starts real graph reconciliation from a default IIFE consumer worker', async
       }));
     });
     void negotiation.catch(() => {});
-    scope = { indexedDB, IDBKeyRange, WebSocket, crypto, URL, URLSearchParams,
+    scope = { indexedDB, IDBKeyRange, WebSocket: FixtureWebSocket, crypto, URL, URLSearchParams,
       TextEncoder, TextDecoder, Uint8Array, ArrayBuffer, DataView, Error, RangeError, TypeError, DOMException, AbortController, AbortSignal,
       Blob, Request, Response, performance, setTimeout, clearTimeout, setInterval, clearInterval,
       queueMicrotask, structuredClone, atob, btoa, console, Event, CustomEvent, EventTarget,
@@ -61,6 +69,9 @@ it('starts real graph reconciliation from a default IIFE consumer worker', async
     expect(await negotiation).toEqual({ kinds: [3, 10000], authors: [owner] });
   } finally {
     clearTimeout(timeout);
+    // Finish local connection handshakes before teardown; Node ws reports an
+    // error when a connecting socket is closed, unlike a browser WebSocket.
+    await expect.poll(() => [...clientSockets].some(socket => socket.readyState === WebSocket.CONNECTING)).toBe(false);
     await scope?.onmessage?.({ data: { id: 'iife-close', type: 'close' } });
     for (const socket of relay.clients) socket.terminate();
     await new Promise<void>(resolve => relay.close(() => resolve()));

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const endpointMessages = vi.hoisted(() => [] as unknown[]);
@@ -195,7 +196,7 @@ vi.mock('@hashtree/core', () => ({
   createBlobRequest: (hash: Uint8Array, htl = 10) => ({ hash, htl }),
   decryptObject: vi.fn(),
   fromHex: (hex: string) => Uint8Array.from(hex.match(/.{2}/g) ?? [], byte => parseInt(byte, 16)),
-  nhashDecode: vi.fn(() => ({ hash: new Uint8Array(32).fill(7) })),
+  nhashDecode: vi.fn(() => ({ hash: new Uint8Array(createHash('sha256').update(new Uint8Array([7, 8, 9, 10])).digest()) })),
   nhashEncode: vi.fn(),
   sha256: async (data: Uint8Array) => new Uint8Array(32).fill(data[0] ?? 0),
   toHex: (data: Uint8Array) => bytesToHex(data),
@@ -390,7 +391,7 @@ describe('worker media headers', () => {
         (message as { type?: string }).type === 'p2pFetch'
       )) as typeof p2pRequest;
       expect(p2pRequest).toMatchObject({
-        hashHex: '07'.repeat(32),
+        hashHex: createHash('sha256').update(new Uint8Array([7, 8, 9, 10])).digest('hex'),
         htl: 10,
         peerId: 'configured-media-peer',
       });

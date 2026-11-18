@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const postMessageMock = vi.hoisted(() => vi.fn());
@@ -90,7 +91,7 @@ class FakeHashTree {
   }
 
   async putBlob(data: Uint8Array): Promise<Uint8Array> {
-    const hash = new Uint8Array(32).fill(data[0] ?? 0);
+    const hash = new Uint8Array(createHash('sha256').update(data).digest());
     await this.store.put(hash, data);
     return hash;
   }
@@ -232,7 +233,7 @@ function hexToBytes(value: string): Uint8Array {
 }
 
 function hashHexForData(data: Uint8Array): string {
-  return (data[0] ?? 0).toString(16).padStart(2, '0').repeat(32);
+  return createHash('sha256').update(data).digest('hex');
 }
 
 class FakeStoreBlobRoute {
@@ -267,7 +268,7 @@ vi.mock('@hashtree/core', async (importOriginal) => ({
   fromHex: (value: string) => hexToBytes(value),
   nhashDecode: vi.fn(),
   nhashEncode: ({ hash }: { hash: Uint8Array }) => `nhash1${bytesToHex(hash).slice(0, 8)}`,
-  sha256: async (data: Uint8Array) => new Uint8Array(32).fill(data[0] ?? 0),
+  sha256: async (data: Uint8Array) => new Uint8Array(createHash('sha256').update(data).digest()),
   toHex: (value: Uint8Array) => bytesToHex(value),
   tryDecodeTreeNode: vi.fn(),
   verifyBlobData: verifyFakeBlobData,
