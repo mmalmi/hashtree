@@ -11,7 +11,7 @@ image=mcr.microsoft.com/playwright@sha256:5b8f294aff9041b7191c34a4bab3ac270157a2
 docker pull "$image" >/dev/null
 id=$(docker image inspect "$image" --format '{{.Id}}')
 sudo chown -R 1000:1000 "$base"
-c=$(docker run --init -d --network none --cap-drop ALL --user 1000:1000 --cpus=1 --memory=1g --label iris.task=app-fips-isolated --name signed-graph-worker -v "$base:/stage" -w /stage/package "$image" sleep 600)
+c=$(docker run --init -d --network none --cap-drop ALL --user 1000:1000 --cpus=1 --memory=1g --label iris.task=app-fips-isolated --name signed-graph-worker -v "$base:/stage" -w /stage/package -e FIPS_DUMMY=1 "$image" sleep 600)
 trap 'docker rm -f "$c" >/dev/null' EXIT
 sudo python3 "$base/procedure/namespace-setup.py" "$c" signed-graph-worker "$id" 1000 | sudo tee "$base/evidence/namespace.json" >/dev/null
 docker exec "$c" python3 /stage/procedure/network-proof.py /stage/evidence/network.json
