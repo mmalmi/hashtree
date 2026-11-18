@@ -142,7 +142,7 @@ async fn timed_out_read_keeps_admission_until_blocking_work_finishes() {
 }
 
 #[tokio::test]
-async fn optional_cache_write_skips_a_full_queue_without_holding_more_permits() {
+async fn optional_cache_write_waits_for_capacity_and_warms_the_cache() {
     let admission = BlobIoAdmission::new_for_test(
         BlobIoLimits::derive(8, 1, Some(1), Some(1)),
         Duration::from_secs(1),
@@ -150,13 +150,40 @@ async fn optional_cache_write_skips_a_full_queue_without_holding_more_permits() 
         Duration::from_secs(30),
     );
     let writer = admission.acquire(BlobIoClass::Write).await.unwrap();
+    let temp = tempfile::tempdir().unwrap();
+    let blob = temp.path().join("verified-blob");
+    let destination = blob.clone();
+    let mut fill = Box::pin(
+        admission
+            .run_optional_write(move || std::fs::write(destination, b"verified cache contents")),
+    );
+
+    assert!(futures::poll!(&mut fill).is_pending());
+    assert_eq!(admission.snapshot().write_in_use, 1);
+    assert!(!blob.exists());
+
+    drop(writer);
+    fill.await.unwrap().unwrap();
+    assert_eq!(std::fs::read(blob).unwrap(), b"verified cache contents");
+    assert_eq!(admission.snapshot().write_in_use, 0);
+}
+
+#[tokio::test]
+async fn optional_cache_write_honors_the_queue_deadline_without_leaking_permits() {
+    let admission = BlobIoAdmission::new_for_test(
+        BlobIoLimits::derive(8, 1, Some(1), Some(1)),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_millis(1),
+    );
+    let writer = admission.acquire(BlobIoClass::Write).await.unwrap();
 
     let result = tokio::time::timeout(
-        Duration::from_millis(100),
+        Duration::from_secs(1),
         admission.run_optional_write(|| panic!("optional write reached a saturated storage pool")),
     )
     .await
-    .expect("optional cache write must not wait for a permit");
+    .expect("optional cache write must honor the configured deadline");
     assert!(result.unwrap_err().is_busy());
     assert_eq!(admission.snapshot().write_in_use, 1);
 
