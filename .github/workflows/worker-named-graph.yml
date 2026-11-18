@@ -1,0 +1,41 @@
+name: Verify normalized npm worker persistence
+on:
+  push:
+    branches: [codex/worker-transient-graph-preview]
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Independently read the public GitHub source history
+        env:
+          GIT_CONFIG_NOSYSTEM: '1'
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_TERMINAL_PROMPT: '0'
+        run: |
+          set -eu
+          test "$(df -PB1 . | awk 'END{print $4}')" -gt 10737418240
+          audit="$RUNNER_TEMP/public-source.git"
+          git clone --bare --no-local --no-hardlinks https://github.com/mmalmi/hashtree.git "$audit"
+          cd "$audit"
+          test "$(git rev-parse --is-shallow-repository)" = false
+          test ! -e objects/info/alternates
+          test ! -e info/grafts
+          test -z "$(git for-each-ref refs/replace)"
+          test "$(git rev-parse refs/heads/master)" = fcae1896e77da2905b477664a9cc53e18c591c6e
+          git fsck --full --strict --no-dangling
+          git rev-list --objects --all | cut -d' ' -f1 | sort -u | wc -l
+      - name: Build and exercise the actual bundled worker on an isolated network
+        run: bash fixtures/worker-named/qualify.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: worker-${{ github.sha }}
+          path: ${{ runner.temp }}/signed-graph/evidence
+          retention-days: 14
