@@ -1,0 +1,23 @@
+name: Seal matched packages with the exact workspace license
+on:
+  push:
+    branches: [codex/signed-graph-worker-qualification]
+permissions:
+  contents: read
+jobs:
+  qualify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 4
+          persist-credentials: false
+      - name: Build and exercise the actual bundled worker on an isolated network
+        run: bash fixtures/worker-named/qualify.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: worker-${{ github.sha }}
+          path: ${{ runner.temp }}/signed-graph/evidence
+          retention-days: 14
