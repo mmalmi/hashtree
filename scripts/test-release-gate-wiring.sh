@@ -30,7 +30,15 @@ reject grep -qF 'requiredSiblingSourceDirs' rust/scripts/build_windows_vm_artifa
 grep -F 'default = []' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
 grep -F 'required-features = ["interop-fixture"]' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
 grep -F 'webrtc = ["webrtc-endpoint"]' rust/crates/hashtree-fips-transport/Cargo.toml >/dev/null
-reject grep -qF 'hashtree-network' rust/crates/hashtree-fips-transport/Cargo.toml
+# The mesh simulations exercise the router as a development dependency.
+cargo metadata --manifest-path rust/Cargo.toml --format-version 1 --no-deps --locked --offline |
+    python3 -c '
+import json, sys
+packages = json.load(sys.stdin)["packages"]
+transport = next(p for p in packages if p["name"] == "hashtree-fips-transport")
+if any(d["name"] == "hashtree-network" and d["kind"] != "dev" for d in transport["dependencies"]):
+    sys.exit("hashtree-fips-transport must not depend on hashtree-network in production builds")
+'
 
 # The normal release path owns one full gate and one artifact publish. Tag
 # pushes must not start a second cross-platform build in GitHub Actions.
