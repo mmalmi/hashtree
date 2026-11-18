@@ -76,14 +76,56 @@ pub struct FipsPaidBlobService {
     task: Option<JoinHandle<Result<(), FipsPaidError>>>,
 }
 
+#[derive(Clone)]
+enum Provider {
+    Cashu(PaidBlobProvider),
+    #[cfg(feature = "peer-credit")]
+    Credit(crate::credit::CreditBlobProvider),
+}
+
+impl Provider {
+    async fn handle(&self, peer: PeerIdentity, request: &[u8]) -> Vec<u8> {
+        match self {
+            Self::Cashu(service) => service.handle(Some(&peer.npub()), request).await,
+            #[cfg(feature = "peer-credit")]
+            Self::Credit(service) => service.handle(&peer.pubkey().to_string(), request).await,
+        }
+    }
+}
+
 impl FipsPaidBlobService {
+    /// Bind the private, authenticated peer-credit blob service. It shares
+    /// neither the mint tariff nor the same-host discovery advertisement.
+    #[cfg(feature = "peer-credit")]
+    pub async fn credit(
+        endpoint: Arc<FipsEndpoint>,
+        provider: Option<crate::credit::CreditBlobProvider>,
+        config: FipsPaidConfig,
+    ) -> Result<Self, FipsPaidError> {
+        Self::bind(
+            endpoint,
+            provider.map(Provider::Credit),
+            config,
+            None,
+            39021,
+        )
+        .await
+    }
+
     /// Sell to every authenticated peer that knows this node.
     pub async fn serve(
         endpoint: Arc<FipsEndpoint>,
         provider: PaidBlobProvider,
         config: FipsPaidConfig,
     ) -> Result<Self, FipsPaidError> {
-        Self::bind(endpoint, Some(provider), config, None).await
+        Self::bind(
+            endpoint,
+            Some(Provider::Cashu(provider)),
+            config,
+            None,
+            PAID_BLOB_SERVICE_PORT,
+        )
+        .await
     }
 
     /// [`Self::serve`], and advertise [`PAID_BLOB_CAPABILITY`] to peers on
@@ -94,7 +136,14 @@ impl FipsPaidBlobService {
         config: FipsPaidConfig,
         priority: i16,
     ) -> Result<Self, FipsPaidError> {
-        Self::bind(endpoint, Some(provider), config, Some(priority)).await
+        Self::bind(
+            endpoint,
+            Some(Provider::Cashu(provider)),
+            config,
+            Some(priority),
+            PAID_BLOB_SERVICE_PORT,
+        )
+        .await
     }
 
     /// Buy only: every inbound connection is closed.
@@ -102,14 +151,15 @@ impl FipsPaidBlobService {
         endpoint: Arc<FipsEndpoint>,
         config: FipsPaidConfig,
     ) -> Result<Self, FipsPaidError> {
-        Self::bind(endpoint, None, config, None).await
+        Self::bind(endpoint, None, config, None, PAID_BLOB_SERVICE_PORT).await
     }
 
     async fn bind(
         endpoint: Arc<FipsEndpoint>,
-        provider: Option<PaidBlobProvider>,
+        provider: Option<Provider>,
         config: FipsPaidConfig,
         advertise_priority: Option<i16>,
+        port: u16,
     ) -> Result<Self, FipsPaidError> {
         if config.idle_timeout.is_zero() {
             return Err(FipsPaidError::InvalidConfig(
@@ -131,7 +181,7 @@ impl FipsPaidBlobService {
                     .await
                     .map_err(transport_error)?
             }
-            None => FipsTcpEndpoint::bind(endpoint, PAID_BLOB_SERVICE_PORT, tcp_config, isn_seed)
+            None => FipsTcpEndpoint::bind(endpoint, port, tcp_config, isn_seed)
                 .await
                 .map_err(transport_error)?,
         };

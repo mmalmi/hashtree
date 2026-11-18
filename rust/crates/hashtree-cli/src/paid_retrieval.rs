@@ -9,6 +9,7 @@
 mod command_tests;
 mod commands;
 mod config;
+pub mod credit;
 mod http;
 mod spend_store;
 mod status;
@@ -87,6 +88,7 @@ pub struct DaemonPaidRetrieval {
     service: tokio::sync::Mutex<Option<FipsPaidBlobService>>,
     selling: Option<SellingSide>,
     buying: Option<BuyingSide>,
+    credit: Option<credit::RunningCredit>,
 }
 
 /// What `POST /paid-blob` answers.
@@ -119,11 +121,18 @@ impl DaemonPaidRetrieval {
     pub fn pays_for_http_reads(&self) -> bool {
         let buying = self.buying.as_ref();
         buying.is_some_and(|buying| buying.pays_for_http_reads)
+            || self
+                .credit
+                .as_ref()
+                .is_some_and(|credit| credit.router.is_some())
     }
 
     /// The router of the paid providers, for reads through the HTTP
     /// listener where they may spend money.
     pub fn http_read_router(&self) -> Option<Arc<BlobRouter>> {
+        if let Some(router) = self.credit.as_ref().and_then(|side| side.router.clone()) {
+            return Some(router);
+        }
         let buying = self.buying.as_ref()?;
         buying
             .pays_for_http_reads
@@ -133,10 +142,14 @@ impl DaemonPaidRetrieval {
     /// Ask the paid providers for one blob, one after another. Call it only
     /// after every free source of the read has finished without data.
     pub async fn buy(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
-        let Some(buying) = &self.buying else {
+        let router = self
+            .credit
+            .as_ref()
+            .and_then(|side| side.router.as_ref())
+            .or_else(|| self.buying.as_ref().map(|side| &side.router));
+        let Some(router) = router else {
             return Ok(BlobReply::NoResult);
         };
-        let router = &buying.router;
         let found = router.get_request_at_cost(request, None, None, BlobRouteCost::Paid);
         Ok(match found.await? {
             Some(data) => BlobReply::Data(data),
@@ -162,6 +175,9 @@ impl DaemonPaidRetrieval {
     /// Stop serving and write the charges that are not on disk yet. Call it
     /// before the FIPS endpoint is shut down.
     pub async fn shutdown(&self) {
+        if let Some(credit) = &self.credit {
+            credit.shutdown().await;
+        }
         if let Some(service) = self.service.lock().await.take() {
             if let Err(error) = service.shutdown().await {
                 tracing::warn!("failed to stop the paid blob service: {error}");
@@ -182,6 +198,60 @@ impl DaemonPaidRetrieval {
 /// the wallet. `Ok(None)` when nothing is configured: then no service is
 /// bound, no file is opened and no route is registered.
 pub async fn start_daemon_paid_retrieval(
+    config: &Config,
+    data_dir: &Path,
+    bind_address: &str,
+    fips: Option<&DaemonFipsHandle>,
+    store: &Arc<HashtreeStore>,
+) -> Result<Option<Arc<DaemonPaidRetrieval>>> {
+    let keys = config
+        .paid_retrieval
+        .credit
+        .as_ref()
+        .and(fips)
+        .map(|_| crate::config::read_keys())
+        .transpose()?;
+    start_daemon_with_keys(config, data_dir, bind_address, fips, store, keys.as_ref()).await
+}
+
+pub async fn start_daemon_with_keys(
+    config: &Config,
+    data_dir: &Path,
+    bind_address: &str,
+    fips: Option<&DaemonFipsHandle>,
+    store: &Arc<HashtreeStore>,
+    keys: Option<&nostr::Keys>,
+) -> Result<Option<Arc<DaemonPaidRetrieval>>> {
+    let cashu = start_daemon_cashu(config, data_dir, bind_address, fips, store).await?;
+    let Some(credit) = &config.paid_retrieval.credit else {
+        return Ok(cashu);
+    };
+    let fips = fips.context("Peer credit requires an authenticated FIPS endpoint")?;
+    let keys = keys.context("Peer credit requires the active FIPS identity")?;
+    let mut paid = match cashu {
+        Some(paid) => {
+            Arc::try_unwrap(paid).map_err(|_| anyhow::anyhow!("paid retrieval already shared"))?
+        }
+        None => DaemonPaidRetrieval {
+            service: tokio::sync::Mutex::new(None),
+            buying: None,
+            selling: None,
+            credit: None,
+        },
+    };
+    let fallback = paid
+        .buying
+        .as_ref()
+        .filter(|side| side.pays_for_http_reads)
+        .map(|side| side.router.clone());
+    paid.credit = Some(
+        credit::RunningCredit::start(credit, data_dir, bind_address, fips, keys, store, fallback)
+            .await?,
+    );
+    Ok(Some(Arc::new(paid)))
+}
+
+async fn start_daemon_cashu(
     config: &Config,
     data_dir: &Path,
     bind_address: &str,
@@ -307,6 +377,7 @@ pub(crate) async fn start_paid_retrieval(
         service: tokio::sync::Mutex::new(service),
         selling,
         buying,
+        credit: None,
     }))
 }
 

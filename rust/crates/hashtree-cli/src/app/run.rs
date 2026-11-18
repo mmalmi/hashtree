@@ -640,12 +640,13 @@ fn run_command(
                 fips_peer_ids,
             )
             .await?;
-            let paid_retrieval = match hashtree_cli::paid_retrieval::start_daemon_paid_retrieval(
+            let paid_retrieval = match hashtree_cli::paid_retrieval::start_daemon_with_keys(
                 &config,
                 &data_dir,
                 &bind_address,
                 fips_handle.as_ref(),
                 &store,
+                Some(&keys),
             )
             .await
             {

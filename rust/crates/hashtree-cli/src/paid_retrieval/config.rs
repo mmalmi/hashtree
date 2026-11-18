@@ -38,6 +38,9 @@ pub const DEFAULT_SPENDING_LIMIT_SAT: u64 = 1_000;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PaidRetrievalConfig {
+    /// Native issuer-local credit, including the private exchange on FIPS.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credit: Option<super::credit::CreditConfig>,
     /// Sell blobs from the local store. Absent: nothing is sold.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<PaidProviderConfig>,
@@ -48,7 +51,7 @@ pub struct PaidRetrievalConfig {
 
 impl PaidRetrievalConfig {
     pub fn is_unset(&self) -> bool {
-        self.provider.is_none() && self.client.is_none()
+        self.provider.is_none() && self.client.is_none() && self.credit.is_none()
     }
 
     /// Whether the free blob service must stop answering peers.
@@ -56,12 +59,22 @@ impl PaidRetrievalConfig {
         self.provider
             .as_ref()
             .is_some_and(|provider| provider.paying_only)
+            || self
+                .credit
+                .as_ref()
+                .is_some_and(|credit| credit.paying_only && credit.sell_sat.is_some())
     }
 
     /// Identities of the providers the client buys from.
     pub fn client_provider_npubs(&self) -> impl Iterator<Item = &str> {
         let providers = self.client.iter().flat_map(|client| &client.providers);
-        providers.filter_map(|provider| provider.npub.as_deref())
+        providers
+            .filter_map(|provider| provider.npub.as_deref())
+            .chain(
+                self.credit
+                    .iter()
+                    .flat_map(|credit| credit.providers.iter().map(String::as_str)),
+            )
     }
 }
 

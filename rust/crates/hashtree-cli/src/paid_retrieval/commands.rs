@@ -136,6 +136,7 @@ pub async fn settle(
     // Settling fetches no blob, so nothing needs a cache.
     let buying = open_client(settings, bind_address, service.as_ref(), wallet, None)?;
     let paid = DaemonPaidRetrieval {
+        credit: None,
         service: tokio::sync::Mutex::new(service),
         selling: None,
         buying: Some(buying),
@@ -151,8 +152,13 @@ pub fn offline_status(config: &Config, data_dir: &Path) -> Result<Value> {
     let wallet_mints = &config.cashu.accepted_mints;
     let settings =
         PaidRetrievalSettings::from_config(&config.paid_retrieval, wallet_mints, data_dir)?;
+    let credit = config.paid_retrieval.credit.is_some();
     let Some(settings) = settings else {
-        return Ok(Value::Null);
+        return Ok(if credit {
+            json!({"peer_credit_configured":true})
+        } else {
+            Value::Null
+        });
     };
     let provider = settings.provider.map(|provider| {
         let tariff = provider.config.tariff;
@@ -196,5 +202,5 @@ pub fn offline_status(config: &Config, data_dir: &Path) -> Result<Value> {
             }))
         }
     };
-    Ok(json!({ "provider": provider, "client": client }))
+    Ok(json!({ "provider": provider, "client": client, "peer_credit_configured":credit }))
 }

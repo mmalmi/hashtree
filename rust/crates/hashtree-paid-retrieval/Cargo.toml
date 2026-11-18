@@ -12,6 +12,7 @@ readme = "README.md"
 
 [features]
 default = []
+peer-credit = ["tokio/time", "dep:peer-payments", "dep:serde", "dep:serde_json", "dep:hex"]
 # Adapters for the existing cashu-service payment client.
 cashu = ["dep:cashu-service"]
 # The exchange as its own TCP/FIPS service, beside the free blob service of
@@ -21,6 +22,10 @@ test-support = ["tokio/sync"]
 fips = ["dep:nvpn-fips-core", "dep:nvpn-fips-tcp", "dep:nvpn-fips-tcp-endpoint", "tokio/sync", "tokio/time"]
 
 [dependencies]
+peer-payments = { version = "=0.1.0", path = "../../vendor/peer-payments", optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 hashtree-core.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
@@ -33,6 +38,7 @@ nvpn-fips-tcp = { version = "0.2.5", optional = true }
 nvpn-fips-tcp-endpoint = { version = "0.2.30", optional = true }
 
 [dev-dependencies]
+secp256k1 = { version = "0.29", default-features = false, features = ["std"] }
 # The crate's own tests use its fake mint.
 hashtree-paid-retrieval = { path = ".", features = ["test-support"] }
 hashtree-network.workspace = true

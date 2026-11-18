@@ -729,3 +729,112 @@ runs, instead of racing it: stop the daemon first.
 
 - Whether an open redemption that no wallet confirms should expire. Today the
   oldest is dropped only when 4,096 are open.
+
+## Peer credit over FIPS
+
+A native node can sell one verified SHA-256 blob for a fixed whole-sat amount
+of its buyer’s credit. The seller is a creditor of that buyer. An operator can
+pay a Lightning invoice from this claim when the debtor pays Lightning or
+forwards against a suitable claim on another connected peer. No mint is
+required. Redemption depends on cooperation, liquidity and an available
+route. Hashtree uses the same signed service receipts, SQLite account and
+private exchange as FIPS and nostr-vpn.
+
+Enable only the roles you need. This example sells a blob for one sat of
+credit and buys from a named provider for at most one sat. Set the server’s
+read listener to loopback for credit buying. Hashtree tries free sources
+first. A sale serves the local store and cannot trigger a purchase.
+
+```toml
+[paid_retrieval.credit]
+sell_sat = 1
+paying_only = true
+providers = ["<provider npub>"]
+max_sat_per_blob = 1
+```
+
+Initialize the account once with the daemon stopped. This example trusts one
+buyer for at most 10 sats, caps total seller exposure at 20 sats, and allows
+up to 30 sats of lifetime purchases. All services using this account share
+the caps. For the same node identity, an optional `journal` path opens an
+existing compatible account. Only one process can own it at a time.
+
+```sh
+htree paid credit init --trust <buyer-npub> --per-peer-sat 10 --total-sat 20 --lifetime-spend-sat 30
+```
+
+An optional `--trial-peer-sat 1 --trial-pool-sat 3` on initialization allows
+one sat for a new authenticated identity inside a three-sat pool shared by
+all trial peers. Successful wallet-verified repayments can increase a peer’s
+individual ceiling inside the configured limits. Manual trust and trial
+credit are both off by default. An operator can lose the outstanding trial
+pool to multiple identities. Receipt counts and public social links do not
+prove repayment.
+
+To receive sats in your wallet, create a fixed-amount BOLT11 invoice in that
+wallet. Stop the daemon to release its account. With FIPS enabled and a peer
+online, run `htree paid credit pay @invoice.txt`. The command shows the invoice amount, conversion fee, total credit debit,
+debtor, payment hash and expiry, then asks for confirmation. Use
+`--receive-rpc <absolute-socket-path>` for your own Core Lightning node to
+verify local receipt and update trial-credit history. The command retries a pending payment for up to 15 seconds using the same
+payment hash. Use `quote @invoice.txt` to inspect an offer, and
+`resume <payment-hash>` to resume further after interruption.
+Use the same receive socket when resuming your own cash-out.
+
+Before configuring a wallet, run `htree paid credit wallet-status` on the
+same machine as Core Lightning. It checks common local sockets with a
+read-only request and reports the network. Use `--receive-rpc` for a
+custom socket. To send Lightning for other users, set
+`[paid_retrieval.credit.exchange.lightning]` with the absolute
+`rpc_socket`, `max_amount_sat`, `max_fee_msat`, `max_lifetime_payout_sat`
+and `max_lifetime_fees_msat`. Only the wallet owner can authorize this.
+
+To earn a fixed spread on a private conversion, set the appropriate fees.
+Here the node asks one sat to forward credit, two sats to spend its own
+Lightning, and authorizes a maximum total conversion fee of three sats
+when spending its own credit. All three fees default to zero. The
+configured payout caps still apply. `htree paid credit balance` shows
+available claims, obligations, earned fees and Lightning network costs
+from a read-only snapshot even while the daemon is running.
+
+```toml
+[paid_retrieval.credit.exchange]
+forward_existing_credit = true
+
+[paid_retrieval.credit.exchange.market]
+forward_fee_sat = 1
+payout_fee_sat = 2
+max_invoice_fee_sat = 3
+```
+
+To automatically receive proceeds in your own local wallet, optionally
+configure a bounded sweep. This example checks every ten minutes for a
+payment of 20–50 sats and authorizes up to three sats in conversion fees.
+Use `receive_rpc` in `[paid_retrieval.credit]` to select a nonstandard
+receiving socket. Automatic receipt of proceeds and permission to spend
+the Lightning wallet have separate settings.
+
+```toml
+[paid_retrieval.credit.auto_cashout]
+min_sat = 20
+max_sat = 50
+max_fee_sat = 3
+interval_secs = 600
+```
+
+A payer can send a short-lived availability hint to a connected creditor
+with `htree paid credit offer-payout <npub>`. An optional `advertise_payout = true` in the exchange market section
+sends current offers to at most 16 connected creditors per minute when local
+wallet budget is available. A creditor can also initiate a private request. The daemon sends these messages over authenticated FIPS
+links. Each participant learns its immediate counterparty and the terms
+it needs for its part. An existing two-way service balance is netted by
+the lower public key proposing and the other node countersigning.
+
+Hashtree verifies the bytes before signing, persists the receipt and keeps the
+blob locally before requesting an acknowledgement. It retries unacknowledged
+receipts with configured providers while running. The offline operator command
+`htree paid credit reconcile <provider-npub> <sha256>` resends the same receipt.
+A lost delivery before verification can leave the original reservation open.
+Replaying that fetch cannot create another allowance. Back up the journal while
+the owner is stopped. Under its default retained-history limit this first
+version supports 256 unique purchases per account, including completed ones.

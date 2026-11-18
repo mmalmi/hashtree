@@ -26,6 +26,14 @@ const CONVERGENCE_TIMEOUT: Duration = Duration::from_secs(10);
 const TWO_MIB: usize = 2 * 1024 * 1024;
 
 async fn endpoint(rendezvous_addr: SocketAddrV4, product_scope: &str) -> Arc<FipsEndpoint> {
+    keyed_endpoint(rendezvous_addr, product_scope, None).await
+}
+
+async fn keyed_endpoint(
+    rendezvous_addr: SocketAddrV4,
+    product_scope: &str,
+    key: Option<&fips_core::identity::Identity>,
+) -> Arc<FipsEndpoint> {
     let mut config = Config::new();
     config.node.discovery.nostr.enabled = false;
     config.node.discovery.lan.enabled = false;
@@ -37,8 +45,15 @@ async fn endpoint(rendezvous_addr: SocketAddrV4, product_scope: &str) -> Arc<Fip
         public: Some(false),
         ..UdpConfig::default()
     });
+    let builder = FipsEndpoint::builder();
+    let builder = match key {
+        Some(key) => builder.identity_nsec(fips_core::identity::encode_nsec(
+            &key.keypair().secret_key(),
+        )),
+        None => builder,
+    };
     Arc::new(
-        FipsEndpoint::builder()
+        builder
             .config(config)
             .discovery_scope(product_scope)
             .local_rendezvous()
@@ -313,4 +328,134 @@ async fn grace_is_bound_to_the_peer_that_fips_authenticated() {
     for endpoint in [first_endpoint, second_endpoint, provider_endpoint] {
         endpoint.shutdown().await.unwrap();
     }
+}
+
+/// Native credit shares a journal with VPN and FIPS service obligations.
+/// A private transfer returns the exact bytes and clears against reciprocal
+/// VPN service using only signatures of the same two identities.
+#[cfg(feature = "peer-credit")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn private_credit_over_fips_nets_against_vpn_service() {
+    use fips_core::identity::Identity;
+    use hashtree_core::{sha256, BlobReply, BlobRequest, BlobRoute};
+    use hashtree_paid_retrieval::credit::{CreditAccount, CreditBlobProvider, CreditBlobRoute};
+    use peer_payments::{
+        Account, AccountStore, Agreement, Book, Buyer, Controller, Keypair, Limits, PurchaseIntent,
+        SpendingLimits,
+    };
+    use std::sync::Mutex;
+    let dir = tempfile::tempdir().unwrap();
+    let a = Identity::generate();
+    let b = Identity::generate();
+    let key = |peer: &Identity| {
+        Keypair::from_seckey_slice(
+            &secp256k1::Secp256k1::signing_only(),
+            &peer.keypair().secret_key().secret_bytes(),
+        )
+        .unwrap()
+    };
+    let open = |name, me: &Identity, peer: &Identity| {
+        let owner = me.pubkey().to_string();
+        let book = Account::new(
+            Book::new(&owner, Limits::default(), [peer.pubkey().to_string()]).unwrap(),
+            Buyer::new(&owner, SpendingLimits::default()).unwrap(),
+        )
+        .unwrap();
+        Arc::new(Mutex::new(
+            AccountStore::create(dir.path().join(name), book).unwrap(),
+        ))
+    };
+    let aj = open("a", &a, &b);
+    let bj = open("b", &b, &a);
+    let rendezvous = rendezvous_addr();
+    let ae = keyed_endpoint(rendezvous, "private-credit", Some(&a)).await;
+    let be = keyed_endpoint(rendezvous, "private-credit", Some(&b)).await;
+    let source = Arc::new(MemoryStore::new());
+    let bytes = vec![53; 256 * 1024];
+    let hash = sha256(&bytes);
+    source.put(hash, bytes.clone()).await.unwrap();
+    let seller =
+        CreditBlobProvider::new(source, CreditAccount::new(bj.clone(), key(&b)).unwrap(), 2)
+            .unwrap();
+    let provider = FipsPaidBlobService::credit(be.clone(), Some(seller), FipsPaidConfig::default())
+        .await
+        .unwrap();
+    let client = FipsPaidBlobService::credit(ae.clone(), None, FipsPaidConfig::default())
+        .await
+        .unwrap();
+    let peer = PeerIdentity::from_npub(&be.npub()).unwrap();
+    let route = CreditBlobRoute::new(
+        CreditAccount::new(aj.clone(), key(&a)).unwrap(),
+        peer.pubkey().to_string(),
+        Arc::new(client.transport_to(peer)),
+        2,
+        Arc::new(MemoryStore::new()),
+    )
+    .unwrap();
+    assert_eq!(
+        timeout(
+            Duration::from_secs(15),
+            route.route(BlobRequest { hash, htl: 0 })
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        BlobReply::Data(bytes)
+    );
+    {
+        let mut aj = aj.lock().unwrap();
+        let mut bj = bj.lock().unwrap();
+        assert_eq!(bj.book().available_claims().next().unwrap().1, 2);
+        assert_eq!(aj.book().available_debts().next().unwrap().1, 2);
+        let ak = key(&a);
+        let bk = key(&b);
+        let mut ac = Controller::new(&mut aj, &ak).unwrap();
+        let mut bc = Controller::new(&mut bj, &bk).unwrap();
+        let a_id = a.pubkey().to_string();
+        let b_id = b.pubkey().to_string();
+        let terms = Agreement {
+            id: "reciprocal-vpn".into(),
+            payer: b_id.clone(),
+            provider: a_id.clone(),
+            service: "vpn.exit.upload_bytes".into(),
+            resource: "tunnel".into(),
+            max_units: 1024,
+            price_sat: 2,
+            price_per_units: 1024,
+            max_amount_sat: 2,
+            created_at: 1,
+            expires_at: 10,
+        };
+        let offer = ac.offer(terms, 2).unwrap();
+        let intent = PurchaseIntent {
+            provider: &a_id,
+            service: "vpn.exit.upload_bytes",
+            resource: "tunnel",
+            units: 1024,
+            max_price_sat: 2,
+            price_per_units: 1024,
+            max_amount_sat: 2,
+            max_duration_secs: 10,
+        };
+        let accepted = bc.accept_offer(&offer, &intent, 2).unwrap();
+        let mut allowance = ac.open(&offer, &accepted, 2).unwrap().allowance.unwrap();
+        assert!(allowance.admit(1024, 2));
+        let receipt = bc.receipt("reciprocal-vpn", 1024, true).unwrap();
+        let ack = ac.receive_receipt(&receipt, 1024).unwrap();
+        bc.acknowledge(&ack).unwrap();
+        let (left, right, peer) = if a_id < b_id {
+            (&mut ac, &mut bc, &b_id)
+        } else {
+            (&mut bc, &mut ac, &a_id)
+        };
+        let proposal = left.propose_netting(peer).unwrap().unwrap();
+        let acceptance = right.accept_netting(&proposal).unwrap();
+        left.finish_netting(&acceptance).unwrap();
+        assert!(aj.book().available_claims().next().is_none());
+        assert!(bj.book().available_claims().next().is_none());
+    }
+    client.shutdown().await.unwrap();
+    provider.shutdown().await.unwrap();
+    ae.shutdown().await.unwrap();
+    be.shutdown().await.unwrap();
 }

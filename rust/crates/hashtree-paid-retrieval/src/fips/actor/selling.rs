@@ -1,5 +1,6 @@
 //! The selling side: inbound connections answered through the provider.
 
+use fips_core::PeerIdentity;
 use fips_tcp::ConnectionId;
 use tokio::task::{AbortHandle, Id as TaskId, JoinError};
 
@@ -15,7 +16,7 @@ enum ServerPhase {
 
 pub(super) struct Server {
     /// The peer FIPS authenticated, as the provider is told.
-    peer: String,
+    peer: PeerIdentity,
     deadline_ms: u64,
     phase: ServerPhase,
 }
@@ -26,8 +27,8 @@ pub(super) type Handled = (ConnectionId, Vec<u8>);
 impl Actor {
     pub(super) async fn accept(&mut self, now_ms: u64) {
         while let Some(connection) = self.tcp.accept() {
-            let peer = self.tcp.peer(connection).map(|peer| peer.npub());
-            let seats = |peer: &String| {
+            let peer = self.tcp.peer(connection);
+            let seats = |peer: &PeerIdentity| {
                 // A connection the peer already closed frees its seat, even
                 // before it is taken out below.
                 let taken = self.servers.iter().filter(|(connection, server)| {
@@ -88,9 +89,9 @@ impl Actor {
                     match read.await {
                         Ok(Some(request)) => {
                             let provider = provider.clone();
-                            let peer = server.peer.clone();
+                            let peer = server.peer;
                             let handler = self.handlers.spawn(async move {
-                                let reply = provider.handle(Some(&peer), &request).await;
+                                let reply = provider.handle(peer, &request).await;
                                 (connection, reply)
                             });
                             server.phase = ServerPhase::Handling(handler);

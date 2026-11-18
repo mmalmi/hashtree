@@ -6,6 +6,7 @@ members = [
     "vendor/lmdb-master-sys",
     "vendor/nostr-social-graph-heed",
 ]
+exclude = ["vendor/cashu-credit", "vendor/peer-payments", "vendor/fips-credit-link"]
 resolver = "2"
 
 [workspace.package]

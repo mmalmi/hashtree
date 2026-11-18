@@ -595,6 +595,11 @@ pub(crate) enum Commands {
 
 #[derive(Subcommand)]
 pub(crate) enum PaidCommands {
+    /// Use peer credit earned from paid services
+    Credit {
+        #[command(subcommand)]
+        command: CreditCommands,
+    },
     /// Show balances, the spending limit, unresolved tokens and blocks
     Status {
         /// Daemon address (default: server.bind_address)
@@ -608,6 +613,52 @@ pub(crate) enum PaidCommands {
     },
     /// Resend unacknowledged payments and try unresolved tokens again
     Settle,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum CreditCommands {
+    /// Check the connection to your own Core Lightning wallet
+    WalletStatus {
+        #[arg(long)]
+        receive_rpc: Option<std::path::PathBuf>,
+    },
+    /// Show earned credit, obligations and conversion fees
+    Balance,
+    /// Create the account once. Limits are amounts of issuer-local credit in sats.
+    Init {
+        #[arg(long)]
+        trust: Vec<String>,
+        #[arg(long, default_value_t = 0)]
+        per_peer_sat: u64,
+        #[arg(long, default_value_t = 0)]
+        total_sat: u64,
+        #[arg(long, default_value_t = 0)]
+        lifetime_spend_sat: u64,
+        /// Initial per-identity trial credit in sats; requires a global trial pool
+        #[arg(long, requires = "trial_pool_sat")]
+        trial_peer_sat: Option<u64>,
+        #[arg(long, requires = "trial_peer_sat")]
+        trial_pool_sat: Option<u64>,
+    },
+    /// Describe the available private conversion for a Lightning invoice
+    Quote { invoice: String },
+    /// Show the quote, then ask for confirmation before spending
+    Pay {
+        invoice: String,
+        /// Verify an incoming settlement with your own Core Lightning node
+        #[arg(long)]
+        receive_rpc: Option<std::path::PathBuf>,
+    },
+    /// Privately advertise payout availability to a connected creditor
+    OfferPayout { peer: String },
+    /// Resume an already confirmed invoice
+    Resume {
+        payment_hash: String,
+        #[arg(long)]
+        receive_rpc: Option<std::path::PathBuf>,
+    },
+    /// Resend the exact receipt for a verified delivery
+    Reconcile { provider: String, hash: String },
 }
 
 #[derive(Subcommand)]

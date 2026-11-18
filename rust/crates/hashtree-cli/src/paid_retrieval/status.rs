@@ -7,6 +7,7 @@ use super::{BuyingSide, ClientRoute, DaemonPaidRetrieval, SellingSide};
 
 pub(super) fn status(paid: &DaemonPaidRetrieval) -> Value {
     json!({
+        "peer_credit": paid.credit.is_some(),
         "provider": paid.selling.as_ref().map(selling),
         "client": paid.buying.as_ref().map(buying),
     })
@@ -77,6 +78,12 @@ pub fn format_paid_status(paid: &Value) -> Vec<String> {
     let number = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
     let sats = |msat: i64| format!("{:.3} sat", msat as f64 / 1_000.0);
     let mut lines = Vec::new();
+    if paid["peer_credit_configured"].as_bool() == Some(true) {
+        lines.push("  Peer credit is configured.".into());
+    }
+    if paid["peer_credit"].as_bool() == Some(true) {
+        lines.push("  Peer credit is active over authenticated FIPS.".into());
+    }
     if let Some(provider) = paid.get("provider").filter(|value| !value.is_null()) {
         let tariff = &provider["tariff"];
         lines.push(format!(

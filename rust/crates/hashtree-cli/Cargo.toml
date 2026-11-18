@@ -33,7 +33,9 @@ hashtree-nostr.workspace = true
 hashtree-nostr-pubsub.workspace = true
 hashtree-fips-transport.workspace = true
 hashtree-network.workspace = true
-hashtree-paid-retrieval = { workspace = true, features = ["cashu", "fips"] }
+hashtree-paid-retrieval = { workspace = true, features = ["cashu", "fips", "peer-credit"] }
+peer-payments = { path = "../../vendor/peer-payments", version = "=0.1.0" }
+fips-credit-link = { path = "../../vendor/fips-credit-link", version = "=0.1.0" }
 hashtree-bittorrent = { version = "0.2.0", path = "../hashtree-bittorrent", optional = true, features = ["libtorrent"] }
 hashtree-resolver = { workspace = true, features = ["nostr"] }
 hashtree-updater = { workspace = true, features = ["nostr-pubsub"] }

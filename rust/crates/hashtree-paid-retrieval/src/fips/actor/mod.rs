@@ -14,8 +14,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
+use super::Provider;
 use super::{transport_error, FipsPaidError};
-use crate::provider::PaidBlobProvider;
 use buying::{Active, Idle};
 use selling::{Handled, Server};
 
@@ -46,7 +46,7 @@ pub(super) enum Command {
 }
 pub(super) struct Actor {
     tcp: FipsTcpEndpoint,
-    provider: Option<PaidBlobProvider>,
+    provider: Option<Provider>,
     commands: mpsc::Receiver<Command>,
     queued: VecDeque<Exchange>,
     active: Vec<Active>,
@@ -60,7 +60,7 @@ pub(super) struct Actor {
 impl Actor {
     pub(super) fn new(
         tcp: FipsTcpEndpoint,
-        provider: Option<PaidBlobProvider>,
+        provider: Option<Provider>,
         commands: mpsc::Receiver<Command>,
         idle_timeout: Duration,
     ) -> Self {

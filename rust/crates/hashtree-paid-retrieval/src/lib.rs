@@ -13,6 +13,9 @@
 //!
 //! Design, failure handling and open decisions: `docs/paid-retrieval.md`.
 
+#[cfg(feature = "peer-credit")]
+pub mod credit;
+
 mod account;
 mod account_store;
 pub mod bencode;

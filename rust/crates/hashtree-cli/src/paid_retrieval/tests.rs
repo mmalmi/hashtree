@@ -916,3 +916,116 @@ async fn the_gateway_answers_every_protocol_outcome_with_200_and_nothing_else() 
     provider.fips.shutdown().await;
     fips_only.fips.shutdown().await;
 }
+
+#[test]
+fn credit_account_creation_needs_explicit_limits_and_never_replaces_an_account() {
+    use peer_payments::TrialPolicy;
+    let dir = tempfile::tempdir().unwrap();
+    let keys = nostr::Keys::generate();
+    let peer = nostr::Keys::generate().public_key();
+    let cfg = credit::CreditConfig::default();
+    assert!(cfg.open(dir.path(), &keys).is_err());
+    cfg.initialize(
+        dir.path(),
+        &keys,
+        &[],
+        5,
+        10,
+        0,
+        Some(TrialPolicy {
+            initial_peer_sat: 1,
+            pool_sat: 3,
+        }),
+    )
+    .unwrap();
+    let journal = cfg.open(dir.path(), &keys).unwrap();
+    let live = cfg.balance(dir.path(), &keys).unwrap();
+    assert_eq!(
+        (live.available_claims_sat, live.available_debts_sat),
+        (0, 0)
+    );
+    assert!(cfg.open(dir.path(), &keys).is_err());
+    assert!(cfg
+        .initialize(dir.path(), &keys, &[], 999, 999, 999, None)
+        .is_err());
+    assert_eq!(
+        journal
+            .lock()
+            .unwrap()
+            .book()
+            .seller()
+            .available_credit_sat(&peer.to_hex())
+            .unwrap(),
+        1
+    );
+    drop(journal);
+    assert!(cfg.open(dir.path(), &nostr::Keys::generate()).is_err());
+}
+
+#[tokio::test]
+async fn credit_only_daemon_requires_fips_before_any_wallet_helper_or_file() {
+    let cfg: Config =
+        toml::from_str("[paid_retrieval.credit]\nsell_sat=1\npaying_only=true").unwrap();
+    assert!(cfg.paid_retrieval.paying_only());
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(HashtreeStore::new(dir.path().join("store")).unwrap());
+    let keys = nostr::Keys::generate();
+    let error = start_daemon_with_keys(
+        &cfg,
+        dir.path(),
+        "127.0.0.1:8080",
+        None,
+        &store,
+        Some(&keys),
+    )
+    .await
+    .err()
+    .unwrap();
+    assert!(error.to_string().contains("FIPS"));
+    assert!(!dir.path().join(PAID_RETRIEVAL_DIR).exists());
+}
+
+#[test]
+fn native_configuration_keeps_converter_fees_and_wallet_sweeps_opt_in() {
+    let plain: Config = toml::from_str("[paid_retrieval.credit]").unwrap();
+    let credit = plain.paid_retrieval.credit.unwrap();
+    assert!(credit.exchange.is_none());
+    assert!(credit.auto_cashout.is_none());
+    let cfg: Config = toml::from_str(
+        r#"
+        [paid_retrieval.credit.exchange]
+        forward_existing_credit=true
+        [paid_retrieval.credit.exchange.market]
+        forward_fee_sat=1
+        payout_fee_sat=2
+        max_invoice_fee_sat=3
+        [paid_retrieval.credit.auto_cashout]
+        min_sat=20
+        max_sat=50
+        max_fee_sat=3
+        interval_secs=600
+    "#,
+    )
+    .unwrap();
+    let credit = cfg.paid_retrieval.credit.unwrap();
+    let policy = credit.exchange.unwrap();
+    let automatic = credit.auto_cashout.unwrap();
+    assert!(policy.forward_existing_credit);
+    assert_eq!(
+        (
+            policy.market.forward_fee_sat,
+            policy.market.payout_fee_sat,
+            policy.market.max_invoice_fee_sat
+        ),
+        (1, 2, 3)
+    );
+    assert_eq!(
+        (
+            automatic.min_sat,
+            automatic.max_sat,
+            automatic.max_fee_sat,
+            automatic.interval_secs
+        ),
+        (20, 50, 3, 600)
+    );
+}

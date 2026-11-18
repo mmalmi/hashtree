@@ -1462,6 +1462,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cashu-credit"
+version = "0.3.1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "cashu-service"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2971,6 +2980,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
+name = "fips-credit-link"
+version = "0.1.0"
+dependencies = [
+ "nvpn-fips-core",
+ "peer-payments",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3052,6 +3073,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "88a41f105fe1d5b6b34b2055e3dc59bb79b46b48b2040b9e6c7b4b5de097aa41"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "fs2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9564fc758e15025b46aa6643b1b77d047d1a56a1aea6e01002ac0c7026876213"
+dependencies = [
+ "libc",
+ "winapi",
 ]
 
 [[package]]
@@ -3726,6 +3757,7 @@ dependencies = [
  "cashu-service",
  "clap",
  "dirs 5.0.1",
+ "fips-credit-link",
  "futures",
  "git-remote-htree",
  "hashtree-bittorrent",
@@ -3763,6 +3795,7 @@ dependencies = [
  "nostr-social-graph",
  "nvpn-fips-core",
  "page_size",
+ "peer-payments",
  "rand 0.8.6",
  "rcgen",
  "reqwest 0.12.28",
@@ -4095,10 +4128,14 @@ dependencies = [
  "hashtree-core",
  "hashtree-network",
  "hashtree-paid-retrieval",
+ "hex",
  "nvpn-fips-core",
  "nvpn-fips-tcp",
  "nvpn-fips-tcp-endpoint",
+ "peer-payments",
  "rand 0.8.6",
+ "secp256k1 0.29.1",
+ "serde",
  "serde_json",
  "tempfile",
  "thiserror 1.0.69",
@@ -6320,6 +6357,21 @@ checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
 dependencies = [
  "digest 0.10.7",
  "hmac 0.12.1",
+]
+
+[[package]]
+name = "peer-payments"
+version = "0.1.0"
+dependencies = [
+ "cashu-credit",
+ "fs2",
+ "lightning-invoice",
+ "rusqlite",
+ "secp256k1 0.29.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
 ]
 
 [[package]]

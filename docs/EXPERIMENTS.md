@@ -4079,3 +4079,72 @@ opt-in IndexedDB event cache took 373 ms and issued zero file-block writes.
 Neither timing includes fixture signing or the final query. With an existing
 portable index, a separate run read back 80 old events together with 120
 new arrivals without rewriting the old index.
+
+### Native Hashtree peer-credit retrieval (2026-11-19)
+
+The Rust release build bought 48 distinct 256-KiB blobs at two sats each
+through an authenticated in-process carrier, using real Schnorr signatures,
+two SQLite journals and the production buyer and seller. It then read all
+48 blobs from its local memory store. We compared a prefix frame that
+allocated and copied the seller’s payload and shifted it on the buyer with
+the shipped suffix frame, which the buyer removes by truncating its buffer.
+The same Linux VM ran five release tests per format with SQLite on its
+disk, pinned to one CPU. The table reports medians.
+
+| Across 48 purchases and 48 repeated reads | Prefix | Suffix |
+| --- | ---: | ---: |
+| First purchase of each blob | 3.52 s | 3.15 s |
+| Repeated reads | 6.04 ms | 6.78 ms |
+| User CPU in the whole test | 0.19 s | 0.16 s |
+| System CPU in the whole test | 0.08 s | 0.05 s |
+| Peak process RSS | 36,628 KiB | 36,628 KiB |
+| Application bytes exchanged | 12,744,594 | 12,744,594 |
+| Bytes occupied by journal files, including WAL, before close | 8,703,488 | 8,703,488 |
+| File-system output (512-byte blocks) | 30,064 | 30,064 |
+
+Every run produced all 48 hash-verified blobs and settled 96 sats of
+issuer-local credit in 144 exchanges. Repeated reads sent zero frames.
+The cold median fell 10.5%. Cold runs varied from 3.03–3.87 seconds with
+the prefix and 2.94–4.43 seconds with the suffix. Cache code was identical
+in both versions. A separate tmpfs run took 110 ms versus 103 ms for the
+same 48 purchases. Durable journal operations dominate cold retrieval
+on disk. The journal footprint reflects rewriting and retaining account
+snapshots as their history grows. The timings exclude network transit and wallet payouts. Use the separate
+`private_credit_over_fips_nets_against_vpn_service` integration test for a
+real encrypted local UDP transfer and reciprocal settlement against VPN
+service. To repeat the shipped benchmark, run the following command in
+the Rust workspace with `TMPDIR` on the storage being measured.
+
+```sh
+cargo test --locked --release -p hashtree-paid-retrieval --features peer-credit --lib credit::tests::measure_purchases_and_cache_hits -- --nocapture --test-threads=1
+```
+
+
+A separate two-process smoke check ran the native Hashtree CLI and FIPS
+relay over authenticated loopback UDP. A seeded, mutually signed Hashtree
+blob claim had six sats outstanding. The normal Hashtree CLI showed the
+five-sat invoice, one-sat conversion fee and six-sat total before its
+confirmation prompt. It verified the receiver-side fixture invoice and the
+FIPS journal recorded one sat in converter earnings, one msat in network
+costs and zero remaining obligations. This run took 1.52 seconds including
+connection, confirmation and an automatic retry of the existing payment.
+The CLI used 0.055 seconds of user CPU, 0.023 seconds of system CPU and
+76.8 MiB peak RSS. No real Lightning funds were used.
+
+
+The automatic withdrawal check used the native Hashtree daemon startup path,
+the FIPS relay executable and a wallet RPC fixture. With a five-sat payment
+and a one-sat fee ceiling the daemon requested one labeled invoice. The
+first attempt left the payment pending. The following 60-second tick
+reconciled it, the receiving wallet showed paid, and the relay accounted
+for its fee. End-to-end time was 60.28 seconds.
+
+
+A separate three-process regtest used Hashtree as creditor, FIPS as the
+credit-conversion hop and nostr-vpn as the Lightning payer. Two Core
+Lightning wallets independently recorded the 5,000-msat payment. All three
+credit journals closed against the same preimage. The two starting bilateral
+service balances were fixture-seeded. Hashtree spent six credit sats, FIPS
+earned one forwarding sat and the direct Lightning channel required zero
+network fees. The scripted quote and confirmation through verification took
+0.714 seconds on that run.

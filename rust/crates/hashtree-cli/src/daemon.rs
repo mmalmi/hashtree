@@ -680,12 +680,13 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
     )
     .await?
     .map(Arc::new);
-    let paid_retrieval = match crate::paid_retrieval::start_daemon_paid_retrieval(
+    let paid_retrieval = match crate::paid_retrieval::start_daemon_with_keys(
         &config,
         &opts.data_dir,
         &opts.bind_address,
         fips_handle.as_deref(),
         &store,
+        Some(&keys),
     )
     .await
     {

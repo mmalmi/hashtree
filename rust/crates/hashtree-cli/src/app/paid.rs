@@ -15,13 +15,15 @@ use hashtree_cli::paid_retrieval::{
 use hashtree_cli::HashtreeStore;
 use hashtree_paid_retrieval::CashuWallet;
 
-use super::args::PaidCommands;
+use super::args::{CreditCommands, PaidCommands};
+mod credit;
 
 pub(crate) async fn run(command: PaidCommands, cli_data_dir: Option<PathBuf>) -> Result<()> {
     let config = Config::load()?;
     // As `htree start` resolves it, so that both use the same accounts.
     let data_dir = cli_data_dir.unwrap_or_else(|| PathBuf::from(&config.storage.data_dir));
     match command {
+        PaidCommands::Credit { command } => credit::run(command, &config, &data_dir).await,
         PaidCommands::Status { addr } => {
             let addr = addr.unwrap_or_else(|| config.server.bind_address.clone());
             print_status(&config, &data_dir, &addr).await
