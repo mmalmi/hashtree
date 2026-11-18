@@ -1,0 +1,19 @@
+{
+  "source": "53eb24ab06b195d45c97a051c9cb1725ac07235a",
+  "previewRun": 44342830243,
+  "archives": {
+    "hashtree-worker-0.4.31.tgz": {
+      "sha256": "3ab1c6fa7ba2311d0ea9d8fddaafaad53d62cfd86d86ef6af8abdf317d23e920",
+      "integrity": "sha512-45n5HmeicduLyeueQHUxRPG+Dhgo41/nsgg2OsPgaWu3xo28qLHu3+RgCILwXlUXgN8s0/1dkkpfxikUKUi1ng==",
+      "bytes": 279150
+    },
+    "hashtree-nostr-pubsub-0.1.10.tgz": {
+      "sha256": "50a16d6b80105acdc9a83cd796640071b6fd914be99462733c1055ad7146d4f8",
+      "integrity": "sha512-AXX0MjWUD9sTK64B3uVgwheasoxDnVAete+FSTsXJYPZMjxPyb/EfgAZok+xHZ2U8igbn3LM8TOfsJDY13ReUQ==",
+      "bytes": 28999
+    }
+  },
+  "normalization": "Source npmManifest with exact registry dependencies; only not-yet-published helper mapped to its exact archive.",
+  "tests": 9,
+  "workspaceSourcesUsed": false
+}

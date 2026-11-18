@@ -1,4 +1,4 @@
-name: Verify exact shipping worker dependencies
+name: Verify normalized npm worker persistence
 on:
   push:
     branches: [codex/signed-graph-worker-qualification]
