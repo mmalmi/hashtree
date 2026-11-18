@@ -97,14 +97,18 @@ async function retainedBytes(page: Page) {
       request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
     });
     try {
-      return await new Promise<number[]>((resolve, reject) => {
+      return await new Promise<number[] | null>((resolve, reject) => {
         const request = db.transaction('socialGraph').objectStore('socialGraph').get('main');
-        request.onsuccess = () => resolve([...request.result.data]); request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result === undefined ? null : [...request.result.data]); request.onerror = () => reject(request.error);
       });
     } finally { db.close(); }
   });
 }
-async function saved(page: Page) { return SocialGraph.fromBinary(owner, new Uint8Array(await retainedBytes(page))); }
+async function saved(page: Page) {
+  const bytes = await retainedBytes(page);
+  if (!bytes) throw new Error('Expected a retained social graph');
+  return SocialGraph.fromBinary(owner, new Uint8Array(bytes));
+}
 async function retain(page: Page, bytes: Uint8Array) {
   await page.evaluate(async bytes => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
@@ -361,8 +365,7 @@ for (const phase of ['pending-snapshot', 'pending-idb', 'catchup', 'changed-sign
         const activeRoot = phase === 'changed-account' ? muted : owner;
         expect(negotiations.some(record => record.filter.authors.includes(activeRoot))).toBe(true);
         await request(page, { type: 'close' });
-        const graph = await saved(page); expect(graph.getListRevision(owner, 3)).toBeUndefined();
-        expect(graph.getListRevision(owner, 10000)).toBeUndefined();
+        expect(await retainedBytes(page)).toBeNull();
       } else {
         if (phase !== 'catchup') { await expect.poll(() => snapshot.counts.directories).toBe(1); expect(snapshot.counts.aborted).toBe(0); releaseDirectory(); }
         await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: owner })).pubkeys).toEqual([friend]);
@@ -450,17 +453,7 @@ for (const mode of ['delayed-upgrade', 'invalid-upgrade', 'small-upgrade', 'reta
         // Close flushes pending durable work. A packaged seed by itself is not
         // user state, and must not disable signed discovery on the next visit.
         await request(page, { type: 'close' });
-        const hasSavedGraph = await page.evaluate(async () => {
-          const db = await new Promise<IDBDatabase>((resolve, reject) => {
-            const request = indexedDB.open('hashtree-social-graph');
-            request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
-          });
-          try { return await new Promise<boolean>((resolve, reject) => {
-            const request = db.transaction('socialGraph').objectStore('socialGraph').get('main');
-            request.onsuccess = () => resolve(request.result !== undefined); request.onerror = () => reject(request.error);
-          }); } finally { db.close(); }
-        });
-        expect(hasSavedGraph, 'Untouched fallback must not become retained user state').toBe(false);
+        expect(await retainedBytes(page), 'Untouched fallback must not become retained user state').toBeNull();
         await page.evaluate(workerUrl => {
           (window as any).policyWorker.terminate();
           (window as any).policyWorker = new Worker(workerUrl);
