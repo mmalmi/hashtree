@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.5.1 - 2026-11-18
+
+- Serve verified upstream downloads when the local blob cache is full, and respect configured cache-write admission.
+- Use hashtree-fips-transport 0.5.2 for the same peer selection in packaged and workspace builds.
+- Refresh the Windows release compiler and SDK inventory.
+
 ## 0.5.0 - 2026-11-18
 
 - Pool migrations tolerate transient file descriptor reuse during the systemd writer check.

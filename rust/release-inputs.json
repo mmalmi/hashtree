@@ -4,7 +4,9 @@
   "inventory": {
     "native": "https://github.com/mmalmi/hashtree/actions/runs/41881952905",
     "linux": "https://github.com/mmalmi/hashtree/actions/runs/41882238833",
-    "cargo": "https://github.com/mmalmi/hashtree/actions/runs/41884369905"
+    "cargo": "https://github.com/mmalmi/hashtree/actions/runs/41884369905",
+    "windows_20261112": "https://github.com/mmalmi/hashtree/actions/runs/44292964809",
+    "windows_20261112_official": "https://github.com/actions/runner-images/blob/3bad2097e709336d1860e86cf52d9a9368ba65b0/images/windows/Windows2022-Readme.md"
   },
   "linux": {
     "aarch64-unknown-linux-musl": {
@@ -813,6 +815,12 @@
             "windows_sdk_version": "10.0.26100.0",
             "visual_studio_version": "17.14.37827.9",
             "image_version": "20261101.353.1"
+          },
+          {
+            "msvc_tools_version": "14.44.35207",
+            "windows_sdk_version": "10.0.26100.0",
+            "visual_studio_version": "17.14.37906.3",
+            "image_version": "20261112.366.7"
           }
         ]
       },
