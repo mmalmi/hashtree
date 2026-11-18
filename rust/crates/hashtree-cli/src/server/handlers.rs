@@ -2,6 +2,7 @@ use super::auth::AppState;
 use super::mime::get_mime_type;
 use super::nostr_query::query_events_for_local_request;
 pub(super) use super::peer_status::daemon_status;
+use super::pooled_store::PooledReadStore;
 use super::request_paths::{
     parse_api_resolve_request_path, parse_bare_npub_request_path, parse_mutable_htree_request_path,
     parse_resolve_request_path, parse_virtual_tree_root, request_virtual_tree_root,
@@ -40,8 +41,11 @@ use tokio::io::AsyncWriteExt;
 mod content;
 mod resolve;
 
-pub(in crate::server) use content::download_blob_batch;
 use content::*;
+pub(in crate::server) use content::{
+    download_blob_batch, fetch_blob_for_tree, get_blob_range_without_blocking_runtime,
+    get_blob_size_without_blocking_runtime, get_blob_without_blocking_runtime,
+};
 use resolve::*;
 
 const CID_RANGE_STREAM_CHUNK_SIZE: u64 = 256 * 1024;
@@ -771,7 +775,7 @@ async fn list_directory_json(
         return decryption_key_forbidden_response();
     }
 
-    let store = state.store.store_arc();
+    let store = Arc::new(PooledReadStore::new(state.clone()));
     let tree = HashTree::new(HashTreeConfig::new(store).public());
     let entries = match list_directory_with_fetch(state, &tree, cid).await {
         Ok(Some(list)) => list,
@@ -902,7 +906,7 @@ async fn serve_tree_root_response(state: &AppState, request: TreeRootRequest) ->
         return decryption_key_forbidden_response();
     }
 
-    let store = state.store.store_arc();
+    let store = Arc::new(PooledReadStore::new(state.clone()));
     let tree = HashTree::new(HashTreeConfig::new(store).public());
     let mut effective_path = path.filter(|value| !value.is_empty());
 
@@ -1173,6 +1177,7 @@ async fn serve_raw_blob_with_range(
     }
 
     let mut source = BlobSource::Local;
+    let mut fetched_body = None;
     let mut total_size = match get_blob_size_without_blocking_runtime(state, hash).await {
         Ok(size) => size,
         Err(error) if error == blob_read_busy_error() => {
@@ -1196,19 +1201,10 @@ async fn serve_raw_blob_with_range(
 
     if total_size.is_none() && allow_fetch {
         match fetch_and_cache_blob_with_source(state, &hash).await {
-            Ok(Some(fetch_source)) => {
+            Ok(Some((fetch_source, data))) => {
                 source = fetch_source;
-                total_size = match get_blob_size_without_blocking_runtime(state, hash).await {
-                    Ok(size) => size,
-                    Err(error) => {
-                        tracing::warn!(
-                            "Failed to read fetched blob size {}: {}",
-                            to_hex(&hash),
-                            error
-                        );
-                        None
-                    }
-                };
+                total_size = Some(data.len() as u64);
+                fetched_body = Some(data);
             }
             Ok(None) => {}
             Err(error) => {
@@ -1270,6 +1266,8 @@ async fn serve_raw_blob_with_range(
             let content_range = format!("bytes {}-{}/{}", start, end_inclusive, total_size);
             let body = if head_only {
                 Body::empty()
+            } else if let Some(data) = fetched_body {
+                Body::from(data.slice(start as usize..=end_inclusive as usize))
             } else {
                 match get_blob_range_without_blocking_runtime(state, hash, start, end_inclusive)
                     .await
@@ -1311,6 +1309,8 @@ async fn serve_raw_blob_with_range(
 
     let body = if head_only {
         Body::empty()
+    } else if let Some(data) = fetched_body {
+        Body::from(data)
     } else {
         match get_blob_without_blocking_runtime(state, hash).await {
             Ok(Some(data)) => Body::from(data),
@@ -1442,7 +1442,7 @@ async fn serve_cid_with_range(state: &AppState, request: CidRangeRequest<'_>) ->
         return decryption_key_forbidden_response();
     }
 
-    let store = state.store.store_arc();
+    let store = Arc::new(PooledReadStore::new(state.clone()));
     let tree = HashTree::new(HashTreeConfig::new(store).public());
     let content_type = content_type_for_path(filename_hint);
     let total_size = match get_size_cid_with_fetch(state, &tree, cid).await {

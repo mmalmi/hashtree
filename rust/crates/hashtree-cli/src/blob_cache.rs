@@ -181,6 +181,15 @@ impl BlobCache {
             .and_then(|mut cache| cache.get(hash_hex))
     }
 
+    pub(crate) fn get_body_size(&self, hash_hex: &str) -> Option<u64> {
+        self.bodies
+            .lock()
+            .ok()?
+            .cache
+            .get(hash_hex)
+            .map(|entry| entry.bytes.len() as u64)
+    }
+
     pub(crate) fn put_body(&self, hash_hex: String, bytes: &[u8]) {
         if let Ok(mut cache) = self.bodies.lock() {
             cache.put(hash_hex, bytes);

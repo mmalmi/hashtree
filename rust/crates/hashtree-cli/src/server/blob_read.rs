@@ -308,6 +308,25 @@ impl BlobIoAdmission {
         .map_err(BlobIoTaskError::Join)
     }
 
+    async fn run_optional_write<F, T>(&self, task: F) -> Result<T, BlobIoTaskError>
+    where
+        F: FnOnce() -> T + Send + 'static,
+        T: Send + 'static,
+    {
+        let busy = |_| BlobIoTaskError::Busy(BLOB_WRITE_BUSY);
+        let permits = BlobIoPermits {
+            _class: self.writes.clone().try_acquire_owned().map_err(busy)?,
+            _bulk: Some(self.bulk.clone().try_acquire_owned().map_err(busy)?),
+            _total: self.total.clone().try_acquire_owned().map_err(busy)?,
+        };
+        tokio::task::spawn_blocking(move || {
+            let _permits = permits;
+            task()
+        })
+        .await
+        .map_err(BlobIoTaskError::Join)
+    }
+
     fn snapshot(&self) -> BlobIoQueueSnapshot {
         let metadata_read_available = self
             .metadata_reads
@@ -394,6 +413,14 @@ where
     T: Send + 'static,
 {
     admission().run_write(task).await
+}
+
+pub(super) async fn run_optional_blob_write<F, T>(task: F) -> Result<T, BlobIoTaskError>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    admission().run_optional_write(task).await
 }
 
 pub(super) fn blob_io_queue_snapshot() -> BlobIoQueueSnapshot {

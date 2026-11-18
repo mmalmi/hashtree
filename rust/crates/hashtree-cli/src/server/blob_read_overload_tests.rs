@@ -1,4 +1,4 @@
-use super::{BlobIoAdmission, BlobIoLimits};
+use super::{BlobIoAdmission, BlobIoClass, BlobIoLimits};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -139,4 +139,28 @@ async fn timed_out_read_keeps_admission_until_blocking_work_finishes() {
             42
         );
     }
+}
+
+#[tokio::test]
+async fn optional_cache_write_skips_a_full_queue_without_holding_more_permits() {
+    let admission = BlobIoAdmission::new_for_test(
+        BlobIoLimits::derive(8, 1, Some(1), Some(1)),
+        Duration::from_secs(1),
+        Duration::from_secs(1),
+        Duration::from_secs(30),
+    );
+    let writer = admission.acquire(BlobIoClass::Write).await.unwrap();
+
+    let result = tokio::time::timeout(
+        Duration::from_millis(100),
+        admission.run_optional_write(|| panic!("optional write reached a saturated storage pool")),
+    )
+    .await
+    .expect("optional cache write must not wait for a permit");
+    assert!(result.unwrap_err().is_busy());
+    assert_eq!(admission.snapshot().write_in_use, 1);
+
+    drop(writer);
+    assert_eq!(admission.run_optional_write(|| 42).await.unwrap(), 42);
+    assert_eq!(admission.snapshot().write_in_use, 0);
 }

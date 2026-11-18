@@ -30,6 +30,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::{accept_async, tungstenite::Message as TungsteniteMessage};
 use tower::ServiceExt;
 
+mod cache_read;
 mod cid_range_stream;
 mod daemon_status_access;
 
@@ -1322,7 +1323,8 @@ async fn get_cid_with_fetch_prefetches_missing_file_chunks_concurrently() {
         local_store.clone(),
         vec![format!("http://{}", upstream_addr)],
     );
-    let local_tree = HashTree::new(HashTreeConfig::new(local_store.store_arc()).public());
+    let local_tree =
+        HashTree::new(HashTreeConfig::new(Arc::new(PooledReadStore::new(state.clone()))).public());
 
     let fetched = get_cid_with_fetch(&state, &local_tree, &cid)
         .await
@@ -1383,7 +1385,8 @@ async fn get_cid_with_fetch_uses_upstream_blob_batch_for_missing_file_chunks() {
         local_store.clone(),
         vec![format!("http://{}", upstream_addr)],
     );
-    let local_tree = HashTree::new(HashTreeConfig::new(local_store.store_arc()).public());
+    let local_tree =
+        HashTree::new(HashTreeConfig::new(Arc::new(PooledReadStore::new(state.clone()))).public());
 
     let fetched = get_cid_with_fetch(&state, &local_tree, &cid)
         .await
