@@ -3,13 +3,13 @@ import type { BrowserContext } from '@playwright/test';
 import { WebSocketServer } from 'ws';
 import { createNamedGraphFixture } from 'nostr-social-graph/testing/namedGraph';
 
-export async function serveSignedGraph(context: BrowserContext, root: string, bytes: Uint8Array, gate?: Promise<void>) {
-  const fixture = await createNamedGraphFixture(root, bytes);
+export async function serveSignedGraph(context: BrowserContext, root: string, bytes: Uint8Array, gate?: Promise<void>, publication?: Awaited<ReturnType<typeof createNamedGraphFixture>>) {
+  const fixture = publication ?? await createNamedGraphFixture(root, bytes);
   const relay = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   await once(relay, 'listening');
   const address = relay.address();
   if (!address || typeof address === 'string') throw new Error('Expected a loopback graph relay');
-  const counts = { names: 0, directories: 0, blocks: 0, aborted: 0, legacy: 0 };
+  const counts = { names: 0, directories: 0, blocks: 0, bytes: 0, aborted: 0, legacy: 0 };
   relay.on('connection', socket => socket.on('message', raw => {
     const [type, id, filter] = JSON.parse(raw.toString());
     if (type !== 'REQ') return;
@@ -27,7 +27,7 @@ export async function serveSignedGraph(context: BrowserContext, root: string, by
     if (url === directory) { counts.directories++; await gate; }
     const block = await fixture.readBlock(new URL(url).pathname.slice(1, -4));
     if (!block) { await route.fulfill({ status: 404 }); return; }
-    counts.blocks++;
+    counts.blocks++; counts.bytes += block.length;
     await route.fulfill({ body: Buffer.from(block), contentType: 'application/octet-stream',
       headers: { 'Access-Control-Allow-Origin': '*' } }).catch(() => {});
   });

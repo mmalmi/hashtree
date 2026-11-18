@@ -133,8 +133,8 @@ const stop = client.onTreeRootUpdate((update) => {
 ```
 
 Social graph follow/mute reconciliation uses the configured relays by default and
-is separate from fixed public HTTP bootstrapping. Metadata-only consumers can set
-`graphReconciliation: false`. HTTP seeding defaults off; an app may explicitly
+is separate from signed public Hashtree discovery. Metadata-only consumers can set
+`graphReconciliation: false`. Public seeding defaults off; an app may explicitly
 allow it for its unchanged shipped public relay set:
 
 ```typescript
@@ -145,14 +145,14 @@ const graphClient = new RelayWorkerClient(HashtreeWorker, {
   graphBootstrap: true,
 });
 await graphClient.init();
-// Omitting graphBootstrap on a settings update revokes HTTP seed permission.
+// Omitting graphBootstrap on a settings update revokes public seed permission.
 // Configured-relay follow/mute reconciliation continues on this custom relay.
 await graphClient.setRelays(['wss://relay.example']);
 // Restore permission only when the complete shipped default set is restored.
 await graphClient.setRelays(['wss://relay.damus.io'], { graphBootstrap: true });
 ```
 
-A relay change, identity change, graph root change, or close cancels pending HTTP
+A relay change, identity change, graph root change, or close cancels pending public
 seeding. Root changes immediately restart reconciliation and the live follow/mute
 subscription for the new root;
 setting the same root again leaves an allowed initial seed in progress. Retained
@@ -160,6 +160,30 @@ local snapshots take priority, including partial lists and unreadable stored
 bytes. Persistence compares the previously observed snapshot atomically and stops
 writing if another tab has replaced it. Raw `setRelays` messages use a flat
 `graphBootstrap` boolean alongside `relays`; absent means false.
+
+Apps with Vite can make packaged discovery available before the signed update by
+passing the SDK's frozen asset and receipt. The worker fetches this asset only
+when `graphBootstrap` is true and no graph was retained, verifies its hash, root,
+counts and mobile size budget, then loads the signed update in the background.
+It merges current local follow/mute revisions into the update before installation.
+An unavailable or rejected update leaves packaged discovery usable.
+
+```typescript
+import graphUrl from 'nostr-social-graph/data/socialGraph.bin?url';
+import graphReceipt from 'nostr-social-graph/data/socialGraph.json';
+import type { MobileGraphReceipt } from 'nostr-social-graph/mobileGraphSnapshot';
+
+const fallback = {
+  url: new URL(graphUrl, window.location.href).href,
+  receipt: graphReceipt as MobileGraphReceipt,
+};
+// Add graphBootstrapFallback: fallback to the graphClient configuration above.
+```
+
+The receipt's scoring root may differ from the worker's public discovery root;
+verification uses the receipt root before adopting the viewer's root. Public
+packaged seeds must contain 10,000–30,000 reachable users and fit in 4 MiB.
+Graph-disabled apps should omit this option and avoid importing the asset.
 
 When bridging a resolved or persisted root through the `setTreeRootCache` protocol
 message, send `source: 'remote'` with its original `updatedAt` Unix timestamp in

@@ -39,6 +39,7 @@ import {
 } from './signing';
 import { SocialGraph, type NostrEvent as SocialGraphNostrEvent } from 'nostr-social-graph';
 import { loadGraphBootstrap, startGraphSync } from 'nostr-social-graph/publicGraphSync';
+import { loadBundledGraphBootstrap } from './graphBootstrap.js';
 import { cloneTransferableBytes } from '../transferableBytes';
 import { InFlightReads, copyBlobBytes } from '../inFlightReads';
 import Dexie from 'dexie';
@@ -415,23 +416,41 @@ async function configureGraphBootstrap() {
   cancelGraphBootstrap();
   const cfg = _config;
   if (cfg?.graphBootstrap !== true || !cfg.relays.length || !graphBootstrapEligible) return;
-  const generation = graphBootstrapGeneration, expectedGraph = socialGraph, version = socialGraphVersion;
+  const generation = graphBootstrapGeneration, lifecycle = graphLifecycleGeneration;
   const abort = graphBootstrapAbort = new AbortController();
-  const current = () => generation === graphBootstrapGeneration && _config === cfg &&
-    cfg.graphBootstrap === true && cfg.relays.length > 0 && graphBootstrapEligible &&
-    socialGraph === expectedGraph && socialGraphVersion === version;
-  try {
-    const fresh = await loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY, signal: abort.signal });
-    if (!current()) return;
-    // Prepare away from the active graph: a policy change or local event wins even
-    // while the asynchronous merge is in progress.
+  // Eligibility is checked before starting. A seed or newly received local list
+  // may then be saved while this already-authorized signed upgrade is in flight.
+  const current = () => generation === graphBootstrapGeneration && lifecycle === graphLifecycleGeneration &&
+    _config === cfg && cfg.graphBootstrap === true && cfg.relays.length > 0 && !abort.signal.aborted;
+  const install = async (fresh: SocialGraph) => {
+    if (!current()) return false;
+    const expectedGraph = socialGraph, version = socialGraphVersion;
+    // Merge the latest local state, including lists received during the download.
+    // Keep the active graph untouched if a local edit arrives during the merge.
     await fresh.setRoot(expectedGraph.getRoot());
     await fresh.merge(expectedGraph);
-    if (!current()) return;
+    if (!current() || socialGraph !== expectedGraph || socialGraphVersion !== version) return false;
     socialGraph = fresh;
     notifySocialGraphVersionUpdate();
-  } catch { /* Configured-relay catch-up remains available when the signed snapshot is unavailable. */ }
-  finally { if (graphBootstrapAbort === abort) graphBootstrapAbort = undefined; }
+    return true;
+  };
+  const upgrade = async (restartCatchup = false) => {
+    try {
+      const fresh = await loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY, signal: abort.signal });
+      if (await install(fresh) && restartCatchup) configureGraphCatchup();
+    } catch { /* Keep the local graph when signed discovery is unavailable or invalid. */ }
+    finally { if (graphBootstrapAbort === abort) graphBootstrapAbort = undefined; }
+  };
+  if (cfg.graphBootstrapFallback) {
+    try {
+      await install(await loadBundledGraphBootstrap(cfg.graphBootstrapFallback, abort.signal));
+    } catch { /* A missing packaged asset must not prevent configured-relay catch-up. */ }
+    if (current()) void upgrade(true);
+    else if (graphBootstrapAbort === abort) graphBootstrapAbort = undefined;
+  } else {
+    // Existing clients without a packaged fallback retain their initialization order.
+    await upgrade();
+  }
 }
 
 function configureGraphCatchup() {

@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
 import { createRequire } from 'node:module';
@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium, type Browser, type Page } from '@playwright/test';
 import { WebSocketServer } from 'ws';
 import { serveSignedGraph } from './namedGraphFixture.js';
+import { createNamedGraphFixture } from 'nostr-social-graph/testing/namedGraph';
 import { SocialGraph } from 'nostr-social-graph';
 import { finalizeEvent, getPublicKey } from 'nostr-tools/pure';
 import { afterAll, beforeAll, expect, it } from 'vitest';
@@ -35,11 +36,11 @@ beforeAll(async () => {
       if (!call.test(source)) throw new Error('Missing worker graph bootstrap call');
       // Only the fixture signer and relay differ from the default signed reader.
       const observed = source.replace(call,
-        "loadGraphBootstrap({ snapshot: JSON.parse(new URL(self.location.href).searchParams.get('snapshot')), root: DEFAULT_BOOTSTRAP_PUBKEY");
+        "loadGraphBootstrap({ snapshot: JSON.parse(new URL(self.location.href).searchParams.get('snapshot')), minUsers: Number(new URL(self.location.href).searchParams.get('minUsers')) || undefined, root: DEFAULT_BOOTSTRAP_PUBKEY");
       return observed + `\nself.addEventListener('message', event => {
         if (event.data.type !== 'fixtureGraphState') return;
         const { id, pubkey } = event.data;
-        self.postMessage({ type: 'fixtureGraphState', id,
+        self.postMessage({ type: 'fixtureGraphState', id, bootstrapPending: graphBootstrapAbort !== undefined,
           follow: socialGraph.getListRevision(pubkey, 3), mute: socialGraph.getListRevision(pubkey, 10000),
           followed: [...socialGraph.getFollowedByUser(pubkey)], muted: [...socialGraph.getMutedByUser(pubkey)] });
       });`;
@@ -384,3 +385,144 @@ for (const phase of ['pending-snapshot', 'pending-idb', 'catchup', 'changed-sign
     }
   }, 15000);
 }
+
+
+for (const mode of ['delayed-upgrade', 'invalid-upgrade', 'small-upgrade', 'retained', 'custom-relays', 'cancel-upgrade'] as const) {
+  it(`keeps packaged discovery usable with ${mode}`, async () => {
+    const context = await browser.newContext({ serviceWorkers: 'block' });
+    const page = await context.newPage(), errors: string[] = [];
+    page.on('pageerror', error => errors.push(error.message));
+    const require = createRequire(import.meta.url);
+    const bundledBytes = await readFile(require.resolve('nostr-social-graph/data/socialGraph.bin'));
+    const receipt = JSON.parse(await readFile(require.resolve('nostr-social-graph/data/socialGraph.json'), 'utf8'));
+    const bundled = await SocialGraph.fromBinary(receipt.root, bundledBytes);
+    const expectedSeedFollows = [...bundled.getFollowedByUser(receipt.root)];
+    expect(receipt.users).toBeGreaterThanOrEqual(10_000);
+    let bundledRequests = 0;
+    await context.route(`${origin}/bundled-graph.bin`, route => {
+      bundledRequests++;
+      return route.fulfill({ body: bundledBytes, contentType: 'application/octet-stream' });
+    });
+    const relay = new WebSocketServer({ port: 0, host: '127.0.0.1' }); await once(relay, 'listening');
+    const address = relay.address(); if (!address || typeof address === 'string') throw new Error('Relay missing');
+    let requests = 0;
+    relay.on('connection', socket => socket.on('message', bytes => {
+      const [type, id] = JSON.parse(bytes.toString());
+      if (type === 'REQ') { requests++; socket.send(JSON.stringify(['EOSE', id])); }
+    }));
+    const freshList = finalizeEvent({ kind: 3, created_at: 500, content: '', tags: [['p', muted]] }, new Uint8Array(32).fill(43));
+    const seed = new SocialGraph(DEFAULT_BOOTSTRAP_PUBKEY);
+    seed.addFollower(DEFAULT_BOOTSTRAP_PUBKEY, friend); seed.handleEvent(freshList, true);
+    if (mode === 'small-upgrade') {
+      for (let i = 0; i < 997; i++) seed.addFollower(DEFAULT_BOOTSTRAP_PUBKEY, (i + 100_000).toString(16).padStart(64, '0'));
+      expect(seed.size().users).toBe(1000);
+    }
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const snapshot = await serveSignedGraph(context, DEFAULT_BOOTSTRAP_PUBKEY, await seed.toBinary(), gate);
+    if (mode === 'small-upgrade') snapshot.workerUrl += '&minUsers=10000';
+    if (mode === 'invalid-upgrade') await context.route(/^https:\/\/cdn\.iris\.to\/[0-9a-f]{64}\.bin$/, async route => {
+      await gate; await route.fulfill({ body: Buffer.from([0, 1, 2]), headers: { 'Access-Control-Allow-Origin': '*' } });
+    });
+    try {
+      await page.goto(origin);
+      const local = new SocialGraph(owner); local.handleEvent([follow(700), mute(690)], true);
+      const retained = await local.toBinary();
+      if (mode === 'retained') await retain(page, retained);
+      await page.evaluate(workerUrl => { (window as any).policyWorker = new Worker(workerUrl); }, snapshot.workerUrl);
+      await request(page, { type: 'init', config: { pubkey: owner, storeName: `bundled-${mode}`,
+        relays: [`ws://127.0.0.1:${address.port}`], blossomServers: [], graphReconciliation: false,
+        graphBootstrap: mode !== 'custom-relays', graphBootstrapFallback: { url: `${origin}/bundled-graph.bin`, receipt } } });
+      if (mode === 'retained' || mode === 'custom-relays') {
+        await expect.poll(() => requests).toBeGreaterThan(0);
+        await request(page, { type: 'close' });
+        expect(bundledRequests).toBe(0); expect(snapshot.counts.names).toBe(0);
+        if (mode === 'retained') expect(await retainedBytes(page)).toEqual([...retained]);
+        return;
+      }
+      // The signed directory is still withheld, but packaged discovery and the
+      // selected relay are already usable. There is no remote-timeout readiness gate.
+      await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: receipt.root })).pubkeys).toEqual(expectedSeedFollows);
+      expect(bundledRequests).toBe(1); await expect.poll(() => requests).toBeGreaterThan(0);
+      expect((await request(page, { type: 'getFollows', pubkey: friend })).pubkeys).toEqual([]);
+      await request(page, { type: 'handleSocialGraphEvents', events: [follow(700), mute(690)] });
+      await expectIngestedLists(page, follow(700), mute(690));
+      if (mode === 'cancel-upgrade') await request(page, { type: 'setRelays', relays: [] });
+      release();
+      if (mode === 'delayed-upgrade') {
+        await expect.poll(async () => (await request(page, { type: 'fixtureGraphState', pubkey: friend })).follow?.id).toBe(freshList.id);
+        await expectIngestedLists(page, follow(700), mute(690));
+      } else {
+        // Observe completion/revocation, then assert both active and durable state.
+        await expect.poll(async () => (await request(page, { type: 'fixtureGraphState', pubkey: friend })).bootstrapPending).toBe(false);
+        expect((await request(page, { type: 'fixtureGraphState', pubkey: friend })).follow).toBeUndefined();
+      }
+      expect((await request(page, { type: 'getFollows', pubkey: receipt.root })).pubkeys).toEqual(expectedSeedFollows);
+      await request(page, { type: 'close' });
+      const graph = await saved(page);
+      expect(graph.getListRevision(owner, 3)?.id).toBe(follow(700).id);
+      expect(graph.getListRevision(owner, 10000)?.id).toBe(mute(690).id);
+      expect(graph.getListRevision(friend, 3)?.id).toBe(mode === 'delayed-upgrade' ? freshList.id : undefined);
+      expect(errors).toEqual([]);
+    } finally {
+      release(); await snapshot.close(); await context.close();
+      for (const socket of relay.clients) socket.terminate();
+      await new Promise<void>(resolve => relay.close(() => resolve()));
+    }
+  }, 20000);
+}
+
+
+it.runIf(Boolean(process.env.GRAPH_BOOTSTRAP_BENCHMARK))('records a bounded first-discovery comparison with identical mobile bytes', async () => {
+  const require = createRequire(import.meta.url);
+  const bytes = await readFile(require.resolve('nostr-social-graph/data/socialGraph.bin'));
+  const receipt = JSON.parse(await readFile(require.resolve('nostr-social-graph/data/socialGraph.json'), 'utf8'));
+  const graph = await SocialGraph.fromBinary(receipt.root, bytes);
+  const followed = [...graph.getFollowedByUser(receipt.root)];
+  const relay = new WebSocketServer({ port: 0, host: '127.0.0.1' }); await once(relay, 'listening');
+  const address = relay.address(); if (!address || typeof address === 'string') throw new Error('Relay missing');
+  relay.on('connection', socket => socket.on('message', bytes => {
+    const [type, id] = JSON.parse(bytes.toString());
+    if (type === 'REQ') socket.send(JSON.stringify(['EOSE', id]));
+  }));
+  const publication = await createNamedGraphFixture(DEFAULT_BOOTSTRAP_PUBKEY, bytes);
+  const results: Array<Record<string, unknown>> = [];
+  try {
+    for (let repeat = 0; repeat < 3; repeat++) for (const packaged of [false, true]) {
+      const context = await browser.newContext({ serviceWorkers: 'block' });
+      const page = await context.newPage();
+      let release!: () => void, timer: ReturnType<typeof setTimeout> | undefined, bundledReads = 0, released = false;
+      const gate = new Promise<void>(resolve => { release = () => { released = true; resolve(); }; });
+      const snapshot = await serveSignedGraph(context, DEFAULT_BOOTSTRAP_PUBKEY, bytes, gate, publication);
+      await context.route(`${origin}/benchmark-graph.bin`, route => {
+        bundledReads++; return route.fulfill({ body: bytes, contentType: 'application/octet-stream' });
+      });
+      try {
+        await page.goto(origin);
+        await page.evaluate(workerUrl => { (window as any).policyWorker = new Worker(workerUrl); }, snapshot.workerUrl);
+        const started = performance.now();
+        // A controlled source delay, not a readiness sleep. All result waits use graph state.
+        timer = setTimeout(release, 500);
+        await request(page, { type: 'init', config: { pubkey: owner, storeName: 'bootstrap-benchmark',
+          relays: [`ws://127.0.0.1:${address.port}`], blossomServers: [], graphBootstrap: true, graphReconciliation: false,
+          ...(packaged ? { graphBootstrapFallback: { url: `${origin}/benchmark-graph.bin`, receipt } } : {}) } });
+        await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: receipt.root })).pubkeys).toEqual(followed);
+        const firstUsefulMs = performance.now() - started, beforeRemoteRelease = !released;
+        await expect.poll(async () => (await request(page, { type: 'fixtureGraphState', pubkey: owner })).bootstrapPending).toBe(false);
+        await request(page, { type: 'close' });
+        const retained = await saved(page);
+        expect([...retained.getFollowedByUser(receipt.root)]).toEqual(followed);
+        expect(bundledReads).toBe(packaged ? 1 : 0);
+        results.push({ repeat, mode: packaged ? 'packaged-first' : 'remote-only', firstUsefulMs: Math.round(firstUsefulMs),
+          beforeRemoteRelease, bundledBytes: bundledReads * bytes.length, signedBytes: snapshot.counts.bytes });
+
+      } finally {
+        clearTimeout(timer); release(); await snapshot.close(); await context.close();
+      }
+    }
+  } finally {
+    for (const socket of relay.clients) socket.terminate();
+    await new Promise<void>(resolve => relay.close(() => resolve()));
+  }
+  await writeFile(process.env.GRAPH_BOOTSTRAP_BENCHMARK!, JSON.stringify({ version: 1, injectedDirectoryDelayMs: 500, mobileBytes: bytes.length, results }, null, 2) + '\n', { flag: 'wx' });
+}, 60000);
