@@ -2,13 +2,16 @@
 //! provider policy, router, forwarding, cache, and wire codec handle each read.
 mod topology;
 
+use std::collections::BTreeSet;
 use std::sync::atomic::Ordering::Relaxed;
 
 use hashtree_core::{sha256, BlobRequest, Store};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use self::topology::{mix, Network, HOP_LIMIT, SEARCH_DEADLINE};
+use fips_core::PeerIdentity;
+
+use self::topology::{identity, mix, Network, HOP_LIMIT, SEARCH_DEADLINE};
 
 const BATCH_SIZE: usize = 8;
 const BATCH_COUNT: usize = 8;
@@ -24,6 +27,8 @@ enum Profile {
 #[derive(Default)]
 struct Report {
     reachable: usize,
+    reachable_queries: BTreeSet<usize>,
+    verified_queries: BTreeSet<usize>,
     verified_ms: Vec<u128>,
     misses: usize,
     deadlines: usize,
@@ -58,17 +63,19 @@ async fn run_size(size: usize) {
         Err(std::env::VarError::NotPresent) => vec![17, 29],
         Err(error) => panic!("invalid HASHTREE_MESH_SIM_SEEDS: {error}"),
     };
+    let identities: Vec<_> = (0..size).map(identity).collect();
     for profile in [Profile::Steady, Profile::Churn, Profile::Adversarial] {
         for &seed in &seeds {
-            run_case(size, seed, profile).await;
+            run_case(&identities, seed, profile).await;
         }
     }
 }
 
-async fn run_case(size: usize, seed: u64, profile: Profile) {
+async fn run_case(identities: &[PeerIdentity], seed: u64, profile: Profile) {
+    let size = identities.len();
     let adversarial = profile == Profile::Adversarial;
     let churn = profile == Profile::Churn;
-    let network = Network::new(size, seed, churn, adversarial).await;
+    let network = Network::new(identities, seed, churn, adversarial).await;
     let simulation_start = Instant::now();
     let mut report = Report::default();
     let mut departures = 0;
@@ -114,6 +121,9 @@ async fn run_case(size: usize, seed: u64, profile: Profile) {
             }
             let reachable = network.reachable(reader, &holders);
             report.reachable += usize::from(reachable);
+            if reachable {
+                report.reachable_queries.insert(probe);
+            }
             let router = network.nodes[reader].router.clone();
             reads.spawn(async move {
                 let start = Instant::now();
@@ -132,14 +142,17 @@ async fn run_case(size: usize, seed: u64, profile: Profile) {
                     assert!(reachable, "a verified reply must have a reachable holder");
                     assert_eq!(*received, data);
                 }
-                (reply, elapsed)
+                (probe, reply, elapsed)
             });
         }
 
         while let Some(result) = reads.join_next().await {
-            let (reply, elapsed) = result.unwrap();
+            let (probe, reply, elapsed) = result.unwrap();
             match reply {
-                Ok(Some(_)) => report.verified_ms.push(elapsed.as_millis()),
+                Ok(Some(_)) => {
+                    report.verified_queries.insert(probe);
+                    report.verified_ms.push(elapsed.as_millis());
+                }
                 Ok(None) => report.misses += 1,
                 Err(_) if elapsed >= SEARCH_DEADLINE => report.deadlines += 1,
                 Err(_) => report.incomplete += 1,
@@ -186,7 +199,12 @@ async fn run_case(size: usize, seed: u64, profile: Profile) {
          reads={reads} reachable={} verified={verified} p50_ms={p50_ms} p95_ms={p95_ms} misses={} \
          deadlines={} incomplete={} attempts={attempts} wire_bytes={wire_bytes} \
          simulated_ms={simulated_ms} wire_bps={wire_bps} false_misses={false_misses} \
-         corrupt_rejected={corrupt_rejected}",
-        report.reachable, report.misses, report.deadlines, report.incomplete,
+         corrupt_rejected={corrupt_rejected} distinct_reachable={} distinct_verified={}",
+        report.reachable,
+        report.misses,
+        report.deadlines,
+        report.incomplete,
+        report.reachable_queries.len(),
+        report.verified_queries.len(),
     );
 }

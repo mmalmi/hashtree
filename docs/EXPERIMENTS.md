@@ -2,6 +2,80 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-18 - Avoiding duplicate hash queries during a mesh search
+
+A transport remembers up to 128 authenticated inbound requests for one second.
+When the router is about to send a hash back to a peer that recently requested it,
+it can use an untried eligible peer for that attempt. The comparison happens
+at dispatch, so a hedge can use information that arrived after the lookup
+started. The initial attempt window can make substitutions. Later windows keep
+their reserved order, and the original peer remains eligible when every
+alternative has asked for the same hash. The limit stays at four attempts.
+A completed miss or error also releases a slot while a slower peer is pending.
+
+We ran 4,992 reads per version on the production routing code in the in-memory
+carrier. The 100-node comparison uses seeds 17 and 29. For 1,000 and 10,000
+nodes it also uses 71 and 113 plus eight fresh layouts (197, 239, 293, 359,
+419, 467, 523 and 587). Within each profile, the two versions use the same placements, faults,
+five-hop limit and 700 ms deadline. Ordinary includes
+steady links and churn. Adversarial peers return false misses or corrupt blobs.
+
+| Nodes | Workload | Verified reads / reachable | Distinct verified queries / reachable | Aggregate Mbps | Successful p95, ms |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 100 | Ordinary | 203/223 → 212/223 | 161/174 → 163/174 | 1.94 → 2.02 | 372–506 → 368–500 |
+| 100 | Adversarial | 90/99 → 91/99 | 69/78 → 70/78 | 1.91 → 2.03 | 464–513 → 436–476 |
+| 1,000 | Ordinary | 571/1,140 → 633/1,140 | 473/860 → 507/860 | 1.85 → 1.97 | 502–698 → 510–694 |
+| 1,000 | Adversarial | 199/392 → 216/392 | 164/315 → 174/315 | 3.83 → 4.11 | 496–677 → 496–644 |
+| 10,000 | Ordinary | 55/348 → 59/348 | 55/285 → 59/285 | 1.60 → 1.69 | 283–675 → 363–668 |
+| 10,000 | Adversarial | 18/82 → 19/82 | 18/75 → 19/75 | 8.20 → 8.76 | 311–694 → 316–676 |
+
+Distinct queries count a concurrent eight-reader burst once. Reachable means
+an honest path to an original holder exists within the hop limit. Each p95
+range spans the cases with at least one delivery. Small successful samples
+at 10,000 nodes give individual reads considerable weight. Mbps sums protocol
+bytes, including corrupt payloads, over simulated durations and excludes carrier framing.
+
+| Nodes | Total protocol traffic, MB | Link attempts | Root deadlines | Other incomplete reads | Simulator CPU seconds |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 100 | 7.23 → 7.36 | 37,320 → 38,087 | 56 → 38 | 35 → 43 | 2.58 → 2.89 |
+| 1,000 | 61.49 → 64.67 | 658,970 → 689,127 | 1,176 → 903 | 358 → 552 | 6.32 → 6.75 |
+| 10,000 | 94.58 → 99.90 | 825,161 → 865,767 | 1,806 → 1,448 | 425 → 778 | 8.29 → 9.58 |
+
+CPU is the median measured user plus system time for 384 reads at each size on macOS
+ARM64. Four serial debug-binary samples per build used seeds 17 and 29,
+first in baseline, candidate, candidate, baseline order and then with the builds
+in the opposite roles. Both builds reused immutable test identities
+across cases and used binary peer addresses in the simulated links. All routers,
+stores, faults and routing observations were constructed afresh for each case.
+Delivery counts and latency percentiles repeated exactly in all timing trials. In a few
+100-node cases an extra request added 36 bytes. The traffic tables use the first trial.
+The host was shared, and these process times include fixture and router work.
+At 10,000 nodes individual CPU samples spanned 7.10–11.63 seconds before the
+change and 7.55–11.48 seconds after it.
+
+| Fresh layouts only | Ordinary verified reads / reachable | Adversarial verified reads / reachable |
+| ---: | ---: | ---: |
+| 1,000 nodes | 385/758 → 428/758 | 131/257 → 134/257 |
+| 10,000 nodes | 42/216 → 43/216 | 13/46 → 13/46 |
+
+At 10,000 nodes, all five additional deliveries were distinct queries. Four occurred
+on the original layouts and one on the eight fresh layouts. Total traffic increased
+by 5.32 MB. At 1,000 nodes, bytes per verified read fell from 79.9 to 76.2 kB.
+
+On the four earlier 10,000-node layouts, an experimental eight-peer terminal
+window delivered 26 of 168 reachable reads and used 40.28 MB. The previous
+four-attempt policy delivered 18 using 30.40 MB. The published change keeps
+the four-attempt limit. The simulation verified every delivered payload and
+the contents of every cache in the adversarial cases.
+
+From the Rust workspace, the following runs the validation layouts at the largest size.
+
+```sh
+HASHTREE_MESH_SIM_SEEDS=197,239,293,359,419,467,523,587 cargo test --locked \
+  -p hashtree-fips-transport --lib provider_route::mesh_scale::mesh_10000_nodes \
+  -- --exact --nocapture --test-threads=1
+```
+
 ## 2026-11-18 - Hash queries on meshes up to 10,000 nodes
 
 The production FIPS provider route now skips the peer that just requested the

@@ -14,7 +14,7 @@ mod integrity;
 mod schedule;
 
 use self::integrity::IntegrityCooldowns;
-use self::schedule::race_providers;
+use self::schedule::ProviderWindow;
 
 const MAX_RETAINED_RETRY_WINDOWS: usize = 256;
 
@@ -143,11 +143,21 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
         Ok(ordered_provider_peers(discovered, explicit))
     }
 
+    #[cfg(test)]
     fn provider_attempts(
         &self,
         hash: Hash,
         attempt_budget: usize,
     ) -> Result<(Vec<PeerIdentity>, usize), StoreError> {
+        let window = self.provider_window(hash, attempt_budget)?;
+        Ok((window.planned, window.untried))
+    }
+
+    fn provider_window(
+        &self,
+        hash: Hash,
+        attempt_budget: usize,
+    ) -> Result<ProviderWindow, StoreError> {
         let mut peers = self.provider_candidates()?;
         let budget = self.max_provider_attempts.min(attempt_budget);
         // An early branch can reach multiple further hops. Near the edge,
@@ -168,7 +178,7 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
             .flatten();
         let deferred = self.integrity.defer(&mut peers, requester);
         let attempts = budget.min(peers.len());
-        self.advance_retry_window(hash, &mut peers, attempts);
+        let first_window = self.advance_retry_window(hash, &mut peers, attempts);
         let mut limit = attempts;
         if let Some(index) = requester.and_then(|source| {
             peers
@@ -181,14 +191,28 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
             }
         }
         let untried = peers.len().saturating_sub(limit) + deferred;
-        peers.truncate(limit);
-        Ok((peers, untried))
+        // At most one substitute per planned attempt. Every peer outside the
+        // dispatched window still counts toward an incomplete search.
+        peers.truncate(if first_window { limit * 2 } else { limit });
+        let spares = peers.split_off(limit.min(peers.len()));
+        Ok(ProviderWindow {
+            planned: peers,
+            spares,
+            untried,
+        })
     }
 
-    fn advance_retry_window(&self, hash: Hash, peers: &mut [PeerIdentity], attempts: usize) {
+    // Substitution is useful on the first window. On retries the reserved
+    // order takes precedence, so a recent requester can still supply data.
+    fn advance_retry_window(
+        &self,
+        hash: Hash,
+        peers: &mut [PeerIdentity],
+        attempts: usize,
+    ) -> bool {
         let count = peers.len();
         if attempts == 0 || attempts == count {
-            return;
+            return false;
         }
         // Reserve progress before awaiting: concurrent searches for this
         // hash cannot all reserve the same window. No peer identities are
@@ -197,17 +221,18 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
             .retry_windows
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let start = windows
+        let previous = windows
             .iter()
             .position(|(key, _)| *key == hash)
-            .and_then(|position| windows.remove(position))
-            .map_or(0, |(_, next)| next % count);
+            .and_then(|position| windows.remove(position));
+        let start = previous.map_or(0, |(_, next)| next % count);
         if windows.len() == MAX_RETAINED_RETRY_WINDOWS {
             windows.pop_front();
         }
         windows.push_back((hash, (start + attempts) % count));
         drop(windows);
         peers.rotate_left(start);
+        previous.is_none()
     }
 
     fn discovered_provider_peers(&self) -> Result<Vec<PeerIdentity>, StoreError> {
@@ -237,20 +262,23 @@ impl<S: Store + ?Sized + 'static> FipsBlobRoute<S> {
         context: Option<BlobRouteContext>,
     ) -> Result<BlobReply, StoreError> {
         let budget = context.map_or(self.max_provider_attempts, |context| context.attempt_budget);
-        let (peers, untried) = self.provider_attempts(request.hash, budget)?;
-        if peers.is_empty() {
-            return completed_misses(untried);
+        let window = self.provider_window(request.hash, budget)?;
+        if window.planned.is_empty() {
+            return completed_misses(window.untried);
         }
         let transport = self
             .transport
             .upgrade()
             .ok_or_else(|| StoreError::Other("TCP/FIPS blob transport is closed".to_string()))?;
-        race_providers(peers, untried, request.htl, context, |peer| {
-            let transport = transport.clone();
-            let integrity = self.integrity.clone();
-            async move { integrity.check_reply(peer, transport.request_from_peer(request, peer).await) }
-        })
-        .await
+        window
+            .race(request, context, &transport.recent_requesters, |peer| {
+                let transport = transport.clone();
+                let integrity = self.integrity.clone();
+                async move {
+                    integrity.check_reply(peer, transport.request_from_peer(request, peer).await)
+                }
+            })
+            .await
     }
 }
 
@@ -334,6 +362,45 @@ mod tests {
     use super::*;
     use fips_core::Identity;
     use hashtree_core::MemoryStore;
+
+    #[tokio::test(start_paused = true)]
+    async fn hedge_uses_new_inbound_evidence_and_retries_keep_their_reserved_peers() {
+        use crate::recent_requesters::RecentRequesters;
+        let peers = test_peers(4);
+        let route = test_route(peers.clone());
+        let recent = Arc::new(RecentRequesters::default());
+        let request = BlobRequest {
+            hash: [7; 32],
+            htl: 2,
+        };
+        let [first, previous_requester, spare] = [peers[0], peers[1], peers[2]];
+        let mut sent = Vec::new();
+        let reply = route
+            .provider_window(request.hash, 2)
+            .unwrap()
+            .race(request, None, &recent, |peer| {
+                sent.push(peer);
+                let recent = recent.clone();
+                async move {
+                    if peer == first {
+                        recent.record(request.hash, previous_requester);
+                    }
+                    Ok(BlobReply::NoResult)
+                }
+            })
+            .await;
+        assert!(
+            reply.is_err(),
+            "the undispatched peers keep this search incomplete"
+        );
+        assert_eq!(sent, [first, spare]);
+        let second = route.provider_window(request.hash, 2).unwrap();
+        assert_eq!(second.planned, peers[2..]);
+        assert!(second.spares.is_empty());
+        let wrapped = route.provider_window(request.hash, 2).unwrap();
+        assert_eq!(wrapped.planned, peers[..2]);
+        assert!(wrapped.spares.is_empty());
+    }
 
     #[tokio::test]
     async fn forwarded_hash_spends_its_window_on_other_peers() {

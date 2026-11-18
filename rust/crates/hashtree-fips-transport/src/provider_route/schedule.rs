@@ -1,7 +1,8 @@
 use std::future::Future;
 
+use crate::recent_requesters::RecentRequesters;
 use fips_core::PeerIdentity;
-use hashtree_core::{BlobReply, BlobRouteContext, StoreError};
+use hashtree_core::{BlobReply, BlobRequest, BlobRouteContext, StoreError};
 use tokio::task::JoinSet;
 use tokio::time::{sleep_until, Duration, Instant};
 
@@ -10,7 +11,32 @@ use super::completed_misses;
 const PROVIDER_HEDGE_DELAY: Duration = Duration::from_millis(100);
 const MIN_PROVIDER_HEDGE_DELAY: Duration = Duration::from_millis(50);
 
-pub(super) async fn race_providers<F>(
+pub(super) struct ProviderWindow {
+    pub(super) planned: Vec<PeerIdentity>,
+    pub(super) spares: Vec<PeerIdentity>,
+    pub(super) untried: usize,
+}
+
+impl ProviderWindow {
+    pub(super) async fn race<F>(
+        self,
+        request: BlobRequest,
+        context: Option<BlobRouteContext>,
+        recent: &RecentRequesters,
+        mut attempt: impl FnMut(PeerIdentity) -> F,
+    ) -> Result<BlobReply, StoreError>
+    where
+        F: Future<Output = Result<BlobReply, StoreError>> + Send + 'static,
+    {
+        let mut spares = self.spares;
+        race_providers(self.planned, self.untried, request.htl, context, |peer| {
+            attempt(recent.choose(&request.hash, peer, &mut spares))
+        })
+        .await
+    }
+}
+
+async fn race_providers<F>(
     peers: Vec<PeerIdentity>,
     untried: usize,
     remaining_htl: u8,
@@ -50,8 +76,8 @@ where
                 ));
             }
             joined = attempts.join_next(), if in_flight => joined,
-            // An idle search can use its next slot immediately. While a
-            // provider is still working, pace additional attempts as hedges.
+            // Pace additional concurrent work. A completed unsuccessful
+            // attempt releases its slot even if another provider is stalled.
             _ = async { if in_flight { sleep_until(next_hedge).await } }, if peers.len() > 0 => {
                 let peer = peers.next().expect("branch requires an untried peer");
                 attempts.spawn(attempt(peer));
@@ -75,6 +101,7 @@ where
                 first_error.get_or_insert_with(|| error.to_string());
             }
         }
+        next_hedge = Instant::now();
     }
     match first_error {
         Some(error) => Err(StoreError::Other(format!(
@@ -109,6 +136,28 @@ mod tests {
         .unwrap();
         assert_eq!(reply, BlobReply::Data(vec![7]));
         assert!(start.elapsed() < MIN_PROVIDER_HEDGE_DELAY);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_miss_releases_its_slot_while_another_provider_is_pending() {
+        let peers = peers(3);
+        let stalled = peers[0];
+        let missing = peers[1];
+        let start = Instant::now();
+        let reply = race_providers(peers, 0, 0, None, |peer| async move {
+            if peer == stalled {
+                return std::future::pending().await;
+            }
+            if peer == missing {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+                return Ok(BlobReply::NoResult);
+            }
+            Ok(BlobReply::Data(vec![7]))
+        })
+        .await
+        .unwrap();
+        assert_eq!(reply, BlobReply::Data(vec![7]));
+        assert!(start.elapsed() < PROVIDER_HEDGE_DELAY * 2);
     }
 
     #[tokio::test(start_paused = true)]

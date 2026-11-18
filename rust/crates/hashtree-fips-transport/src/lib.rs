@@ -14,6 +14,7 @@
 
 mod endpoint;
 mod provider_route;
+mod recent_requesters;
 mod tcp_blob;
 
 pub use endpoint::*;

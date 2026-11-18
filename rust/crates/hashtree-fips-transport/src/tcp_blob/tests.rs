@@ -126,6 +126,12 @@ async fn custom_server_route_on_worker() {
             }));
         }
     }
+    let client = PeerIdentity::from_npub(endpoint_b.npub()).unwrap();
+    assert_eq!(
+        transport_a.recent_requesters.last_request(),
+        Some((failing_hash, *client.node_addr().as_bytes()))
+    );
+    assert_eq!(transport_b.recent_requesters.last_request(), None);
     drop(peer_route);
 
     transport_a.shutdown().await.unwrap();

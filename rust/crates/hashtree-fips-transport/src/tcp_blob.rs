@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Duration;
 
+use crate::recent_requesters::RecentRequesters;
 use async_trait::async_trait;
 use fips_core::discovery::local::LocalInstanceCapability;
 use fips_core::{FipsEndpoint, FipsEndpointError, NodeError, PeerIdentity};
@@ -55,6 +56,7 @@ tokio::task_local! {
 /// policies when they bind it.
 pub struct TcpBlobTransport<S: Store + ?Sized + 'static = MemoryStore> {
     store: Arc<S>,
+    pub(crate) recent_requesters: Arc<RecentRequesters>,
     commands: mpsc::Sender<Command>,
     task: Option<JoinHandle<Result<(), TcpBlobTransportError>>>,
 }
@@ -313,7 +315,9 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
                 .map_err(transport_error)?,
         };
         let (commands, command_rx) = mpsc::channel(COMMAND_CHANNEL_CAPACITY);
+        let recent_requesters = Arc::new(RecentRequesters::default());
         let actor = TcpBlobActor {
+            recent_requesters: recent_requesters.clone(),
             tcp,
             inbound_policy,
             route,
@@ -329,6 +333,7 @@ impl<S: Store + ?Sized + 'static> TcpBlobTransport<S> {
         let task = tokio::spawn(actor.run());
         Ok(Self {
             store,
+            recent_requesters,
             commands,
             task: Some(task),
         })
@@ -525,6 +530,7 @@ struct StoreLoad {
 }
 
 struct TcpBlobActor {
+    recent_requesters: Arc<RecentRequesters>,
     tcp: FipsTcpEndpoint,
     inbound_policy: InboundBlobPolicy,
     route: Arc<dyn BlobRoute>,
@@ -802,6 +808,7 @@ impl TcpBlobActor {
             .collect::<Vec<_>>();
 
         for (connection, peer, request) in waiting {
+            self.recent_requesters.record(request.hash, peer);
             let route = self.route.clone();
             let abort = self.store_loads.spawn(async move {
                 StoreLoad {

@@ -11,8 +11,9 @@ use hashtree_core::{
 use hashtree_network::{BlobRouteEntry, BlobRouter, BlobRouterConfig, MeshForwardingRoute};
 use tokio::time::{sleep, Duration};
 
-use super::super::{race_providers, FipsBlobRoute, PeerIdentity};
+use super::super::{FipsBlobRoute, PeerIdentity};
 use super::PAYLOAD_BYTES;
+use crate::recent_requesters::RecentRequesters;
 use crate::tcp_blob::{verify_hash, INBOUND_BLOB_PEER};
 use crate::TcpBlobTransportError;
 
@@ -36,6 +37,7 @@ enum Behavior {
 }
 
 pub(super) struct Node {
+    recent_requesters: Arc<RecentRequesters>,
     pub store: Arc<MemoryStore>,
     pub router: Arc<BlobRouter>,
     pub online: Arc<AtomicBool>,
@@ -50,6 +52,7 @@ impl Node {
 
 #[derive(Clone)]
 struct Link {
+    recent_requesters: Arc<RecentRequesters>,
     source: PeerIdentity,
     node: Weak<BlobRouter>,
     online: Arc<AtomicBool>,
@@ -74,6 +77,7 @@ impl Link {
             .filter(|_| self.online.load(Relaxed))
             .ok_or_else(|| StoreError::Other("simulated peer departed".into()))?;
         let request = decode_blob_request(&wire).unwrap();
+        self.recent_requesters.record(request.hash, self.source);
         let reply = match self.behavior {
             Behavior::FalseMiss => BlobReply::NoResult,
             Behavior::Corrupt => BlobReply::Data(vec![255; PAYLOAD_BYTES]),
@@ -107,8 +111,9 @@ impl Link {
 }
 
 struct SimulatedProviderRoute {
+    recent_requesters: Arc<RecentRequesters>,
     policy: FipsBlobRoute<MemoryStore>,
-    links: HashMap<String, Link>,
+    links: HashMap<[u8; 16], Link>,
 }
 
 impl SimulatedProviderRoute {
@@ -118,13 +123,14 @@ impl SimulatedProviderRoute {
         context: Option<BlobRouteContext>,
     ) -> Result<BlobReply, StoreError> {
         let budget = context.map_or(PROVIDER_ATTEMPTS, |context| context.attempt_budget);
-        let (peers, untried) = self.policy.provider_attempts(request.hash, budget)?;
-        race_providers(peers, untried, request.htl, context, |peer| {
-            let link = self.links[&peer.npub()].clone();
-            let integrity = self.policy.integrity.clone();
-            async move { integrity.check_reply(peer, link.fetch(request).await) }
-        })
-        .await
+        let window = self.policy.provider_window(request.hash, budget)?;
+        window
+            .race(request, context, &self.recent_requesters, |peer| {
+                let link = self.links[peer.node_addr().as_bytes()].clone();
+                let integrity = self.policy.integrity.clone();
+                async move { integrity.check_reply(peer, link.fetch(request).await) }
+            })
+            .await
     }
 }
 
@@ -157,9 +163,14 @@ pub(super) struct Network {
 }
 
 impl Network {
-    pub async fn new(size: usize, seed: u64, disturbances: bool, adversarial: bool) -> Self {
+    pub async fn new(
+        identities: &[PeerIdentity],
+        seed: u64,
+        disturbances: bool,
+        adversarial: bool,
+    ) -> Self {
         let traffic = Arc::new(Traffic::default());
-        let identities = (0..size).map(identity).collect::<Vec<_>>();
+        let size = identities.len();
         let nodes = (0..size)
             .map(|index| {
                 let store = Arc::new(MemoryStore::new());
@@ -178,6 +189,7 @@ impl Network {
                     _ => Behavior::Honest,
                 };
                 Node {
+                    recent_requesters: Arc::default(),
                     store,
                     router: Arc::new(router),
                     online: Arc::new(AtomicBool::new(true)),
@@ -193,8 +205,9 @@ impl Network {
                 .map(|edge| {
                     let remote = &nodes[edge.to];
                     (
-                        identities[edge.to].npub(),
+                        *identities[edge.to].node_addr().as_bytes(),
                         Link {
+                            recent_requesters: remote.recent_requesters.clone(),
                             source: *source,
                             node: Arc::downgrade(&remote.router),
                             online: remote.online.clone(),
@@ -207,7 +220,11 @@ impl Network {
                 })
                 .collect();
             let policy = FipsBlobRoute::new(None, Weak::new(), peers, PROVIDER_ATTEMPTS).unwrap();
-            let mesh = MeshForwardingRoute::new(Arc::new(SimulatedProviderRoute { policy, links }));
+            let mesh = MeshForwardingRoute::new(Arc::new(SimulatedProviderRoute {
+                recent_requesters: node.recent_requesters.clone(),
+                policy,
+                links,
+            }));
             node.router
                 .set_routes(vec![
                     BlobRouteEntry::new("store", Arc::new(StoreBlobRoute::new(node.store.clone()))),
@@ -245,11 +262,11 @@ impl Network {
     }
 }
 
-fn identity(node: usize) -> PeerIdentity {
+pub(super) fn identity(node: usize) -> PeerIdentity {
     let mut fixture_key = [0; 32];
     fixture_key[24..].copy_from_slice(&((node + 1) as u64).to_be_bytes());
     let identity = Identity::from_secret_bytes(&fixture_key).unwrap();
-    PeerIdentity::from_npub(&identity.npub()).unwrap()
+    PeerIdentity::from_pubkey(identity.pubkey())
 }
 
 fn topology(size: usize, seed: u64, disturbances: bool) -> Vec<Vec<Edge>> {
