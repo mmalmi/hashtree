@@ -1,0 +1,13 @@
+{
+  "source": "94cf0088f724f02feccac33453a4239f8582d2df",
+  "qualificationRun": 44336032246,
+  "sha256": "96d39ec1c736afab3f27408807c104fc6e6370f66209811265bf14da4f995c6f",
+  "integrity": "sha512-rRVrnrgSCtMLx60hLTBxGp4cz6GOnKkPp6QIvEKZ97F5CWWJK5fry5sGB/2VuHffTKD/IQ31cggZK5WOvm/FCQ==",
+  "bytes": 29001,
+  "mapping": {
+    "releasedUrl": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.50/hashtree-nostr-pubsub-0.1.10.tgz",
+    "qualifiedLocalArchive": "file:artifacts/hashtree-nostr-pubsub-0.1.10.tgz"
+  },
+  "buildSource": "2d49ef4e10fb1f4931b74e8b763a59808df07b59",
+  "packagingRun": 44341633769
+}
