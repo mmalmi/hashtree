@@ -422,7 +422,7 @@ async function configureGraphBootstrap() {
   // may then be saved while this already-authorized signed upgrade is in flight.
   const current = () => generation === graphBootstrapGeneration && lifecycle === graphLifecycleGeneration &&
     _config === cfg && cfg.graphBootstrap === true && cfg.relays.length > 0 && !abort.signal.aborted;
-  const install = async (fresh: SocialGraph) => {
+  const install = async (fresh: SocialGraph, persist = true) => {
     if (!current()) return false;
     const expectedGraph = socialGraph, version = socialGraphVersion;
     // Merge the latest local state, including lists received during the download.
@@ -431,7 +431,7 @@ async function configureGraphBootstrap() {
     await fresh.merge(expectedGraph);
     if (!current() || socialGraph !== expectedGraph || socialGraphVersion !== version) return false;
     socialGraph = fresh;
-    notifySocialGraphVersionUpdate();
+    notifySocialGraphVersionUpdate(persist);
     return true;
   };
   const upgrade = async (restartCatchup = false) => {
@@ -443,7 +443,7 @@ async function configureGraphBootstrap() {
   };
   if (cfg.graphBootstrapFallback) {
     try {
-      await install(await loadBundledGraphBootstrap(cfg.graphBootstrapFallback, abort.signal));
+      await install(await loadBundledGraphBootstrap(cfg.graphBootstrapFallback, abort.signal), false);
     } catch { /* A missing packaged asset must not prevent configured-relay catch-up. */ }
     if (current()) void upgrade(true);
     else if (graphBootstrapAbort === abort) graphBootstrapAbort = undefined;
@@ -492,11 +492,14 @@ function scheduleFollowDistanceRefresh() {
   }, FOLLOW_DISTANCE_SETTLE_MS);
 }
 
-function notifySocialGraphVersionUpdate() {
-  graphBootstrapEligible = false;
+function notifySocialGraphVersionUpdate(persist = true) {
   socialGraphVersion++;
-  socialGraphDirty = true;
   self.postMessage({ type: 'socialGraphVersion', version: socialGraphVersion });
+  // A packaged-only first visit must remain eligible for signed discovery next
+  // time. Real local changes and accepted signed snapshots still become durable.
+  if (!persist) return;
+  graphBootstrapEligible = false;
+  socialGraphDirty = true;
 
   // Debounce save - save 5 seconds after last update
   if (socialGraphSaveTimeout) {

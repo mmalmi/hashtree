@@ -387,7 +387,7 @@ for (const phase of ['pending-snapshot', 'pending-idb', 'catchup', 'changed-sign
 }
 
 
-for (const mode of ['delayed-upgrade', 'invalid-upgrade', 'small-upgrade', 'retained', 'custom-relays', 'cancel-upgrade'] as const) {
+for (const mode of ['delayed-upgrade', 'invalid-upgrade', 'small-upgrade', 'retained', 'custom-relays', 'cancel-upgrade', 'untouched-restart'] as const) {
   it(`keeps packaged discovery usable with ${mode}`, async () => {
     const context = await browser.newContext({ serviceWorkers: 'block' });
     const page = await context.newPage(), errors: string[] = [];
@@ -445,6 +445,37 @@ for (const mode of ['delayed-upgrade', 'invalid-upgrade', 'small-upgrade', 'reta
       await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: receipt.root })).pubkeys).toEqual(expectedSeedFollows);
       expect(bundledRequests).toBe(1); await expect.poll(() => requests).toBeGreaterThan(0);
       expect((await request(page, { type: 'getFollows', pubkey: friend })).pubkeys).toEqual([]);
+      if (mode === 'untouched-restart') {
+        // Close flushes pending durable work. A packaged seed by itself is not
+        // user state, and must not disable signed discovery on the next visit.
+        await request(page, { type: 'close' });
+        const hasSavedGraph = await page.evaluate(async () => {
+          const db = await new Promise<IDBDatabase>((resolve, reject) => {
+            const request = indexedDB.open('hashtree-social-graph');
+            request.onsuccess = () => resolve(request.result); request.onerror = () => reject(request.error);
+          });
+          try { return await new Promise<boolean>((resolve, reject) => {
+            const request = db.transaction('socialGraph').objectStore('socialGraph').get('main');
+            request.onsuccess = () => resolve(request.result !== undefined); request.onerror = () => reject(request.error);
+          }); } finally { db.close(); }
+        });
+        expect(hasSavedGraph, 'Untouched fallback must not become retained user state').toBe(false);
+        await page.evaluate(workerUrl => {
+          (window as any).policyWorker.terminate();
+          (window as any).policyWorker = new Worker(workerUrl);
+        }, snapshot.workerUrl);
+        await request(page, { type: 'init', config: { pubkey: owner, storeName: `bundled-${mode}`,
+          relays: [`ws://127.0.0.1:${address.port}`], blossomServers: [], graphReconciliation: false,
+          graphBootstrap: true, graphBootstrapFallback: { url: `${origin}/bundled-graph.bin`, receipt } } });
+        await expect.poll(() => bundledRequests).toBe(2);
+        await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: receipt.root })).pubkeys).toEqual(expectedSeedFollows);
+        release();
+        await expect.poll(async () => (await request(page, { type: 'fixtureGraphState', pubkey: friend })).follow?.id).toBe(freshList.id);
+        await request(page, { type: 'close' });
+        expect((await saved(page)).getListRevision(friend, 3)?.id).toBe(freshList.id);
+        expect(errors).toEqual([]);
+        return;
+      }
       await request(page, { type: 'handleSocialGraphEvents', events: [follow(700), mute(690)] });
       await expectIngestedLists(page, follow(700), mute(690));
       if (mode === 'cancel-upgrade') await request(page, { type: 'setRelays', relays: [] });

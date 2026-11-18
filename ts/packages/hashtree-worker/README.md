@@ -166,7 +166,9 @@ passing the SDK's frozen asset and receipt. The worker fetches this asset only
 when `graphBootstrap` is true and no graph was retained, verifies its hash, root,
 counts and mobile size budget, then loads the signed update in the background.
 It merges current local follow/mute revisions into the update before installation.
-An unavailable or rejected update leaves packaged discovery usable.
+An unavailable or rejected update leaves packaged discovery usable. An untouched
+packaged seed is not saved as user state, so a later visit can retry signed
+discovery. Real local changes and accepted signed snapshots remain durable.
 
 ```typescript
 import graphUrl from 'nostr-social-graph/data/socialGraph.bin?url';
