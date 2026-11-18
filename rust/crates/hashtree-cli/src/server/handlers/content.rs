@@ -355,6 +355,9 @@ async fn fetch_and_cache_blobs_from_upstream_batch(state: &AppState, hashes: &[[
 
     let mut missing = Vec::new();
     for hash in hashes {
+        if state.blob_cache.get_body_size(&to_hex(hash)).is_some() {
+            continue;
+        }
         match blob_exists_without_blocking_runtime(state, *hash).await {
             Ok(false) => missing.push(*hash),
             Ok(true) => {}
@@ -428,15 +431,16 @@ async fn put_cached_blobs_without_blocking_runtime(
 
     let store = state.store.clone();
     let blob_cache = state.blob_cache.clone();
+    for (hash, data) in &items {
+        blob_cache.put_body(to_hex(hash), data);
+    }
     match run_optional_blob_write(move || {
         let result = store
             .put_cached_blobs_report(&items)
             .map_err(|e| e.to_string());
         if result.is_ok() {
             for (hash, data) in &items {
-                let hash_hex = to_hex(hash);
-                blob_cache.put_size(hash_hex.clone(), Some(data.len() as u64));
-                blob_cache.put_body(hash_hex, data);
+                blob_cache.put_size(to_hex(hash), Some(data.len() as u64));
             }
         }
         result.map(|report| report.inserted_hashes.len())
