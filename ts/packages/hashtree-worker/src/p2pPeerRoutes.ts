@@ -1,6 +1,7 @@
 import {
   BLOB_NO_RESULT,
   type BlobRequest,
+  type BlobReply,
   type BlobRoute,
   type BlobRouteContext,
 } from '@hashtree/core';
@@ -47,7 +48,7 @@ export class P2PPeerRoutes implements BlobRoute {
     this.bridge.setEnabled(enabled);
   }
 
-  async read(request: BlobRequest, context?: BlobRouteContext) {
+  async read(request: BlobRequest, context?: BlobRouteContext): Promise<BlobReply> {
     if (context?.signal?.aborted) throw new Error('P2P blob request was cancelled');
     if (!this.peerListSupported) return this.bridge.fetch(request, undefined, context?.signal);
     const peerIds = await this.peerList();

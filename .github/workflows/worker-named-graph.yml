@@ -1,4 +1,4 @@
-name: Seal matched packages with the exact workspace license
+name: Verify exact shipping worker dependencies
 on:
   push:
     branches: [codex/signed-graph-worker-qualification]
