@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.51 - 2026-11-18
+
+- Worker 0.4.32 keeps a fresh graph eligible for signed discovery on the next visit
+  after an account switch, graph root change, or ignored event. Saved follow and
+  mute lists keep their existing persistence behavior.
+- The worker uses graph SDK 4.2.5 to skip repeat downloads of older signed lists
+  when a mobile snapshot retains the newer timestamp without an event ID.
+
 ## TypeScript runtime 0.5.47 - 2026-11-16
 
 - Worker 0.4.29 adds an opt-in IndexedDB relay event cache for browsing clients.

@@ -387,7 +387,7 @@ for (const phase of ['pending-snapshot', 'pending-idb', 'catchup', 'changed-sign
 }
 
 
-for (const mode of ['delayed-upgrade', 'invalid-upgrade', 'small-upgrade', 'retained', 'custom-relays', 'cancel-upgrade', 'untouched-restart'] as const) {
+for (const mode of ['delayed-upgrade', 'invalid-upgrade', 'small-upgrade', 'retained', 'custom-relays', 'cancel-upgrade', 'untouched-restart', 'root-only-restart'] as const) {
   it(`keeps packaged discovery usable with ${mode}`, async () => {
     const context = await browser.newContext({ serviceWorkers: 'block' });
     const page = await context.newPage(), errors: string[] = [];
@@ -445,7 +445,8 @@ for (const mode of ['delayed-upgrade', 'invalid-upgrade', 'small-upgrade', 'reta
       await expect.poll(async () => (await request(page, { type: 'getFollows', pubkey: receipt.root })).pubkeys).toEqual(expectedSeedFollows);
       expect(bundledRequests).toBe(1); await expect.poll(() => requests).toBeGreaterThan(0);
       expect((await request(page, { type: 'getFollows', pubkey: friend })).pubkeys).toEqual([]);
-      if (mode === 'untouched-restart') {
+      if (mode === 'untouched-restart' || mode === 'root-only-restart') {
+        if (mode === 'root-only-restart') await request(page, { type: 'setSocialGraphRoot', pubkey: friend });
         // Close flushes pending durable work. A packaged seed by itself is not
         // user state, and must not disable signed discovery on the next visit.
         await request(page, { type: 'close' });

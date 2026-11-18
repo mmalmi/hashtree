@@ -1029,7 +1029,7 @@ async function handleSetIdentity(id: string, pubkey: string, nsec?: string) {
   }
   setupSocialGraphSubscription(pubkey);
   configureGraphCatchup();
-  notifySocialGraphVersionUpdate();
+  notifySocialGraphVersionUpdate(socialGraphDirty);
   console.log('[Worker] SocialGraph root updated:', pubkey.slice(0, 16) + '...');
 
   // Reinitialize Blossom with new signer and progress callback
@@ -1632,7 +1632,7 @@ async function changeSocialGraphRoot(pubkey: string): Promise<boolean> {
   }
   setupSocialGraphSubscription(pubkey);
   configureGraphCatchup();
-  notifySocialGraphVersionUpdate();
+  notifySocialGraphVersionUpdate(socialGraphDirty);
   return true;
 }
 
@@ -1657,15 +1657,14 @@ async function handleSetSocialGraphRoot(id: string, pubkey: string) {
 
 function handleSocialGraphEvents(id: string, events: SocialGraphNostrEvent[]) {
   try {
-    let updated = false, changed = false;
+    let changed = false;
     for (const event of events) {
       if (socialGraph.handleEvent(event)) changed = true;
-      updated = true;
     }
-    if (updated) {
+    if (changed) {
       notifySocialGraphVersionUpdate();
+      scheduleFollowDistanceRefresh();
     }
-    if (changed) scheduleFollowDistanceRefresh();
     respond({ type: 'void', id });
   } catch (err) {
     respond({ type: 'void', id, error: getErrorMessage(err) });

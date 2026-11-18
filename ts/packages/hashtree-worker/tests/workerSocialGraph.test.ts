@@ -65,6 +65,29 @@ it('keeps the personal graph on init/root changes and flushes follow/mute revisi
   }
 });
 
+for (const action of ['setSocialGraphRoot', 'setIdentity', 'ignored-event'] as const) {
+  it(`keeps an untouched graph retryable after ${action}`, async () => {
+    const db = new Dexie('hashtree-social-graph');
+    db.version(1).stores({ socialGraph: '&id' });
+    await db.table('socialGraph').clear();
+    const store = `transient-graph-${crypto.randomUUID()}`;
+    try {
+      await init(store);
+      if (action === 'ignored-event') {
+        const event = finalizeEvent({ kind: 1, created_at: 100, content: '', tags: [] }, key);
+        await request({ type: 'handleSocialGraphEvents', events: [event] });
+      } else {
+        await request({ type: action, pubkey: friend });
+      }
+      await request({ type: 'close' });
+      expect(await db.table('socialGraph').get('main')).toBeUndefined();
+    } finally {
+      await request({ type: 'close' }); db.close();
+      await Dexie.delete(store); await Dexie.delete(`${store}-nostr-index`);
+    }
+  });
+}
+
 it('reconciles optional public lists and accepts mutes independently of newer follow timestamps', async () => {
   const relay = new WebSocketServer({ port: 0 });
   await once(relay, 'listening');
