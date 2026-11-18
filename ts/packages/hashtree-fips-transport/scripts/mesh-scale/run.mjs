@@ -5,12 +5,11 @@ import { mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import {
-  TcpBlobTransport, encodeTcpBlobRequest, decodeTcpBlobRequest, encodeTcpBlobResponseHeader,
-} from '../../dist/tcpBlobTransport.js';
+import * as currentTransport from '../../dist/tcpBlobTransport.js';
 import { createLayout, FRESH_SEEDS, HOP_LIMIT, NODE_COUNT, PAYLOAD_BYTES, PROFILES, TIMEOUT_MS } from './layout.mjs';
 import { SimulationClock } from './clock.mjs';
 
+const { encodeTcpBlobRequest, decodeTcpBlobRequest, encodeTcpBlobResponseHeader } = currentTransport;
 const BASELINE = 'ff350793daece8a7e056c135b98b05c82233e6fa';
 const TRANSPORT_PATH = 'ts/packages/hashtree-fips-transport';
 const TIMEOUT = new Error('simulated deadline expired');
@@ -64,10 +63,11 @@ class Simulation {
   batch = 0;
   #nodes = new Map();
 
-  constructor(Transport, layout, legacy) {
-    this.Transport = Transport;
+  constructor(module, layout) {
+    this.Transport = module.TcpBlobTransport;
     this.layout = layout;
-    this.legacy = legacy;
+    this.legacy = typeof this.Transport.prototype.getFromPeers !== 'function';
+    this.corruptReply = module.PeerBlobHashMismatch ? new module.PeerBlobHashMismatch() : CORRUPT;
   }
 
   node(id) {
@@ -116,7 +116,7 @@ class Simulation {
     if (behavior === 0) this.traffic.falseMisses++;
     if (data && !digest(data).equals(hash)) {
       this.traffic.rejectedCorrupt++;
-      throw CORRUPT;
+      throw this.corruptReply;
     }
     // The earlier transport cached each valid reply inside fetchFromPeer.
     if (data && this.legacy) this.node(source).contents.set(hashKey(hash), data);
@@ -239,8 +239,7 @@ async function loadTransport(dir, revision) {
     const input = execFileSync('git', ['show', `${revision}:${TRANSPORT_PATH}/dist/${name}`], { cwd: packageDir });
     await writeFile(join(dir, name), input);
   }
-  const transport = await import(pathToFileURL(join(dir, 'tcpBlobTransport.js')).href);
-  return transport.TcpBlobTransport;
+  return import(pathToFileURL(join(dir, 'tcpBlobTransport.js')).href);
 }
 
 const [version, list, revision = version === 'baseline' ? BASELINE : undefined] = process.argv.slice(2);
@@ -254,12 +253,11 @@ assert.ok(seeds.every(Number.isSafeInteger));
 const scratch = await mkdtemp(join(tmpdir(), 'hashtree-ts-mesh-'));
 try {
   const cpuStart = process.cpuUsage();
-  const Transport = revision ? await loadTransport(scratch, revision) : TcpBlobTransport;
+  const transport = revision ? await loadTransport(scratch, revision) : currentTransport;
   for (const direct of [true, false]) {
     for (const seed of seeds) {
       for (const profile of PROFILES) {
-        const simulation = new Simulation(Transport, createLayout(seed, profile, direct),
-          typeof Transport.prototype.getFromPeers !== 'function');
+        const simulation = new Simulation(transport, createLayout(seed, profile, direct));
         const result = await simulation.sample(direct);
         console.log(JSON.stringify({ version, seed, profile, mode: direct ? 'direct' : 'mesh', nodes: NODE_COUNT, ...result }));
       }

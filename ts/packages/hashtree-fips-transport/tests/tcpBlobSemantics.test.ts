@@ -1,7 +1,7 @@
 import { type FipsDatagramEndpoint } from '@fips/tcp';
 import { MemoryStore, sha256, type Hash, type Store } from '@hashtree/core';
 import { describe, expect, it, vi } from 'vitest';
-import { TcpBlobTransport } from '../src/tcpBlobTransport.js';
+import { PeerBlobHashMismatch, TcpBlobTransport } from '../src/tcpBlobTransport.js';
 
 type FetchFromPeer = (
   peer: string,
@@ -97,6 +97,17 @@ describe('TCP/FIPS blob provider result semantics', () => {
     });
   });
 
+  it('keeps a corrupt reply uncertain when the retried peer reports a miss', async () => {
+    await withTransport(async (transport, fetch) => {
+      const corrupt = new PeerBlobHashMismatch();
+      fetch.mockRejectedValueOnce(corrupt).mockRejectedValueOnce(new Error('disconnected')).mockResolvedValue(null);
+      await expect(transport.get(hash(), ['bad', 'offline'])).rejects.toMatchObject({ errors: [corrupt] });
+      expect(fetch.mock.calls.map(([peer]) => peer)).toEqual(['bad', 'offline', 'offline']);
+      await expect(transport.get(hash(), ['bad'])).resolves.toBeNull();
+      expect(fetch.mock.calls.at(-1)?.[0]).toBe('bad');
+    });
+  });
+
   it('returns a valid fallback result after another provider fails', async () => {
     await withTransport(async (transport, fetch) => {
       const expected = new TextEncoder().encode('fallback data');
@@ -108,6 +119,7 @@ describe('TCP/FIPS blob provider result semantics', () => {
       });
 
       await expect(transport.get(hash(), ['peer-a', 'peer-b'])).resolves.toEqual(expected);
+      expect(fetch.mock.calls.map(([peer]) => peer)).toEqual(['peer-a', 'peer-b', 'peer-b']);
     });
   });
 

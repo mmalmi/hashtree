@@ -22,6 +22,10 @@ const IO_CHUNK_BYTES = 64 * 1024;
 const POLL_INTERVAL_MS = 10;
 export const TCP_BLOB_MAX_BYTES = 16 * 1024 * 1024;
 
+export class PeerBlobHashMismatch extends Error {
+  constructor() { super('TCP/FIPS blob hash mismatch'); }
+}
+
 export interface TcpBlobTransportOptions {
   endpoint: FipsDatagramEndpoint;
   localStore: Store;
@@ -68,41 +72,33 @@ export class TcpBlobTransport {
     checkHtl(htl);
     const local = await this.whileOpen(() => this.verifiedGet(hash));
     if (local) return local;
-    const peers = [...new Set(peerIds.map((peer) => peer.trim()).filter(Boolean))];
+    let peers = [...new Set(peerIds.map((peer) => peer.trim()).filter(Boolean))];
     if (peers.length === 0) throw new Error('no TCP/FIPS blob providers are available');
-    let failures: unknown[] = [];
+    const attemptTimeoutMs = Math.max(250, Math.floor(this.timeoutMs / 2));
+    const failures = new Map<string, unknown>();
     for (let sessionAttempt = 0; sessionAttempt < 2; sessionAttempt += 1) {
-      this.lifetime.signal.throwIfAborted();
-      const pending = new Map<number, Promise<readonly [number, ProviderResult]>>();
-      for (const [index, peer] of peers.entries()) {
-        pending.set(index, (async () => {
-          try {
-            const data = await this.fetchFromPeer(
-              peer,
-              hash,
-              Math.max(250, Math.floor(this.timeoutMs / 2)),
-              htl,
-            );
-            const result: ProviderResult = data === null
-              ? { kind: 'missing' as const }
-              : { kind: 'found' as const, data };
-            return [index, result] as const;
-          } catch (error) {
-            return [index, { kind: 'failed' as const, error }] as const;
-          }
-        })());
-      }
-      const results: ProviderResult[] = [];
-      while (pending.size > 0) {
-        const [index, result] = await this.whileOpen(() => Promise.race(pending.values()));
-        pending.delete(index);
-        if (result.kind === 'found') return result.data;
-        results.push(result);
-      }
-      failures = results.flatMap((result) => result.kind === 'failed' ? [result.error] : []);
-      if (failures.length === 0) return null;
+      const data = await this.whileOpen(() => new Promise<Uint8Array | null>((resolve) => {
+        let remaining = peers.length;
+        const finish = (reply: Uint8Array | null) => {
+          remaining--;
+          if (reply !== null || remaining === 0) resolve(reply);
+        };
+        for (const peer of peers) {
+          this.fetchFromPeer(peer, hash, attemptTimeoutMs, htl).then((reply) => {
+            failures.delete(peer);
+            finish(reply);
+          }, (error: unknown) => {
+            failures.set(peer, error);
+            finish(null);
+          });
+        }
+      }));
+      if (data !== null || failures.size === 0) return data;
+      // Retry interrupted streams once. A bad payload remains an error for this lookup.
+      peers = peers.filter((peer) => failures.has(peer) && !(failures.get(peer) instanceof PeerBlobHashMismatch));
+      if (!peers.length) break;
     }
-    throw new AggregateError(failures, 'TCP/FIPS blob availability is uncertain');
+    throw new AggregateError(failures.values(), 'TCP/FIPS blob availability is uncertain');
   }
 
   close(): Promise<void> {
@@ -160,7 +156,7 @@ export class TcpBlobTransport {
       const response = decodeTcpBlobResponseHeader(header);
       if (!response.found) return null;
       const data = await this.readExact(connection, response.size, deadline);
-      if (!bytesEqual(await this.whileOpen(() => sha256(data)), hash)) throw new Error('TCP/FIPS blob hash mismatch');
+      if (!bytesEqual(await this.whileOpen(() => sha256(data)), hash)) throw new PeerBlobHashMismatch();
       await this.whileOpen(() => this.options.localStore.put(hash, data.slice()).catch(() => false));
       return data;
     } finally {
@@ -347,11 +343,6 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   if (left.byteLength !== right.byteLength) return false;
   return left.every((byte, index) => byte === right[index]);
 }
-
-type ProviderResult =
-  | { kind: 'found'; data: Uint8Array }
-  | { kind: 'missing' }
-  | { kind: 'failed'; error: unknown };
 
 function checkHtl(htl: number): void {
   if (!Number.isInteger(htl) || htl < 0 || htl > TCP_BLOB_MAX_HTL) {

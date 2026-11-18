@@ -2,6 +2,50 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-18 - TypeScript peer retries on fresh 10,000-node layouts
+
+Transport 0.5.2 starts the same peers in parallel as 0.5.1. Each stream
+reports completion once. The first verified reply wins. A retry contacts
+peers whose streams failed, skipping peers that already answered missing
+or returned bytes with the wrong hash. A corrupt reply leaves the result
+uncertain until a peer supplies valid data. A new lookup can try every peer.
+
+We developed the change on two layouts and fixed it before testing twelve
+previously unused layouts. Each version ran 4,608 reads with the same graph,
+placements, faults and 700 ms deadlines. Counts use the production TypeScript
+lookup over simulated links. CPU includes the Node.js scheduler and
+verification. Protocol bytes count requests and replies before carrier framing.
+
+| Workload | Verified / reachable (both) | Protocol MB, 0.5.1 → 0.5.2 | Query CPU s, 0.5.1 → 0.5.2 | Successful p50 / p95 ms (both) |
+| --- | ---: | ---: | ---: | ---: |
+| Direct, all | 1,084 / 1,084 | 4.82 → 3.98 | 0.39 → 0.35 | 30 / 48 |
+| Five-hop, all | 323 / 323 | 5,043.98 → 3,270.72 | 365.92 → 177.87 | 144 / 370 |
+| Five-hop, steady | 151 / 151 | 72.91 → 72.91 | 36.08 → 25.17 | 136 / 190 |
+| Five-hop, churn | 114 / 114 | 389.98 → 254.91 | 177.53 → 82.87 | 152 / 446 |
+| Five-hop, adversarial | 58 / 58 | 4,581.09 → 2,942.90 | 152.30 → 69.82 | 144 / 184 |
+
+Both versions delivered the same number of distinct blobs in every case.
+All cache entries passed hash verification. Five-hop attempts fell from
+17.85 million to 12.63 million and aggregate traffic from 91.57 to 63.17 Mbps.
+Across four serial pairs of three layouts with alternating run order, total
+process CPU fell from 368.99 to 180.74 seconds and maximum resident memory
+from 724 to 663 MiB. Direct steady reads used 0.169 and 0.182 CPU seconds
+respectively across 768 reads. CPU measurements are host-dependent.
+On the earlier churn layout where 0.5.1 missed one reachable read, 0.5.2
+also delivered seven of eight.
+
+To reproduce from the TypeScript workspace, build the transport and use the
+same seeds with both commands. To reproduce the process-level measurements,
+run three consecutive seeds per process and alternate which version runs
+first for each group. The baseline revision is the 0.5.1 release.
+
+```sh
+pnpm --filter @hashtree/fips-transport build
+seeds=3217,3253,3299,3329,3371,3407,3449,3491,3541,3583,3617,3659
+node packages/hashtree-fips-transport/scripts/mesh-scale/run.mjs baseline "$seeds" 9ee330b87b0e18e738a2f708eaf08e2287917e13
+node packages/hashtree-fips-transport/scripts/mesh-scale/run.mjs candidate "$seeds"
+```
+
 ## 2026-11-18 - TypeScript hash retrieval on 10,000-node layouts
 
 The baseline TypeScript transport and the proposed four-stream policy ran

@@ -10,9 +10,9 @@ Install the FIPS peers from their immutable release archives alongside this
 package. These two peers are not yet available in the npm registry:
 
 ```bash
-npm install https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.17/hashtree-fips-transport-0.4.20.tgz \
-  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.48/fips-core-0.0.48.tgz \
-  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.48/fips-transport-webrtc-0.0.51.tgz
+npm install @hashtree/fips-transport@0.5.2 \
+  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.62/fips-core-0.0.57.tgz \
+  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.62/fips-transport-webrtc-0.0.61.tgz
 ```
 
 With npm 12, add `--allow-remote=all` to this command and subsequent `npm install`
@@ -23,7 +23,10 @@ or `npm ci` commands, because the FIPS packages use release URL dependencies.
 This package keeps FIPS below Hashtree: FIPS discovers peers, signals transports,
 and moves authenticated datagrams between node identities. TCP/FIPS owns
 ordered byte delivery, flow control, and segment retransmission. Hashtree still
-owns hash verification, peer choice, one whole-session retry, and cache writes.
+owns hash verification, peer choice, and cache writes. An interrupted stream
+gets one retry. A peer that reports a miss or sends bytes with the wrong hash
+is skipped for the rest of that lookup. A hash mismatch leaves availability
+uncertain unless another peer supplies valid bytes.
 The byte framing is documented in the
 [networking protocol](https://github.com/mmalmi/hashtree/blob/master/docs/NETWORKING.md#blob-protocol-v1).
 

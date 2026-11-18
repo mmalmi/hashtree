@@ -14,6 +14,9 @@ const REQUEST_BYTES = 36;
 const IO_CHUNK_BYTES = 64 * 1024;
 const POLL_INTERVAL_MS = 10;
 export const TCP_BLOB_MAX_BYTES = 16 * 1024 * 1024;
+export class PeerBlobHashMismatch extends Error {
+    constructor() { super('TCP/FIPS blob hash mismatch'); }
+}
 /** Hash-verified Hashtree blobs carried by one reliable TCP/FIPS stream per request. */
 export class TcpBlobTransport {
     options;
@@ -43,40 +46,37 @@ export class TcpBlobTransport {
         const local = await this.whileOpen(() => this.verifiedGet(hash));
         if (local)
             return local;
-        const peers = [...new Set(peerIds.map((peer) => peer.trim()).filter(Boolean))];
+        let peers = [...new Set(peerIds.map((peer) => peer.trim()).filter(Boolean))];
         if (peers.length === 0)
             throw new Error('no TCP/FIPS blob providers are available');
-        let failures = [];
+        const attemptTimeoutMs = Math.max(250, Math.floor(this.timeoutMs / 2));
+        const failures = new Map();
         for (let sessionAttempt = 0; sessionAttempt < 2; sessionAttempt += 1) {
-            this.lifetime.signal.throwIfAborted();
-            const pending = new Map();
-            for (const [index, peer] of peers.entries()) {
-                pending.set(index, (async () => {
-                    try {
-                        const data = await this.fetchFromPeer(peer, hash, Math.max(250, Math.floor(this.timeoutMs / 2)), htl);
-                        const result = data === null
-                            ? { kind: 'missing' }
-                            : { kind: 'found', data };
-                        return [index, result];
-                    }
-                    catch (error) {
-                        return [index, { kind: 'failed', error }];
-                    }
-                })());
-            }
-            const results = [];
-            while (pending.size > 0) {
-                const [index, result] = await this.whileOpen(() => Promise.race(pending.values()));
-                pending.delete(index);
-                if (result.kind === 'found')
-                    return result.data;
-                results.push(result);
-            }
-            failures = results.flatMap((result) => result.kind === 'failed' ? [result.error] : []);
-            if (failures.length === 0)
-                return null;
+            const data = await this.whileOpen(() => new Promise((resolve) => {
+                let remaining = peers.length;
+                const finish = (reply) => {
+                    remaining--;
+                    if (reply !== null || remaining === 0)
+                        resolve(reply);
+                };
+                for (const peer of peers) {
+                    this.fetchFromPeer(peer, hash, attemptTimeoutMs, htl).then((reply) => {
+                        failures.delete(peer);
+                        finish(reply);
+                    }, (error) => {
+                        failures.set(peer, error);
+                        finish(null);
+                    });
+                }
+            }));
+            if (data !== null || failures.size === 0)
+                return data;
+            // Retry interrupted streams once. A bad payload remains an error for this lookup.
+            peers = peers.filter((peer) => failures.has(peer) && !(failures.get(peer) instanceof PeerBlobHashMismatch));
+            if (!peers.length)
+                break;
         }
-        throw new AggregateError(failures, 'TCP/FIPS blob availability is uncertain');
+        throw new AggregateError(failures.values(), 'TCP/FIPS blob availability is uncertain');
     }
     close() {
         if (this.closing)
@@ -128,7 +128,7 @@ export class TcpBlobTransport {
                 return null;
             const data = await this.readExact(connection, response.size, deadline);
             if (!bytesEqual(await this.whileOpen(() => sha256(data)), hash))
-                throw new Error('TCP/FIPS blob hash mismatch');
+                throw new PeerBlobHashMismatch();
             await this.whileOpen(() => this.options.localStore.put(hash, data.slice()).catch(() => false));
             return data;
         }

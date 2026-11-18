@@ -6,6 +6,9 @@ export declare const TCP_BLOB_VERSION = 1;
 export declare const TCP_BLOB_DEFAULT_HTL = 10;
 export declare const TCP_BLOB_MAX_HTL = 10;
 export declare const TCP_BLOB_MAX_BYTES: number;
+export declare class PeerBlobHashMismatch extends Error {
+    constructor();
+}
 export interface TcpBlobTransportOptions {
     endpoint: FipsDatagramEndpoint;
     localStore: Store;
