@@ -1,0 +1,12 @@
+{
+  "name": "worker-shipping-qualification",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.23.0",
+  "devDependencies": {
+    "@playwright/test": "1.61.1",
+    "ws": "8.21.1",
+    "@types/ws": "8.18.1",
+    "@types/node": "26.1.1"
+  }
+}

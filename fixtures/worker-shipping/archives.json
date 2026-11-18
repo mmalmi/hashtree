@@ -1,0 +1,92 @@
+[
+  {
+    "url": "https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-v0.2.4/fips-tcp-0.2.3.tgz",
+    "bytes": 28482,
+    "sha256": "72fe87d554cffde23d2c34f779f3b8cebdca3f54f33878ca5e3b147a36681904",
+    "integrity": "sha512-0j7ucAgb7SFLkHHKMjJmR4v29psVmGoShiSgpba5IgJqAT/lJGTTKlHoAItKie+oNsiPGf/ww4YMuLTRYov2TA=="
+  },
+  {
+    "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-collection-0.2.11.tgz",
+    "bytes": 26245,
+    "sha256": "587d5a7bdacb0bb1c8f29507f86afb1e278ff8ef9b1c685eff9255f596365f23",
+    "integrity": "sha512-FI6cVBneXSgOEAEeZH6Yv12eC+pZpG2kTCHc9Bt4+bW6Vu0nVNo5V3Gtt5Dk9p8l7G47sq/R9CBbo6A0D+dVwA=="
+  },
+  {
+    "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-core-0.4.0.tgz",
+    "bytes": 151369,
+    "sha256": "380a9af7209657f05bf85ac8d6962c1f0c12598984d7f5176dec85790373d57f",
+    "integrity": "sha512-hdqjU1MoGjc55BL5WM93jgVxW7cYOWCWHcYUl5glUT8boEinFfmlmnhyjGp7TNwWgxZKQ7Rgag9XiyDnRUGBUA=="
+  },
+  {
+    "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-index-0.1.15.tgz",
+    "bytes": 78962,
+    "sha256": "f2d76a8c5245d29fa1f3a099be9db605ebb0568c10b77e3b95a4ebf39d1e80ef",
+    "integrity": "sha512-EnXs4hE0fxCzQfruEsjO9YVBTpzb3Rr1k1vF6p7gLgpZ2oIEg4DEv/pZji9uj7/qJYqOa+EsZTjA0lT0SZozdA=="
+  },
+  {
+    "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-mesh-0.3.3.tgz",
+    "bytes": 14466,
+    "sha256": "c5f900bd31ad0cfb126bdd5797fc7660f569d2b8fed5b349bcda7248463eee3d",
+    "integrity": "sha512-fiLvKjbEO1J/fuj6wcLGjI3RPsPrGgSuc2O+QqN/vX3OSHI7uPS+feH49vFduUMHYM79Yvsrq6MV2XDUiGq59A=="
+  },
+  {
+    "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-nostr-0.2.6.tgz",
+    "bytes": 70461,
+    "sha256": "84b81d577e0f94b797c04b045952c60f578dc2a50aafb181388bb19196f9f585",
+    "integrity": "sha512-rLumTs98r1AFAaYu1bnY7MUiF7M5hsehjnjB4GV7b68OBcdGpyWqT6ccBULmH4VLstyCU6d/qYxqu3ctlZbjUg=="
+  },
+  {
+    "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-nostr-pubsub-0.1.9.tgz",
+    "bytes": 28801,
+    "sha256": "8b95b5902d4eb4a6a02fb2c8dfc963c783ae6ecc3de16a5d14ffcddb0e3b7404",
+    "integrity": "sha512-7QfJ1LwAYb8ThdA/ECXJQYxh7BjQk/gTQS+XAfnZvzjxx5YSDRjGj+7bqLtbDdIAPDuIA9dUNYCfH8oj9RLdPQ=="
+  },
+  {
+    "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.40/hashtree-nostr-0.2.7.tgz",
+    "bytes": 69524,
+    "sha256": "36ef662470e349af9e8a51d8b4a67ac7fffa7bb36a19b82e38c05bc4bd54040d",
+    "integrity": "sha512-ah0pS1PDckTkz/QntsNn9D9aFPcJWb7BDjBvaVtY9gaWryiWMvXv0QaGbTU5aGIqRd32BLmnojNDXHPJ/IkIhQ=="
+  },
+  {
+    "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.42/hashtree-core-0.4.2.tgz",
+    "bytes": 156599,
+    "sha256": "9d6b87aa9503d793c4cad53c3cffa66cd5372fd87c70e194ddbbc968ffda168b",
+    "integrity": "sha512-9gPIe39QJoCUtVo8VhbDOX5bHAtGlJ2EZlQJqKh3l9++2CY1Njg2LINXQWBgKRqB0P2LBKoDpyYz1XIBoJ/SMw=="
+  },
+  {
+    "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.46/hashtree-dexie-0.1.15.tgz",
+    "bytes": 14701,
+    "sha256": "aede1fd3e0fcb86d237edd5b3dc3a63161d14ac12d78aa5e224f61379b376155",
+    "integrity": "sha512-YPn2gh0QQQRMcZY3zYmkycLqBjKJhA8GEmWq2/LPSbD0441YEQPCkWvTfAgRUsXA+gvjxB51tvqev1caXylp8A=="
+  },
+  {
+    "url": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-reconcile-ts-v0.1.0/nostr-pubsub-reconcile-0.1.0.tgz",
+    "bytes": 6509,
+    "sha256": "fc96071df48690b49118c32b692553c145d530d5f7ac65e07818626346c703b2",
+    "integrity": "sha512-F1UToi75yYrZpt5KFocPUlQH4MeU/J9A/aJBndWUuDvzx1WdQtF99tNxD3KnH2x81R4oaT721hf5OcTdSv8hRg=="
+  },
+  {
+    "url": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-reconcile-ts-v0.1.2/nostr-pubsub-reconcile-0.1.2.tgz",
+    "bytes": 8300,
+    "sha256": "6c9ec87b644f6fcb59d5fa36180281753b1e91610fb7582cbabb6290b0c268ee",
+    "integrity": "sha512-w2N8AE2bL5h7H0tOuTONOTprHS4/SVCP93lyipA/mekk+RogF3fZFh+s2lxLEDvW5tSjIJcBdX1lguX7wD5+2g=="
+  },
+  {
+    "url": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.15/nostr-pubsub-0.5.15.tgz",
+    "bytes": 194327,
+    "sha256": "6fe3a2bfb4c9b5331994eb829fd49ef1a0e6d9704a852303be8176a4ae01e7d5",
+    "integrity": "sha512-59CecbZTYxPjY0zBBvZwhbQsC9bwTkTYBKUG2v+tePw90KfUmzEolQus/CzwYns4MJNeQHq4oVYXfw7cVvDMbA=="
+  },
+  {
+    "url": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.32/nostr-pubsub-0.5.32.tgz",
+    "bytes": 286112,
+    "sha256": "5b8b6a06e6ff51629afd434b3964d69474182bc7f6c9150ead404fa529c6f1ab",
+    "integrity": "sha512-r4atGsees6cb2XOynyzN8/RzkiHmitRrsek3+J6WQ5zBAC8owa6krzgR0Vd3F7UUf7MRvyVh0to0/+eTmRi8+Q=="
+  },
+  {
+    "url": "https://github.com/mmalmi/nostr-social-graph/releases/download/v4.2.3/nostr-social-graph-4.2.3.tgz",
+    "bytes": 2681399,
+    "sha256": "68f5f790c09efcac15ec83ccb783f9239fae58d3828acb43f480c245efb23df1",
+    "integrity": "sha512-ph2wNSfjqeDvp0WrjqhJ4LET1O/FuGR0EbfosswjyGpd052xk020+PybXOWauZfx/92NG7O/cY/ZkHhM+9mCvw=="
+  }
+]

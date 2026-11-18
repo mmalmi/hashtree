@@ -1,4 +1,4 @@
-name: Verify the signed graph in the upstream worker
+name: Verify the worker against immutable shipping dependencies
 on:
   push:
     branches: [codex/signed-graph-worker-qualification]
@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
-          fetch-depth: 2
+          fetch-depth: 3
           persist-credentials: false
       - name: Build and exercise the actual bundled worker on an isolated network
         run: bash fixtures/worker-named/qualify.sh
