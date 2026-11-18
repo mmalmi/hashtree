@@ -2,6 +2,63 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-18 - TypeScript hash retrieval on 10,000-node layouts
+
+The baseline TypeScript transport and the proposed four-stream policy ran
+the same twelve fresh layouts. Each version handled 4,608 reads. This
+includes 2,304 direct-peer reads and 2,304 five-hop mesh reads. Both cases
+cover steady links, churn with stalled and departing peers, and simulated
+false misses and corrupt replies. Both drop results after 700 ms.
+
+The direct-peer case limits each roster to four neighbors and puts the first
+replica of each even-numbered query on an adjacent peer. The five-hop case
+uses the Rust simulator’s sparse placements and topology. Incoming
+requests share forwarding work at equal hop limits. A waiting reader can
+take over when the owner is cancelled. TypeScript limits simultaneous
+attempts and can continue through the full roster. Rust uses a total
+attempt budget for each search. The results compare the TypeScript
+versions within each case.
+
+| Workload | Verified / reachable | Distinct verified / reachable | Protocol MB | Aggregate Mbps | Query CPU s | Successful p50 / p95 ms |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Direct, all | 1,075 → 1,075 / 1,075 | 641 → 641 / 641 | 4.84 → 4.77 | 0.69 → 0.73 | 0.37 → 0.57 | 30 / 48 → 30 / 48 |
+| Five-hop, all | 474 → 370 / 475 | 362 → 286 / 363 | 4,897.57 → 1,322.17 | 89.70 → 53.66 | 334.51 → 252.26 | 128 / 420 → 196 / 528 |
+| Five-hop, steady | 222 → 198 / 222 | 173 → 156 / 173 | 72.46 → 71.92 | 26.78 → 8.83 | 34.16 → 107.30 | 130 / 180 → 208 / 554 |
+| Five-hop, churn | 163 → 97 / 164 | 121 → 69 / 122 | 391.73 → 41.77 | 11.53 → 5.07 | 159.35 → 57.21 | 142 / 532 → 301 / 522 |
+| Five-hop, adversarial | 89 → 75 / 89 | 68 → 61 / 68 | 4,433.37 → 1,208.48 | 247.42 → 146.32 | 141.00 → 87.75 | 118 / 178 → 152 / 524 |
+
+The five-hop candidate saved 73.0% of traffic and delivered
+104 fewer verified reads. Direct reads retained their delivery
+count and tail latency. Every five-hop layout delivered fewer reads on the
+candidate. The port remains an experiment.
+
+The simulator calls the production TypeScript lookup methods and replaces
+TCP streams with deterministic links. It counts encoded requests and replies
+including corrupt payloads, before carrier framing. Simulated durations
+include work still draining at the end of a batch. Direct reads drained sooner,
+which raised their aggregate rate even as their byte count fell. CPU covers the Node.js
+simulator, including its scheduling and hash checks. The query column
+excludes creating the graph and auditing caches. All returned data and
+cache entries passed hash verification.
+
+Total process CPU was 337.5 → 257.9 seconds,
+and peak resident memory was 760 → 2,685 MiB.
+We ran four serial pairs of three layouts in alternating order on macOS
+ARM64 with Node.js 26.12.1. Reachable and distinct reachable counts matched the
+Rust fixture on all 48 reference cases. A replay of the pinned candidate
+reproduced the delivery, traffic and latency counters on six cases.
+
+Build the transport and core packages from the TypeScript workspace, then
+run the fixture. The candidate comparison uses the local experimental
+revision when supplied. Seeds can be passed as a comma-separated list.
+
+```sh
+pnpm --filter @hashtree/core build
+pnpm --filter @hashtree/fips-transport build
+node packages/hashtree-fips-transport/scripts/mesh-scale/run.mjs baseline
+node packages/hashtree-fips-transport/scripts/mesh-scale/run.mjs candidate 2281,2333,2377,2423,2473,2521,2579,2621,2671,2729,2777,2833 3f2b18df6badb65777420632bfb8609480fbec78
+```
+
 ## 2026-11-18 - Fresh 10,000-node layouts with a fixed resource budget
 
 We tested whether a routing change could deliver more verified reads while holding
