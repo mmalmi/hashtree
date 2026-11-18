@@ -313,18 +313,9 @@ impl BlobIoAdmission {
         F: FnOnce() -> T + Send + 'static,
         T: Send + 'static,
     {
-        let busy = |_| BlobIoTaskError::Busy(BLOB_WRITE_BUSY);
-        let permits = BlobIoPermits {
-            _class: self.writes.clone().try_acquire_owned().map_err(busy)?,
-            _bulk: Some(self.bulk.clone().try_acquire_owned().map_err(busy)?),
-            _total: self.total.clone().try_acquire_owned().map_err(busy)?,
-        };
-        tokio::task::spawn_blocking(move || {
-            let _permits = permits;
-            task()
-        })
-        .await
-        .map_err(BlobIoTaskError::Join)
+        // Use the configured write queue for cache fills. HTTP callers can
+        // still return verified bytes when admission or persistence fails.
+        self.run_write(task).await
     }
 
     fn snapshot(&self) -> BlobIoQueueSnapshot {
