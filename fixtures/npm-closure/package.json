@@ -4,8 +4,8 @@
   "type": "module",
   "packageManager": "pnpm@10.23.0",
   "dependencies": {
-    "@hashtree/worker": "file:artifacts/hashtree-worker-0.4.31.tgz",
-    "@hashtree/nostr-pubsub": "file:artifacts/hashtree-nostr-pubsub-0.1.10.tgz",
+    "@hashtree/worker": "0.4.31",
+    "@hashtree/nostr-pubsub": "0.1.10",
     "@hashtree/core": "0.4.2",
     "@hashtree/dexie": "0.1.15",
     "dexie": "4.4.2",
@@ -16,10 +16,5 @@
     "vitest": "4.1.12",
     "fake-indexeddb": "6.2.8",
     "typescript": "5.9.3"
-  },
-  "pnpm": {
-    "overrides": {
-      "@hashtree/nostr-pubsub": "file:artifacts/hashtree-nostr-pubsub-0.1.10.tgz"
-    }
   }
 }

@@ -4,9 +4,6 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
-overrides:
-  '@hashtree/nostr-pubsub': file:artifacts/hashtree-nostr-pubsub-0.1.10.tgz
-
 importers:
 
   .:
@@ -18,11 +15,11 @@ importers:
         specifier: 0.1.15
         version: 0.1.15
       '@hashtree/nostr-pubsub':
-        specifier: file:artifacts/hashtree-nostr-pubsub-0.1.10.tgz
-        version: file:artifacts/hashtree-nostr-pubsub-0.1.10.tgz(nostr-tools@2.26.1(typescript@5.9.3))(typescript@5.9.3)
+        specifier: 0.1.10
+        version: 0.1.10(nostr-tools@2.26.1(typescript@5.9.3))(typescript@5.9.3)
       '@hashtree/worker':
-        specifier: file:artifacts/hashtree-worker-0.4.31.tgz
-        version: file:artifacts/hashtree-worker-0.4.31.tgz(typescript@5.9.3)
+        specifier: 0.4.31
+        version: 0.4.31(typescript@5.9.3)
       dexie:
         specifier: 4.4.2
         version: 4.4.2
@@ -76,18 +73,16 @@ packages:
   '@hashtree/mesh@0.3.3':
     resolution: {integrity: sha512-17irFicqkGq16y2HmDlrZZaZfaoN7nRaGQDjrLGLPq/spj+/9aalgb37O/+QnlVdgu4AkigXdaa6WtHupw2N1Q==}
 
-  '@hashtree/nostr-pubsub@file:artifacts/hashtree-nostr-pubsub-0.1.10.tgz':
-    resolution: {integrity: sha512-AXX0MjWUD9sTK64B3uVgwheasoxDnVAete+FSTsXJYPZMjxPyb/EfgAZok+xHZ2U8igbn3LM8TOfsJDY13ReUQ==, tarball: file:artifacts/hashtree-nostr-pubsub-0.1.10.tgz}
-    version: 0.1.10
+  '@hashtree/nostr-pubsub@0.1.10':
+    resolution: {integrity: sha512-AXX0MjWUD9sTK64B3uVgwheasoxDnVAete+FSTsXJYPZMjxPyb/EfgAZok+xHZ2U8igbn3LM8TOfsJDY13ReUQ==}
     peerDependencies:
       nostr-tools: '>=2.18.2 <3'
 
   '@hashtree/nostr@0.2.7':
     resolution: {integrity: sha512-ah0pS1PDckTkz/QntsNn9D9aFPcJWb7BDjBvaVtY9gaWryiWMvXv0QaGbTU5aGIqRd32BLmnojNDXHPJ/IkIhQ==}
 
-  '@hashtree/worker@file:artifacts/hashtree-worker-0.4.31.tgz':
-    resolution: {integrity: sha512-45n5HmeicduLyeueQHUxRPG+Dhgo41/nsgg2OsPgaWu3xo28qLHu3+RgCILwXlUXgN8s0/1dkkpfxikUKUi1ng==, tarball: file:artifacts/hashtree-worker-0.4.31.tgz}
-    version: 0.4.31
+  '@hashtree/worker@0.4.31':
+    resolution: {integrity: sha512-45n5HmeicduLyeueQHUxRPG+Dhgo41/nsgg2OsPgaWu3xo28qLHu3+RgCILwXlUXgN8s0/1dkkpfxikUKUi1ng==}
     peerDependencies:
       nostr-social-graph: '>=4.2.3'
     peerDependenciesMeta:
@@ -624,7 +619,7 @@ snapshots:
     dependencies:
       '@hashtree/core': 0.4.0
 
-  '@hashtree/nostr-pubsub@file:artifacts/hashtree-nostr-pubsub-0.1.10.tgz(nostr-tools@2.26.1(typescript@5.9.3))(typescript@5.9.3)':
+  '@hashtree/nostr-pubsub@0.1.10(nostr-tools@2.26.1(typescript@5.9.3))(typescript@5.9.3)':
     dependencies:
       '@hashtree/core': 0.4.2
       '@hashtree/nostr': 0.2.7(typescript@5.9.3)
@@ -645,13 +640,13 @@ snapshots:
       - nostr-wasm
       - typescript
 
-  '@hashtree/worker@file:artifacts/hashtree-worker-0.4.31.tgz(typescript@5.9.3)':
+  '@hashtree/worker@0.4.31(typescript@5.9.3)':
     dependencies:
       '@hashtree/core': 0.4.2
       '@hashtree/dexie': 0.1.15
       '@hashtree/mesh': 0.3.3
       '@hashtree/nostr': 0.2.7(typescript@5.9.3)
-      '@hashtree/nostr-pubsub': file:artifacts/hashtree-nostr-pubsub-0.1.10.tgz(nostr-tools@2.26.1(typescript@5.9.3))(typescript@5.9.3)
+      '@hashtree/nostr-pubsub': 0.1.10(nostr-tools@2.26.1(typescript@5.9.3))(typescript@5.9.3)
       '@msgpack/msgpack': 3.1.3
       dexie: 4.4.2
       nostr-pubsub: https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.32/nostr-pubsub-0.5.32.tgz(nostr-tools@2.26.1(typescript@5.9.3))

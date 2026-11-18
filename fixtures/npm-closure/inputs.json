@@ -13,7 +13,9 @@
       "bytes": 28999
     }
   },
-  "normalization": "Source npmManifest with exact registry dependencies; only not-yet-published helper mapped to its exact archive.",
+  "normalization": "Unmodified published npm packages and registry dependency closure; no file overrides or workspace links.",
   "tests": 9,
-  "workspaceSourcesUsed": false
+  "workspaceSourcesUsed": false,
+  "registryInstall": true,
+  "publicationRun": 44344509627
 }

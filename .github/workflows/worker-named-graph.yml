@@ -1,4 +1,4 @@
-name: Verify normalized npm worker persistence
+name: Verify published registry worker persistence
 on:
   push:
     branches: [codex/signed-graph-worker-qualification]
