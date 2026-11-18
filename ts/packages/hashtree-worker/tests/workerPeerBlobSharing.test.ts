@@ -542,12 +542,14 @@ describe('worker peer blob sharing', () => {
     await vi.advanceTimersByTimeAsync(500);
     await Promise.resolve();
     await Promise.resolve();
-    expect(readBlobResponse('blob-3')).toEqual({
+    // The separately installed core verifies bytes with asynchronous WebCrypto.
+    // Observe its response within one more second, before the 20-second deadline.
+    await vi.waitFor(() => expect(readBlobResponse('blob-3')).toEqual({
       type: 'blob',
       id: 'blob-3',
       data: blobData,
       source: 'p2p',
-    });
+    }), { timeout: 1000 });
   });
 
   it('expires unanswered p2p fetches at the mesh read timeout', async () => {
