@@ -71,12 +71,27 @@ async fn run_size(size: usize) {
     }
 }
 
+// The paused Tokio runtime runs the mesh on the test thread. Sampling this
+// thread excludes fixture construction and other tests running in the process.
+fn query_cpu_time() -> Option<std::time::Duration> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    {
+        let now = rustix::time::clock_gettime(rustix::time::ClockId::ThreadCPUTime);
+        now.try_into().ok()
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        None
+    }
+}
+
 async fn run_case(identities: &[PeerIdentity], seed: u64, profile: Profile) {
     let size = identities.len();
     let adversarial = profile == Profile::Adversarial;
     let churn = profile == Profile::Churn;
     let network = Network::new(identities, seed, churn, adversarial).await;
     let simulation_start = Instant::now();
+    let cpu_start = query_cpu_time();
     let mut report = Report::default();
     let mut departures = 0;
     for batch in 0..BATCH_COUNT {
@@ -160,6 +175,10 @@ async fn run_case(identities: &[PeerIdentity], seed: u64, profile: Profile) {
         }
     }
 
+    let query_cpu_us = cpu_start
+        .zip(query_cpu_time())
+        .map(|(start, end)| (end - start).as_micros().to_string())
+        .unwrap_or_else(|| "n/a".into());
     let reads = BATCH_COUNT * BATCH_SIZE;
     let verified = report.verified_ms.len();
     assert_eq!(
@@ -199,7 +218,7 @@ async fn run_case(identities: &[PeerIdentity], seed: u64, profile: Profile) {
          reads={reads} reachable={} verified={verified} p50_ms={p50_ms} p95_ms={p95_ms} misses={} \
          deadlines={} incomplete={} attempts={attempts} wire_bytes={wire_bytes} \
          simulated_ms={simulated_ms} wire_bps={wire_bps} false_misses={false_misses} \
-         corrupt_rejected={corrupt_rejected} distinct_reachable={} distinct_verified={}",
+         corrupt_rejected={corrupt_rejected} distinct_reachable={} distinct_verified={} query_cpu_us={query_cpu_us}",
         report.reachable,
         report.misses,
         report.deadlines,

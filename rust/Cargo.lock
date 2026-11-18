@@ -3908,6 +3908,7 @@ dependencies = [
  "nvpn-fips-core",
  "nvpn-fips-tcp",
  "nvpn-fips-tcp-endpoint",
+ "rustix",
  "serde",
  "serde_json",
  "sha2 0.10.9",

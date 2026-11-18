@@ -34,6 +34,9 @@ hashtree-network.workspace = true
 hex.workspace = true
 tokio = { version = "1", features = ["sync", "time", "rt", "macros", "test-util"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dev-dependencies]
+rustix = { version = "1", features = ["time"] }
+
 [[bin]]
 name = "hashtree-fips-stdio-fixture"
 path = "src/bin/stdio_fixture.rs"

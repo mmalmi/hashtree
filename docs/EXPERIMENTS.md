@@ -2,6 +2,64 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-18 - Fresh 10,000-node layouts with a fixed resource budget
+
+We tested whether a routing change could deliver more verified reads while holding
+traffic and CPU steady. Each layout ran 64 reads with steady links, 64 with churn
+and 64 with false misses and corrupt replies. Both versions used the same graph,
+holders, five-hop limit, four-attempt limit and 700 ms deadline. The router on
+master at the start of the experiment was the baseline for both comparisons.
+
+The first candidate started deep searches sooner, spaced the last two hops further
+apart and deferred neighbors that had recently asked for the same hash. It delivered
+81 of 430 reachable reads on the twelve development layouts, up from 78. We then
+fixed the candidate and ran 16 previously unused layouts.
+
+The second candidate remembered recent terminal misses and incoming queries for
+the same hash. It used an untried last-hop peer when available. With one forwarding
+hop left, it started the next probe at two thirds of the usual interval. We selected this
+candidate before running a separate set of 24 new layouts.
+
+| Layouts | Router | Verified / reachable | Distinct verified / reachable | Protocol MB | Aggregate Mbps | Query CPU, s | Whole-run CPU, s |
+| ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 16 | Baseline | 165/478 | 144/457 | 131.13 | 3.946 | 41.68 | 58.20 |
+| 16 | Changed timing | 152/478 | 131/457 | 127.21 | 3.824 | 39.48 | 56.23 |
+| 24 | Baseline | 264/826 | 208/658 | 193.85 | 3.898 | 49.25 | 67.19 |
+| 24 | Terminal misses and earlier hedges | 265/826 | 209/658 | 193.36 | 3.933 | 51.13 | 69.09 |
+
+On the 16 layouts, ordinary deliveries fell from 138 to 125. Adversarial
+deliveries stayed at 27. For comparison, the routing implementation shipped in
+transport 0.5.1 delivered 147 of the same 478 reachable reads and used 123.98 MB.
+On the separate 24 layouts, ordinary deliveries rose from 198 to 200 and
+adversarial deliveries fell from 66 to 65. Three layouts gained reads, two lost
+reads and 19 tied. The highest successful per-case p95 latency moved from 680
+to 694 ms on ordinary workloads and from 688 to 659 ms on adversarial workloads.
+The current routing policy and library version were retained.
+
+Protocol traffic counts requests and replies, including rejected data, before
+carrier framing. Aggregate Mbps divides those bytes by simulated elapsed time.
+Query CPU measures the test thread from the start of the read batches through
+their completion, including placements and reachability checks. It excludes
+building the 10,000 nodes and the final cache audit. Whole-run CPU is process
+user plus system time. Both were measured with serial debug binaries on macOS
+ARM64. For each four- or six-layout group we ran both versions twice in opposite
+orders and summed the per-group means. CPU timing varies with host load.
+Distinct queries count a concurrent eight-reader burst once. Every delivered
+payload and every cache in the adversarial cases passed hash verification.
+
+From the Rust workspace, this runs the 16-layout baseline. The test also reports
+query CPU microseconds on Linux and macOS. Use seeds 613 and 641 for a short run.
+
+```sh
+HASHTREE_MESH_SIM_SEEDS=613,641,683,719,757,797,839,877,919,953,991,1031,1069,1109,1151,1193 \
+  cargo test --locked -p hashtree-fips-transport --lib provider_route::mesh_scale::mesh_10000_nodes \
+  -- --exact --nocapture --test-threads=1
+```
+
+The separate confirmation used seeds 1231, 1277, 1321, 1361, 1409, 1451, 1493,
+1531, 1579, 1621, 1663, 1709, 1753, 1789, 1831, 1873, 1913, 1951, 1993,
+2039, 2081, 2129, 2179 and 2221.
+
 ## 2026-11-18 - Avoiding duplicate hash queries during a mesh search
 
 A transport remembers up to 128 authenticated inbound requests for one second.
