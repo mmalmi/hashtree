@@ -128,6 +128,8 @@ run_pool_migration_systemd_gate() {
     cargo test --locked -p hashtree-cli --bin htree \
       cursor_parent_lease_serializes_independent_open_descriptions \
       -- --test-threads=1 || exit $?
+    cargo test --locked -p hashtree-cli --bin htree \
+      fd_census::tests -- --test-threads=1 || exit $?
     cargo test --locked -p hashtree-cli --test pool_migration \
       -- --ignored --test-threads=1 || exit $?
   )
