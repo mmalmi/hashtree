@@ -2658,12 +2658,8 @@ mod tests {
             nostr_event_transport: None,
             nostr_relay_urls: Vec::new(),
             tree_root_cache: Arc::new(StdMutex::new(std::collections::HashMap::new())),
-            inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
-            inflight_blob_reads: Arc::new(
-                tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            ),
+            inflight_blob_fetches: Default::default(),
+            inflight_blob_reads: Default::default(),
             blob_cache: Arc::new(crate::blob_cache::BlobCache::for_tests()),
             directory_listing_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
             resolved_path_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),

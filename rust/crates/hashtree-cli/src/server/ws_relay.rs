@@ -791,12 +791,8 @@ mod tests {
             nostr_event_transport: None,
             nostr_relay_urls: vec![relay_url],
             tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-            inflight_blob_fetches: Arc::new(tokio::sync::Mutex::new(
-                std::collections::HashMap::new(),
-            )),
-            inflight_blob_reads: Arc::new(
-                tokio::sync::Mutex::new(std::collections::HashMap::new()),
-            ),
+            inflight_blob_fetches: Default::default(),
+            inflight_blob_reads: Default::default(),
             blob_cache: Arc::new(crate::blob_cache::BlobCache::for_tests()),
             directory_listing_cache: Arc::new(std::sync::Mutex::new(
                 super::super::auth::new_lookup_cache(),
