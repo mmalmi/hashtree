@@ -42,6 +42,11 @@ const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_millis(5_500);
 
 static NEXT_ISN_SEED: AtomicU64 = AtomicU64::new(0x4854_5245_4554_4350);
 
+tokio::task_local! {
+    /// The authenticated previous hop while serving this hash on this task.
+    pub(crate) static INBOUND_BLOB_PEER: (BlobRequest, PeerIdentity);
+}
+
 /// Hash-verified Hashtree blobs carried by one bounded TCP/FIPS actor.
 ///
 /// Each [`Self::get`] targets one explicit peer and caches verified remote
@@ -489,6 +494,7 @@ enum ClientPhase {
 }
 
 struct ServerConnection {
+    peer: PeerIdentity,
     deadline_ms: u64,
     phase: ServerPhase,
 }
@@ -741,17 +747,17 @@ impl TcpBlobActor {
 
     async fn accept_connections(&mut self, now_ms: u64) {
         while let Some(connection) = self.tcp.accept() {
-            let authorized = self
-                .tcp
-                .peer(connection)
-                .is_some_and(|peer| (self.inbound_policy)(peer));
-            if self.servers.len() >= MAX_SERVER_CONNECTIONS || !authorized {
+            let admitted = self.tcp.peer(connection).filter(|peer| {
+                self.servers.len() < MAX_SERVER_CONNECTIONS && (self.inbound_policy)(*peer)
+            });
+            let Some(peer) = admitted else {
                 let _ = self.tcp.close(connection, now_ms).await;
                 continue;
-            }
+            };
             self.servers.insert(
                 connection,
                 ServerConnection {
+                    peer,
                     deadline_ms: self.deadline_ms(now_ms),
                     phase: ServerPhase::ReadingRequest {
                         bytes: Vec::with_capacity(BLOB_REQUEST_BYTES),
@@ -787,18 +793,22 @@ impl TcpBlobActor {
             .servers
             .iter()
             .filter_map(|(connection, server)| match server.phase {
-                ServerPhase::WaitingForStore { request } => Some((*connection, request)),
+                ServerPhase::WaitingForStore { request } => {
+                    Some((*connection, server.peer, request))
+                }
                 _ => None,
             })
             .take(available)
             .collect::<Vec<_>>();
 
-        for (connection, request) in waiting {
+        for (connection, peer, request) in waiting {
             let route = self.route.clone();
             let abort = self.store_loads.spawn(async move {
                 StoreLoad {
                     connection,
-                    result: route.route(request).await,
+                    result: INBOUND_BLOB_PEER
+                        .scope((request, peer), route.route(request))
+                        .await,
                 }
             });
             let task_id = abort.id();
@@ -1147,7 +1157,7 @@ fn codec_error(error: BlobCodecError) -> TcpBlobTransportError {
     }
 }
 
-fn verify_hash(data: &[u8], expected: &Hash) -> bool {
+pub(super) fn verify_hash(data: &[u8], expected: &Hash) -> bool {
     Sha256::digest(data).as_slice() == expected
 }
 

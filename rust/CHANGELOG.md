@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.5.0 - 2026-11-18
+
+- Pool migrations tolerate transient file descriptor reuse during the systemd writer check.
+- The packaged Git helper uses hashtree-core 0.3.2 to open link-visible trees.
+- Retains the public peer feed and Negentropy provider from the 0.4.6 CLI crate.
+- Applications that use the CLI’s public blob router types should update to hashtree-network 0.4.
+
 ### Security
 
 - Routes meant for local callers no longer trust a loopback peer address

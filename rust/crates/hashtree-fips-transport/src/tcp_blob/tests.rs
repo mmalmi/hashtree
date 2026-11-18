@@ -120,18 +120,11 @@ async fn custom_server_route_on_worker() {
 
     {
         let requests = route.requests.lock().expect("recorded requests");
-        assert!(requests.contains(&BlobRequest {
-            hash: data_hash,
-            htl: 7,
-        }));
-        assert!(requests.contains(&BlobRequest {
-            hash: missing_hash,
-            htl: 3,
-        }));
-        assert!(requests.contains(&BlobRequest {
-            hash: failing_hash,
-            htl: 1,
-        }));
+        for (hash, htl) in [(data_hash, 7), (missing_hash, 3), (failing_hash, 1)] {
+            assert!(requests.iter().any(|(request, peer)| {
+                *request == BlobRequest { hash, htl } && peer.npub() == endpoint_b.npub()
+            }));
+        }
     }
     drop(peer_route);
 
@@ -695,7 +688,7 @@ struct RecordingRoute {
     data_hash: Hash,
     data: Vec<u8>,
     failing_hash: Hash,
-    requests: Mutex<Vec<BlobRequest>>,
+    requests: Mutex<Vec<(BlobRequest, PeerIdentity)>>,
 }
 
 impl RecordingRoute {
@@ -712,10 +705,14 @@ impl RecordingRoute {
 #[async_trait::async_trait]
 impl BlobRoute for RecordingRoute {
     async fn route(&self, request: BlobRequest) -> Result<BlobReply, StoreError> {
+        let peer = INBOUND_BLOB_PEER.with(|(inbound, peer)| {
+            assert_eq!(request, *inbound);
+            *peer
+        });
         self.requests
             .lock()
             .expect("record route request")
-            .push(request);
+            .push((request, peer));
         if request.hash == self.data_hash {
             Ok(BlobReply::Data(self.data.clone()))
         } else if request.hash == self.failing_hash {

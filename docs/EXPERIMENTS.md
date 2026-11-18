@@ -2,6 +2,186 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-18 - Hash queries on meshes up to 10,000 nodes
+
+The production FIPS provider route now skips the peer that just requested the
+same hash. With more than two hops left, another peer can use the freed attempt.
+In the last two hops, the search keeps its original window to limit traffic.
+A one-attempt search always gets an eligible peer when one exists. A directly
+observed hash mismatch defers that peer for 30 seconds on the observing node.
+A timeout or explicit miss does not start a cooldown. Each route tracks up to
+256 peers, and a search with deferred alternatives reports an incomplete
+result. The explicit peer roster is deduplicated when it changes.
+
+We compared this policy with the previous deadline-aware scheduler using the
+same five-hop limit, four-attempt budget, 700 ms deadline, placements and
+link conditions described below. We ran 384 reads per version at 100 nodes
+(seeds 17 and 29) and 768 each at 1,000 and 10,000 nodes (also seeds 71 and
+113). Each 64-read case includes concurrent bursts for one hash. Ordinary
+combines steady links and churn. Adversarial nodes returned
+false misses or corrupt payloads. Every delivered blob matched its requested
+hash, and the adversarial runs verified the contents of every cache.
+
+| Nodes | Workload | Verified / reachable, before → after | Aggregate Mbps | Successful p95, ms |
+| ---: | --- | ---: | ---: | ---: |
+| 100 | Ordinary | 200/223 → 203/223 | 1.77 → 1.94 | 392–590 → 372–506 |
+| 100 | Adversarial | 82/99 → 90/99 | 3.74 → 1.91 | 470–526 → 464–513 |
+| 1,000 | Ordinary | 132/382 → 186/382 | 1.58 → 1.83 | 540–661 → 502–668 |
+| 1,000 | Adversarial | 33/135 → 68/135 | 6.45 → 3.93 | 557–674 → 576–628 |
+| 10,000 | Ordinary | 11/132 → 13/132 | 1.42 → 1.58 | 283–630 → 283–630 |
+| 10,000 | Adversarial | 4/36 → 5/36 | 7.17 → 7.90 | 373–447 → 311–488 |
+
+Reachable means an honest path to an original holder exists within five hops.
+The p95 column gives the range of per-case percentiles among verified reads.
+Cases with zero successes have no latency percentile. At 10,000 nodes several
+percentiles represent a single delivery. Bandwidth counts aggregate blob-wire
+bytes over simulated time and excludes carrier framing and retransmissions.
+
+| Nodes | Workload | Probe attempts, before → after | Blob-wire bytes | Root deadlines | Other incomplete reads |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 100 | Ordinary | 26,927 → 26,868 | 4,499,418 → 4,920,858 | 53 → 51 | 3 → 2 |
+| 100 | Adversarial | 9,537 → 10,454 | 4,703,628 → 2,311,787 | 8 → 5 | 38 → 33 |
+| 1,000 | Ordinary | 152,022 → 162,583 | 8,764,442 → 10,013,272 | 348 → 305 | 32 → 21 |
+| 1,000 | Adversarial | 42,918 → 54,099 | 17,213,041 → 10,435,484 | 79 → 78 | 144 → 110 |
+| 10,000 | Ordinary | 188,188 → 211,563 | 7,955,179 → 8,851,461 | 477 → 489 | 24 → 10 |
+| 10,000 | Adversarial | 53,835 → 63,407 | 19,458,320 → 21,543,725 | 103 → 123 | 149 → 128 |
+
+At 1,000 nodes, total blob-wire traffic fell from 25.98 MB to 20.45 MB
+across the two workloads. Corrupt replies received fell from 3,587 to 1,725 and the
+two additional seeds reproduced the delivery gain (ordinary 57/187 → 92/187,
+adversarial 16/63 → 32/63). At 10,000 nodes corrupt replies rose from
+4,179 to 4,590, and only 18 of 168 reachable reads finished. All remaining
+root reads in these experiments ended at a deadline or with an incomplete
+search error.
+
+At 1,000 nodes on the original two seeds, always refilling the return slot
+verified 99 ordinary and 42 adversarial reads using 12.30 MB in total.
+Always preserving the window verified 78 and 31 using 8.55 MB. The selected
+policy verified 94 and 36 using 10.42 MB. Limiting every forwarded search
+to three attempts verified 64 and 24.
+
+CPU is the median of two user-plus-system process times for the original
+two seeds (384 reads per size). Each debug test binary ran directly under
+`/usr/bin/time -p` in baseline, updated, updated, baseline order on macOS
+ARM64 with Rust 1.99.0. Compilation was excluded. CPU includes overlay
+setup, simulated links and all routers. All modeled counters and latency
+percentiles repeated across both timings.
+
+| Nodes | Baseline CPU seconds | Updated CPU seconds |
+| ---: | ---: | ---: |
+| 100 | 1.88 | 1.53 |
+| 1,000 | 6.22 | 5.57 |
+| 10,000 | 28.50 | 27.37 |
+
+Run the full three-size workload from the Rust workspace. The seed override
+takes a comma-separated list. To reproduce the baseline, apply just the
+updated `provider_route/mesh_scale.rs` test file to the parent revision.
+That keeps its original carrier and forwarding policy.
+
+```sh
+cargo test --locked -p hashtree-fips-transport --lib \
+  provider_route::mesh_scale:: -- --nocapture --test-threads=1
+HASHTREE_MESH_SIM_SEEDS=71,113 cargo test --locked \
+  -p hashtree-fips-transport --lib provider_route::mesh_scale::mesh_10000_nodes \
+  -- --exact --nocapture --test-threads=1
+```
+
+## 2026-11-18 - Sparse blob retrieval at 100 and 1,000 nodes
+
+Run the workload from the `rust/` directory.
+
+```sh
+cargo test --locked -p hashtree-fips-transport --lib \
+  provider_route::mesh_scale:: -- --nocapture --test-threads=1
+```
+
+The fixture builds sparse overlays of 100 and 1,000 nodes. For each size it
+runs seeds 17 and 29 under three profiles: steady links, slow/stalled links
+with peer departures halfway through, and adversarial replies. In the last
+profile, a seeded subset of about 20% of nodes either declines every request
+or replies with a corrupt 4 KiB blob. Each case makes 64 reads in batches of
+eight, including bursts for one shared hash, single-copy and three-copy blobs,
+and absent hashes. The topology, placement, and faults are paired across revisions.
+
+Each node uses the production router, forwarding and provider selection,
+using explicit peer rosters and an in-memory carrier. Requests use a 700 ms
+search deadline, five Hashtree hops and four provider attempts per window.
+Graph reachability counts paths through live, honest nodes to an original
+holder within five hops, before considering attempt and time budgets. The
+carrier uses the production TCP/FIPS hash check on received data. Adversarial
+cases verify the contents of every cached blob as well as all delivered blobs.
+
+`Ordinary` combines the steady and churn profiles. Latencies are per-case
+percentiles of verified reads, shown as a range across cases. Bandwidth is
+aggregate blob-wire bytes divided by summed simulated durations, in Mbps.
+It includes corrupt payloads and excludes transport framing and retransmits.
+
+| Nodes | Workload | Verified / reachable | p50 latency, ms | p95 latency, ms | Mean aggregate Mbps |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 100 | Ordinary | 151/223 → 200/223 | 314–490 → 220–377 | 632–656 → 392–590 | 1.19 → 1.77 |
+| 100 | Adversarial | 48/99 → 82/99 | 426–450 → 290–316 | 636–659 → 470–526 | 2.30 → 3.74 |
+| 1,000 | Ordinary | 28/195 → 75/195 | 460–568 → 369–526 | 624–688 → 587–661 | 0.80 → 1.64 |
+| 1,000 | Adversarial | 8/72 → 17/72 | 440–460 → 363–378 | 568–686 → 629–674 | 3.62 → 6.82 |
+
+| Nodes | Workload | Deadlines | Other incomplete | Link attempts | Blob-wire bytes |
+| ---: | --- | ---: | ---: | ---: | ---: |
+| 100 | Ordinary | 105 → 53 | 0 → 3 | 18,421 → 26,927 | 3,214,212 → 4,499,418 |
+| 100 | Adversarial | 80 → 8 | 0 → 38 | 6,362 → 9,537 | 3,166,221 → 4,703,628 |
+| 1,000 | Ordinary | 228 → 164 | 0 → 17 | 41,762 → 77,634 | 2,235,658 → 4,514,991 |
+| 1,000 | Adversarial | 112 → 29 | 8 → 82 | 11,704 → 20,874 | 4,910,428 → 8,760,574 |
+
+An idle search now starts its next candidate as soon as the previous
+attempt finishes without data. While a candidate is pending, a hedge starts
+after 50–100 ms, with pace based on time left, candidates and remaining hops.
+At 1,000 nodes link attempts per verified delivery fell from 1,492 to 1,035,
+alongside the increase in total traffic.
+The ordinary workload still leaves 120 of 195 graph-reachable reads
+unresolved at 1,000 nodes. The updated adversarial runs at that size rejected
+1,839 corrupt replies, and all returned and cached bytes verified.
+
+Advancing idle searches alone with 100 ms hedges delivered 39/195 at 1,000
+nodes. Fixed 50 ms and 25 ms hedges delivered 77/195 and 78/195, at 78,347
+and 79,774 link attempts. Deadline-aware pacing keeps the longer interval
+when the budget permits it. Across the listed cases the remaining root
+results were deadlines or incomplete-search errors, with zero explicit
+misses observed.
+
+Process CPU time includes the entire simulator workload at each size, with
+all three profiles. On macOS ARM64 the median user plus system CPU time was
+1.49 → 1.91 seconds at 100 nodes and 4.71 → 6.10 seconds at 1,000 nodes.
+Two samples per build ran serially in baseline, candidate, candidate, baseline
+order. All modeled counters and latency percentiles repeated exactly.
+Build the library tests with `cargo test --locked -p hashtree-fips-transport
+--lib --no-run` at the harness-only revision and the scheduler revision.
+Run each printed debug binary directly to exclude Cargo and compilation.
+
+```sh
+/usr/bin/time -p "$test_binary" provider_route::mesh_scale::mesh_1000_nodes \
+  --exact --nocapture --test-threads=1
+```
+
+## 2026-11-18 - Mesh route exploration with stalled links
+
+The `mesh_topology` probe uses the production `BlobRouter` and blob codec.
+It trains one known provider, then makes 12 uncached 4 KiB reads through two
+stalled links and two healthy links. Both runs use two in-flight slots and a
+5 ms hedge delay. Exploration runs on every read to stress the policy.
+
+| Metric | Previous router | Updated router |
+| --- | ---: | ---: |
+| Verified deliveries | 8/12 | 12/12 |
+| Request deadlines expired | 4 | 0 |
+| Link attempts | 16 | 20 |
+| Link attempts per delivery | 2.00 | 1.67 |
+| Blob-wire bytes | 33,400 | 49,956 |
+
+Exploration now promotes one candidate per cost tier and keeps the usual
+ranking for backups. Free routes still run before paid routes.
+Recording actual starts lets the probe advance past a stalled request that was
+cancelled when a hedge won. All four links were sampled. Each run sent eight
+requests to stalled links. The extra bytes are the four additional verified
+replies and their requests. These counts exclude carrier overhead.
+
 ## 2026-11-11 - Browser Cold Loads: Chunk Reads, Shared Blob Reads, Root Event Bursts
 
 Question: a cold repository load in a browser app spent most of its time in

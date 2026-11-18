@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-fips-transport"
-version = "0.5.0"
+version = "0.5.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -30,6 +30,7 @@ tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 tracing.workspace = true
 
 [dev-dependencies]
+hashtree-network.workspace = true
 hex.workspace = true
 tokio = { version = "1", features = ["sync", "time", "rt", "macros", "test-util"] }
 
