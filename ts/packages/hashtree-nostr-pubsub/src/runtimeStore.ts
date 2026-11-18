@@ -53,35 +53,58 @@ export class HashtreeRuntimeEventStore implements RuntimeEventStore {
   async listPending(): Promise<RuntimeOutboxEntry[]> {
     return this.read(async (state) => {
       const entries: RuntimeOutboxEntry[] = [];
-      for (const entry of state.pending) {
-        const event = await this.events.getById(state.outboxRoot, entry.id);
+      for (const { id, ...scope } of state.pending) {
+        const event = await this.events.getById(state.outboxRoot, id);
         // Replaceable events supersede older pending versions in the same index.
-        if (event) entries.push({ event, attempts: entry.attempts, updatedAt: entry.updatedAt, relays: entry.relays, sources: entry.sources });
+        if (event) entries.push({ event, ...scope });
       }
       return entries;
     });
   }
 
   putPending(entry: RuntimeOutboxEntry): Promise<void> {
-    return this.update(async (state) => {
-      if (state.pending.length >= 1_000 && !state.pending.some(({ id }) => id === entry.event.id)) {
-        throw new Error('Outbox capacity exhausted');
+    return this.update(state => this.writePending(state, entry));
+  }
+
+  updatePending(id: string, update: (row: RuntimeOutboxEntry | undefined) => RuntimeOutboxEntry | undefined): Promise<void> {
+    return this.update(async state => {
+      const metadata = state.pending.find(entry => entry.id === id);
+      let previous: RuntimeOutboxEntry | undefined;
+      if (metadata) {
+        const { id: eventId, ...scope } = metadata;
+        const event = await this.events.getById(state.outboxRoot, eventId);
+        if (event) previous = { event, ...scope };
       }
-      state.outboxRoot = await this.events.add(state.outboxRoot, entry.event);
-      state.pending = state.pending.filter(({ id }) => id !== entry.event.id);
-      state.pending.push({ id: entry.event.id, attempts: entry.attempts, updatedAt: entry.updatedAt, relays: entry.relays, sources: entry.sources });
-      const present = await Promise.all(state.pending.map(async (item) => ({
-        item, exists: !!await this.events.getById(state.outboxRoot, item.id),
-      })));
-      state.pending = present.filter(({ exists }) => exists).map(({ item }) => item);
+      const next = update(previous);
+      if (next) {
+        if (next.event.id !== id) throw new Error('Pending update changed the event ID');
+        await this.writePending(state, next);
+      } else if (metadata) {
+        await this.removePending(state, id);
+      }
     });
   }
 
   deletePending(id: string): Promise<void> {
-    return this.update(async (state) => {
-      state.outboxRoot = await this.events.delete(state.outboxRoot, id);
-      state.pending = state.pending.filter((entry) => entry.id !== id);
-    });
+    return this.update(state => this.removePending(state, id));
+  }
+
+  private async removePending(state: HashtreeRuntimeState, id: string): Promise<void> {
+    state.outboxRoot = await this.events.delete(state.outboxRoot, id);
+    state.pending = state.pending.filter(entry => entry.id !== id);
+  }
+
+  private async writePending(state: HashtreeRuntimeState, { event, ...scope }: RuntimeOutboxEntry): Promise<void> {
+    if (state.pending.length >= 1_000 && !state.pending.some(({ id }) => id === event.id)) {
+      throw new Error('Outbox capacity exhausted');
+    }
+    state.outboxRoot = await this.events.add(state.outboxRoot, event);
+    state.pending = state.pending.filter(({ id }) => id !== event.id);
+    state.pending.push({ id: event.id, ...scope });
+    const present = await Promise.all(state.pending.map(async (item) => ({
+      item, exists: !!await this.events.getById(state.outboxRoot, item.id),
+    })));
+    state.pending = present.filter(({ exists }) => exists).map(({ item }) => item);
   }
 
   async close(): Promise<void> { await this.pendingWrite; await this.state.close?.(); }
