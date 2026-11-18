@@ -240,6 +240,26 @@ class WindowsEnvironmentProfileTests(unittest.TestCase):
                 self.assertIn(profile["windows_sdk_version"], command)
                 self.assertEqual(export.call_args.args[0]["VCTOOLSVERSION"], profile["msvc_tools_version"])
 
+    def test_every_reviewed_release_profile_selects_its_exact_compiler_and_sdk(self):
+        manifest = Path(__file__).resolve().parents[1] / "release-inputs.json"
+        sdk = json.loads(manifest.read_text())["native"]["x86_64-pc-windows-msvc"]["sdk"]
+        profiles = sdk["profiles"]
+        self.assertIn({
+            "image_version": "20261112.366.7",
+            "visual_studio_version": "17.14.37906.3",
+            "msvc_tools_version": "14.44.35207",
+            "windows_sdk_version": "10.0.26100.0",
+        }, profiles)
+        self.assertEqual(len(profiles), len({profile["image_version"] for profile in profiles}))
+        for profile in profiles:
+            with self.subTest(image=profile["image_version"]):
+                execute, export = self.configure(profile, sdk=sdk)
+                self.assertIn("-vcvars_ver=" + profile["msvc_tools_version"], execute.call_args.args[0])
+                self.assertEqual(export.call_args.args[0]["VCTOOLSVERSION"], profile["msvc_tools_version"])
+                self.assertEqual(export.call_args.args[0]["WINDOWSSDKVERSION"], profile["windows_sdk_version"] + "\\")
+                with self.assertRaisesRegex(ValueError, "selected a different"):
+                    self.configure(profile, sdk=sdk, msvc="0.0.0")
+
     def test_batch_path_quotes_reach_cmd_without_list_escaping(self):
         installation = r"C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
         execute, _ = self.configure(self.new_profile, installation_path=installation)
