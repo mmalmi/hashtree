@@ -2137,10 +2137,14 @@ fn run_command(
 
                     println!("Storage Statistics:");
                     println!(
-                        "  Max size:     {} GB ({} bytes)",
-                        config.storage.max_size_gb, max_size_bytes
+                        "  Max size:     {} GiB ({} bytes)",
+                        config.storage.max_size_gb, stats.quota_limit_bytes
                     );
                     println!("  Total size:   {}", format_bytes(stats.total_bytes));
+                    println!(
+                        "  Writable quota used: {}",
+                        format_bytes(stats.quota_used_bytes)
+                    );
                     println!(
                         "  Tracked:      {} ({:.2} GB)",
                         tracked,
@@ -2151,13 +2155,14 @@ fn run_command(
                     println!("  Indexed trees: {}", trees.len());
                     print_storage_inventory(&store, &data_dir)?;
 
-                    let utilization = if max_size_bytes > 0 {
-                        (tracked as f64 / max_size_bytes as f64) * 100.0
-                    } else {
-                        0.0
-                    };
                     println!();
-                    println!("Utilization: {:.1}%", utilization);
+                    if stats.quota_limit_bytes > 0 {
+                        let utilization =
+                            stats.quota_used_bytes as f64 / stats.quota_limit_bytes as f64 * 100.0;
+                        println!("Utilization: {:.1}%", utilization);
+                    } else {
+                        println!("Utilization: N/A (zero-byte limit)");
+                    }
                 }
                 StorageCommands::Trees => {
                     use hashtree_core::to_hex;
