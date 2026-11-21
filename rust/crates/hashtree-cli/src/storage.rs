@@ -2056,6 +2056,21 @@ impl StorageRouter {
         self.local.writable_stats()
     }
 
+    /// Report the usual inventory alongside the bytes charged by retention.
+    fn stats_with_quota_usage(&self) -> Result<(LocalStoreStats, u64), StoreError> {
+        let inventory = self.stats()?;
+        let quota_used_bytes = match self.local.as_ref() {
+            // These backends already counted the writable store. In particular,
+            // avoid a second filesystem walk just to report the same size.
+            LocalStore::Fs(_) => inventory.total_bytes,
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(_) => inventory.total_bytes,
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(_) | LocalStore::ReadOnlyPool(_) => self.writable_stats()?.total_bytes,
+        };
+        Ok((inventory, quota_used_bytes))
+    }
+
     /// List all hashes from local store
     pub fn list(&self) -> Result<Vec<Hash>, StoreError> {
         self.local.list()
