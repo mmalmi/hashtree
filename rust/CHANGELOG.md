@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.5.2 - 2026-11-21
+
+- `htree storage stats` now calculates quota utilization from writable bytes, including unindexed data. It reports `N/A` when the limit is zero.
+- `GET /api/stats` now includes `quota_used_bytes` and `quota_limit_bytes` alongside the existing inventory totals.
+- Verify the Windows release build against the updated Windows Server 2022 runner image.
+
 ## 0.5.1 - 2026-11-18
 
 - Serve verified upstream downloads when the local blob cache is full, and respect configured cache-write admission.

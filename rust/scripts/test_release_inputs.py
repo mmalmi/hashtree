@@ -244,12 +244,13 @@ class WindowsEnvironmentProfileTests(unittest.TestCase):
         manifest = Path(__file__).resolve().parents[1] / "release-inputs.json"
         sdk = json.loads(manifest.read_text())["native"]["x86_64-pc-windows-msvc"]["sdk"]
         profiles = sdk["profiles"]
-        self.assertIn({
-            "image_version": "20261112.366.7",
-            "visual_studio_version": "17.14.37906.3",
-            "msvc_tools_version": "14.44.35207",
-            "windows_sdk_version": "10.0.26100.0",
-        }, profiles)
+        for image in ("20261112.366.7", "20261116.370.1"):
+            self.assertIn({
+                "image_version": image,
+                "visual_studio_version": "17.14.37906.3",
+                "msvc_tools_version": "14.44.35207",
+                "windows_sdk_version": "10.0.26100.0",
+            }, profiles)
         self.assertEqual(len(profiles), len({profile["image_version"] for profile in profiles}))
         for profile in profiles:
             with self.subTest(image=profile["image_version"]):
