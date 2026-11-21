@@ -373,6 +373,9 @@ pub struct StorageStats {
     pub total_dags: usize,
     pub pinned_dags: usize,
     pub total_bytes: u64,
+    /// Writable blob bytes counted by eviction, including unindexed content.
+    pub quota_used_bytes: u64,
+    pub quota_limit_bytes: u64,
 }
 
 /// Storage usage broken down by priority tier
@@ -1920,15 +1923,17 @@ impl HashtreeStore {
         let rtxn = self.env.read_txn()?;
         let total_pins = self.pins.len(&rtxn)? as usize;
 
-        let stats = self
+        let (stats, quota_used_bytes) = self
             .router
-            .stats()
+            .stats_with_quota_usage()
             .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
 
         Ok(StorageStats {
             total_dags: stats.count,
             pinned_dags: total_pins,
             total_bytes: stats.total_bytes,
+            quota_used_bytes,
+            quota_limit_bytes: self.max_size_bytes,
         })
     }
 }

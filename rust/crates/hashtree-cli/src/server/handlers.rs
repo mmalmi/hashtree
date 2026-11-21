@@ -2150,6 +2150,8 @@ pub async fn storage_stats(State(state): State<AppState>) -> impl IntoResponse {
             "total_dags": stats.total_dags,
             "pinned_dags": stats.pinned_dags,
             "total_bytes": stats.total_bytes,
+            "quota_used_bytes": stats.quota_used_bytes,
+            "quota_limit_bytes": stats.quota_limit_bytes,
         })),
         Err(e) => Json(json!({
             "error": e.to_string()

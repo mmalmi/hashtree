@@ -319,6 +319,35 @@ async fn wait_for_cached_tree_root_hash(state: &AppState, cache_key: &str, expec
     }
 }
 
+#[cfg(feature = "lmdb")]
+#[tokio::test]
+async fn storage_stats_reports_quota_and_preserves_inventory_fields() -> anyhow::Result<()> {
+    let temp = TempDir::new()?;
+    let open_store =
+        || HashtreeStore::new_with_backend(temp.path(), hashtree_config::StorageBackend::Lmdb, 100);
+    open_store()?.put_blob(b"unindexed")?;
+    let member = hashtree_lmdb::LmdbBlobStore::with_map_size_and_external_blob_options(
+        temp.path().join("blobs"),
+        16 * 1024 * 1024,
+        None,
+    )?;
+    member.put_sync(hashtree_core::sha256(b"direct"), b"direct")?;
+    drop(member);
+    let store = open_store()?;
+    let response = storage_stats(AxumState(test_app_state(Arc::new(store), vec![])))
+        .await
+        .into_response();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 4096).await?;
+    let stats: serde_json::Value = serde_json::from_slice(&body)?;
+    assert_eq!(stats["total_dags"], 1);
+    assert_eq!(stats["pinned_dags"], 0);
+    assert_eq!(stats["total_bytes"], 9);
+    assert_eq!(stats["quota_used_bytes"], 15);
+    assert_eq!(stats["quota_limit_bytes"], 100);
+    Ok(())
+}
+
 #[tokio::test]
 async fn native_store_endpoint_round_trips_raw_blob() {
     let temp = TempDir::new().unwrap();
