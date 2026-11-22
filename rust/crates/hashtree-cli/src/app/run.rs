@@ -702,7 +702,8 @@ fn run_command(
                     blossom_replica_queue_bytes,
                     keys.clone(),
                 )
-                .with_nostr_relay_urls(active_nostr_relays);
+                .with_nostr_relay_urls(active_nostr_relays)
+                .with_public_root_read_relays(&config.nostr.public_root_read_relays);
 
             // Add social graph to server when its durable stores are writable.
             if let Some(social_graph) = social_graph {

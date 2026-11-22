@@ -56,6 +56,7 @@ struct BrowserSettings {
     social_graph_db_max_size_gb: Option<u64>,
     spambox_db_max_size_gb: Option<u64>,
     nostr_relays: Option<Vec<String>>,
+    public_root_read_relays: std::collections::BTreeMap<String, String>,
     blossom_read_servers: Option<Vec<String>>,
     blossom_write_servers: Option<Vec<String>>,
     enable_fips: Option<bool>,
@@ -205,6 +206,8 @@ fn browser_config(data_dir: &Path, config_dir: &Path) -> Config {
         config.nostr.enabled = !config.nostr.relays.is_empty();
     }
 
+    config.nostr.public_root_read_relays = settings.public_root_read_relays;
+
     if let Some(blossom_read_servers) = settings.blossom_read_servers {
         config.blossom.read_servers = normalize_server_list(blossom_read_servers);
         config.blossom.servers.clear();
@@ -272,6 +275,7 @@ fn default_browser_settings() -> BrowserSettings {
         social_graph_db_max_size_gb: Some(BROWSER_SOCIAL_GRAPH_DB_MAX_SIZE_GB),
         spambox_db_max_size_gb: Some(BROWSER_SPAMBOX_DB_MAX_SIZE_GB),
         nostr_relays: None,
+        public_root_read_relays: Default::default(),
         blossom_read_servers: None,
         blossom_write_servers: None,
         enable_fips: None,
