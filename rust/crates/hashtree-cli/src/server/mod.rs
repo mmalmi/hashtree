@@ -1910,20 +1910,22 @@ mod tests {
         assert_eq!(publish.status(), reqwest::StatusCode::ACCEPTED);
 
         let npub = keys.public_key().to_bech32()?;
-        let resolved = client
-            .get(format!(
-                "http://127.0.0.1:{port}/api/nostr/resolve/{npub}/{tree_name}?refresh=1"
-            ))
-            .send()
-            .await?
-            .json::<serde_json::Value>()
-            .await?;
+        for _ in 0..2 {
+            let resolved = client
+                .get(format!(
+                    "http://127.0.0.1:{port}/api/nostr/resolve/{npub}/{tree_name}?refresh=1"
+                ))
+                .send()
+                .await?
+                .json::<serde_json::Value>()
+                .await?;
 
-        assert_eq!(resolved["hash"], root_hash);
-        assert_eq!(resolved["key_tag"], encryption_key);
-        assert_eq!(resolved["source"], "local-relay");
+            assert_eq!(resolved["hash"], root_hash);
+            assert_eq!(resolved["key_tag"], encryption_key);
+            assert_eq!(resolved["source"], "local-relay");
+        }
         assert_eq!(provider.publishes.load(Ordering::Relaxed), 1);
-        assert_eq!(provider.queries.load(Ordering::Relaxed), 1);
+        assert_eq!(provider.queries.load(Ordering::Relaxed), 2);
         handle.abort();
         Ok(())
     }
