@@ -2640,6 +2640,7 @@ mod tests {
             nostr_provider: None,
             nostr_event_transport: None,
             nostr_relay_urls: Vec::new(),
+            public_root_read_relays: Default::default(),
             tree_root_cache: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             inflight_blob_fetches: Default::default(),
             inflight_blob_reads: Default::default(),

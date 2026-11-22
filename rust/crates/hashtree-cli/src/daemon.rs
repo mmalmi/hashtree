@@ -708,6 +708,7 @@ pub async fn start_embedded(opts: EmbeddedDaemonOptions) -> Result<EmbeddedDaemo
             keys.clone(),
         )
         .with_nostr_relay_urls(active_nostr_relays)
+        .with_public_root_read_relays(&config.nostr.public_root_read_relays)
         .with_cached_tree_roots(opts.initial_tree_roots);
     if let Some(social_graph) = social_graph {
         server = server.with_social_graph(social_graph);

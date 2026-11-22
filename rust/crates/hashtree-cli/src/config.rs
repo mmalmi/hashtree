@@ -299,6 +299,9 @@ pub struct NostrConfig {
     /// Provider used for Hashtree root/site event lookup and publication.
     #[serde(default)]
     pub event_transport: NostrEventTransport,
+    /// Additional read-only relay for an exact public npub/tree. Never used for publication.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub public_root_read_relays: std::collections::BTreeMap<String, String>,
     /// List of npubs allowed to write (blossom uploads). If empty, uses public_writes setting.
     #[serde(default)]
     pub allowed_npubs: Vec<String>,
@@ -789,6 +792,7 @@ impl Default for NostrConfig {
             enabled: default_nostr_enabled(),
             relays: default_relays(),
             event_transport: NostrEventTransport::default(),
+            public_root_read_relays: Default::default(),
             allowed_npubs: Vec::new(),
             socialgraph_root: None,
             bootstrap_follows: default_nostr_bootstrap_follows(),

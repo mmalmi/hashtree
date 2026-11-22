@@ -12,6 +12,7 @@ mod peer_status;
 mod pin_tree_tests;
 mod pooled_store;
 mod request_paths;
+mod root_read_relays;
 mod status_metrics;
 mod ui;
 pub mod ws_relay;
@@ -237,6 +238,7 @@ impl HashtreeServer {
                 nostr_provider: None,
                 nostr_event_transport: None,
                 nostr_relay_urls: Vec::new(),
+                public_root_read_relays: Default::default(),
                 tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 inflight_blob_fetches: Default::default(),
                 inflight_blob_reads: Default::default(),
@@ -395,6 +397,15 @@ impl HashtreeServer {
     /// Set active upstream Nostr relays for HTTP resolver operations.
     pub fn with_nostr_relay_urls(mut self, relays: Vec<String>) -> Self {
         self.state.nostr_relay_urls = relays;
+        self
+    }
+
+    /// Add explicitly scoped sources for signed public tree reads.
+    pub fn with_public_root_read_relays(
+        mut self,
+        roots: &std::collections::BTreeMap<String, String>,
+    ) -> Self {
+        self.state.public_root_read_relays = root_read_relays::RootReadRelays::new(roots);
         self
     }
 

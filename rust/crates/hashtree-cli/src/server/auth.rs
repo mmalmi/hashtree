@@ -311,6 +311,7 @@ pub struct AppState {
     pub nostr_event_transport: Option<crate::config::NostrEventTransport>,
     /// Active upstream Nostr relays for HTTP resolver operations.
     pub nostr_relay_urls: Vec<String>,
+    pub(super) public_root_read_relays: super::root_read_relays::RootReadRelays,
     /// In-process cache for resolved mutable tree roots, keyed by npub/tree(+key)
     pub tree_root_cache: Arc<StdMutex<HashMap<String, CachedTreeRootEntry>>>,
     /// Shared in-flight blob fetches so concurrent misses only hit upstream once per hash

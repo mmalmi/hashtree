@@ -290,6 +290,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         nostr_provider: None,
         nostr_event_transport: None,
         nostr_relay_urls: Vec::new(),
+        public_root_read_relays: Default::default(),
         tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         inflight_blob_fetches: Default::default(),
         inflight_blob_reads: Default::default(),
@@ -3039,6 +3040,93 @@ fn resolver_config_prefers_state_relay_urls() {
 
     assert_eq!(config.relays, state.nostr_relay_urls);
     assert_eq!(config.resolve_timeout, HTTP_RESOLVER_TIMEOUT);
+}
+
+#[tokio::test]
+async fn public_root_read_relay_only_queries_configured_names_and_preserves_newer_heads() {
+    let dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(dir.path().join("db")).unwrap());
+    let keys = Keys::generate();
+    let npub = keys.public_key().to_bech32().unwrap();
+    let signed = |name: &str, hash: &str, ts: u64| {
+        hashtree_resolver::nostr::NostrRootResolver::root_event_builder(
+            name,
+            &Cid::parse(hash).unwrap(),
+            None,
+        )
+        .custom_created_at(Timestamp::from_secs(ts))
+        .sign_with_keys(&keys)
+        .unwrap()
+    };
+    let old = signed("guide", &"aa".repeat(32), 10);
+    let newer = signed("guide", &"bb".repeat(32), 20);
+    let unrelated = signed("private", &"cc".repeat(32), 30);
+    let endpoint = spawn_mock_upstream_relay(vec![old.clone(), unrelated], false).await;
+    let mut state = test_app_state(store, Vec::new());
+    state.public_root_read_relays = crate::server::root_read_relays::RootReadRelays::new(
+        &[(format!("{npub}/guide"), endpoint)].into_iter().collect(),
+    );
+    let author = keys.public_key().to_hex();
+    let guide = crate::root_events::build_root_filter(&author, "guide").unwrap();
+    let private = crate::root_events::build_root_filter(&author, "private").unwrap();
+    state.nostr_event_transport = Some(crate::config::NostrEventTransport::Relay);
+    assert!(state
+        .public_root_read_relays
+        .query(&state, "guide", &guide)
+        .await
+        .is_none());
+    state.nostr_relay_urls.push("ws://127.0.0.1:1".into());
+    state.nostr_event_transport = Some(crate::config::NostrEventTransport::FipsLocalOnly);
+    assert!(state
+        .public_root_read_relays
+        .query(&state, "guide", &guide)
+        .await
+        .is_none());
+    state.nostr_event_transport = Some(crate::config::NostrEventTransport::Relay);
+    assert!(state
+        .public_root_read_relays
+        .query(&state, "private", &private)
+        .await
+        .is_none());
+    let other = Keys::generate().public_key().to_hex();
+    let other_filter = crate::root_events::build_root_filter(&other, "guide").unwrap();
+    assert!(state
+        .public_root_read_relays
+        .query(&state, "guide", &other_filter)
+        .await
+        .is_none());
+
+    let first = resolve_root_from_nostr_relays(&state, &npub, "guide")
+        .await
+        .unwrap();
+    assert_eq!(first.root_event.event_id, old.id.to_hex());
+    assert_eq!(first.source, "root-read-relay");
+    // A simultaneous refresh may already have cached a newer signed root.
+    let newer_root =
+        crate::root_events::root_event_from_peer(&newer, "root-read-relay", "guide").unwrap();
+    let key = tree_root_cache_key(&npub, "guide", None);
+    put_cached_tree_root(
+        &state,
+        key,
+        peer_root_to_cid(&newer_root).unwrap(),
+        "root-read-relay",
+        Some(newer_root),
+    );
+    let refreshed = resolve_root_without_cache(&state, &npub, "guide", None)
+        .await
+        .unwrap();
+    assert_eq!(refreshed.root_event.unwrap().event_id, newer.id.to_hex());
+
+    let relay = test_nostr_relay(&dir, author.clone()).await;
+    relay
+        .ingest_trusted_event_silent(newer.clone())
+        .await
+        .unwrap();
+    state.nostr_relay = Some(relay);
+    let latest = resolve_root_from_nostr_relays(&state, &author, "guide")
+        .await
+        .unwrap();
+    assert_eq!(latest.root_event.event_id, newer.id.to_hex());
 }
 
 #[tokio::test]

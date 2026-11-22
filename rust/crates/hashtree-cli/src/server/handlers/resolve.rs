@@ -45,12 +45,18 @@ pub(super) async fn resolve_root_from_nostr_relays(
     treename: &str,
 ) -> Option<NostrResolvedRootEvent> {
     let filter = build_root_filter(pubkey, treename)?;
-    let query = query_events_for_local_request(state, &filter, 50).await;
+    let (query, scoped) = tokio::join!(
+        query_events_for_local_request(state, &filter, 50),
+        state
+            .public_root_read_relays
+            .query(state, treename, &filter),
+    );
     let events = query.merged_events(50);
-    let latest = pick_latest_event(events.iter())?;
+    let latest = pick_latest_event(events.iter().chain(scoped.iter()))?;
     let source = match query.upstream_source(&latest.id) {
         Some(EventSourceKind::FipsEndpoint | EventSourceKind::Peer) => "fips-pubsub",
         Some(EventSourceKind::Relay) => "nostr-relay",
+        None if scoped.as_ref().is_some_and(|event| event.id == latest.id) => "root-read-relay",
         Some(EventSourceKind::LocalIndex) | None => "local-relay",
     };
     Some(NostrResolvedRootEvent {
@@ -124,18 +130,10 @@ pub(super) async fn resolve_root_without_cache(
             if cid.key.is_none() {
                 cid.key = link_key;
             }
-            put_cached_tree_root(
-                state,
-                cache_key.clone(),
-                cid.clone(),
-                root.source,
-                Some(root.root_event.clone()),
-            );
-            return Some(ResolvedRoot {
-                cid,
-                source: root.source,
-                root_event: Some(root.root_event),
-            });
+            let entry =
+                put_cached_tree_root(state, cache_key, cid, root.source, Some(root.root_event));
+            let source = entry.source;
+            return Some(resolved_cached_tree_root(entry, link_key, source));
         }
     }
 
@@ -265,19 +263,31 @@ pub(super) fn put_cached_tree_root(
     cid: Cid,
     source: &'static str,
     root_event: Option<PeerRootEvent>,
-) {
+) -> CachedTreeRootEntry {
+    let candidate = CachedTreeRootEntry {
+        cid,
+        source,
+        root_event,
+        event: None,
+        cached_at: Instant::now(),
+    };
     if let Ok(mut cache) = state.tree_root_cache.lock() {
-        cache.insert(
-            cache_key,
-            CachedTreeRootEntry {
-                cid,
-                source,
-                root_event,
-                event: None,
-                cached_at: Instant::now(),
-            },
-        );
+        if let Some(current) = cache.get_mut(&cache_key) {
+            if let (Some(incoming), Some(known)) = (&candidate.root_event, &current.root_event) {
+                if !is_newer_root(incoming, known) {
+                    current.cached_at = candidate.cached_at;
+                    return current.clone();
+                }
+            }
+        }
+        cache.insert(cache_key, candidate.clone());
     }
+    candidate
+}
+
+fn is_newer_root(incoming: &PeerRootEvent, known: &PeerRootEvent) -> bool {
+    incoming.created_at > known.created_at
+        || (incoming.created_at == known.created_at && incoming.event_id < known.event_id)
 }
 
 pub(super) fn cache_published_tree_root(
@@ -312,10 +322,7 @@ pub(super) fn cache_published_tree_root(
     let is_newer = cache
         .get(&cache_key)
         .and_then(|cached| cached.root_event.as_ref())
-        .map(|cached| {
-            (root_event.created_at, root_event.event_id.as_str())
-                > (cached.created_at, cached.event_id.as_str())
-        })
+        .map(|cached| is_newer_root(&root_event, cached))
         .unwrap_or(true);
     if is_newer {
         cache.insert(
