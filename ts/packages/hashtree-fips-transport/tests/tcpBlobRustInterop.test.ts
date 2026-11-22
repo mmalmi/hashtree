@@ -1,8 +1,9 @@
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createSocket, type Socket as DatagramSocket } from 'node:dgram';
 import { once } from 'node:events';
 import { createInterface } from 'node:readline';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import {
   encodeNpub,
   FipsNode,
@@ -12,7 +13,7 @@ import {
   type TransportContext,
 } from '@fips/core';
 import { fromHex, MemoryStore, sha256, toHex, type Hash } from '@hashtree/core';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { TcpBlobTransport } from '../src/tcpBlobTransport.js';
 
 interface ReadyMessage {
@@ -113,30 +114,11 @@ class RustInteropFixture {
     readonly ready: ReadyMessage,
   ) {}
 
-  static async start(peerNpub: string, peerAddress: string): Promise<RustInteropFixture> {
-    const proc = spawn(
-      'cargo',
-      [
-        ...candidateCargoPatchArgs(),
-        'run',
-        '--locked',
-        '-q',
-        '-p',
-        'hashtree-fips-transport',
-        '--no-default-features',
-        '--features',
-        'interop-fixture',
-        '--bin',
-        'hashtree-fips-stdio-fixture',
-        '--',
-        peerNpub,
-        peerAddress,
-      ],
-      {
-        cwd: cargoRoot(),
-        detached: process.platform !== 'win32',
-      },
-    );
+  static async start(executable: string, peerNpub: string, peerAddress: string): Promise<RustInteropFixture> {
+    const proc = spawn(executable, [peerNpub, peerAddress], {
+      cwd: cargoRoot(),
+      detached: process.platform !== 'win32',
+    });
 
     let stderr = '';
     proc.stderr.on('data', (chunk) => {
@@ -224,6 +206,21 @@ class RustInteropFixture {
 }
 
 describe('Rust/TypeScript TCP blob v1 interop', () => {
+  let executable: string;
+  beforeAll(async () => {
+    // A cold Cargo build has its own deadline. Start timing the peer only after linking.
+    const { stdout } = await promisify(execFile)('cargo', [
+      ...candidateCargoPatchArgs(), 'build', '--locked', '--message-format=json-render-diagnostics',
+      '-p', 'hashtree-fips-transport', '--no-default-features', '--features', 'interop-fixture',
+      '--bin', 'hashtree-fips-stdio-fixture',
+    ], { cwd: cargoRoot(), timeout: 15 * 60_000, maxBuffer: 32 * 1024 * 1024 });
+    const artifacts = stdout.trim().split('\n').map(line => JSON.parse(line));
+    const fixture = artifacts.find(message => message.reason === 'compiler-artifact'
+      && message.target.name === 'hashtree-fips-stdio-fixture' && message.executable);
+    if (!fixture) throw new Error('Cargo did not report the compiled TCP blob fixture');
+    executable = fixture.executable;
+  }, 16 * 60_000);
+
   it('exchanges hits and explicit misses through real TCP/FIPS transports', async () => {
     const identity = await identityFromSecretKey(secret(7));
     const udp = new LoopbackUdpTransport();
@@ -246,6 +243,7 @@ describe('Rust/TypeScript TCP blob v1 interop', () => {
 
     try {
       fixture = await RustInteropFixture.start(
+        executable,
         encodeNpub(identity.xOnlyPubkey),
         udp.localAddress(),
       );

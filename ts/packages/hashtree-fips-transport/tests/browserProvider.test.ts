@@ -3,6 +3,7 @@ import type { FipsIdentity } from '@fips/core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const fake = vi.hoisted(() => ({
+  emitPeer: undefined as ((event: unknown) => void) | undefined,
   webRtcOptions: undefined as Record<string, unknown> | undefined,
   providerOptions: undefined as Record<string, unknown> | undefined,
   webSocketOptions: [] as Record<string, unknown>[],
@@ -10,7 +11,10 @@ const fake = vi.hoisted(() => ({
 
 vi.mock('@fips/core', () => ({
   FipsNode: class {
-    on(): () => void { return () => {}; }
+    on(_event: string, listener: (event: unknown) => void): () => void {
+      fake.emitPeer = listener;
+      return () => { fake.emitPeer = undefined; };
+    }
     async start(): Promise<void> {}
     async stop(): Promise<void> {}
   },
@@ -75,6 +79,28 @@ describe('browser Hashtree FIPS provider', () => {
     expect(fake.webSocketOptions[0]?.seedUrls).toEqual(DEFAULT_FIPS_WEBSOCKET_SEED_URLS);
     expect(provider.webSocketTransport).toBeDefined();
     await provider.stop();
+  });
+
+  it('retains an authenticated peer while either carrier is connected', async () => {
+    vi.stubGlobal('WebSocket', class {});
+    vi.stubGlobal('RTCPeerConnection', class {});
+    const provider = await createBrowserHashtreeFipsProvider({
+      relays: ['wss://relay.example'], localStore: new MemoryStore(), identity: identity(),
+    });
+    const peerId = '11'.repeat(32);
+    const rtc = { peerId, remotePubkey: `02${peerId}`, remoteAddr: { transport: 'webrtc', addr: 'rtc' } };
+    const ws = { remotePubkey: `03${peerId}`, remoteAddr: { transport: 'websocket', addr: 'ws' } };
+    try {
+      fake.emitPeer!({ ...rtc, state: 'connected' });
+      fake.emitPeer!({ ...ws, state: 'connected' });
+      expect(provider.listConnectedPeerIds()).toEqual([rtc.remotePubkey]);
+      fake.emitPeer!({ ...rtc, state: 'disconnected' });
+      expect(provider.listConnectedPeerIds()).toEqual([ws.remotePubkey]);
+      fake.emitPeer!({ ...ws, state: 'disconnected' });
+      expect(provider.listConnectedPeerIds()).toEqual([]);
+    } finally {
+      await provider.stop();
+    }
   });
 
   it('keeps WebRTC and the chosen relay when explicit seeds and STUN are empty', async () => {

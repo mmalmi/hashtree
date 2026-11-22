@@ -66,7 +66,15 @@ async function createBrowserProvider(options, { relays, webSocketTransport }) {
         routingMode: 'reply_learned',
         logger: options.logger,
     });
-    const adjacentPeers = new Set();
+    const paths = new Map();
+    function listConnectedPeerIds() {
+        const peers = new Map();
+        for (const { peerId, address } of paths.values()) {
+            if (!peers.has(peerId))
+                peers.set(peerId, address);
+        }
+        return [...peers.values()];
+    }
     const provider = createFipsWorkerP2PProvider({
         node,
         localStore: options.localStore,
@@ -75,16 +83,16 @@ async function createBrowserProvider(options, { relays, webSocketTransport }) {
         requestTimeoutMs: options.requestTimeoutMs,
         providerRoutes: options.providerRoutes,
         allowIncomingPeer: options.allowIncomingPeer,
-        candidatePeerIds: () => [...adjacentPeers],
+        candidatePeerIds: listConnectedPeerIds,
     });
     const removePeerListener = node.on('peer', (data) => {
-        const peer = data;
-        if (!peer.remotePubkey)
-            return;
-        if (peer.state === 'connected')
-            adjacentPeers.add(peer.remotePubkey);
-        else if (peer.state === 'disconnected')
-            adjacentPeers.delete(peer.remotePubkey);
+        const event = data;
+        const peerId = event.peerId ?? event.remotePubkey.slice(2).toLowerCase();
+        const path = `${event.remoteAddr.transport}:${event.remoteAddr.addr}`;
+        if (event.state === 'connected')
+            paths.set(path, { peerId, address: event.remotePubkey });
+        else if (paths.get(path)?.peerId === peerId)
+            paths.delete(path);
         void provider.discoverProviders();
     });
     let stopped = false;
@@ -93,7 +101,7 @@ async function createBrowserProvider(options, { relays, webSocketTransport }) {
             return;
         stopped = true;
         removePeerListener();
-        adjacentPeers.clear();
+        paths.clear();
         provider.close();
         await node.stop();
     };
@@ -109,7 +117,7 @@ async function createBrowserProvider(options, { relays, webSocketTransport }) {
         listPeerIds: () => provider.listPeerIds(),
         node,
         localPeerId: toHex(identity.publicKey),
-        listConnectedPeerIds: () => [...adjacentPeers],
+        listConnectedPeerIds,
         webRtcTransport,
         webSocketTransport,
         stop,
