@@ -264,7 +264,7 @@ pub(super) fn put_cached_tree_root(
     source: &'static str,
     root_event: Option<PeerRootEvent>,
 ) -> CachedTreeRootEntry {
-    let candidate = CachedTreeRootEntry {
+    let mut candidate = CachedTreeRootEntry {
         cid,
         source,
         root_event,
@@ -274,9 +274,13 @@ pub(super) fn put_cached_tree_root(
     if let Ok(mut cache) = state.tree_root_cache.lock() {
         if let Some(current) = cache.get_mut(&cache_key) {
             if let (Some(incoming), Some(known)) = (&candidate.root_event, &current.root_event) {
-                if !is_newer_root(incoming, known) {
+                if is_newer_root(known, incoming) {
                     current.cached_at = candidate.cached_at;
                     return current.clone();
+                }
+                if incoming.event_id == known.event_id {
+                    // A refresh can find the locally published event again before provider replay.
+                    candidate.event = current.event.clone();
                 }
             }
         }
