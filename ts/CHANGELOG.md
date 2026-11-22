@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.52 - 2026-11-22
+
+- FIPS transport 0.5.3 uses the authenticated Nostr key to count peers reached
+  over WebRTC and WebSocket. Losing one carrier keeps the peer available over
+  its remaining carrier. Routes still expose the compressed key for dialing.
+- Nostr pubsub 0.1.11 and worker 0.4.33 use nostr-pubsub 0.5.40 for signed
+  reads when a peer's link and session report different compressed key prefixes.
+
 ## TypeScript runtime 0.5.51 - 2026-11-18
 
 - Worker 0.4.32 keeps a fresh graph eligible for signed discovery on the next visit

@@ -13,7 +13,7 @@ import {
 import { MemoryHub, MemoryTransport } from './support/memoryTransport.js';
 
 describe('FIPS worker P2P provider integration', () => {
-  it('fetches a block through an explicit authenticated Hashtree peer', async () => {
+  it.each(['compressed', 'x-only'])('fetches a block when the service adapter reports the %s key', async (format) => {
     const hub = new MemoryHub();
     const sourceIdentity = await identityFromSecretKey(secret(1));
     const readerIdentity = await identityFromSecretKey(secret(2));
@@ -36,7 +36,11 @@ describe('FIPS worker P2P provider integration', () => {
     });
     let sourcePeerId = '';
     const readerProvider = createFipsWorkerP2PProvider({
-      node: readerNode,
+      node: format === 'compressed' ? readerNode : {
+        registerService: (port, handler) => readerNode.registerService(port, context =>
+          handler({ ...context, src: context.peerId })),
+        sendDatagram: packet => readerNode.sendDatagram(packet),
+      },
       localStore: readerStore,
       requestTimeoutMs: 2_000,
       providerRoutes: () => sourcePeerId ? [{ peerId: sourcePeerId, htl: 10 }] : [],
