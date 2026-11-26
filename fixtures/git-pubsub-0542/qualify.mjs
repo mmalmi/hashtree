@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, readdirSync, statSync, openSync, closeSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -15,10 +15,14 @@ assert.equal(originalLock, manifest.lockSha256);
 assert.equal(originalPackage, manifest.packageSha256);
 function run(id, command, env = {}) {
   const started = Date.now();
+  const monitorFd = openSync(`${evidence}/${id}-resources.log`, 'w');
+  const monitor = spawn('sh', ['-c', 'while true; do date -u +%FT%TZ; for f in memory.current memory.peak memory.events pids.current pids.events; do echo "$f"; cat /sys/fs/cgroup/$f; done; ps -eo pid,ppid,rss,comm --sort=-rss | head -10; sleep 5; done'], {stdio:['ignore',monitorFd,monitorFd]});
   const output = spawnSync(command[0], command.slice(1), {
     env: {...process.env, ...env}, encoding:'utf8', maxBuffer:32 * 1024 * 1024,
     timeout: 2100000,
   });
+  monitor.kill();
+  closeSync(monitorFd);
   writeFileSync(`${evidence}/${id}.log`, `${output.stdout ?? ''}\n${output.stderr ?? ''}`);
   const status = output.status ?? 1;
   result.steps.push({id, command, status, seconds: (Date.now()-started)/1000, logSha256: digest(`${evidence}/${id}.log`)});
