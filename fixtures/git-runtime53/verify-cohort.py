@@ -13,14 +13,9 @@ for name,s in pins.items():
   with urllib.request.urlopen(s['url'],timeout=90) as response:archive.write_bytes(response.read(32*1024**2))
  data=archive.read_bytes();assert digest(data)==s['sha256'],name
  assert 'sha512-'+base64.b64encode(hashlib.sha512(data).digest()).decode()==s['integrity'],name
- registry='https://registry.npmjs.org/'+name+'/-/'+name.split('/')[-1]+'-'+s['version']+'.tgz'
- with urllib.request.urlopen(registry,timeout=90) as response:registryBytes=response.read(32*1024**2)
- # The accepted consumer path is the immutable GitHub archive. Registry packages
- # have separately normalized manifests; record equality truthfully, never substitute.
- registryEqual=registryBytes==data
  old='resolution: {tarball: '+s['url']+'}'
  lock=lock.replace(old,'resolution: {integrity: '+s['integrity']+', tarball: '+s['url']+'}')
- record={'name':name,'version':s['version'],'archiveSHA256':digest(data),'integrity':s['integrity'],'registryEqualsRelease':registryEqual,'registrySHA256':digest(registryBytes)}
+ record={'name':name,'version':s['version'],'archiveSHA256':digest(data),'integrity':s['integrity']}
  if mode=='installed':
   expected=cache/(name.replace('/','-').replace('@','')+'-expected');expected.mkdir(exist_ok=True)
   with tarfile.open(archive) as t:t.extractall(expected,filter='data')
@@ -36,6 +31,7 @@ for name,s in pins.items():
   for file in package.rglob('*'):
    if file.is_file():
     relative=str(file.relative_to(package));assert (installed/relative).read_bytes()==file.read_bytes(),(name,relative)
+    assert (installed/relative).stat().st_mode & 0o111 == file.stat().st_mode & 0o111,(name,relative,'executable mode')
     files[relative]=digest(file.read_bytes())
   record.update(installed=str(installed.relative_to(APP)),references=sorted(str(p.parent.relative_to(APP)) for p in paths),files=files)
  records.append(record)
@@ -43,4 +39,4 @@ assert len(records)==17,(len(records),[r['name'] for r in records])
 if mode=='lock':(APP/'pnpm-lock.yaml').write_text(lock)
 else:assert (APP/'pnpm-lock.yaml').read_text()==lock,'Installed lock lacks verified pins'
 (E/('cohort-'+mode+'.json')).write_text(json.dumps({'cohortSHA256':digest(pinsBytes),'packages':records,'unused':['@hashtree/merge','@fips/transport-ethernet','@fips/transport-memory']},indent=2)+'\n')
-print('Verified',len(records),'accepted archive hashes, recorded registry comparison and '+mode+' bindings')
+print('Verified',len(records),'accepted archive hashes and '+mode+' bindings')
