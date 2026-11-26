@@ -1091,9 +1091,9 @@ impl NostrClient {
         let author = PublicKey::from_hex(&self.pubkey)
             .map_err(|e| anyhow::anyhow!("Invalid pubkey: {}", e))?;
         let filter = build_repo_event_filter(author, repo_name);
-        // Keep open subscription observation past EOSE across up to two attempts
-        // while staying within the caller's timeout budget (matching resolve_window = 3s).
-        let query_window = Duration::from_secs((timeout_secs / 2).clamp(2, 3));
+        // Preserve the caller's observation window past EOSE. The blob resolver's
+        // shorter resolve_window is unrelated to how long signed roots may arrive.
+        let query_window = Duration::from_secs(timeout_secs.saturating_sub(2).max(3));
         let mut root_data = None;
         let mut daemon_fallback = None;
         let mut query_error = None;

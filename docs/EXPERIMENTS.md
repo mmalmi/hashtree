@@ -4275,3 +4275,18 @@ affected connection exactly once and performs no further polls after cancellatio
 an independent request remains active. A delayed connection is also aborted before
 it sends a blob request. The 72 transport tests, including Rust interoperability,
 pass with the unchanged timeout and retry policy.
+
+## 2026-11-26: Reobserve quiet Git remotes before a push
+
+A loopback relay fixture sent a signed repository root 3.2 seconds after EOSE.
+The shortened lookup discarded both subscriptions before delivery and reported
+an unobserved repository after 6.33 seconds. Restoring the caller-derived open
+observation window resolves the same root and preserves its advertised branch.
+
+A second regression check advertises an unobserved root, then introduces a relay
+read failure before an ordinary push. Reusing the negative advertisement skipped
+that failure. Removing the negative cache makes the push reject the unreadable
+remote before resolving local refs. Existing explicit repair behavior is unchanged.
+Nine standalone root-discovery cases and four focused push checks pass. Quiet
+new-repository pushes can take longer because they again observe the remote before
+writing; a short quiet window cannot establish that a repository does not exist.

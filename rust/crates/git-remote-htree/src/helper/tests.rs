@@ -1363,6 +1363,53 @@ fn test_handle_list_for_push_command() {
 }
 
 #[test]
+fn test_unobserved_listing_does_not_skip_pre_push_remote_state_check() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = TempDir::new().expect("temporary home");
+    let _home = HomeGuard::set(home.path());
+    let directory = TempDir::new().expect("temporary store");
+    let mut config = Config::default();
+    config.storage.data_dir = directory.path().to_string_lossy().into_owned();
+    config.server.bind_address = "127.0.0.1:1".to_string();
+    config.nostr.relays.clear();
+    config.blossom.servers.clear();
+    config.blossom.read_servers.clear();
+    config.blossom.write_servers.clear();
+    let mut helper = create_test_helper_with_config(config).expect("helper");
+    let listed = helper
+        .handle_command("list for-push")
+        .expect("an unobserved root can advertise no refs")
+        .expect("ref advertisement");
+    assert_eq!(listed, vec![String::new()]);
+
+    // A quiet advertisement is not proof that the remote is still absent.
+    // Any fresh remote read failure must stop an ordinary push before local work.
+    helper.nostr.force_fetch_refs_error_for_test(
+        "Repository root observation incomplete: relay disconnected",
+    );
+    helper.push_specs.push(PushSpec {
+        src: "refs/heads/intentionally-missing".to_string(),
+        dst: "refs/heads/master".to_string(),
+        force: false,
+    });
+    let result = helper
+        .execute_push()
+        .expect("fresh remote failure must return rejection, not resolve local refs")
+        .expect("push status");
+    assert!(
+        result
+            .iter()
+            .any(|line| line.contains("remote-state-unreadable")),
+        "{result:?}"
+    );
+    assert!(helper
+        .storage
+        .list_refs()
+        .expect("unchanged refs")
+        .is_empty());
+}
+
+#[test]
 fn test_for_push_allows_normal_push_to_replace_missing_remote_root() {
     let Some(mut helper) = create_test_helper() else {
         return;

@@ -28,6 +28,7 @@ struct Fixture {
     store: Arc<MemoryStore>,
     historical: Vec<Event>,
     after_eose: Vec<Event>,
+    after_eose_delay: Duration,
     corrupt: HashSet<Hash>,
     reads: Arc<AtomicUsize>,
     delivered_after_eose: Arc<AtomicUsize>,
@@ -41,6 +42,7 @@ impl Fixture {
             store,
             historical,
             after_eose: Vec::new(),
+            after_eose_delay: Duration::from_millis(250),
             corrupt: HashSet::new(),
             reads: Arc::new(AtomicUsize::new(0)),
             delivered_after_eose: Arc::new(AtomicUsize::new(0)),
@@ -113,7 +115,7 @@ async fn relay(State(state): State<Fixture>, upgrade: WebSocketUpgrade) -> Respo
             if !state.after_eose.is_empty() {
                 tokio::select! {
                     _ = shutdown.changed() => return,
-                    _ = tokio::time::sleep(Duration::from_millis(250)) => {},
+                    _ = tokio::time::sleep(state.after_eose_delay) => {},
                 }
             }
             for event in state.after_eose.iter().filter(|event| matches(event)) {
@@ -305,6 +307,23 @@ async fn delayed_newer_repository_root_after_eose_wins_over_the_historical_root(
     let (refs, resolved, _) = fetch(config(data.path(), &server), &author, "live-root").await?;
     assert!(server.fixture.delivered_after_eose.load(Ordering::SeqCst) > 0);
     assert_eq!(resolved, Some(hex::encode(newer_root.hash)));
+    assert_eq!(refs.get("refs/heads/main"), Some(&commit));
+    Ok(())
+}
+
+#[tokio::test]
+async fn repository_root_arriving_after_three_seconds_is_not_an_empty_repository() -> Result<()> {
+    let author = Keys::generate();
+    let store = Arc::new(MemoryStore::new());
+    let commit = "66".repeat(20);
+    let root = git_root(store.clone(), &commit).await?;
+    let mut fixture = Fixture::new(store, vec![]);
+    fixture.after_eose = vec![root_event(&author, "slow-root", &root, 100)?];
+    fixture.after_eose_delay = Duration::from_millis(3200);
+    let server = Server::start(fixture).await?;
+    let data = tempfile::tempdir()?;
+    let (refs, resolved, _) = fetch(config(data.path(), &server), &author, "slow-root").await?;
+    assert_eq!(resolved, Some(hex::encode(root.hash)));
     assert_eq!(refs.get("refs/heads/main"), Some(&commit));
     Ok(())
 }

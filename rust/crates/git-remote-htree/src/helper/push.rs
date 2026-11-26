@@ -1181,21 +1181,17 @@ impl RemoteHelper {
         info!("Pushing {} refs", self.push_specs.len());
 
         // First, load existing refs and objects from remote to preserve other branches.
-        // If `list for-push` just cleanly observed `RootNotObserved` in this same
-        // process, skip repeating the full relay lookup milliseconds later.
+        // An earlier quiet ref advertisement is not evidence that a remote is absent.
+        // Reobserve before writing so later roots and read failures cannot be skipped.
         let has_force_push = self.push_specs.iter().any(|s| s.force);
-        let unobserved_in_list = std::mem::take(&mut self.observed_unobserved_in_list);
         debug!(
             force = has_force_push,
-            unobserved_in_list, "About to call load_existing_remote_state"
+            "About to call load_existing_remote_state"
         );
 
         let loaded = if rebuild {
             self.load_existing_remote_state()
                 .context("local rebuild requires readable existing remote state")
-        } else if unobserved_in_list {
-            self.detail("  Reusing unobserved new-repository state from ref advertisement");
-            Ok(())
         } else {
             self.load_existing_remote_state_with_missing_root_repair()
         };

@@ -172,9 +172,6 @@ pub struct RemoteHelper {
     is_private: bool,
     /// Start time for current operation (for conditional verbose logging)
     op_start: Option<Instant>,
-    /// True when `list for-push` cleanly observed no existing remote root in
-    /// this process, avoiding a duplicate back-to-back relay wait in `execute_push`.
-    observed_unobserved_in_list: bool,
     #[cfg(test)]
     cached_root_build_attempts: std::sync::atomic::AtomicUsize,
 }
@@ -363,7 +360,6 @@ impl RemoteHelper {
             url_secret,
             is_private,
             op_start: None,
-            observed_unobserved_in_list: false,
             #[cfg(test)]
             cached_root_build_attempts: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -478,7 +474,6 @@ impl RemoteHelper {
 
         // Advertise refs for clone/pull and for ordinary pushes so Git can skip true no-ops.
         self.remote_refs.clear();
-        self.observed_unobserved_in_list = false;
         let refs = match self.nostr.fetch_refs(&self.repo_name) {
             Ok(refs) => refs,
             Err(err) if rebuild => {
@@ -488,7 +483,6 @@ impl RemoteHelper {
                 debug!(
                     "No repository root observed during push ref advertisement; treating as empty"
                 );
-                self.observed_unobserved_in_list = true;
                 HashMap::new()
             }
             Err(err) if for_push => {
