@@ -38,6 +38,46 @@ afterEach(async () => {
 });
 
 describe('TCP/FIPS transport cancellation', () => {
+  it('caller cancellation aborts only its real TCP handshake and stops polling it', async () => {
+    const { transport, io } = fixture();
+    const caller = new AbortController();
+    const abort = vi.spyOn(io.tcp, 'abort');
+    const state = vi.spyOn(io.tcp, 'state');
+    const connect = vi.spyOn(io.tcp, 'connect');
+    const reason = new Error('request cancelled');
+    const cancelled = observe(transport.get(hash, ['cancelled-peer'], 5, caller.signal));
+    const independent = observe(transport.get(hash, ['independent-peer']));
+    await vi.advanceTimersByTimeAsync(0);
+    const cancelledId = await connect.mock.results[0].value;
+    caller.abort(reason);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cancelled()).toBe(reason);
+    expect(abort).toHaveBeenCalledExactlyOnceWith(cancelledId);
+    const before = state.mock.calls.filter(([id]) => id === cancelledId).length;
+    await vi.advanceTimersByTimeAsync(100);
+    expect(state.mock.calls.filter(([id]) => id === cancelledId)).toHaveLength(before);
+    expect(independent()).toBe('pending');
+    expect(connect).toHaveBeenCalledTimes(2);
+  });
+
+  it('caller cancellation aborts a connection that finishes connecting later', async () => {
+    const { transport, io } = fixture();
+    const caller = new AbortController();
+    let release!: (id: ConnectionId) => void;
+    vi.spyOn(io.tcp, 'connect').mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    const abort = vi.spyOn(io.tcp, 'abort').mockResolvedValue();
+    const write = vi.spyOn(io.tcp, 'write');
+    const result = observe(transport.get(hash, ['peer'], 5, caller.signal));
+    await vi.advanceTimersByTimeAsync(0);
+    caller.abort(new Error('request cancelled'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result()).toEqual(new Error('request cancelled'));
+    release(connection);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(abort).toHaveBeenCalledExactlyOnceWith(connection);
+    expect(write).not.toHaveBeenCalled();
+  });
+
   it('rejects a stalled real TCP handshake immediately and never retries after close', async () => {
     const { transport, io, send } = fixture();
     const connect = vi.spyOn(io.tcp, 'connect');

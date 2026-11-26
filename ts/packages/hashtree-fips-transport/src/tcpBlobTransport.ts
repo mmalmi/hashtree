@@ -90,7 +90,7 @@ export class TcpBlobTransport {
           if (reply !== null || remaining === 0) resolve(reply);
         };
         for (const peer of peers) {
-          this.fetchFromPeer(peer, hash, attemptTimeoutMs, htl).then((reply) => {
+          this.fetchFromPeer(peer, hash, attemptTimeoutMs, htl, signal).then((reply) => {
             if (this.corruptPeers.size > 0) this.corruptPeers.delete(peer);
             failures.delete(peer);
             finish(reply);
@@ -180,31 +180,34 @@ export class TcpBlobTransport {
     hash: Hash,
     attemptTimeoutMs: number,
     htl: number,
+    signal?: AbortSignal,
   ): Promise<Uint8Array | null> {
     const deadline = Date.now() + attemptTimeoutMs;
     const connection = await this.whileOpen(() => this.tcp.connect(peer).then((id) => {
-      if (this.closed) {
+      if (this.closed || signal?.aborted) {
         // A connect already queued in TCP can finish after transport shutdown.
         void this.tcp.abort(id).catch(() => undefined);
-        throw this.lifetime.signal.reason;
+        throw this.closed ? this.lifetime.signal.reason : signal!.reason;
       }
       this.outgoing.add(id);
       return id;
-    }));
+    }), signal);
     try {
-      await this.waitEstablished(connection, deadline);
+      await this.waitEstablished(connection, deadline, signal);
       const request = encodeTcpBlobRequest(hash, htl);
-      await this.writeAll(connection, request, deadline);
-      const header = await this.readExact(connection, HEADER_BYTES, deadline);
+      await this.writeAll(connection, request, deadline, false, signal);
+      const header = await this.readExact(connection, HEADER_BYTES, deadline, signal);
       const response = decodeTcpBlobResponseHeader(header);
       if (!response.found) return null;
-      const data = await this.readExact(connection, response.size, deadline);
-      if (!bytesEqual(await this.whileOpen(() => sha256(data)), hash)) throw new PeerBlobHashMismatch();
-      await this.whileOpen(() => this.options.localStore.put(hash, data.slice()).catch(() => false));
+      const data = await this.readExact(connection, response.size, deadline, signal);
+      if (!bytesEqual(await this.whileOpen(() => sha256(data), signal), hash)) throw new PeerBlobHashMismatch();
+      await this.whileOpen(() => this.options.localStore.put(hash, data.slice()).catch(() => false), signal);
       return data;
     } finally {
       this.outgoing.delete(connection);
-      if (!this.closed) await this.tcp.close(connection).catch(() => undefined);
+      if (!this.closed) {
+        await (signal?.aborted ? this.tcp.abort(connection) : this.tcp.close(connection)).catch(() => undefined);
+      }
     }
   }
 
@@ -264,18 +267,19 @@ export class TcpBlobTransport {
     return data;
   }
 
-  private async waitEstablished(connection: ConnectionId, deadline: number): Promise<void> {
+  private async waitEstablished(connection: ConnectionId, deadline: number, signal?: AbortSignal): Promise<void> {
     while (Date.now() < deadline) {
-      if (await this.whileOpen(() => this.tcp.state(connection)) === State.Established) return;
-      await sleep(POLL_INTERVAL_MS, this.lifetime.signal);
+      if (await this.whileOpen(() => this.tcp.state(connection), signal) === State.Established) return;
+      await sleep(POLL_INTERVAL_MS, this.lifetime.signal, signal);
     }
     throw new Error('TCP/FIPS connect timed out');
   }
 
-  private async writeAll(connection: ConnectionId, data: Uint8Array, deadline: number, response = false): Promise<void> {
+  private async writeAll(connection: ConnectionId, data: Uint8Array, deadline: number, response = false, signal?: AbortSignal): Promise<void> {
     let offset = 0;
     while (offset < data.byteLength && Date.now() < deadline) {
       this.lifetime.signal.throwIfAborted();
+      signal?.throwIfAborted();
       const limited = response && this.options.getUploadLimitBytesPerSecond !== undefined;
       if (limited) this.uploadRateLimiter.setBytesPerSecond(this.options.getUploadLimitBytesPerSecond!());
       const capacity = limited ? this.uploadRateLimiter.getBytesPerSecond() : null;
@@ -284,33 +288,33 @@ export class TcpBlobTransport {
       if (limited) {
         const reservation = this.uploadRateLimiter.reserve(size);
         if (!reservation.allowed) {
-          await sleep(Math.min(reservation.delayMs, POLL_INTERVAL_MS, deadline - Date.now()), this.lifetime.signal);
+          await sleep(Math.min(reservation.delayMs, POLL_INTERVAL_MS, deadline - Date.now()), this.lifetime.signal, signal);
           continue;
         }
       }
       let accepted = 0;
       try {
-        accepted = await this.whileOpen(() => this.tcp.write(connection, data.subarray(offset, end)));
+        accepted = await this.whileOpen(() => this.tcp.write(connection, data.subarray(offset, end)), signal);
       } finally {
         if (limited) this.uploadRateLimiter.refund(size - accepted);
       }
       offset += accepted;
-      if (accepted === 0) await sleep(POLL_INTERVAL_MS, this.lifetime.signal);
+      if (accepted === 0) await sleep(POLL_INTERVAL_MS, this.lifetime.signal, signal);
     }
     if (offset !== data.byteLength) throw new Error('TCP/FIPS write timed out');
   }
 
-  private async readExact(connection: ConnectionId, size: number, deadline: number): Promise<Uint8Array> {
+  private async readExact(connection: ConnectionId, size: number, deadline: number, signal?: AbortSignal): Promise<Uint8Array> {
     const chunks: Uint8Array[] = [];
     let received = 0;
     while (received < size && Date.now() < deadline) {
-      const chunk = await this.whileOpen(() => this.tcp.read(connection, Math.min(IO_CHUNK_BYTES, size - received)));
+      const chunk = await this.whileOpen(() => this.tcp.read(connection, Math.min(IO_CHUNK_BYTES, size - received)), signal);
       if (chunk.byteLength > 0) {
         chunks.push(chunk);
         received += chunk.byteLength;
       } else {
-        if (await this.whileOpen(() => this.tcp.isReadClosed(connection))) break;
-        await sleep(POLL_INTERVAL_MS, this.lifetime.signal);
+        if (await this.whileOpen(() => this.tcp.isReadClosed(connection), signal)) break;
+        await sleep(POLL_INTERVAL_MS, this.lifetime.signal, signal);
       }
     }
     if (received !== size) throw new Error('TCP/FIPS read timed out');
@@ -399,18 +403,25 @@ function checkHtl(htl: number): void {
   }
 }
 
-function sleep(ms: number, signal: AbortSignal): Promise<void> {
+function sleep(ms: number, signal: AbortSignal, secondary?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
     signal.throwIfAborted();
-    const abort = () => {
+    secondary?.throwIfAborted();
+    const cleanup = () => {
       clearTimeout(timer);
-      reject(signal.reason);
+      signal.removeEventListener('abort', abort);
+      secondary?.removeEventListener('abort', abort);
+    };
+    const abort = () => {
+      cleanup();
+      reject(signal.aborted ? signal.reason : secondary!.reason);
     };
     const timer = setTimeout(() => {
-      signal.removeEventListener('abort', abort);
+      cleanup();
       resolve();
     }, ms);
     signal.addEventListener('abort', abort, { once: true });
+    secondary?.addEventListener('abort', abort, { once: true });
   });
 }
 

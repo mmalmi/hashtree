@@ -4263,3 +4263,15 @@ service balances were fixture-seeded. Hashtree spent six credit sats, FIPS
 earned one forwarding sat and the direct Lightning channel required zero
 network fees. The scripted quote and confirmation through verification took
 0.714 seconds on that run.
+
+### 2026-11-26: Stop TCP blob work when its caller cancels
+
+The caller cancellation test previously replaced the peer fetch with a promise,
+so it checked the returned error without observing the real TCP connection. A
+real endpoint fixture showed that cancellation sent no TCP abort and left the
+handshake polling until its deadline. The corrected path propagates the caller
+signal through connection setup, reads, writes and polling waits. It aborts the
+affected connection exactly once and performs no further polls after cancellation;
+an independent request remains active. A delayed connection is also aborted before
+it sends a blob request. The 72 transport tests, including Rust interoperability,
+pass with the unchanged timeout and retry policy.
