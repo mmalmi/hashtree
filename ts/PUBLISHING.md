@@ -59,6 +59,16 @@ New versions use npm's `latest` tag. This workflow is for stable releases; use a
 separate prerelease policy before publishing versions that should not be latest.
 Registry scanning can delay availability after a successful publish.
 
+The Linux verification and publishing jobs pin actions by commit and verify
+Node 24.22.2, npm 12.0.2, pnpm 10.23.0, Rust 1.99.0, D-Bus 1.14.10 development
+files, and Playwright's Chromium 1228 archives before use. The Ubuntu 24.04
+runner supplies the C linker, pkg-config, glibc and browser system libraries;
+their inventory is recorded during setup. Missing browser libraries fail the
+job without installing unpinned system packages. Frozen dependency installation
+disables automatic lifecycle scripts, then explicitly prepares the hash-verified
+esbuild 0.28.1 binary through its reviewed install script without a download
+fallback. All release, packing, interoperability and browser checks still run.
+
 All 11 SDK package names have had their initial npm publication and are configured
 to trust this workflow, with direct publishing enabled. When adding a new package
 name, publish its verified archive once with an interactive npm login, then

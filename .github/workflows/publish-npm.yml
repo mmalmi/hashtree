@@ -26,32 +26,27 @@ concurrency:
 jobs:
   verify:
     if: github.ref == 'refs/heads/master' && !inputs.prepared_worker_0425
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
+    env:
+      npm_config_ignore_scripts: 'true'
     defaults:
       run:
         working-directory: ts
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: pnpm/action-setup@v4
-        with:
-          package_json_file: ts/package.json
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - run: npm install --global npm@12.0.2
-      - name: Install FIPS interoperability dependencies
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install verified release tools
+        working-directory: .
+        run: bash scripts/setup-ts-release-tools.sh verify
       - run: pnpm install --frozen-lockfile
+      - name: Prepare the verified esbuild binary without network fallback
+        run: node ../scripts/prepare-ts-release-deps.cjs
       - name: Run the TypeScript release gate
         run: bash ../scripts/release-gate.sh --lane typescript
       - name: Build npm archives and verify their contents
         run: pnpm run publish:packages:dry-run > npm-pack.log 2>&1 || { tail -100 npm-pack.log; exit 1; }
-      - name: Install browser for worker policy checks
-        run: pnpm exec playwright install --with-deps chromium
       - name: Verify worker behavior and default IIFE consumer bundles
         run: pnpm --filter @hashtree/worker test
       - name: Verify explicit browser transports and real WebRTC delivery
@@ -61,13 +56,13 @@ jobs:
           pnpm test:browser
       - name: Check examples and build API reference
         run: node scripts/check-doc-examples.mjs && pnpm docs:api
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: npm-packages
           path: ts/dist-npm/
           if-no-files-found: error
           retention-days: 14
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: typescript-api-docs
           path: ts/docs/api/
@@ -76,21 +71,19 @@ jobs:
   publish:
     needs: verify
     if: inputs.publish && github.ref == 'refs/heads/master' && !inputs.prepared_worker_0425
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: npm
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - run: npm install --global npm@12.0.2
-      - uses: actions/download-artifact@v4
+      - name: Install verified publishing tools
+        run: bash scripts/setup-ts-release-tools.sh publish
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           name: npm-packages
           path: ts/dist-npm/
