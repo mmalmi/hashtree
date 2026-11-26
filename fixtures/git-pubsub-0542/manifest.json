@@ -19,5 +19,9 @@
     },
     "provenance": "Accepted release binding plus exact public GitHub asset digest; old release has no SLSA attestation"
   },
-  "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9"
+  "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
+  "baseline": {
+    "source": "d1c30412457f3856f57066602f241977a317199e",
+    "sha256": "39523ef024579c96dadb04b574aeaa4a75761f617e3b82f2cc9b7828acc7b608"
+  }
 }

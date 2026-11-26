@@ -16,10 +16,12 @@ def extract(archive,path):
 source=HERE/'source.tar.gz'
 assert digest(source)==M['archiveSha256']
 extract(source,STAGE/'app')
+assert digest(HERE/'baseline.tar.gz')==M['baseline']['sha256']
+extract(HERE/'baseline.tar.gz',STAGE/'baseline')
 for name in ['pnpm','native']:
  file=STAGE/(name+'.tgz');fetch(M[name],file);extract(file,STAGE/'tools'/name)
 for name,sha in M['native']['executables'].items():assert digest(STAGE/'tools/native/hashtree'/name)==sha
-for file in ['qualify.mjs','verify-package.py','manifest.json','nostr-pubsub-0.5.42.tgz']:
+for file in ['diagnose.mjs','qualify.mjs','verify-package.py','manifest.json','nostr-pubsub-0.5.42.tgz']:
  shutil.copyfile(HERE/file,STAGE/file)
 wrapper=STAGE/'tools/bin/pnpm'
 wrapper.write_text('#!/bin/sh\nexec node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');wrapper.chmod(0o755)
