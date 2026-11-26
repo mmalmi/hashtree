@@ -2,6 +2,39 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-26 - Nostr archive indexer (`hashtree-nostr`, `hashtree-index`, `PoolStore`/LMDB batch writes, and `htree` catch-up / forward append)
+
+We profiled and optimized the durable Nostr event archive indexer (`htree nostr-index catch-up` and `htree nostr-index append-forward`) across both paired local macOS ARM64 release microbenchmarks (comparing the pre-optimization baseline commit against the optimized commit on identical workloads and bit-for-bit identical output root CIDs) and a live multi-terabyte Linux x86_64 archive workload (47 GiB pool catalog LMDB + 24 GiB packed cold-member LMDB on mirrored 7200 RPM HDDs with `HTREE_LMDB_NO_READ_AHEAD=1` and synchronous durability).
+
+Codebase changes evaluated:
+- **`hashtree-lmdb` (`LmdbBlobStore` & `PoolStore`) batch writes**: parallelized `existing_hashes_in_sorted_candidates`, `PoolStore` `locations` prechecks, and `by_member` / `last_accessed` leaf prewarming across up to 8 scoped read-only LMDB transactions for batches `>= 128` items (overlapping cold HDD page faults); eliminated double `blobs` B-tree writes during external-pack batch commits by checking presence read-only and inserting final pack markers once in sorted `Hash` order (while preserving caller pack byte order); skipped per-item `pins` lookups when the pin DB is empty and split `metadata` (sorted by `Hash`) from `eviction_order` (monotonic) writes; replaced per-blob post-commit verification loops with a batched `verify_many_committed_sync` (one `read_txn` dropped before disk I/O, grouping pack reads by pack file sorted by offset and opening each pack once with a reused buffer); simplified `PoolStore` `Pending -> Stored` finalization (`wtxn #2`) to sorted single-table `locations` updates.
+- **`hashtree-index` B-tree lookup & bulk update**: added zero-allocation `Cow<str>` key escaping/unescaping fast paths (`unescape_key_cow` / `escape_key_cow` when no `%` is present); replaced `BTreeMap` allocation/drain in `update_link_leaf` and `lookup_step` leaf scans with O(N+M) linear two-pointer merges; lowered parallel link-B-tree thresholds from 32 → 2 keys (`PARALLEL_READ_MIN_KEYS`) and 256 → 2 changes (`PARALLEL_UPDATE_MIN_CHANGES`) so small/medium tag batches and 3-ID reconciliations overlap blocking storage reads.
+- **`hashtree-nostr` event ingestion & lookup**: borrowed `&pubkey`/`&tags`/`&content` during `validate_event` (eliminating cloning of wide tag lists); parallelized existing-event replacement reads in `build_index_commit` via `buffer_unordered`; added batched `NostrEventStore::get_verified_by_ids` (one manifest read + one batched `by-id` lookup + concurrent blob reads and signature verification).
+- **`hashtree-cli` (`catch-up` & `append-forward`)**: raised `CatchupReadCache` metadata entry cap from 16,384 to 65,536; wired `btree_update_concurrency: Some(8)` for local `catch-up` and `append-forward`; added `CatchupReadCache` (128 MiB default, `--read-cache-mib`) and write coalescing (16 MiB default, `--index-write-buffer-mib`) plus batched `get_verified_by_ids` disposition checks to `append-forward`.
+
+Paired macOS ARM64 release benchmarks (identical roots verified):
+
+| Benchmark | Baseline (median) | Optimized (median) | Speedup | Notes |
+| --- | ---: | ---: | ---: | --- |
+| `PoolStore::put_many` packed (5,000 × 3 KiB, `NO_READ_AHEAD=1`, `external_blob_sync=true`) | 243.38 ms | 118.23 ms | 2.06x | 20k prepopulated; 3 runs (`211.0–264.9` → `117.9–126.3 ms`) |
+| `BTree` 3-key blocking lookup (2 ms read latency, 10k keys, conc=8) | 17.83 ms (`peak=1`) | 7.75 ms (`peak=3`) | 2.30x | Reconcile shape; parallel below old 32-key floor |
+| `BTree` 32-key blocking update (2 ms read latency, 10k keys, conc=8) | 93.90 ms (`peak=1`) | 23.19 ms (`peak=8`) | 4.05x | Forward batch shape; identical root CID |
+| `BTree` 2,000-key CPU lookup (20k tag keys, in-memory) | 29.74 ms | 8.60 ms | 3.46x | Zero-alloc unescape + linear leaf scan |
+| `BTree` 2,000-key CPU update (20k tag keys, in-memory) | 13.13 ms | 6.60 ms | 1.99x | Zero-alloc unescape + linear leaf merge; identical root CID |
+| `NostrEventStore` wide-tag forward batch (32 events, 1,200 tags) | 46.10 ms | 35.18 ms | 1.31x | Borrowed validation + concurrent lookups/updates |
+
+Live multi-TB HDD RAID1 archive observations (codebase + `--read-cache-mib 256 --index-write-buffer-mib 32` + cgroup `CPUQuota=300%`, `MemoryHigh=8G`, `MemoryMax=12G`, `IOWeight=50`):
+
+| Live metric (HDD RAID1 archive pool) | Before | After | Net Change |
+| --- | ---: | ---: | ---: |
+| Cold `by-tag` B-tree read rate (`UpdateIndex`) | 24.2 cold reads/s (20,420 reads / 843.8 s) | 67.4–76.7 cold reads/s (3,181 reads / 47.2 s; 245 reads / 3.2 s) | 2.8x–3.2x faster |
+| `PoolStore` packed flush throughput (`FlushIndex`) | 62.3 s/MiB (64.9 MB / 4,046 s) | 21.6 s/MiB (10.5 MB / 227.1 s, 1 coalesced commit) | 2.9x faster |
+| Zero-event author checkpoint (`Saved`) | 1,280–1,368 ms (`append` 485–528 ms, `sync` 200–235 ms) | 396 ms (`append` 175 ms, `sync` 10 ms) | 3.3x faster |
+| Forward 32-event batch (~330–400 tags, cold) | 707.0–847.4 s (331–370 tags) | 384.5 s (397 tags, cold after 8 d idle) | 1.8x–2.2x faster |
+| HDD RAID1 random read IOPS during prewarm | ~80 IOPS (single-threaded) | ~302 IOPS (8 parallel read workers across both mirrors) | ~3.8x IOPS |
+
+All crate unit and integration suites passed across `hashtree-collection` (14), `hashtree-index` (58, including `small_batch_lookup_and_update_overlap_reads_and_preserve_escaped_key_parity`), `hashtree-nostr` (151, including `get_verified_by_ids_matches_single_lookups_for_present_and_absent_events`), `hashtree-lmdb` (125 unit tests, 4 ignored, including `put_many_optimistic_large_packed_batch_verifies_and_detects_pack_corruption`), and `hashtree-cli` (`nostr_index::catchup` 70/70 including `append_io_attribution_49_events` verified on Linux x86_64 plus `forward::cli_forward_keeps_cursor_then_resumes_and_replays_original_receipt`).
+
 ## 2026-11-26 - LMDB, `PoolStore`, HTTP blob serving, and Nostr relay hot-path optimization
 
 We profiled and benchmarked a live multi-terabyte `htree` daemon on an 8-core / 16-thread Linux x86_64 host (60 GiB RAM, NVMe catalog/member LMDB tier plus mirrored HDD external-blob and read-only fallback tiers, ~128.9 million blobs / ~5.78 TB logical bytes) across three matched release stages:
