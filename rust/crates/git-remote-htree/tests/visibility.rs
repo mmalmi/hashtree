@@ -75,13 +75,21 @@ fn test_link_visible_push_and_clone_with_secret() {
 
     // Clone with the same secret
     let npub = &test_env.npub;
-    let clone_url = format!("htree://{}/link-visible-test#k={}", npub, secret);
+    let clone_url = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("Published to: "))
+        .unwrap();
+    assert_eq!(
+        clone_url,
+        format!("htree://{npub}/link-visible-test#k={secret}/link-visible-test")
+    );
     let clone_dir = TempDir::new().unwrap();
-    let clone_path = clone_dir.path().join("cloned");
+    let clone_path = clone_dir.path().join("link-visible-test");
 
     println!("\nCloning with correct secret...");
     let clone = Command::new("git")
-        .args(["clone", &clone_url, clone_path.to_str().unwrap()])
+        .args(["clone", "--", clone_url])
+        .current_dir(clone_dir.path())
         .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .output()
         .expect("Failed to clone");

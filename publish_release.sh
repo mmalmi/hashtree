@@ -10,14 +10,14 @@ same staged files to GitHub.
 
 Wrapper options:
   --version <version>       Release tag, for example: v0.2.20
-  --skip-github             Publish only to hashtree/Homebrew
+  --skip-github             Skip the GitHub mirror
   --github-repo <owner/repo>
                             Override the GitHub mirror repo (default: infer from remotes)
   -h, --help                Show this help
 
 All other flags are forwarded to rust/scripts/release_to_htree.sh, including:
   --skip-homebrew-tap
-  --cargo-publish
+  --skip-cargo-publish
   --release-stage-dir <dir>
   --output-dir <dir>
   --target-dir <dir>

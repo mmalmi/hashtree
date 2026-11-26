@@ -33,10 +33,13 @@ export declare class TcpBlobTransport {
     private closing?;
     private get closed();
     private readonly serving;
+    private readonly corruptPeers;
     private readonly uploadRateLimiter;
     constructor(options: TcpBlobTransportOptions);
-    get(hash: Hash, peerIds: readonly string[], htl?: number): Promise<Uint8Array | null>;
+    get(hash: Hash, peerIds: readonly string[], htl?: number, signal?: AbortSignal): Promise<Uint8Array | null>;
     close(): Promise<void>;
+    private selectPeers;
+    private recordCorruptPeer;
     private whileOpen;
     /** A valid authenticated response proves the peer implements the blob service. */
     probe(peerId: string): Promise<boolean>;

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.5.3 - 2026-11-26
+
+- A default `cargo install hashtree-cli` includes the Git remote helper.
+- Link-visible Git clone URLs now end in the repository name so plain `git clone` uses that name for the checkout.
+- Product releases publish the workspace crates to crates.io.
+- `htree add` now coalesces durable LMDB directory writes into bounded 16 MiB batches instead of committing once per small file.
+- `htree push` and auto-push now pre-filter existing blobs with `POST /upload/check` and upload in bounded binary batches (`POST /upload/batch-binary`), falling back cleanly to single `PUT /upload` on plain Blossom servers without sending wasted batch bodies.
+- `htree get`, `htree load`, `htree cat`, and `htree pin` now fetch in parallel (`concurrency = 16`), use `POST /blob/batch` for small/medium blobs, batch LMDB cache writes, retry transient 408/429/5xx/transport errors, hedge downloads across configured read servers (150 ms hedge delay), and return an explicit error instead of silently succeeding when a child chunk cannot be fetched.
+- `HashTree::get_stream` (`hashtree-core 0.3.3`) prefetches bounded upcoming chunks in order (up to 8 chunks / 8 MiB), and `BlossomStore` (`hashtree-blossom 0.3.1`) caps its in-memory LRU blob cache (64 MiB default) and propagates read errors instead of turning timeouts into misses.
+
 ## 0.5.2 - 2026-11-21
 
 - `htree storage stats` now calculates quota utilization from writable bytes, including unindexed data. It reports `N/A` when the limit is zero.

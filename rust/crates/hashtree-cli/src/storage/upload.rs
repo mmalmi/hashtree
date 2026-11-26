@@ -144,6 +144,10 @@ async fn add_file_to_tree<S: Store>(
     if let Some(progress) = progress {
         progress.record_file_finished();
     }
+    tree.get_store()
+        .flush_pending_if_needed()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to flush buffered writes: {e}"))?;
     Ok((cid, size))
 }
 
@@ -263,6 +267,9 @@ const PARALLEL_FILE_ADD_MIN_BYTES: u64 = 32 * 1024;
 /// Most files a directory add stores at once. Each in-flight file may hold a
 /// write batch in memory, so this also bounds peak memory.
 const MAX_PARALLEL_FILE_ADDS: usize = 4;
+
+/// Target batch size for coalescing directory writes into fewer LMDB commits.
+const DIR_UPLOAD_WRITE_BATCH_BYTES: usize = 16 * 1024 * 1024;
 
 /// Store `files` (absolute path, path relative to the root) and return each
 /// relative path with its CID and plaintext size. Hashing and encryption dominate an add and are
@@ -386,8 +393,8 @@ pub fn key_mode(legacy_keys: bool) -> hashtree_core::EncryptionMode {
 }
 
 impl HashtreeStore {
-    fn upload_tree(&self, options: &UploadOptions<'_>) -> HashTree<StorageRouter> {
-        let mut config = HashTreeConfig::new(self.store_arc());
+    fn upload_tree_with_store<S: Store>(store: Arc<S>, options: &UploadOptions<'_>) -> HashTree<S> {
+        let mut config = HashTreeConfig::new(store);
         if !options.encrypted {
             config = config.public();
         }
@@ -395,6 +402,10 @@ impl HashtreeStore {
             config = config.with_chunk_size(chunk_size);
         }
         HashTree::new(config).with_encryption_mode(key_mode(options.legacy_keys))
+    }
+
+    fn upload_tree(&self, options: &UploadOptions<'_>) -> HashTree<StorageRouter> {
+        Self::upload_tree_with_store(self.store_arc(), options)
     }
 
     fn pin_upload_root(&self, cid: &Cid) -> Result<()> {
@@ -425,6 +436,36 @@ impl HashtreeStore {
         Ok(cid.to_string())
     }
 
+    fn buffered_upload_tree(
+        &self,
+        options: &UploadOptions<'_>,
+    ) -> (
+        Arc<hashtree_core::BufferedStore<StorageRouter>>,
+        HashTree<hashtree_core::BufferedStore<StorageRouter>>,
+    ) {
+        let buffered = Arc::new(
+            hashtree_core::BufferedStore::new_optimistic(self.store_arc())
+                .with_flush_threshold(DIR_UPLOAD_WRITE_BATCH_BYTES),
+        );
+        let tree = Self::upload_tree_with_store(Arc::clone(&buffered), options);
+        (buffered, tree)
+    }
+
+    async fn finish_buffered_dir(
+        buffered: &hashtree_core::BufferedStore<StorageRouter>,
+        result: Result<Cid>,
+    ) -> Result<Cid> {
+        let flush = buffered
+            .flush()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to flush directory writes: {e}"));
+        match (result, flush) {
+            (Ok(root), Ok(_)) => Ok(root),
+            (Err(err), _) => Err(err),
+            (Ok(_), Err(err)) => Err(err),
+        }
+    }
+
     /// Store a directory and pin its root. Returns the CID as a string:
     /// the hash for plaintext, `hash:key` for encrypted content.
     pub fn upload_dir_with<P: AsRef<Path>>(
@@ -432,13 +473,17 @@ impl HashtreeStore {
         dir_path: P,
         options: UploadOptions<'_>,
     ) -> Result<String> {
-        let tree = self.upload_tree(&options);
-        let root = sync_block_on(add_directory_to_tree(
-            &tree,
-            dir_path.as_ref(),
-            options.respect_gitignore,
-            options.progress,
-        ))
+        let (buffered, tree) = self.buffered_upload_tree(&options);
+        let root = sync_block_on(async {
+            let result = add_directory_to_tree(
+                &tree,
+                dir_path.as_ref(),
+                options.respect_gitignore,
+                options.progress,
+            )
+            .await;
+            Self::finish_buffered_dir(&buffered, result).await
+        })
         .context("Failed to upload directory")?;
         self.pin_upload_root(&root)?;
         Ok(root.to_string())
@@ -629,14 +674,13 @@ impl HashtreeStore {
         progress: &AddProgress,
         cache_path: &Path,
     ) -> Result<String> {
-        let mut config = HashTreeConfig::new(self.store_arc());
-        if !encrypted {
-            config = config.public();
-        }
-        if let Some(chunk_size) = chunk_size {
-            config = config.with_chunk_size(chunk_size);
-        }
-        let tree = HashTree::new(config);
+        let options = UploadOptions {
+            encrypted,
+            chunk_size,
+            respect_gitignore: respect_ignore,
+            ..UploadOptions::public()
+        };
+        let (buffered, tree) = self.buffered_upload_tree(&options);
         let root = sync_block_on(async {
             let mut cache = super::add_cache::DirectoryCache::open(
                 &tree,
@@ -646,20 +690,19 @@ impl HashtreeStore {
                 cache_path,
             )
             .await?;
-            let root = add_directory_to_tree_inner(
+            let result = add_directory_to_tree_inner(
                 &tree,
                 source,
                 respect_ignore,
                 Some(progress),
                 Some(&mut cache),
             )
-            .await?;
+            .await;
+            let root = Self::finish_buffered_dir(&buffered, result).await?;
             cache.save(&root)?;
             Ok::<_, anyhow::Error>(root)
         })?;
-        let mut transaction = self.env.write_txn()?;
-        self.pins.put(&mut transaction, root.hash.as_slice(), &())?;
-        transaction.commit()?;
+        self.pin_upload_root(&root)?;
         Ok(root.to_string())
     }
 }

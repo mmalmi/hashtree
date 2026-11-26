@@ -212,7 +212,7 @@ fi
 echo "✓ Installed htree, htree-cashu, and git-remote-htree"
 echo ""
 echo "Note: release binaries omit optional FUSE mount support."
-echo "Build from source with: cargo install hashtree-cli --no-default-features --features lmdb,fuse"
+echo "Build from source with: cargo install hashtree-cli --features fuse"
 if ! path_contains "$INSTALL_DIR"; then
   echo ""
   echo "Add $INSTALL_DIR to your PATH, for example:"
@@ -256,7 +256,7 @@ Usage:
 
 FUSE note:
   Release binaries omit optional FUSE mount support. Build from source with:
-    cargo install hashtree-cli --no-default-features --features lmdb,fuse
+    cargo install hashtree-cli --features fuse
 
 More info: https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree
 EOF
@@ -286,7 +286,7 @@ Usage:
 
 FUSE note:
   Prebuilt release binaries omit optional FUSE mount support. Build from source with:
-    cargo install hashtree-cli --no-default-features --features lmdb,fuse
+    cargo install hashtree-cli --features fuse
 
 More info: https://git.iris.to/#/npub1xdhnr9mrv47kkrn95k6cwecearydeh8e895990n3acntwvmgk2dsdeeycm/hashtree
 EOF
@@ -318,7 +318,6 @@ build_target() {
         build
         --release
         --target "$target"
-        -p git-remote-htree
         -p hashtree-cashu-cli
         -p hashtree-cli
     )

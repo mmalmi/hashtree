@@ -12,7 +12,7 @@ optional daemon. A daemon is not required for basic Git operations.
 
 1. Check `htree --version` and `command -v git-remote-htree`. Install released
    binaries using the project's [installation guide](https://github.com/mmalmi/hashtree/blob/master/rust/crates/git-remote-htree/README.md#installation),
-   or `cargo install hashtree-cli git-remote-htree` if a Rust build is appropriate.
+   or `cargo install hashtree-cli` if a Rust build is appropriate.
 2. Use the identity the user intends. `htree user` generates a key if absent and
    shows public identities, with the default first. For an agent's independent
    profile, set `HTREE_CONFIG_DIR` and `HTREE_DATA_DIR` to persistent private

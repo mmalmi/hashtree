@@ -24,10 +24,10 @@ Windows note: this shell bootstrap is not supported on Windows. Download the lat
 Or install with Cargo:
 
 ```bash
-cargo install hashtree-cli git-remote-htree
+cargo install hashtree-cli
 ```
 
-If you already have `hashtree-cli`, just install the helper:
+For the standalone Git helper:
 
 ```bash
 cargo install git-remote-htree
@@ -52,8 +52,11 @@ git push htree master
 git remote add origin htree://self/myrepo#link-visible
 git push origin main
 
-# Clone with secret key
-git clone htree://npub1.../repo#k=<64-hex-chars>
+# Clone into repo/ using the share URL printed by the helper
+git clone 'htree://npub1.../repo#k=<hex-key>/repo'
+
+# With an older share URL, give Git the directory name explicitly
+git clone 'htree://npub1.../repo#k=<hex-key>' repo
 
 # Private repo (encrypted, author-only)
 git remote add origin htree://self/myrepo#private

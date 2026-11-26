@@ -231,6 +231,12 @@ Current git mapping at tree root:
 
 Repository publication uses Section 7 with `d=<repo_path>`.
 
+Git clone links MAY append the final repository path component inside a keyed
+fragment, as in `htree://<npub>/group/repo#k=<hex>/repo`. Git uses the last
+component as its checkout directory before it starts the helper. The helper
+MUST validate the repeated name and interpret the key as in Section 8. The
+repository path and the link key are the same as for the shorter `#k=<hex>` form.
+
 ## 11. Blob Request/Reply Service
 
 Blob retrieval uses one vocabulary on every in-process and transported route:

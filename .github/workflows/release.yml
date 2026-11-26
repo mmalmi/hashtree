@@ -208,7 +208,8 @@ jobs:
         working-directory: rust
         run: |
           cargo package --locked -p hashtree-nostr
-          cargo package --locked -p hashtree-cli
+          cargo package --locked -p hashtree-cli -p git-remote-htree \
+            -p hashtree-fips-credit-link -p hashtree-peer-payments -p hashtree-paid-retrieval
 
       - name: Preserve the verified package
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -452,7 +453,6 @@ jobs:
         shell: pwsh
         run: |
           cargo build --release --locked --target ${{ matrix.target }} `
-            -p git-remote-htree `
             -p hashtree-cashu-cli `
             -p hashtree-cli `
             --features hashtree-cli/fips-webrtc

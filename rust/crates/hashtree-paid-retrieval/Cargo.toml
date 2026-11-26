@@ -1,6 +1,6 @@
 [package]
 name = "hashtree-paid-retrieval"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -22,7 +22,7 @@ test-support = ["tokio/sync"]
 fips = ["dep:nvpn-fips-core", "dep:nvpn-fips-tcp", "dep:nvpn-fips-tcp-endpoint", "tokio/sync", "tokio/time"]
 
 [dependencies]
-peer-payments = { version = "=0.1.0", path = "../../vendor/peer-payments", optional = true }
+peer-payments = { package = "hashtree-peer-payments", version = "=0.1.0", path = "../../vendor/peer-payments", optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }

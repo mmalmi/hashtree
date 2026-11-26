@@ -38,7 +38,7 @@ if (bytes) console.log(new TextDecoder().decode(bytes));
 
 ```bash
 cargo add hashtree-core                       # Library for a Rust project
-cargo install hashtree-cli git-remote-htree    # CLI and Git helper
+cargo install hashtree-cli                     # CLI and Git helper
 ```
 
 [Library guide](rust/crates/hashtree-core/README.md) · [API reference](https://docs.rs/hashtree-core/latest/hashtree_core/) · [CLI and installation](rust/README.md)

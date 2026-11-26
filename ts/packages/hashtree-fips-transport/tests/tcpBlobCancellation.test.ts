@@ -117,4 +117,20 @@ describe('TCP/FIPS transport cancellation', () => {
     expect(connect).toHaveBeenCalledOnce();
     expect(write).not.toHaveBeenCalled();
   });
+
+  it('aborts a search immediately when the caller signal fires without retrying', async () => {
+    const { transport } = fixture();
+    const fetch = vi.fn(() => new Promise<Uint8Array | null>(() => {}));
+    (transport as unknown as { fetchFromPeer: typeof fetch }).fetchFromPeer = fetch;
+    const caller = new AbortController();
+    const reason = new Error('caller deadline expired');
+    const result = observe(transport.get(hash, ['peer-a', 'peer-b'], 5, caller.signal));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    caller.abort(reason);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(result()).toBe(reason);
+    await vi.advanceTimersByTimeAsync(6_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
 });

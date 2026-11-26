@@ -20,6 +20,8 @@ const HEADER_BYTES = 7;
 const REQUEST_BYTES = 36;
 const IO_CHUNK_BYTES = 64 * 1024;
 const POLL_INTERVAL_MS = 10;
+const CORRUPT_PEER_COOLDOWN_MS = 30_000;
+const MAX_COOLED_PEERS = 256;
 export const TCP_BLOB_MAX_BYTES = 16 * 1024 * 1024;
 
 export class PeerBlobHashMismatch extends Error {
@@ -51,6 +53,7 @@ export class TcpBlobTransport {
 
   private get closed(): boolean { return this.lifetime.signal.aborted; }
   private readonly serving = new Set<AbortController>();
+  private readonly corruptPeers = new Map<string, number>();
   private readonly uploadRateLimiter: UploadRateLimiter;
 
   constructor(private readonly options: TcpBlobTransportOptions) {
@@ -67,15 +70,18 @@ export class TcpBlobTransport {
     hash: Hash,
     peerIds: readonly string[],
     htl = TCP_BLOB_DEFAULT_HTL,
+    signal?: AbortSignal,
   ): Promise<Uint8Array | null> {
     this.lifetime.signal.throwIfAborted();
+    signal?.throwIfAborted();
     checkHtl(htl);
-    const local = await this.whileOpen(() => this.verifiedGet(hash));
+    const local = await this.whileOpen(() => this.verifiedGet(hash), signal);
     if (local) return local;
-    let peers = [...new Set(peerIds.map((peer) => peer.trim()).filter(Boolean))];
-    if (peers.length === 0) throw new Error('no TCP/FIPS blob providers are available');
-    const attemptTimeoutMs = Math.max(250, Math.floor(this.timeoutMs / 2));
+    const allPeers = [...new Set(peerIds.map((peer) => peer.trim()).filter(Boolean))];
+    if (allPeers.length === 0) throw new Error('no TCP/FIPS blob providers are available');
     const failures = new Map<string, unknown>();
+    let peers = this.selectPeers(allPeers, failures);
+    const attemptTimeoutMs = Math.max(250, Math.floor(this.timeoutMs / 2));
     for (let sessionAttempt = 0; sessionAttempt < 2; sessionAttempt += 1) {
       const data = await this.whileOpen(() => new Promise<Uint8Array | null>((resolve) => {
         let remaining = peers.length;
@@ -85,17 +91,19 @@ export class TcpBlobTransport {
         };
         for (const peer of peers) {
           this.fetchFromPeer(peer, hash, attemptTimeoutMs, htl).then((reply) => {
+            if (this.corruptPeers.size > 0) this.corruptPeers.delete(peer);
             failures.delete(peer);
             finish(reply);
           }, (error: unknown) => {
+            if (error instanceof PeerBlobHashMismatch) this.recordCorruptPeer(peer);
             failures.set(peer, error);
             finish(null);
           });
         }
-      }));
+      }), signal);
       if (data !== null || failures.size === 0) return data;
-      // Retry interrupted streams once. A bad payload remains an error for this lookup.
-      peers = peers.filter((peer) => failures.has(peer) && !(failures.get(peer) instanceof PeerBlobHashMismatch));
+      // Retry interrupted direct links once; never amplify bad payloads or downstream aggregates.
+      peers = peers.filter((peer) => isRetryablePeerFailure(failures.get(peer)));
       if (!peers.length) break;
     }
     throw new AggregateError(failures.values(), 'TCP/FIPS blob availability is uncertain');
@@ -113,11 +121,46 @@ export class TcpBlobTransport {
     return this.closing;
   }
 
-  private async whileOpen<T>(operation: () => Promise<T>): Promise<T> {
-    const { signal } = this.lifetime;
-    signal.throwIfAborted();
-    const value = await withAbort(operation(), signal);
-    signal.throwIfAborted();
+  private selectPeers(allPeers: string[], failures: Map<string, unknown>): string[] {
+    if (this.corruptPeers.size === 0) return allPeers;
+    const now = Date.now();
+    const fresh: string[] = [];
+    const cooled: string[] = [];
+    for (const peer of allPeers) {
+      const until = this.corruptPeers.get(peer);
+      if (until === undefined) {
+        fresh.push(peer);
+      } else if (until <= now) {
+        this.corruptPeers.delete(peer);
+        fresh.push(peer);
+      } else {
+        cooled.push(peer);
+      }
+    }
+    if (fresh.length === 0) return allPeers;
+    for (const peer of cooled) failures.set(peer, new PeerBlobHashMismatch());
+    return fresh;
+  }
+
+  private recordCorruptPeer(peer: string): void {
+    const now = Date.now();
+    for (const [id, until] of this.corruptPeers) {
+      if (until <= now) this.corruptPeers.delete(id);
+    }
+    this.corruptPeers.delete(peer);
+    if (this.corruptPeers.size >= MAX_COOLED_PEERS) {
+      const oldest = this.corruptPeers.keys().next().value;
+      if (oldest !== undefined) this.corruptPeers.delete(oldest);
+    }
+    this.corruptPeers.set(peer, now + CORRUPT_PEER_COOLDOWN_MS);
+  }
+
+  private async whileOpen<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    this.lifetime.signal.throwIfAborted();
+    signal?.throwIfAborted();
+    const value = await withAbort(operation(), this.lifetime.signal, signal);
+    this.lifetime.signal.throwIfAborted();
+    signal?.throwIfAborted();
     return value;
   }
 
@@ -339,6 +382,12 @@ export function decodeTcpBlobResponseHeader(header: Uint8Array): TcpBlobResponse
   return { found: true, size };
 }
 
+function isRetryablePeerFailure(error: unknown): boolean {
+  return error !== undefined
+    && !(error instanceof PeerBlobHashMismatch)
+    && !(error instanceof AggregateError);
+}
+
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
   if (left.byteLength !== right.byteLength) return false;
   return left.every((byte, index) => byte === right[index]);
@@ -365,24 +414,24 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-
-function withAbort<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+function withAbort<T>(pending: Promise<T>, signal: AbortSignal, secondary?: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const abort = () => {
-      signal.removeEventListener('abort', abort);
-      reject(signal.reason);
+    if (signal.aborted) { reject(signal.reason); return; }
+    if (secondary?.aborted) { reject(secondary.reason); return; }
+    const cleanup = () => {
+      signal.removeEventListener('abort', onPrimary);
+      secondary?.removeEventListener('abort', onSecondary);
     };
-    signal.addEventListener('abort', abort, { once: true });
+    const onPrimary = () => { cleanup(); reject(signal.reason); };
+    const onSecondary = () => { cleanup(); reject(secondary!.reason); };
+    signal.addEventListener('abort', onPrimary, { once: true });
+    secondary?.addEventListener('abort', onSecondary, { once: true });
     pending.then((value) => {
-      signal.removeEventListener('abort', abort);
+      cleanup();
       resolve(value);
     }, (error) => {
-      signal.removeEventListener('abort', abort);
+      cleanup();
       reject(error);
     });
-    if (signal.aborted) {
-      signal.removeEventListener('abort', abort);
-      abort();
-    }
   });
 }

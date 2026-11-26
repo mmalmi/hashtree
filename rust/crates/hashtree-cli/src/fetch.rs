@@ -2,23 +2,34 @@
 //!
 //! Provides shared logic for fetching content from:
 //! 1. Local storage (first)
-//! 2. Blossom HTTP servers
+//! 2. Blossom HTTP servers (using `POST /blob/batch` when supported, with hedged parallel GET fallback)
 
 use anyhow::Result;
-use hashtree_blossom::BlossomClient;
+use futures::stream::{FuturesUnordered, StreamExt};
+use hashtree_blossom::{BlossomClient, BlossomError};
 use hashtree_config::detect_local_daemon_url;
-use hashtree_core::{to_hex, Cid, HashTree, HashTreeConfig, Link};
+use hashtree_core::{
+    decode_tree_node_by_cid, encrypted_size, encrypted_size_chk, to_hex, Cid, EncryptionMode, Link,
+    LinkType,
+};
 use nostr::Keys;
-use std::collections::{HashSet, VecDeque};
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 use tracing::debug;
 
 use crate::config::Config as CliConfig;
 use crate::storage::HashtreeStore;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
-fn child_cid(parent: &Cid, link: &Link) -> Cid {
+const DEFAULT_FETCH_CONCURRENCY: usize = 16;
+const FETCH_BATCH_MAX_HASHES: usize = 64;
+const FETCH_BATCH_MAX_BYTES: u64 = 8 * 1024 * 1024;
+const FETCH_BATCH_SINGLE_ITEM_MAX_BYTES: u64 = 512 * 1024;
+const FETCH_MAX_CONCURRENT_BATCHES: usize = 4;
+const FETCH_WRITE_BATCH_ITEMS: usize = 128;
+const FETCH_WRITE_BATCH_BYTES: usize = 8 * 1024 * 1024;
+
+pub(crate) fn child_cid(parent: &Cid, link: &Link) -> Cid {
     let inherits_parent_key = link
         .name
         .as_deref()
@@ -36,6 +47,123 @@ fn child_cid(parent: &Cid, link: &Link) -> Cid {
             None
         }),
     }
+}
+
+fn is_definite_leaf_len(cid: &Cid, blob_size: Option<u64>, stored_len: u64) -> bool {
+    let Some(plaintext_size) = blob_size else {
+        return false;
+    };
+    let Ok(plaintext_usize) = usize::try_from(plaintext_size) else {
+        return false;
+    };
+    let expected = match cid.key.as_ref() {
+        None => plaintext_size,
+        Some(key) => match key.mode() {
+            EncryptionMode::LegacyChk | EncryptionMode::ChkV1 => {
+                encrypted_size_chk(plaintext_usize) as u64
+            }
+            EncryptionMode::RndV1 => encrypted_size(plaintext_usize) as u64,
+        },
+    };
+    stored_len == expected
+}
+
+#[derive(Clone)]
+struct FetchItem {
+    cid: Cid,
+    blob_size: Option<u64>,
+}
+
+enum FetchOutcome {
+    Single(FetchItem, Result<Vec<u8>, BlossomError>),
+    Batch(
+        Vec<FetchItem>,
+        Result<Option<Vec<([u8; 32], Vec<u8>)>>, BlossomError>,
+    ),
+}
+
+type FetchFuture = std::pin::Pin<Box<dyn std::future::Future<Output = FetchOutcome> + Send>>;
+
+#[derive(Default)]
+struct FetchWriteBuffer {
+    entries: Vec<([u8; 32], Vec<u8>)>,
+    index: HashMap<[u8; 32], usize>,
+    bytes: usize,
+}
+
+impl FetchWriteBuffer {
+    fn get(&self, hash: &[u8; 32]) -> Option<&[u8]> {
+        self.index
+            .get(hash)
+            .map(|&idx| self.entries[idx].1.as_slice())
+    }
+
+    fn insert(&mut self, hash: [u8; 32], data: Vec<u8>) {
+        if self.index.contains_key(&hash) {
+            return;
+        }
+        self.bytes += data.len();
+        self.index.insert(hash, self.entries.len());
+        self.entries.push((hash, data));
+    }
+
+    fn flush(&mut self, store: &HashtreeStore) -> Result<()> {
+        if self.entries.is_empty() {
+            return Ok(());
+        }
+        store.put_cached_blobs(&self.entries)?;
+        self.entries.clear();
+        self.index.clear();
+        self.bytes = 0;
+        Ok(())
+    }
+
+    fn flush_if_needed(&mut self, store: &HashtreeStore) -> Result<()> {
+        if self.entries.len() >= FETCH_WRITE_BATCH_ITEMS || self.bytes >= FETCH_WRITE_BATCH_BYTES {
+            self.flush(store)?;
+        }
+        Ok(())
+    }
+}
+
+fn enqueue_children(
+    parent: &Cid,
+    data: &[u8],
+    blob_size: Option<u64>,
+    visited: &mut HashSet<([u8; 32], Option<u64>)>,
+    pending: &mut VecDeque<FetchItem>,
+) -> Result<()> {
+    if is_definite_leaf_len(parent, blob_size, data.len() as u64) {
+        return Ok(());
+    }
+    if let Some(node) = decode_tree_node_by_cid(parent, data.to_vec())
+        .map_err(|err| anyhow::anyhow!("Failed to decode {}: {err}", to_hex(&parent.hash)))?
+    {
+        for link in node.links {
+            let child = child_cid(parent, &link);
+            let child_blob_size = (link.link_type == LinkType::Blob).then_some(link.size);
+            if visited.insert((child.hash, child_blob_size)) {
+                pending.push_back(FetchItem {
+                    cid: child,
+                    blob_size: child_blob_size,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn spawn_single_fetch(
+    active: &mut FuturesUnordered<FetchFuture>,
+    blossom: &BlossomClient,
+    item: FetchItem,
+) {
+    let blossom = blossom.clone();
+    active.push(Box::pin(async move {
+        let hash_hex = to_hex(&item.cid.hash);
+        let res = blossom.download(&hash_hex).await;
+        FetchOutcome::Single(item, res)
+    }));
 }
 
 #[derive(Debug, Default)]
@@ -90,22 +218,26 @@ pub struct Fetcher {
 }
 
 impl Fetcher {
-    /// Create a new fetcher with the given config
-    /// BlossomClient auto-loads servers from ~/.hashtree/config.toml
+    /// Create a new fetcher with the given config.
+    /// BlossomClient auto-loads servers from ~/.hashtree/config.toml.
     pub fn new(config: FetchConfig) -> Self {
-        // Generate ephemeral keys for downloads (no signing needed)
         let keys = Keys::generate();
         let blossom = BlossomClient::new(keys).with_timeout(config.blossom_timeout);
-        let blossom = with_local_daemon_read(blossom);
-
-        Self { blossom }
+        Self {
+            blossom: with_local_daemon_read(blossom),
+        }
     }
 
-    /// Create a new fetcher with specific keys (for authenticated uploads)
+    /// Create a new fetcher with specific keys (for authenticated uploads).
     pub fn with_keys(config: FetchConfig, keys: Keys) -> Self {
         let blossom = BlossomClient::new(keys).with_timeout(config.blossom_timeout);
-        let blossom = with_local_daemon_read(blossom);
+        Self {
+            blossom: with_local_daemon_read(blossom),
+        }
+    }
 
+    /// Create a fetcher with an explicit BlossomClient.
+    pub fn with_client(blossom: BlossomClient) -> Self {
         Self { blossom }
     }
 
@@ -116,12 +248,7 @@ impl Fetcher {
 
     /// Fetch a single chunk by hash.
     pub async fn fetch_chunk(&self, hash_hex: &str) -> Result<Vec<u8>> {
-        let short_hash = if hash_hex.len() >= 12 {
-            &hash_hex[..12]
-        } else {
-            hash_hex
-        };
-
+        let short_hash = &hash_hex[..12.min(hash_hex.len())];
         debug!("Trying Blossom for {}", short_hash);
         match self.blossom.download(hash_hex).await {
             Ok(data) => {
@@ -139,26 +266,24 @@ impl Fetcher {
         }
     }
 
-    /// Fetch a chunk, checking local storage first
+    /// Fetch a chunk, checking local storage first.
     pub async fn fetch_chunk_with_store(
         &self,
         store: &HashtreeStore,
         hash: &[u8; 32],
     ) -> Result<Vec<u8>> {
-        // Check local storage first
         if let Some(data) = store.get_chunk(hash)? {
             return Ok(data);
         }
 
-        // Fetch remotely and store
         let hash_hex = to_hex(hash);
         let data = self.fetch_chunk(&hash_hex).await?;
         store.put_cached_blob(&data)?;
         Ok(data)
     }
 
-    /// Fetch an entire tree (all chunks recursively) - sequential version
-    /// Returns (chunks_fetched, bytes_fetched)
+    /// Fetch an entire tree (all chunks recursively).
+    /// Returns (chunks_fetched, bytes_fetched).
     pub async fn fetch_tree(
         &self,
         store: &HashtreeStore,
@@ -184,13 +309,17 @@ impl Fetcher {
         root_cid: &Cid,
         progress: Option<&FetchProgress>,
     ) -> Result<(usize, u64)> {
-        self.fetch_cid_tree_parallel_with_progress(store, root_cid, 1, progress)
-            .await
+        self.fetch_cid_tree_parallel_with_progress(
+            store,
+            root_cid,
+            DEFAULT_FETCH_CONCURRENCY,
+            progress,
+        )
+        .await
     }
 
-    /// Fetch an entire tree with parallel downloads
-    /// Uses work-stealing: always keeps `concurrency` requests in flight
-    /// Returns (chunks_fetched, bytes_fetched)
+    /// Fetch an entire tree with parallel downloads.
+    /// Returns (chunks_fetched, bytes_fetched).
     pub async fn fetch_tree_parallel(
         &self,
         store: &HashtreeStore,
@@ -212,7 +341,11 @@ impl Fetcher {
             .await
     }
 
-    /// Fetch an entire tree with parallel downloads, preserving decryption keys, with optional progress updates.
+    /// Fetch an entire tree with parallel & batched downloads, preserving decryption keys.
+    ///
+    /// Batches local cache writes into fewer LMDB transactions, decodes tree
+    /// nodes in memory without rereading leaf blobs, and fails explicitly if
+    /// any required chunk cannot be fetched.
     pub async fn fetch_cid_tree_parallel_with_progress(
         &self,
         store: &HashtreeStore,
@@ -220,125 +353,225 @@ impl Fetcher {
         concurrency: usize,
         progress: Option<&FetchProgress>,
     ) -> Result<(usize, u64)> {
-        use futures::stream::{FuturesUnordered, StreamExt};
+        let concurrency = concurrency.max(1);
+        let mut chunks_fetched = 0usize;
+        let mut bytes_fetched = 0u64;
 
-        let chunks_fetched = Arc::new(AtomicUsize::new(0));
-        let bytes_fetched = Arc::new(AtomicU64::new(0));
-        let mut queued: HashSet<[u8; 32]> = HashSet::new();
-        let mut pending: VecDeque<Cid> = VecDeque::new();
+        let mut visited: HashSet<([u8; 32], Option<u64>)> = HashSet::new();
+        let mut pending: VecDeque<FetchItem> = VecDeque::new();
+        let mut remote_queue: VecDeque<FetchItem> = VecDeque::new();
+        let mut single_only: VecDeque<FetchItem> = VecDeque::new();
+        let mut in_flight: HashSet<[u8; 32]> = HashSet::new();
+        let mut waiting_same_hash: HashMap<[u8; 32], Vec<FetchItem>> = HashMap::new();
+        let mut writes = FetchWriteBuffer::default();
+        let mut failed: Vec<(String, String)> = Vec::new();
 
-        pending.push_back(root_cid.clone());
-        queued.insert(root_cid.hash);
+        let mut batch_supported = concurrency > 1 && !self.blossom.read_servers().is_empty();
+        let mut active_batches = 0usize;
+        let mut active: FuturesUnordered<FetchFuture> = FuturesUnordered::new();
 
-        let mut active = FuturesUnordered::new();
-        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+        visited.insert((root_cid.hash, None));
+        pending.push_back(FetchItem {
+            cid: root_cid.clone(),
+            blob_size: None,
+        });
 
         loop {
-            // Fill up to concurrency limit from pending queue
+            // 1. Resolve locally present or already-buffered items first so
+            //    their children become available for batching right away.
+            while let Some(item) = pending.pop_front() {
+                if let Some(data) = writes.get(&item.cid.hash) {
+                    enqueue_children(&item.cid, data, item.blob_size, &mut visited, &mut pending)?;
+                    continue;
+                }
+                if let Some(local_len) = store.blob_size(&item.cid.hash)? {
+                    if !is_definite_leaf_len(&item.cid, item.blob_size, local_len) {
+                        if let Some(data) = store.get_blob(&item.cid.hash)? {
+                            enqueue_children(
+                                &item.cid,
+                                &data,
+                                item.blob_size,
+                                &mut visited,
+                                &mut pending,
+                            )?;
+                        }
+                    }
+                    continue;
+                }
+                if in_flight.contains(&item.cid.hash) {
+                    waiting_same_hash
+                        .entry(item.cid.hash)
+                        .or_default()
+                        .push(item);
+                    continue;
+                }
+                in_flight.insert(item.cid.hash);
+                remote_queue.push_back(item);
+            }
+
+            // 2. Dispatch missing items as /blob/batch or hedged single GETs.
             while active.len() < concurrency {
-                if let Some(cid) = pending.pop_front() {
-                    if store.blob_exists(&cid.hash).unwrap_or(false) {
-                        if let Some(node) = tree.get_node(&cid).await? {
-                            for link in node.links {
-                                let child = child_cid(&cid, &link);
-                                if queued.insert(child.hash) {
-                                    pending.push_back(child);
-                                }
-                            }
+                if let Some(item) = single_only.pop_front() {
+                    spawn_single_fetch(&mut active, &self.blossom, item);
+                    continue;
+                }
+
+                if batch_supported
+                    && active_batches < FETCH_MAX_CONCURRENT_BATCHES
+                    && remote_queue.len() >= 2
+                {
+                    let mut batch = Vec::new();
+                    let mut est_bytes = 0u64;
+                    while batch.len() < FETCH_BATCH_MAX_HASHES {
+                        let Some(next) = remote_queue.front() else {
+                            break;
+                        };
+                        let item_est = next.blob_size.unwrap_or(64 * 1024);
+                        if item_est > FETCH_BATCH_SINGLE_ITEM_MAX_BYTES
+                            || (!batch.is_empty() && est_bytes + item_est > FETCH_BATCH_MAX_BYTES)
+                        {
+                            break;
                         }
+                        est_bytes += item_est;
+                        batch.push(remote_queue.pop_front().unwrap());
+                    }
+                    if batch.len() >= 2 {
+                        let hashes: Vec<String> =
+                            batch.iter().map(|item| to_hex(&item.cid.hash)).collect();
+                        let blossom = self.blossom.clone();
+                        active_batches += 1;
+                        active.push(Box::pin(async move {
+                            let res = blossom.download_batch(&hashes).await;
+                            FetchOutcome::Batch(batch, res)
+                        }));
                         continue;
+                    } else if let Some(item) = batch.pop() {
+                        remote_queue.push_front(item);
                     }
+                }
 
-                    let hash_hex = to_hex(&cid.hash);
-                    let blossom = self.blossom.clone();
-                    let fut = async move {
-                        let data = blossom.download(&hash_hex).await;
-                        (cid, data)
-                    };
-                    active.push(fut);
-                } else {
+                let Some(item) = remote_queue.pop_front() else {
                     break;
-                }
+                };
+                spawn_single_fetch(&mut active, &self.blossom, item);
             }
 
-            // If nothing active, we're done
-            if active.is_empty() {
+            // 3. Process the next completed network fetch.
+            let Some(outcome) = active.next().await else {
                 break;
-            }
-
-            // Wait for any download to complete
-            if let Some((cid, result)) = active.next().await {
-                match result {
-                    Ok(data) => {
-                        // Store it
-                        store.put_cached_blob(&data)?;
-                        if let Some(progress) = progress {
-                            progress.record_chunk(data.len());
+            };
+            let mut delivered = Vec::new();
+            match outcome {
+                FetchOutcome::Single(item, Ok(data)) => delivered.push((item, data)),
+                FetchOutcome::Single(item, Err(err)) => {
+                    in_flight.remove(&item.cid.hash);
+                    waiting_same_hash.remove(&item.cid.hash);
+                    let hash_hex = to_hex(&item.cid.hash);
+                    debug!("Failed to fetch {}: {}", hash_hex, err);
+                    failed.push((hash_hex, err.to_string()));
+                }
+                FetchOutcome::Batch(items, Ok(Some(returned))) => {
+                    active_batches = active_batches.saturating_sub(1);
+                    let mut returned_map: HashMap<[u8; 32], Vec<u8>> =
+                        returned.into_iter().collect();
+                    for item in items {
+                        if let Some(data) = returned_map.remove(&item.cid.hash) {
+                            delivered.push((item, data));
+                        } else {
+                            // Omitted from batch response (truncated or only on another server).
+                            single_only.push_back(item);
                         }
-                        chunks_fetched.fetch_add(1, Ordering::Relaxed);
-                        bytes_fetched.fetch_add(data.len() as u64, Ordering::Relaxed);
-
-                        if let Some(node) = tree.get_node(&cid).await? {
-                            for link in node.links {
-                                let child = child_cid(&cid, &link);
-                                if queued.insert(child.hash) {
-                                    pending.push_back(child);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        debug!("Failed to fetch {}: {}", to_hex(&cid.hash), e);
-                        // Continue with other chunks - don't fail the whole tree
                     }
                 }
+                FetchOutcome::Batch(items, Ok(None)) => {
+                    active_batches = active_batches.saturating_sub(1);
+                    batch_supported = false;
+                    single_only.extend(items);
+                }
+                FetchOutcome::Batch(items, Err(err)) => {
+                    active_batches = active_batches.saturating_sub(1);
+                    debug!("Blossom batch fetch failed, falling back to single GETs: {err}");
+                    single_only.extend(items);
+                }
             }
+
+            for (item, data) in delivered {
+                in_flight.remove(&item.cid.hash);
+                if let Some(progress) = progress {
+                    progress.record_chunk(data.len());
+                }
+                chunks_fetched += 1;
+                bytes_fetched += data.len() as u64;
+
+                let mut decode_res =
+                    enqueue_children(&item.cid, &data, item.blob_size, &mut visited, &mut pending);
+                if let Some(extras) = waiting_same_hash.remove(&item.cid.hash) {
+                    for extra in extras {
+                        if decode_res.is_ok() {
+                            decode_res = enqueue_children(
+                                &extra.cid,
+                                &data,
+                                extra.blob_size,
+                                &mut visited,
+                                &mut pending,
+                            );
+                        }
+                    }
+                }
+                writes.insert(item.cid.hash, data);
+                if let Err(err) = decode_res {
+                    let _ = writes.flush(store);
+                    return Err(err);
+                }
+            }
+
+            writes.flush_if_needed(store)?;
         }
 
-        Ok((
-            chunks_fetched.load(Ordering::Relaxed),
-            bytes_fetched.load(Ordering::Relaxed),
-        ))
+        writes.flush(store)?;
+
+        if !failed.is_empty() {
+            let (first_hash, first_err) = &failed[0];
+            let short = &first_hash[..12.min(first_hash.len())];
+            anyhow::bail!(
+                "Failed to fetch {} chunk(s) (first: {}: {})",
+                failed.len(),
+                short,
+                first_err
+            );
+        }
+
+        Ok((chunks_fetched, bytes_fetched))
     }
 
-    /// Fetch a file by hash, fetching all chunks if needed
-    /// Returns the complete file content
+    /// Fetch a file by hash, fetching all chunks if needed.
+    /// Returns the complete file content.
     pub async fn fetch_file(
         &self,
         store: &HashtreeStore,
         hash: &[u8; 32],
     ) -> Result<Option<Vec<u8>>> {
-        // First, try to get from local storage
         if let Some(content) = store.get_file(hash)? {
             return Ok(Some(content));
         }
-
-        // Fetch the tree
         self.fetch_tree(store, hash).await?;
-
-        // Now try to read the file
         store.get_file(hash)
     }
 
-    /// Fetch a directory listing, fetching chunks if needed
+    /// Fetch a directory listing, fetching chunks if needed.
     pub async fn fetch_directory(
         &self,
         store: &HashtreeStore,
         hash: &[u8; 32],
     ) -> Result<Option<crate::storage::DirectoryListing>> {
-        // First, try to get from local storage
         if let Ok(Some(listing)) = store.get_directory_listing(hash) {
             return Ok(Some(listing));
         }
-
-        // Fetch the tree
         self.fetch_tree(store, hash).await?;
-
-        // Now try to get the directory listing
         store.get_directory_listing(hash)
     }
 
-    /// Upload data to Blossom servers
+    /// Upload data to Blossom servers.
     pub async fn upload(&self, data: &[u8]) -> Result<String> {
         self.blossom
             .upload(data)
@@ -346,7 +579,7 @@ impl Fetcher {
             .map_err(|e| anyhow::anyhow!("Blossom upload failed: {}", e))
     }
 
-    /// Upload data if it doesn't already exist
+    /// Upload data if it doesn't already exist.
     pub async fn upload_if_missing(&self, data: &[u8]) -> Result<(String, bool)> {
         self.blossom
             .upload_if_missing(data)
@@ -368,4 +601,181 @@ fn with_local_daemon_read(blossom: BlossomClient) -> BlossomClient {
     }
     servers.insert(0, local_url);
     blossom.with_read_servers(servers)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hashtree_core::{DirEntry, HashTree, HashTreeConfig};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn fetch_cid_tree_fails_loudly_on_missing_child_chunk() {
+        let src_dir = tempdir().unwrap();
+        let src = HashtreeStore::with_options(src_dir.path(), None, 32 * 1024 * 1024).unwrap();
+        let tree = HashTree::new(HashTreeConfig::new(src.store_arc()));
+        let (a_cid, a_size) = tree.put(b"present-file").await.unwrap();
+        let (b_cid, b_size) = tree.put(b"missing-file").await.unwrap();
+        let root = tree
+            .put_directory(vec![
+                DirEntry::from_cid("a.txt", &a_cid).with_size(a_size),
+                DirEntry::from_cid("b.txt", &b_cid).with_size(b_size),
+            ])
+            .await
+            .unwrap();
+
+        let blobs = Arc::new(HashMap::from([
+            (
+                to_hex(&root.hash),
+                src.get_blob(&root.hash).unwrap().unwrap(),
+            ),
+            (
+                to_hex(&a_cid.hash),
+                src.get_blob(&a_cid.hash).unwrap().unwrap(),
+            ),
+        ]));
+        let serve_blobs = Arc::clone(&blobs);
+        let app = axum::Router::new().route(
+            "/:name",
+            axum::routing::get(
+                move |axum::extract::Path(name): axum::extract::Path<String>| {
+                    let blobs = Arc::clone(&serve_blobs);
+                    async move {
+                        let key = name.trim_end_matches(".bin");
+                        match blobs.get(key) {
+                            Some(bytes) => (axum::http::StatusCode::OK, bytes.clone()),
+                            None => (axum::http::StatusCode::NOT_FOUND, Vec::new()),
+                        }
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dst_dir = tempdir().unwrap();
+        let dst = HashtreeStore::with_options(dst_dir.path(), None, 32 * 1024 * 1024).unwrap();
+        let client = BlossomClient::new_empty(Keys::generate())
+            .with_read_servers(vec![format!("http://{addr}")]);
+        let fetcher = Fetcher::with_client(client);
+
+        let err = fetcher
+            .fetch_cid_tree(&dst, &root)
+            .await
+            .expect_err("missing child chunk must fail instead of returning Ok");
+        assert!(err.to_string().contains("Failed to fetch 1 chunk(s)"));
+        assert!(
+            dst.blob_exists(&a_cid.hash).unwrap(),
+            "valid fetched chunks should be preserved in cache for retries"
+        );
+
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn fetch_cid_tree_uses_blob_batch_and_recovers_encrypted_directory() {
+        let src_dir = tempdir().unwrap();
+        let src = HashtreeStore::with_options(src_dir.path(), None, 32 * 1024 * 1024).unwrap();
+        let tree = HashTree::new(HashTreeConfig::new(src.store_arc()));
+        let mut entries = Vec::new();
+        let mut blobs: HashMap<[u8; 32], Vec<u8>> = HashMap::new();
+        for i in 0..8u8 {
+            let payload = vec![i.wrapping_mul(17); 2048];
+            let (cid, size) = tree.put(&payload).await.unwrap();
+            blobs.insert(cid.hash, src.get_blob(&cid.hash).unwrap().unwrap());
+            entries.push(DirEntry::from_cid(format!("f{i}.bin"), &cid).with_size(size));
+        }
+        let root = tree.put_directory(entries).await.unwrap();
+        blobs.insert(root.hash, src.get_blob(&root.hash).unwrap().unwrap());
+
+        let blobs = Arc::new(blobs);
+        let batch_hits = Arc::new(AtomicUsize::new(0));
+        let blobs_get = Arc::clone(&blobs);
+        let blobs_batch = Arc::clone(&blobs);
+        let batch_hits_route = Arc::clone(&batch_hits);
+
+        let app = axum::Router::new()
+            .route(
+                "/blob/batch",
+                axum::routing::post(move |axum::Json(req): axum::Json<serde_json::Value>| {
+                    let blobs = Arc::clone(&blobs_batch);
+                    let batch_hits = Arc::clone(&batch_hits_route);
+                    async move {
+                        batch_hits.fetch_add(1, Ordering::SeqCst);
+                        let hashes = req["hashes"].as_array().cloned().unwrap_or_default();
+                        let mut found = Vec::new();
+                        for h in hashes {
+                            if let Some(hex_str) = h.as_str() {
+                                if let Ok(raw) = hashtree_core::from_hex(hex_str) {
+                                    if let Some(data) = blobs.get(&raw) {
+                                        found.push((raw, data.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        let mut body = Vec::new();
+                        body.extend_from_slice(hashtree_blossom::BLOB_BATCH_DOWNLOAD_MAGIC);
+                        body.extend_from_slice(&(found.len() as u32).to_be_bytes());
+                        for (h, d) in found {
+                            body.extend_from_slice(&h);
+                            body.extend_from_slice(&(d.len() as u64).to_be_bytes());
+                            body.extend_from_slice(&d);
+                        }
+                        (axum::http::StatusCode::OK, body)
+                    }
+                }),
+            )
+            .route(
+                "/:name",
+                axum::routing::get(
+                    move |axum::extract::Path(name): axum::extract::Path<String>| {
+                        let blobs = Arc::clone(&blobs_get);
+                        async move {
+                            let key = name.trim_end_matches(".bin");
+                            match hashtree_core::from_hex(key)
+                                .ok()
+                                .and_then(|h| blobs.get(&h))
+                            {
+                                Some(bytes) => (axum::http::StatusCode::OK, bytes.clone()),
+                                None => (axum::http::StatusCode::NOT_FOUND, Vec::new()),
+                            }
+                        }
+                    },
+                ),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dst_dir = tempdir().unwrap();
+        let dst = HashtreeStore::with_options(dst_dir.path(), None, 32 * 1024 * 1024).unwrap();
+        let client = BlossomClient::new_empty(Keys::generate())
+            .with_read_servers(vec![format!("http://{addr}")]);
+        let fetcher = Fetcher::with_client(client);
+
+        let (chunks, _) = fetcher.fetch_cid_tree(&dst, &root).await.expect("fetch ok");
+        assert_eq!(chunks, 9);
+        assert!(
+            batch_hits.load(Ordering::SeqCst) >= 1,
+            "expected /blob/batch usage"
+        );
+
+        let dst_tree = HashTree::new(HashTreeConfig::new(dst.store_arc()));
+        for i in 0..8u8 {
+            let child = dst_tree
+                .resolve_path(&root, &format!("f{i}.bin"))
+                .await
+                .unwrap()
+                .unwrap();
+            let got = dst_tree.get(&child, None).await.unwrap().unwrap();
+            assert_eq!(got, vec![i.wrapping_mul(17); 2048]);
+        }
+
+        server.abort();
+        let _ = server.await;
+    }
 }

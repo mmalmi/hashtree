@@ -15,7 +15,7 @@ Options:
   --homebrew-tap-repo <name>         Existing Homebrew tap name (default: homebrew-<repo>)
   --skip-homebrew-tap                Skip updating the Homebrew tap
   --skip-post-publish-install-checks Skip live install smoke checks after publish
-  --cargo-publish                    Publish Rust crates to crates.io after releasing artifacts
+  --skip-cargo-publish               Skip the default crates.io publish for an artifacts-only release
   --output-dir <dir>                 Release directory to create/use
   --repo-dir <dir>                   Repository root to build/package from
   --target-dir <dir>                 Cargo target dir to read/write
@@ -54,7 +54,7 @@ TREE_NAME="releases/${REPO_NAME}"
 HOMEBREW_TAP_REPO="homebrew-${REPO_NAME}"
 SKIP_HOMEBREW_TAP=0
 SKIP_POST_PUBLISH_INSTALL_CHECKS=0
-CARGO_PUBLISH=0
+CARGO_PUBLISH=1
 RELEASE_STAGE_DIR=""
 
 BUILD_ARGS=()
@@ -100,6 +100,10 @@ while [ $# -gt 0 ]; do
             ;;
         --skip-post-publish-install-checks)
             SKIP_POST_PUBLISH_INSTALL_CHECKS=1
+            shift
+            ;;
+        --skip-cargo-publish)
+            CARGO_PUBLISH=0
             shift
             ;;
         --cargo-publish)
@@ -501,5 +505,5 @@ run_post_publish_install_checks
 haps "${HAPS_ARGS[@]}" --publish
 
 if [ "$CARGO_PUBLISH" -eq 1 ]; then
-    "${SCRIPT_DIR}/publish.sh"
+    "${BUILD_REPO_DIR}/rust/scripts/publish.sh" --version "$VERSION"
 fi

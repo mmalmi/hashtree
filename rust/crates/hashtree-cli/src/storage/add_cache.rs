@@ -380,6 +380,7 @@ impl DirectoryCache {
                     }
                 })
                 .await?;
+            tree.get_store().flush_pending_if_needed().await?;
             ensure!(
                 stamp == Stamp::of(&check.metadata()?)?,
                 "source changed during cached add"

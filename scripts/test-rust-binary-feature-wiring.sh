@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$repo_root"
 
-grep -F 'default = ["lmdb"]' rust/crates/hashtree-cli/Cargo.toml >/dev/null
+grep -F 'default = ["lmdb", "git-remote-wrapper"]' rust/crates/hashtree-cli/Cargo.toml >/dev/null
 grep -F 'fips-webrtc = ["hashtree-fips-transport/webrtc-endpoint"]' rust/crates/hashtree-cli/Cargo.toml >/dev/null
 grep -F 'bash scripts/build_release_artifacts.sh' .github/workflows/release.yml >/dev/null
 grep -F -- '--linux-builder docker' .github/workflows/release.yml >/dev/null

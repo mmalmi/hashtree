@@ -116,9 +116,8 @@ repositories, which the updater clones successfully before its first push.
 
 `rust/scripts/release_to_htree.sh` calls the updater automatically when the release
 directory contains the full macOS/Linux archive set needed by the formula; the tap
-must already be provisioned. Add
-`--cargo-publish` there if you also want the same command to publish the Rust
-crates to crates.io.
+must already be provisioned. The release also publishes the Rust crates to
+crates.io by default. Pass `--skip-cargo-publish` for an artifacts-only run.
 
 ## Local verification
 

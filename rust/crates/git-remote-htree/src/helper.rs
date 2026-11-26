@@ -670,7 +670,8 @@ impl RemoteHelper {
         let local_store: std::sync::Arc<dyn Store + Send + Sync> = self.storage.store().clone();
         let local_store_for_eviction = local_store.clone();
 
-        let blossom_store = BlossomStore::with_servers(nostr::Keys::generate(), servers);
+        let blossom_store =
+            BlossomStore::with_servers(nostr::Keys::generate(), servers).with_max_cache_bytes(0);
 
         let store = cached_store::CachedStore::new(local_store, blossom_store);
         let tree = HashTree::new(HashTreeConfig::new(std::sync::Arc::new(store)));

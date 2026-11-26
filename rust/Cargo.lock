@@ -2980,18 +2980,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
-name = "fips-credit-link"
-version = "0.1.0"
-dependencies = [
- "nvpn-fips-core",
- "peer-payments",
- "rand 0.10.1",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3393,7 +3381,7 @@ dependencies = [
 
 [[package]]
 name = "git-remote-htree"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3713,7 +3701,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-blossom"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3733,7 +3721,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cashu-cli"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3745,7 +3733,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-cli"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3757,13 +3745,13 @@ dependencies = [
  "cashu-service",
  "clap",
  "dirs 5.0.1",
- "fips-credit-link",
  "futures",
  "git-remote-htree",
  "hashtree-bittorrent",
  "hashtree-blossom",
  "hashtree-config",
  "hashtree-core",
+ "hashtree-fips-credit-link",
  "hashtree-fips-transport",
  "hashtree-fs",
  "hashtree-fuse",
@@ -3776,6 +3764,7 @@ dependencies = [
  "hashtree-nostr-pubsub",
  "hashtree-nostr-social-graph-heed",
  "hashtree-paid-retrieval",
+ "hashtree-peer-payments",
  "hashtree-resolver",
  "hashtree-updater",
  "hex",
@@ -3795,7 +3784,6 @@ dependencies = [
  "nostr-social-graph",
  "nvpn-fips-core",
  "page_size",
- "peer-payments",
  "rand 0.8.6",
  "rcgen",
  "reqwest 0.12.28",
@@ -3871,7 +3859,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "aes-gcm 0.11.1",
  "async-trait",
@@ -3893,7 +3881,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded"
-version = "0.4.2"
+version = "0.4.4"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -3909,7 +3897,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-embedded-ffi"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "hashtree-embedded",
 ]
@@ -3928,6 +3916,19 @@ dependencies = [
  "thiserror 1.0.69",
  "tokio",
  "uniffi",
+]
+
+[[package]]
+name = "hashtree-fips-credit-link"
+version = "0.1.0"
+dependencies = [
+ "hashtree-peer-payments",
+ "nvpn-fips-core",
+ "rand 0.10.1",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]
@@ -4120,7 +4121,7 @@ dependencies = [
 
 [[package]]
 name = "hashtree-paid-retrieval"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4128,11 +4129,11 @@ dependencies = [
  "hashtree-core",
  "hashtree-network",
  "hashtree-paid-retrieval",
+ "hashtree-peer-payments",
  "hex",
  "nvpn-fips-core",
  "nvpn-fips-tcp",
  "nvpn-fips-tcp-endpoint",
- "peer-payments",
  "rand 0.8.6",
  "secp256k1 0.29.1",
  "serde",
@@ -4140,6 +4141,23 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "hashtree-peer-payments"
+version = "0.1.0"
+dependencies = [
+ "cashu-credit",
+ "fs2",
+ "lightning-invoice",
+ "nostr-social-graph",
+ "rusqlite",
+ "secp256k1 0.29.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -6357,21 +6375,6 @@ checksum = "f8ed6a7761f76e3b9f92dfb0a60a6a6477c61024b775147ff0973a02653abaf2"
 dependencies = [
  "digest 0.10.7",
  "hmac 0.12.1",
-]
-
-[[package]]
-name = "peer-payments"
-version = "0.1.0"
-dependencies = [
- "cashu-credit",
- "fs2",
- "lightning-invoice",
- "rusqlite",
- "secp256k1 0.29.1",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "thiserror 1.0.69",
 ]
 
 [[package]]

@@ -23,10 +23,14 @@ or `npm ci` commands, because the FIPS packages use release URL dependencies.
 This package keeps FIPS below Hashtree: FIPS discovers peers, signals transports,
 and moves authenticated datagrams between node identities. TCP/FIPS owns
 ordered byte delivery, flow control, and segment retransmission. Hashtree still
-owns hash verification, peer choice, and cache writes. An interrupted stream
-gets one retry. A peer that reports a miss or sends bytes with the wrong hash
-is skipped for the rest of that lookup. A hash mismatch leaves availability
-uncertain unless another peer supplies valid bytes.
+owns hash verification, peer choice, and cache writes. An interrupted direct
+stream gets one retry; downstream aggregate failures are not retried across
+hops. A peer that reports a miss or sends bytes with the wrong hash is skipped
+for the rest of that lookup, and a directly observed corrupt peer is deferred
+for 30 seconds whenever healthy alternatives exist (without faking absence on
+misses). A hash mismatch leaves availability uncertain unless another peer
+supplies valid bytes, and callers may pass an optional `AbortSignal` to cancel
+pending lookups.
 The byte framing is documented in the
 [networking protocol](https://github.com/mmalmi/hashtree/blob/master/docs/NETWORKING.md#blob-protocol-v1).
 

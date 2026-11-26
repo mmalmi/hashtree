@@ -5,11 +5,11 @@ Hashtree daemon and CLI - content-addressed storage with P2P sync.
 ## Installation
 
 ```bash
-# CLI + daemon (default cargo features; FUSE is optional)
+# CLI, daemon and Git remote helper (default features)
 cargo install hashtree-cli
 
 # Add mount support explicitly when you want it
-cargo install hashtree-cli --no-default-features --features lmdb,fuse
+cargo install hashtree-cli --features fuse
 
 # Without default LMDB storage
 cargo install hashtree-cli --no-default-features
@@ -21,12 +21,14 @@ cargo install hashtree-cli --no-default-features --features lmdb
 cargo install hashtree-cashu-cli
 ```
 
+If Cargo reports that the standalone `git-remote-htree` already owns the executable, use `cargo install --force hashtree-cli` to switch to the bundled helper.
+
 For cargo installs, `fuse` is opt-in. Building with `--features lmdb,fuse` needs platform FUSE headers/libs:
 
 - Linux: typically `pkg-config` plus `libfuse3-dev` (or the distro equivalent).
 - macOS: install macFUSE first.
 
-Prebuilt macOS release binaries intentionally omit FUSE mount support so `htree` still runs on machines without macFUSE installed. Build from source with `--no-default-features --features lmdb,fuse` if you need `htree mount` on macOS. Linux release binaries keep FUSE mount support, and Windows builds do not ship it.
+Prebuilt macOS release binaries intentionally omit FUSE mount support so `htree` still runs on machines without macFUSE installed. Build from source with `--features fuse` if you need `htree mount` on macOS. Linux release binaries keep FUSE mount support, and Windows builds do not ship it.
 
 ## Commands
 

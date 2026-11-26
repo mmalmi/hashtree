@@ -23,8 +23,7 @@ impl Store for CachedStore {
 
     async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
         if let Ok(Some(data)) = self.local.get(hash).await {
-            let computed = Sha256::digest(&data);
-            if computed[..] == hash[..] {
+            if Sha256::digest(&data)[..] == hash[..] {
                 return Ok(Some(data));
             }
             debug!(
@@ -33,34 +32,11 @@ impl Store for CachedStore {
             );
         }
 
-        let mut last_result = Ok(None);
-        for attempt in 0..4 {
-            let result = self.blossom.get(hash).await;
-            match result {
-                Ok(Some(data)) => {
-                    let _ = self.local.put(*hash, data.clone()).await;
-                    return Ok(Some(data));
-                }
-                Ok(None) if attempt < 3 => {
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        100 * (attempt + 1) as u64,
-                    ))
-                    .await;
-                    last_result = Ok(None);
-                }
-                Ok(None) => return Ok(None),
-                Err(err) if attempt < 3 => {
-                    last_result = Err(err);
-                    tokio::time::sleep(std::time::Duration::from_millis(
-                        100 * (attempt + 1) as u64,
-                    ))
-                    .await;
-                }
-                Err(err) => return Err(err),
-            }
+        let result = self.blossom.get(hash).await?;
+        if let Some(ref data) = result {
+            let _ = self.local.put(*hash, data.clone()).await;
         }
-
-        last_result
+        Ok(result)
     }
 
     async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {

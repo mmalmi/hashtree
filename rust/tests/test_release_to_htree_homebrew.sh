@@ -138,6 +138,8 @@ set -euo pipefail
 echo "cargo_publish:$*" >>"${TEST_LOG_DIR}/calls.log"
 EOF
 chmod +x "${REPO_ROOT}/rust/scripts/publish.sh"
+mkdir -p "${SOURCE_REPO}/rust/scripts"
+cp "${REPO_ROOT}/rust/scripts/publish.sh" "${SOURCE_REPO}/rust/scripts/publish.sh"
 
 cat >"${REPO_ROOT}/rust/scripts/test_install_matrix.sh" <<'EOF'
 #!/bin/bash
@@ -250,6 +252,7 @@ cleanup() {
     rm -rf "$TMPDIR"
 }
 while [ ! -s "${PORT_FILE}" ]; do
+    kill -0 "$SERVER_PID" 2>/dev/null || { cat "$SERVER_LOG" >&2; exit 1; }
     sleep 0.1
 done
 PORT="$(cat "${PORT_FILE}")"
@@ -295,6 +298,7 @@ with socketserver.TCPServer(("127.0.0.1", 0), handler) as httpd:
 PY
 SERVER_PID=$!
 while [ ! -s "${PORT_FILE}" ]; do
+    kill -0 "$SERVER_PID" 2>/dev/null || { cat "$SERVER_LOG" >&2; exit 1; }
     sleep 0.1
 done
 PORT="$(cat "${PORT_FILE}")"
@@ -312,19 +316,7 @@ kill "${SERVER_PID}" 2>/dev/null || true
 wait "${SERVER_PID}" 2>/dev/null || true
 SERVER_PID=""
 
-if grep -F "cargo_publish:" "${TMPDIR}/logs/calls.log" >/dev/null; then
-    echo "release_to_htree should not cargo publish unless requested" >&2
-    exit 1
-fi
-
-rm -f "${TMPDIR}/logs/calls.log"
-PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" \
-    "${REPO_ROOT}/rust/scripts/release_to_htree.sh" \
-    --version v0.2.3 \
-    --output-dir "${TMPDIR}/out" \
-    --cargo-publish >/dev/null
-
-grep -F "cargo_publish:" "${TMPDIR}/logs/calls.log" >/dev/null
+grep -Fx "cargo_publish:--version v0.2.3" "${TMPDIR}/logs/calls.log" >/dev/null
 publish_release_line="$(grep -n '^publish_release:' "${TMPDIR}/logs/calls.log" | cut -d: -f1)"
 publish_tap_line="$(grep -n '^publish_tap:' "${TMPDIR}/logs/calls.log" | cut -d: -f1)"
 install_matrix_line="$(grep -n '^install_matrix:' "${TMPDIR}/logs/calls.log" | cut -d: -f1)"
@@ -346,7 +338,12 @@ STDERR_FILE="${TMPDIR}/release_to_htree_homebrew.err"
 PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" FAIL_HOME_TAP=1 \
     "${REPO_ROOT}/rust/scripts/release_to_htree.sh" \
     --version v0.2.3 \
-    --output-dir "${TMPDIR}/out" >"${STDOUT_FILE}" 2>"${STDERR_FILE}"
+    --skip-cargo-publish --output-dir "${TMPDIR}/out" >"${STDOUT_FILE}" 2>"${STDERR_FILE}"
+
+if grep -F "cargo_publish:" "${TMPDIR}/logs/calls.log" >/dev/null; then
+    echo "Artifacts-only release published to Cargo" >&2
+    exit 1
+fi
 
 grep -F "Warning: Homebrew tap update failed; release artifacts are still published." "${STDERR_FILE}" >/dev/null
 

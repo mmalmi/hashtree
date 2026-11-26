@@ -309,3 +309,69 @@ async fn test_get_stream_rejects_malformed_file_links() {
         assert!(stream.next().await.is_none());
     }
 }
+
+#[tokio::test]
+async fn test_get_stream_prefetches_bounded_chunks_in_order() {
+    use async_trait::async_trait;
+    use hashtree_core::{Hash, Store, StoreError};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    struct DelayedStore {
+        inner: MemoryStore,
+        delay: Duration,
+        in_flight: AtomicUsize,
+        peak_in_flight: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl Store for DelayedStore {
+        async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
+            self.inner.put(hash, data).await
+        }
+        async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
+            let active = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak_in_flight.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(self.delay).await;
+            let res = self.inner.get(hash).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            res
+        }
+        async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
+            self.inner.has(hash).await
+        }
+        async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
+            self.inner.delete(hash).await
+        }
+    }
+
+    let store = Arc::new(DelayedStore {
+        inner: MemoryStore::new(),
+        delay: Duration::from_millis(25),
+        in_flight: AtomicUsize::new(0),
+        peak_in_flight: AtomicUsize::new(0),
+    });
+    let tree = HashTree::new(HashTreeConfig::new(Arc::clone(&store)).with_chunk_size(1024));
+    // 16 chunks of 1 KiB -> sequential would take >= 425ms, 8-wide prefetch takes ~75-120ms.
+    let data: Vec<u8> = (0..16 * 1024).map(|i| ((i * 31) % 251) as u8).collect();
+    let (cid, _) = tree.put(&data).await.unwrap();
+
+    let start = Instant::now();
+    let mut stream = tree.get_stream(&cid);
+    let mut received = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        received.extend(chunk.unwrap());
+    }
+    let elapsed = start.elapsed();
+
+    assert_eq!(received, data);
+    let peak = store.peak_in_flight.load(Ordering::SeqCst);
+    assert!(
+        (2..=8).contains(&peak),
+        "expected bounded concurrent prefetch (2..=8), saw peak={peak}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(280),
+        "expected read-ahead speedup over sequential 425ms, took {elapsed:?}"
+    );
+}

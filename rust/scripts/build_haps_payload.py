@@ -116,7 +116,7 @@ def build(root, package_target):
         prepare_native(root, work, build_target)
     if expected_os == "Windows":
         run(["cargo", "build", "--release", "--locked", "--target", build_target,
-             "--target-dir", str(binaries), "-p", "git-remote-htree",
+             "--target-dir", str(binaries),
              "-p", "hashtree-cashu-cli", "-p", "hashtree-cli",
              "--features", "hashtree-cli/fips-webrtc"])
         run(["pwsh", "-NoProfile", "-File", "scripts/package_release_windows.ps1",

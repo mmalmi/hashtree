@@ -143,7 +143,6 @@ if [ -f /work/rust/Cargo.lock ]; then
 fi
 cargo build --release --target ${TARGET} --target-dir /target-dir \\
     --jobs "\${CARGO_BUILD_JOBS:-4}" \\
-    -p git-remote-htree \\
     -p hashtree-cashu-cli \\
     -p hashtree-cli \\
     --features hashtree-cli/fips-webrtc \\

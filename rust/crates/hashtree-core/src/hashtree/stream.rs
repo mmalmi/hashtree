@@ -1,18 +1,27 @@
+use std::collections::VecDeque;
+use std::future::Future;
 use std::pin::Pin;
 
-use futures::stream::{self, Stream};
+use futures::stream::{self, FuturesOrdered, Stream, StreamExt};
 
 use crate::codec::{decode_tree_node, is_tree_node};
 use crate::store::Store;
-use crate::types::{Cid, Hash, Link};
+use crate::types::{Cid, Hash, Link, LinkType};
 
 use super::{HashTree, HashTreeError};
 
+/// Bounded ordered read-ahead for streamed chunked files.
+const STREAM_READ_AHEAD_CHUNKS: usize = 8;
+const STREAM_READ_AHEAD_BYTES: u64 = 8 * 1024 * 1024;
+
+type ReadLinkFuture<'a> =
+    Pin<Box<dyn Future<Output = (Link, Result<Vec<u8>, HashTreeError>)> + Send + 'a>>;
+
 impl<S: Store> HashTree<S> {
-    /// Read content as a stream of chunks by Cid (handles decryption automatically)
+    /// Read content as a stream of chunks by Cid (handles decryption automatically).
     ///
-    /// Returns an async stream that yields chunks as they are read.
-    /// Useful for large files or when you want to process data incrementally.
+    /// Prefetches bounded upcoming leaf chunks while yielding bytes strictly in
+    /// file order and canceling pending work on error or stream drop.
     pub fn get_stream(
         &self,
         cid: &Cid,
@@ -32,11 +41,9 @@ impl<S: Store> HashTree<S> {
                         };
 
                         if !is_tree_node(&decrypted) {
-                            // Single blob - yield decrypted data
                             return Some((Ok(decrypted), ReadStreamState::Done));
                         }
 
-                        // Tree node - parse and traverse
                         let node = match decode_tree_node(&decrypted) {
                             Ok(n) => n,
                             Err(e) => {
@@ -44,43 +51,30 @@ impl<S: Store> HashTree<S> {
                             }
                         };
 
-                        let mut stack = node.links.into_iter().rev().collect();
-
-                        tree.process_stream_stack(&mut stack).await
+                        let mut reader = OrderedStreamReader {
+                            tree,
+                            stack: node.links.into_iter().rev().collect(),
+                            in_flight: FuturesOrdered::new(),
+                            in_flight_links: VecDeque::new(),
+                            in_flight_bytes: 0,
+                        };
+                        match reader.next_chunk().await {
+                            Some(Ok(chunk)) => {
+                                Some((Ok(chunk), ReadStreamState::Processing(reader)))
+                            }
+                            Some(Err(e)) => Some((Err(e), ReadStreamState::Done)),
+                            None => None,
+                        }
                     }
-                    ReadStreamState::Processing { mut stack, tree } => {
-                        tree.process_stream_stack(&mut stack).await
-                    }
+                    ReadStreamState::Processing(mut reader) => match reader.next_chunk().await {
+                        Some(Ok(chunk)) => Some((Ok(chunk), ReadStreamState::Processing(reader))),
+                        Some(Err(e)) => Some((Err(e), ReadStreamState::Done)),
+                        None => None,
+                    },
                     ReadStreamState::Done => None,
                 }
             },
         ))
-    }
-
-    async fn process_stream_stack<'a>(
-        &'a self,
-        stack: &mut Vec<Link>,
-    ) -> Option<(Result<Vec<u8>, HashTreeError>, ReadStreamState<'a, S>)> {
-        while let Some(item) = stack.pop() {
-            let decrypted = match self.read_link_bytes(&item).await {
-                Ok(bytes) => bytes,
-                Err(e) => return Some((Err(e), ReadStreamState::Done)),
-            };
-            match Self::decode_linked_file_node(&item, &decrypted) {
-                Ok(Some(node)) => stack.extend(node.links.into_iter().rev()),
-                Ok(None) => {
-                    return Some((
-                        Ok(decrypted),
-                        ReadStreamState::Processing {
-                            stack: std::mem::take(stack),
-                            tree: self,
-                        },
-                    ))
-                }
-                Err(e) => return Some((Err(e), ReadStreamState::Done)),
-            }
-        }
-        None
     }
 
     /// Read a file as stream of chunks
@@ -93,16 +87,72 @@ impl<S: Store> HashTree<S> {
     }
 }
 
-// Internal state types for streaming
+struct OrderedStreamReader<'a, S: Store> {
+    tree: &'a HashTree<S>,
+    stack: Vec<Link>,
+    in_flight: FuturesOrdered<ReadLinkFuture<'a>>,
+    in_flight_links: VecDeque<Link>,
+    in_flight_bytes: u64,
+}
+
+impl<'a, S: Store> OrderedStreamReader<'a, S> {
+    fn fill_prefetch(&mut self) {
+        while self.in_flight.len() < STREAM_READ_AHEAD_CHUNKS {
+            let Some(next) = self.stack.last() else {
+                break;
+            };
+            let allow = self.in_flight.is_empty()
+                || (next.link_type == LinkType::Blob
+                    && self.in_flight_bytes.saturating_add(next.size) <= STREAM_READ_AHEAD_BYTES);
+            if !allow {
+                break;
+            }
+            let link = self.stack.pop().expect("checked non-empty stack");
+            self.in_flight_bytes = self.in_flight_bytes.saturating_add(link.size);
+            self.in_flight_links.push_back(link.clone());
+            let tree = self.tree;
+            self.in_flight.push_back(Box::pin(async move {
+                let res = tree.read_link_bytes(&link).await;
+                (link, res)
+            }));
+        }
+    }
+
+    async fn next_chunk(&mut self) -> Option<Result<Vec<u8>, HashTreeError>> {
+        loop {
+            self.fill_prefetch();
+            let (link, result) = self.in_flight.next().await?;
+            let _ = self.in_flight_links.pop_front();
+            self.in_flight_bytes = self.in_flight_bytes.saturating_sub(link.size);
+
+            let decrypted = match result {
+                Ok(bytes) => bytes,
+                Err(e) => return Some(Err(e)),
+            };
+            match HashTree::<S>::decode_linked_file_node(&link, &decrypted) {
+                Ok(Some(node)) => {
+                    // Preserve exact file order if a legacy Blob link expanded into a subtree.
+                    if !self.in_flight_links.is_empty() {
+                        self.in_flight = FuturesOrdered::new();
+                        self.in_flight_bytes = 0;
+                        while let Some(sibling) = self.in_flight_links.pop_back() {
+                            self.stack.push(sibling);
+                        }
+                    }
+                    self.stack.extend(node.links.into_iter().rev());
+                }
+                Ok(None) => {
+                    self.fill_prefetch();
+                    return Some(Ok(decrypted));
+                }
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+}
 
 enum ReadStreamState<'a, S: Store> {
-    Init {
-        cid: Cid,
-        tree: &'a HashTree<S>,
-    },
-    Processing {
-        stack: Vec<Link>,
-        tree: &'a HashTree<S>,
-    },
+    Init { cid: Cid, tree: &'a HashTree<S> },
+    Processing(OrderedStreamReader<'a, S>),
     Done,
 }

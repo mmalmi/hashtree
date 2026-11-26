@@ -12,7 +12,7 @@ Blossom-compatible storage with chunking and directory structure. Merkle roots c
 
 Download the archive for your platform from the [release assets](https://github.com/mmalmi/hashtree/releases), extract it, and run `./install.sh`. Htree-published releases may also publish a top-level `install.sh` asset that downloads the matching platform archive from the same release root and delegates to the packaged installer.
 
-The installer places `htree`, `htree-cashu`, and `git-remote-htree` into `~/.local/bin` by default. Prebuilt release binaries omit optional FUSE mount support. Build from source with `cargo install hashtree-cli --no-default-features --features lmdb,fuse` if you need `htree mount`. For a system-wide install, pass a target directory, for example `./install.sh /usr/local/bin`.
+The installer places `htree`, `htree-cashu`, and `git-remote-htree` into `~/.local/bin` by default. Prebuilt release binaries omit optional FUSE mount support. Build from source with `cargo install hashtree-cli --features fuse` if you need `htree mount`. For a system-wide install, pass a target directory, for example `./install.sh /usr/local/bin`.
 
 Windows note: the shell bootstrap is not supported there. Download the latest `hashtree-x86_64-pc-windows-msvc.zip` release asset, extract it, and add `htree.exe`, `htree-cashu.exe`, and `git-remote-htree.exe` to your PATH. The Windows release zip does not include FUSE mount support.
 
@@ -29,14 +29,14 @@ source "$HOME/.cargo/env"
 # Git helper only (enables git clone/pull/push for htree:// URLs)
 cargo install git-remote-htree
 
-# CLI + daemon (cargo defaults keep FUSE optional)
+# CLI, daemon and Git remote helper
 cargo install hashtree-cli
 
 # CLI + daemon + git helper + Cashu helper
-cargo install hashtree-cli git-remote-htree hashtree-cashu-cli
+cargo install hashtree-cli hashtree-cashu-cli
 
 # Add FUSE mount support explicitly when you want it
-cargo install hashtree-cli --no-default-features --features lmdb,fuse
+cargo install hashtree-cli --features fuse
 ```
 
 For cargo installs, `fuse` is opt-in. That keeps `cargo install hashtree-cli` working on machines that do not have platform FUSE headers/libs available.
@@ -52,11 +52,10 @@ Run these commands from the repository root:
 
 ```bash
 cargo install --path rust/crates/hashtree-cli
-cargo install --path rust/crates/git-remote-htree
 cargo install --path rust/crates/hashtree-cashu-cli
 
 # Local build with FUSE mount support
-cargo install --path rust/crates/hashtree-cli --no-default-features --features lmdb,fuse
+cargo install --path rust/crates/hashtree-cli --features fuse
 ```
 
 ### Homebrew
@@ -204,7 +203,6 @@ Push/pull git repos via hashtree:
 # Install (local path)
 cargo install --path crates/hashtree-cli
 cargo install --path crates/hashtree-cashu-cli
-cargo install --path crates/git-remote-htree
 
 # Configure signing keys in ~/.hashtree/keys
 # Format: <nsec or secret hex> [petname]
@@ -416,10 +414,12 @@ Skip that step explicitly with:
 ./publish_release.sh --version v<version> --skip-homebrew-tap
 ```
 
-If you also want the same command to publish the crates.io release, opt into the irreversible step explicitly:
+The release publishes Cargo packages in dependency order. Publishing a CLI release on GitHub also runs the Cargo publisher for that tag and tests a fresh install. The GitHub `crates-io` environment uses a `CARGO_REGISTRY_TOKEN` secret with publish access to the workspace crates.
+
+For an artifacts-only run of the local publisher, skip crates.io and the GitHub release event:
 
 ```bash
-./publish_release.sh --version v<version> --cargo-publish
+./publish_release.sh --version v<version> --skip-cargo-publish --skip-github
 ```
 
 ## Development

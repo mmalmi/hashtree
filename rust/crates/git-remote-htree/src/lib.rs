@@ -171,7 +171,7 @@ fn run() -> Result<()> {
         };
 
         let local_url = format!("htree://{}/{}#k={}", identifier, repo_name, secret_hex);
-        let share_url = format!("htree://{}/{}#k={}", npub, repo_name, secret_hex);
+        let share_url = keyed_clone_url(&format!("htree://{npub}/{repo_name}"), key);
 
         eprintln!();
         eprintln!("=== Link-Visible Repository Setup ===");
@@ -347,7 +347,20 @@ fn parse_htree_url(url: &str) -> Result<ParsedUrl> {
         .strip_prefix("htree://")
         .context("URL must start with htree://")?;
 
-    // Take the link secret (#k=, or a local ?k=) and the visibility fragment
+    // Git chooses its checkout directory before invoking this helper. Share
+    // links repeat the repository basename inside the fragment for that step.
+    let url = match url.split_once("#k=") {
+        Some((path, fragment)) if fragment.contains('/') => {
+            let (key_url, basename) = url.rsplit_once('/').unwrap();
+            let path = path.split('?').next().unwrap().trim_end_matches('/');
+            anyhow::ensure!(
+                !basename.is_empty() && path.rsplit('/').next() == Some(basename),
+                "Clone directory suffix must match the repository name"
+            );
+            key_url
+        }
+        _ => url,
+    };
     let parsed = hashtree_core::LinkSecretRef::parse(url)?;
     let (url_path, secret_key) = (parsed.reference, parsed.link_key);
     let (is_private, auto_generate_secret) = match parsed.fragment {
@@ -389,6 +402,11 @@ fn parse_htree_url(url: &str) -> Result<ParsedUrl> {
         is_private,
         auto_generate_secret,
     })
+}
+
+fn keyed_clone_url(base: &str, key: hashtree_core::LinkKeyBytes) -> String {
+    let name = base.trim_end_matches('/').rsplit('/').next().unwrap();
+    format!("{base}#k={}/{name}", hex::encode(key))
 }
 
 /// Generate a new random secret key for private repos
@@ -467,6 +485,20 @@ mod tests {
         assert!(parsed.secret_key.is_some());
         let key = parsed.secret_key.unwrap();
         assert_eq!(hex::encode(key), secret_hex);
+    }
+
+    #[test]
+    fn clone_url_keeps_the_directory_name_outside_the_key() {
+        for length in [32, 33] {
+            let key = "ab".repeat(length);
+            let base = "htree://self/group/project";
+            let url = format!("{base}#k={key}/project");
+            let parsed = parse_htree_url(&url).unwrap();
+            assert_eq!(parsed.repo_name, "group/project");
+            assert_eq!(hex::encode(parsed.secret_key.unwrap()), key);
+            assert!(parse_htree_url(&format!("{base}#k={key}/other")).is_err());
+            assert!(parse_htree_url(&format!("{base}#k=bad/project")).is_err());
+        }
     }
 
     #[test]

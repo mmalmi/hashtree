@@ -182,6 +182,7 @@ PATH="${TMPDIR}/bin:$PATH" TEST_LOG_DIR="${TMPDIR}/logs" \
     --version v0.2.3 \
     --output-dir "${TMPDIR}/out" \
     --release-stage-dir "${TMPDIR}/release-stage" \
+    --skip-cargo-publish \
     --skip-homebrew-tap \
     --skip-post-publish-install-checks >"${STDOUT_FILE}" 2>"${STDERR_FILE}"
 

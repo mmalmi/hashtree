@@ -108,6 +108,33 @@ describe('TCP/FIPS blob provider result semantics', () => {
     });
   });
 
+  it('does not retry downstream aggregate failures across hops', async () => {
+    await withTransport(async (transport, fetch) => {
+      const downstream = new AggregateError([new PeerBlobHashMismatch()], 'downstream uncertain');
+      fetch.mockRejectedValueOnce(downstream).mockRejectedValueOnce(new Error('disconnected')).mockResolvedValue(null);
+      await expect(transport.get(hash(), ['relay', 'direct'])).rejects.toMatchObject({ errors: [downstream] });
+      expect(fetch.mock.calls.map(([peer]) => peer)).toEqual(['relay', 'direct', 'direct']);
+    });
+  });
+
+  it('defers directly corrupt peers while alternatives exist without faking absence', async () => {
+    await withTransport(async (transport, fetch) => {
+      const expected = new TextEncoder().encode('verified from healthy peer');
+      fetch
+        .mockRejectedValueOnce(new PeerBlobHashMismatch())
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(expected)
+        .mockResolvedValueOnce(null);
+
+      await expect(transport.get(hash(), ['bad', 'good'])).rejects.toThrow('TCP/FIPS blob availability is uncertain');
+      await expect(transport.get(hash(), ['bad', 'good'])).rejects.toThrow('TCP/FIPS blob availability is uncertain');
+      await expect(transport.get(hash(), ['bad', 'good'])).resolves.toEqual(expected);
+      await expect(transport.get(hash(), ['bad'])).resolves.toBeNull();
+      expect(fetch.mock.calls.map(([peer]) => peer)).toEqual(['bad', 'good', 'good', 'good', 'bad']);
+    });
+  });
+
   it('returns a valid fallback result after another provider fails', async () => {
     await withTransport(async (transport, fetch) => {
       const expected = new TextEncoder().encode('fallback data');

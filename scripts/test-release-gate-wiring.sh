@@ -190,7 +190,7 @@ NODE
 
 # Windows packaging must build every binary before copying it into the zip.
 grep -F 'name: Build release binaries (Windows)' .github/workflows/release.yml >/dev/null
-grep -F -- '-p git-remote-htree' .github/workflows/release.yml >/dev/null
+reject grep -F -- '-p git-remote-htree `' .github/workflows/release.yml
 grep -F -- '-p hashtree-cashu-cli' .github/workflows/release.yml >/dev/null
 grep -F -- '-p hashtree-cli' .github/workflows/release.yml >/dev/null
 grep -F -- '--features hashtree-cli/fips-webrtc' .github/workflows/release.yml >/dev/null

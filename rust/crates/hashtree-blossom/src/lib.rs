@@ -22,8 +22,13 @@ pub const BATCH_UPLOAD_MAX_BLOBS: usize = 1024;
 pub const BATCH_UPLOAD_MAX_BYTES: usize = 64 * 1024 * 1024;
 pub const BATCH_UPLOAD_BINARY_CONTENT_TYPE: &str = "application/vnd.hashtree.blossom.batch.v1";
 pub const BATCH_UPLOAD_HASH_LIST_AUTH_TAG: &str = "x-batch";
+pub const BLOB_BATCH_DOWNLOAD_MAGIC: &[u8; 8] = b"HTBDV1\0\0";
+pub const BLOB_BATCH_DOWNLOAD_CONTENT_TYPE: &str =
+    "application/vnd.hashtree.blob-batch.v1+octet-stream";
 const BINARY_BATCH_UPLOAD_MAGIC: &[u8; 8] = b"HTBBV1\0\0";
 const BINARY_BATCH_UPLOAD_MAX_CONTENT_TYPE_BYTES: usize = 1024;
+const DOWNLOAD_HEDGE_DELAY: Duration = Duration::from_millis(150);
+const DOWNLOAD_MAX_ATTEMPTS: usize = 3;
 
 #[derive(Error, Debug)]
 pub enum BlossomError {
@@ -1099,20 +1104,247 @@ impl BlossomClient {
         Ok((hash, succeeded))
     }
 
-    /// Download data from Blossom servers
-    /// Verifies the hash matches before returning
+    /// Download data from Blossom servers with multi-server hedging and transient retries.
+    /// Verifies the SHA-256 hash matches before returning.
     pub async fn download(&self, hash: &str) -> Result<Vec<u8>, BlossomError> {
+        match self.try_download_result(hash).await? {
+            Some(bytes) => Ok(bytes),
+            None => Err(BlossomError::DownloadFailed(
+                "not found on any read server".to_string(),
+            )),
+        }
+    }
+
+    /// Download data while distinguishing explicit misses (`Ok(None)`) from
+    /// transport, timeout, server, or integrity failures (`Err`).
+    ///
+    /// Probes the primary read server immediately and hedges to additional
+    /// configured read servers if earlier probes stay pending; the first
+    /// hash-verified response wins.
+    pub async fn try_download_result(&self, hash: &str) -> Result<Option<Vec<u8>>, BlossomError> {
         if self.read_servers.is_empty() {
             return Err(BlossomError::NoServers);
         }
 
+        match self
+            .hedge_read_servers(|server| async move {
+                self.download_from_server_with_retry(&server, hash).await
+            })
+            .await
+        {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(misses) => match misses.into_iter().flatten().last() {
+                Some(err) => Err(BlossomError::DownloadFailed(err)),
+                None => Ok(None),
+            },
+        }
+    }
+
+    /// Download if available, returns None if not found or unreachable.
+    pub async fn try_download(&self, hash: &str) -> Option<Vec<u8>> {
+        self.try_download_result(hash).await.ok().flatten()
+    }
+
+    /// Fetch multiple blobs from one server via `POST /blob/batch`.
+    /// Returns `Ok(None)` when the server does not support the batch endpoint.
+    pub async fn download_batch_from_server(
+        &self,
+        server: &str,
+        hashes: &[String],
+    ) -> Result<Option<Vec<([u8; 32], Vec<u8>)>>, BlossomError> {
+        if hashes.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let mut requested = HashSet::with_capacity(hashes.len());
+        for hash_hex in hashes {
+            let bytes = hex::decode(hash_hex).map_err(|_| {
+                BlossomError::DownloadFailed(format!("invalid batch hash: {hash_hex}"))
+            })?;
+            let hash: [u8; 32] = bytes.try_into().map_err(|_| {
+                BlossomError::DownloadFailed(format!("invalid batch hash: {hash_hex}"))
+            })?;
+            requested.insert(hash);
+        }
+
+        let url = format!("{}/blob/batch", server.trim_end_matches('/'));
+        let body = serde_json::to_vec(&UploadCheckRequest { hashes })
+            .map_err(|err| BlossomError::DownloadFailed(err.to_string()))?;
+
+        let mut last_error = String::new();
+        for attempt in 0..2 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            }
+            let resp = match self
+                .http
+                .post(&url)
+                .header(CONTENT_TYPE, "application/json")
+                .header("Accept", BLOB_BATCH_DOWNLOAD_CONTENT_TYPE)
+                .body(body.clone())
+                .send()
+                .await
+            {
+                Ok(resp) => resp,
+                Err(err) => {
+                    last_error = format!("{server}: {err}");
+                    if Self::is_retryable_reqwest_error(&err) {
+                        continue;
+                    }
+                    return Err(BlossomError::DownloadFailed(last_error));
+                }
+            };
+
+            let status = resp.status();
+            if status == StatusCode::NOT_FOUND
+                || status == StatusCode::METHOD_NOT_ALLOWED
+                || status == StatusCode::NOT_IMPLEMENTED
+            {
+                return Ok(None);
+            }
+            if !status.is_success() {
+                last_error = format!("{server} returned {status}");
+                if Self::is_retryable_status(status) {
+                    continue;
+                }
+                return Err(BlossomError::DownloadFailed(last_error));
+            }
+
+            let raw = match resp.bytes().await {
+                Ok(raw) => raw,
+                Err(err) => {
+                    last_error = format!("{server}: {err}");
+                    continue;
+                }
+            };
+            let decoded = decode_binary_batch_download(&raw)?;
+            let mut verified = Vec::with_capacity(decoded.len());
+            let mut seen = HashSet::with_capacity(decoded.len());
+            for (hash, data) in decoded {
+                if !requested.contains(&hash) || !seen.insert(hash) {
+                    continue;
+                }
+                let actual = Sha256::digest(&data);
+                if actual.as_slice() != hash.as_slice() {
+                    return Err(BlossomError::HashMismatch {
+                        expected: hex::encode(hash),
+                        actual: hex::encode(actual),
+                    });
+                }
+                verified.push((hash, data));
+            }
+            return Ok(Some(verified));
+        }
+
+        Err(BlossomError::DownloadFailed(last_error))
+    }
+
+    /// Fetch multiple blobs across configured read servers via `POST /blob/batch`,
+    /// hedging to secondary read servers if earlier servers stall.
+    /// Returns `Ok(None)` if no read server supports the batch endpoint.
+    pub async fn download_batch(
+        &self,
+        hashes: &[String],
+    ) -> Result<Option<Vec<([u8; 32], Vec<u8>)>>, BlossomError> {
+        if self.read_servers.is_empty() {
+            return Err(BlossomError::NoServers);
+        }
+        if hashes.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        match self
+            .hedge_read_servers(|server| async move {
+                match self.download_batch_from_server(&server, hashes).await {
+                    Ok(Some(items)) if !items.is_empty() => HedgeOutcome::Win(items),
+                    Ok(Some(_)) => HedgeOutcome::Continue(Ok(true)),
+                    Ok(None) => HedgeOutcome::Continue(Ok(false)),
+                    Err(err) => HedgeOutcome::Continue(Err(err)),
+                }
+            })
+            .await
+        {
+            Ok(items) => Ok(Some(items)),
+            Err(results) => {
+                let mut saw_supported_empty = false;
+                let mut last_error = None;
+                for result in results {
+                    match result {
+                        Ok(true) => saw_supported_empty = true,
+                        Ok(false) => {}
+                        Err(err) => last_error = Some(err),
+                    }
+                }
+                if saw_supported_empty {
+                    Ok(Some(Vec::new()))
+                } else if let Some(err) = last_error {
+                    Err(err)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    async fn hedge_read_servers<T, M, F, Fut>(&self, probe: F) -> Result<T, Vec<M>>
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = HedgeOutcome<T, M>>,
+    {
+        use futures::stream::{FuturesUnordered, StreamExt};
+
+        let mut in_flight = FuturesUnordered::new();
+        let mut next = 0usize;
+        let mut misses = Vec::new();
+
+        while !in_flight.is_empty() || next < self.read_servers.len() {
+            if in_flight.is_empty() {
+                in_flight.push(probe(self.read_servers[next].clone()));
+                next += 1;
+                continue;
+            }
+            let outcome = if next < self.read_servers.len() {
+                tokio::select! {
+                    outcome = in_flight.next() => outcome,
+                    _ = tokio::time::sleep(DOWNLOAD_HEDGE_DELAY) => {
+                        in_flight.push(probe(self.read_servers[next].clone()));
+                        next += 1;
+                        continue;
+                    }
+                }
+            } else {
+                in_flight.next().await
+            };
+            match outcome {
+                Some(HedgeOutcome::Win(value)) => return Ok(value),
+                Some(HedgeOutcome::Continue(miss)) => misses.push(miss),
+                None => break,
+            }
+        }
+
+        Err(misses)
+    }
+
+    fn is_retryable_reqwest_error(err: &reqwest::Error) -> bool {
+        err.is_timeout() || err.is_connect() || err.is_request() || err.is_body()
+    }
+
+    async fn download_from_server_with_retry(
+        &self,
+        server: &str,
+        hash: &str,
+    ) -> HedgeOutcome<Vec<u8>, Option<String>> {
+        let url = format!("{}/{}.bin", server.trim_end_matches('/'), hash);
         let mut last_error = String::new();
 
-        for server in &self.read_servers {
-            let url = format!("{}/{}.bin", server.trim_end_matches('/'), hash);
+        for attempt in 0..DOWNLOAD_MAX_ATTEMPTS {
+            if attempt > 0 {
+                let delay_ms = if attempt == 1 { 150 } else { 400 };
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
+
             match self.http.get(&url).send().await {
                 Ok(resp) if resp.status().is_success() => {
-                    // Capture X-Source header before consuming body (if from local daemon)
                     let x_source = resp
                         .headers()
                         .get("x-source")
@@ -1139,50 +1371,62 @@ impl BlossomClient {
                                         server
                                     );
                                 }
-                                return Ok(bytes.to_vec());
-                            } else {
-                                last_error = format!(
-                                    "hash mismatch from {}: expected {}, got {} ({} bytes received)",
-                                    server,
-                                    hash,
-                                    computed,
-                                    bytes.len()
-                                );
-                                warn!(
-                                    "Hash mismatch downloading {} from {}: got {} ({} bytes)",
-                                    hash,
-                                    server,
-                                    &computed[..12.min(computed.len())],
-                                    bytes.len()
-                                );
+                                return HedgeOutcome::Win(bytes.to_vec());
                             }
+                            last_error = format!(
+                                "hash mismatch from {}: expected {}, got {} ({} bytes received)",
+                                server,
+                                hash,
+                                computed,
+                                bytes.len()
+                            );
+                            warn!(
+                                "Hash mismatch downloading {} from {}: got {} ({} bytes)",
+                                hash,
+                                server,
+                                &computed[..12.min(computed.len())],
+                                bytes.len()
+                            );
+                            return HedgeOutcome::Continue(Some(last_error));
                         }
                         Err(e) => {
-                            last_error = e.to_string();
+                            last_error = format!("{server}: {e}");
                         }
                     }
                 }
-                Ok(resp) => {
-                    last_error = format!("{} returned {}", server, resp.status());
+                Ok(resp)
+                    if resp.status() == StatusCode::NOT_FOUND
+                        || resp.status() == StatusCode::GONE =>
+                {
                     debug!(
                         "Download {} from {} returned status {}",
                         hash,
                         server,
                         resp.status()
                     );
+                    return HedgeOutcome::Continue(None);
+                }
+                Ok(resp) => {
+                    let status = resp.status();
+                    last_error = format!("{server} returned {status}");
+                    debug!(
+                        "Download {} from {} returned status {}",
+                        hash, server, status
+                    );
+                    if !Self::is_retryable_status(status) {
+                        return HedgeOutcome::Continue(Some(last_error));
+                    }
                 }
                 Err(e) => {
-                    last_error = e.to_string();
+                    last_error = format!("{server}: {e}");
+                    if !Self::is_retryable_reqwest_error(&e) {
+                        return HedgeOutcome::Continue(Some(last_error));
+                    }
                 }
             }
         }
 
-        Err(BlossomError::DownloadFailed(last_error))
-    }
-
-    /// Download if available, returns None if not found
-    pub async fn try_download(&self, hash: &str) -> Option<Vec<u8>> {
-        self.download(hash).await.ok()
+        HedgeOutcome::Continue(Some(last_error))
     }
 
     async fn send_upload_body_request(
@@ -1411,29 +1655,161 @@ pub fn compute_sha256(data: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Decode a binary `POST /blob/batch` response (`HTBDV1\0\0`).
+pub fn decode_binary_batch_download(
+    bytes: &[u8],
+) -> Result<Vec<([u8; 32], Vec<u8>)>, BlossomError> {
+    if bytes.len() < 12 {
+        return Err(BlossomError::DownloadFailed(
+            "batch response too short".to_string(),
+        ));
+    }
+    if &bytes[..8] != BLOB_BATCH_DOWNLOAD_MAGIC {
+        return Err(BlossomError::DownloadFailed(
+            "invalid batch response magic".to_string(),
+        ));
+    }
+
+    let count = u32::from_be_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let mut offset = 12usize;
+    let mut items = Vec::with_capacity(count.min(4096));
+
+    for _ in 0..count {
+        if bytes.len().saturating_sub(offset) < 40 {
+            return Err(BlossomError::DownloadFailed(
+                "truncated batch response entry header".to_string(),
+            ));
+        }
+        let hash: [u8; 32] = bytes[offset..offset + 32].try_into().unwrap();
+        offset += 32;
+        let len = u64::from_be_bytes(bytes[offset..offset + 8].try_into().unwrap());
+        offset += 8;
+        let len = usize::try_from(len).map_err(|_| {
+            BlossomError::DownloadFailed("batch response entry length too large".to_string())
+        })?;
+        if bytes.len().saturating_sub(offset) < len {
+            return Err(BlossomError::DownloadFailed(
+                "truncated batch response entry body".to_string(),
+            ));
+        }
+        items.push((hash, bytes[offset..offset + len].to_vec()));
+        offset += len;
+    }
+
+    if offset != bytes.len() {
+        return Err(BlossomError::DownloadFailed(
+            "batch response has trailing bytes".to_string(),
+        ));
+    }
+
+    Ok(items)
+}
+
+enum HedgeOutcome<T, M> {
+    Win(T),
+    Continue(M),
+}
+
 /// Store implementation for Blossom (read-only, fetches from servers on demand)
 #[cfg(feature = "store")]
 mod store_impl {
     use super::*;
     use async_trait::async_trait;
     use hashtree_core::{to_hex, Hash, Store, StoreError};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
     use std::sync::RwLock;
 
-    /// Blossom-backed store (read-only with local cache)
+    const DEFAULT_STORE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+    struct BoundedBlobCache {
+        max_bytes: usize,
+        total_bytes: usize,
+        tick: u64,
+        entries: HashMap<Hash, (Vec<u8>, u64)>,
+        order: BTreeMap<u64, Hash>,
+    }
+
+    impl BoundedBlobCache {
+        fn new(max_bytes: usize) -> Self {
+            Self {
+                max_bytes,
+                total_bytes: 0,
+                tick: 0,
+                entries: HashMap::new(),
+                order: BTreeMap::new(),
+            }
+        }
+
+        fn next_tick(&mut self) -> u64 {
+            self.tick = self.tick.wrapping_add(1);
+            self.tick
+        }
+
+        fn get(&mut self, hash: &Hash) -> Option<Vec<u8>> {
+            if self.max_bytes == 0 {
+                return None;
+            }
+            let new_tick = self.next_tick();
+            let (data, old_tick) = self.entries.get_mut(hash)?;
+            let prev = std::mem::replace(old_tick, new_tick);
+            self.order.remove(&prev);
+            self.order.insert(new_tick, *hash);
+            Some(data.clone())
+        }
+
+        fn contains(&self, hash: &Hash) -> bool {
+            self.max_bytes > 0 && self.entries.contains_key(hash)
+        }
+
+        fn insert(&mut self, hash: Hash, data: Vec<u8>) -> bool {
+            if self.entries.contains_key(&hash) {
+                return false;
+            }
+            if self.max_bytes == 0 || data.len() > self.max_bytes {
+                return true;
+            }
+            while self.total_bytes.saturating_add(data.len()) > self.max_bytes {
+                let Some((&oldest_tick, &oldest_hash)) = self.order.iter().next() else {
+                    break;
+                };
+                self.order.remove(&oldest_tick);
+                if let Some((removed, _)) = self.entries.remove(&oldest_hash) {
+                    self.total_bytes = self.total_bytes.saturating_sub(removed.len());
+                }
+            }
+            let tick = self.next_tick();
+            self.total_bytes += data.len();
+            self.entries.insert(hash, (data, tick));
+            self.order.insert(tick, hash);
+            true
+        }
+
+        fn remove(&mut self, hash: &Hash) -> bool {
+            if let Some((data, tick)) = self.entries.remove(hash) {
+                self.order.remove(&tick);
+                self.total_bytes = self.total_bytes.saturating_sub(data.len());
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    /// Blossom-backed store (read-only with bounded in-memory LRU cache)
     ///
-    /// Fetches data from Blossom servers on demand and caches locally.
-    /// Write operations are no-ops (data should be uploaded separately).
+    /// Fetches data from Blossom servers on demand and caches recently read blobs
+    /// up to `max_cache_bytes` (64 MiB by default).
+    /// Write operations are cached in memory only (data should be uploaded separately).
     pub struct BlossomStore {
         client: BlossomClient,
-        cache: RwLock<HashMap<String, Vec<u8>>>,
+        cache: RwLock<BoundedBlobCache>,
     }
 
     impl BlossomStore {
         pub fn new(client: BlossomClient) -> Self {
             Self {
                 client,
-                cache: RwLock::new(HashMap::new()),
+                cache: RwLock::new(BoundedBlobCache::new(DEFAULT_STORE_CACHE_MAX_BYTES)),
             }
         }
 
@@ -1441,6 +1817,19 @@ mod store_impl {
         pub fn with_servers(keys: nostr::Keys, servers: Vec<String>) -> Self {
             let client = BlossomClient::new(keys).with_servers(servers);
             Self::new(client)
+        }
+
+        /// Cap the in-memory blob cache in bytes (`0` disables in-memory caching).
+        pub fn with_max_cache_bytes(self, max_bytes: usize) -> Self {
+            Self {
+                client: self.client,
+                cache: RwLock::new(BoundedBlobCache::new(max_bytes)),
+            }
+        }
+
+        /// Current bytes held in the in-memory blob cache.
+        pub fn cached_bytes(&self) -> usize {
+            self.cache.read().unwrap().total_bytes
         }
 
         /// Get underlying client
@@ -1452,59 +1841,35 @@ mod store_impl {
     #[async_trait]
     impl Store for BlossomStore {
         async fn put(&self, hash: Hash, data: Vec<u8>) -> Result<bool, StoreError> {
-            // Cache locally, but don't upload (caller should upload explicitly)
-            let key = to_hex(&hash);
-            let mut cache = self.cache.write().unwrap();
-            if cache.contains_key(&key) {
-                return Ok(false);
-            }
-            cache.insert(key, data);
-            Ok(true)
+            Ok(self.cache.write().unwrap().insert(hash, data))
         }
 
         async fn get(&self, hash: &Hash) -> Result<Option<Vec<u8>>, StoreError> {
-            let key = to_hex(hash);
-
-            // Check cache first
-            {
-                let cache = self.cache.read().unwrap();
-                if let Some(data) = cache.get(&key) {
-                    return Ok(Some(data.clone()));
-                }
+            if let Some(data) = self.cache.write().unwrap().get(hash) {
+                return Ok(Some(data));
             }
 
-            // Fetch from Blossom
-            match self.client.try_download(&key).await {
-                Some(data) => {
-                    // Cache for future use
-                    let mut cache = self.cache.write().unwrap();
-                    cache.insert(key, data.clone());
+            let key = to_hex(hash);
+            match self.client.try_download_result(&key).await {
+                Ok(Some(data)) => {
+                    self.cache.write().unwrap().insert(*hash, data.clone());
                     Ok(Some(data))
                 }
-                None => Ok(None),
+                Ok(None) => Ok(None),
+                Err(err) => Err(StoreError::Other(err.to_string())),
             }
         }
 
         async fn has(&self, hash: &Hash) -> Result<bool, StoreError> {
-            let key = to_hex(hash);
-
-            // Check cache first
-            {
-                let cache = self.cache.read().unwrap();
-                if cache.contains_key(&key) {
-                    return Ok(true);
-                }
+            if self.cache.read().unwrap().contains(hash) {
+                return Ok(true);
             }
-
-            // Check Blossom
+            let key = to_hex(hash);
             Ok(self.client.exists(&key).await)
         }
 
         async fn delete(&self, hash: &Hash) -> Result<bool, StoreError> {
-            // Only delete from local cache (can't delete from Blossom)
-            let key = to_hex(hash);
-            let mut cache = self.cache.write().unwrap();
-            Ok(cache.remove(&key).is_some())
+            Ok(self.cache.write().unwrap().remove(hash))
         }
     }
 }
@@ -2348,5 +2713,173 @@ mod tests {
         // Should not duplicate
         assert_eq!(client.read_servers().len(), 2);
         assert_eq!(client.read_servers()[0], "http://127.0.0.1:8080");
+    }
+
+    fn spawn_download_server(
+        responses: Vec<(u16, Duration, Vec<u8>)>,
+    ) -> (String, Arc<AtomicUsize>, tokio::sync::oneshot::Receiver<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let count = Arc::new(AtomicUsize::new(0));
+        let count_thread = Arc::clone(&count);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        thread::spawn(move || {
+            let mut buffer = [0u8; 8192];
+            for (status, delay, body) in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                count_thread.fetch_add(1, Ordering::SeqCst);
+                drain_http_request(&mut stream, &mut buffer);
+                if !delay.is_zero() {
+                    thread::sleep(delay);
+                }
+                let reason = match status {
+                    200 => "OK",
+                    404 => "Not Found",
+                    503 => "Service Unavailable",
+                    _ => "Test",
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(&body);
+                let _ = stream.flush();
+            }
+            let _ = done_tx.send(());
+        });
+        (format!("http://{addr}"), count, done_rx)
+    }
+
+    #[tokio::test]
+    async fn test_download_hedges_past_stalled_primary_server() {
+        let payload = b"hedged blossom payload".to_vec();
+        let hash = compute_sha256(&payload);
+        let (slow_url, _, _) =
+            spawn_download_server(vec![(200, Duration::from_secs(3), payload.clone())]);
+        let (fast_url, fast_reqs, fast_done) =
+            spawn_download_server(vec![(200, Duration::ZERO, payload.clone())]);
+
+        let client = BlossomClient::new_empty(Keys::generate())
+            .with_read_servers(vec![slow_url, fast_url])
+            .with_timeout(Duration::from_secs(5));
+
+        let started = std::time::Instant::now();
+        let got = client.download(&hash).await.expect("hedged hit");
+        let elapsed = started.elapsed();
+
+        assert_eq!(got, payload);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "expected hedge to win well before 3s stall, took {elapsed:?}"
+        );
+        let _ = fast_done.await;
+        assert_eq!(fast_reqs.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_download_retries_transient_503_and_distinguishes_404_from_error() {
+        let payload = b"recovered after 503".to_vec();
+        let hash = compute_sha256(&payload);
+        let (flaky_url, flaky_reqs, flaky_done) = spawn_download_server(vec![
+            (503, Duration::ZERO, b"busy".to_vec()),
+            (200, Duration::ZERO, payload.clone()),
+        ]);
+        let client = BlossomClient::new_empty(Keys::generate()).with_read_servers(vec![flaky_url]);
+        let got = client.download(&hash).await.expect("recovered");
+        assert_eq!(got, payload);
+        let _ = flaky_done.await;
+        assert_eq!(flaky_reqs.load(Ordering::SeqCst), 2);
+
+        let (miss_url, miss_reqs, miss_done) =
+            spawn_download_server(vec![(404, Duration::ZERO, b"missing".to_vec())]);
+        let miss_client =
+            BlossomClient::new_empty(Keys::generate()).with_read_servers(vec![miss_url]);
+        assert_eq!(
+            miss_client
+                .try_download_result(&hash)
+                .await
+                .expect("explicit 404 is Ok(None)"),
+            None
+        );
+        let _ = miss_done.await;
+        assert_eq!(miss_reqs.load(Ordering::SeqCst), 1, "404 must not retry");
+
+        let (err_url, _, err_done) = spawn_download_server(vec![
+            (503, Duration::ZERO, b"err".to_vec()),
+            (503, Duration::ZERO, b"err".to_vec()),
+            (503, Duration::ZERO, b"err".to_vec()),
+        ]);
+        let err_client =
+            BlossomClient::new_empty(Keys::generate()).with_read_servers(vec![err_url]);
+        assert!(
+            err_client.try_download_result(&hash).await.is_err(),
+            "persistent 503 must return Err, not fake Ok(None)"
+        );
+        let _ = err_done.await;
+    }
+
+    #[tokio::test]
+    async fn test_download_batch_verifies_hashes_and_detects_unsupported() {
+        let a = b"batch-alpha".to_vec();
+        let b = b"batch-beta".to_vec();
+        let ha: [u8; 32] = Sha256::digest(&a).into();
+        let hb: [u8; 32] = Sha256::digest(&b).into();
+
+        let mut frame = Vec::new();
+        frame.extend_from_slice(BLOB_BATCH_DOWNLOAD_MAGIC);
+        frame.extend_from_slice(&2u32.to_be_bytes());
+        for (h, d) in [(ha, &a), (hb, &b)] {
+            frame.extend_from_slice(&h);
+            frame.extend_from_slice(&(d.len() as u64).to_be_bytes());
+            frame.extend_from_slice(d);
+        }
+
+        let (batch_url, _, done) = spawn_download_server(vec![(200, Duration::ZERO, frame)]);
+        let client = BlossomClient::new_empty(Keys::generate()).with_read_servers(vec![batch_url]);
+        let items = client
+            .download_batch(&[hex::encode(ha), hex::encode(hb)])
+            .await
+            .expect("batch ok")
+            .expect("batch supported");
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], (ha, a));
+        assert_eq!(items[1], (hb, b));
+        let _ = done.await;
+
+        let (plain_url, _, plain_done) =
+            spawn_download_server(vec![(404, Duration::ZERO, b"no batch".to_vec())]);
+        let plain_client =
+            BlossomClient::new_empty(Keys::generate()).with_read_servers(vec![plain_url]);
+        assert!(plain_client
+            .download_batch(&[hex::encode(ha)])
+            .await
+            .expect("404 is Ok(None)")
+            .is_none());
+        let _ = plain_done.await;
+    }
+
+    #[cfg(feature = "store")]
+    #[tokio::test]
+    async fn test_blossom_store_cache_is_bounded() {
+        use hashtree_core::Store;
+
+        let store =
+            BlossomStore::new(BlossomClient::new_empty(Keys::generate())).with_max_cache_bytes(10);
+        let h1 = [1u8; 32];
+        let h2 = [2u8; 32];
+        let h3 = [3u8; 32];
+        store.put(h1, vec![1; 6]).await.unwrap();
+        store.put(h2, vec![2; 6]).await.unwrap();
+        assert!(store.cached_bytes() <= 10);
+        assert!(!store.has(&h1).await.unwrap(), "oldest entry evicted");
+        assert!(store.has(&h2).await.unwrap());
+
+        let uncached =
+            BlossomStore::new(BlossomClient::new_empty(Keys::generate())).with_max_cache_bytes(0);
+        uncached.put(h3, vec![3; 6]).await.unwrap();
+        assert_eq!(uncached.cached_bytes(), 0);
     }
 }

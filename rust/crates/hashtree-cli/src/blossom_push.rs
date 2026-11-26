@@ -1,48 +1,34 @@
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
+use hashtree_blossom::{BatchUploadItem, BlossomClient, BATCH_UPLOAD_MAX_BLOBS};
+use hashtree_core::{
+    decode_tree_node_by_cid, decrypt_object, to_hex, Cid, Link, LinkType, TreeNode,
+};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::ensure_keys_string;
-use crate::fetch::{FetchConfig, Fetcher};
+use crate::fetch::{child_cid, FetchConfig, Fetcher};
 use crate::HashtreeStore;
-use hashtree_core::{to_hex, Cid, HashTree, HashTreeConfig, Link, LinkType, Store, TreeNode};
 
-const BLOSSOM_PUSH_CONCURRENCY: usize = 16;
+const BLOSSOM_PUSH_BATCH_CONCURRENCY: usize = 4;
+const BLOSSOM_PUSH_SINGLE_CONCURRENCY: usize = 8;
+const BLOSSOM_PUSH_BATCH_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const BLOSSOM_PUSH_PROGRESS_EVERY: usize = 512;
 
 fn parse_root_cid(cid_str: &str) -> Result<Cid> {
     Cid::parse(cid_str).map_err(|e| anyhow::anyhow!("Invalid CID '{}': {}", cid_str, e))
 }
 
-fn child_cid(parent: &Cid, link: &Link) -> Cid {
-    let inherits_parent_key = link
-        .name
-        .as_deref()
-        .map(|name| {
-            name.starts_with("_chunk_")
-                || (name.starts_with('_') && name.chars().count() == 2 && link.link_type.is_tree())
-        })
-        .unwrap_or(false);
-
-    Cid {
-        hash: link.hash,
-        key: link.key.or(if inherits_parent_key {
-            parent.key
-        } else {
-            None
-        }),
-    }
-}
-
-async fn ensure_local_blob_for_push(
+async fn load_local_blob_for_push(
     store: &HashtreeStore,
     fetcher: Option<&Fetcher>,
     cid: &Cid,
-) -> Result<()> {
-    if store.get_blob(&cid.hash)?.is_some() {
-        return Ok(());
+) -> Result<Vec<u8>> {
+    if let Some(data) = store.get_blob(&cid.hash)? {
+        return Ok(data);
     }
 
     if let Some(fetcher) = fetcher {
@@ -53,38 +39,29 @@ async fn ensure_local_blob_for_push(
         store
             .put_blob(&data)
             .with_context(|| format!("failed to persist hydrated blob {}", cid))?;
-        if store.get_blob(&cid.hash)?.is_some() {
-            return Ok(());
-        }
+        return Ok(data);
     }
 
     anyhow::bail!("missing local blob while pushing DAG: {}", cid);
 }
 
-async fn node_for_push<S: Store>(
-    tree: &HashTree<S>,
-    cid: &Cid,
-    blob_size: Option<u64>,
-) -> Result<Option<TreeNode>> {
+fn node_for_push_bytes(cid: &Cid, data: &[u8], blob_size: Option<u64>) -> Result<Option<TreeNode>> {
     if let Some(size) = blob_size {
-        if let Some(data) = tree.get_blob(&cid.hash).await? {
-            // Match the core file reader: a Blob's declared size describes its
-            // plaintext leaf, regardless of the writer's chunk size. Authenticate
-            // keyed bytes before treating tree-shaped file contents as a leaf.
-            let plaintext_size = match cid.key.as_ref() {
-                Some(key) => hashtree_core::decrypt_object(&data, key)
-                    .ok()
-                    .map(|plaintext| plaintext.len() as u64),
-                None => Some(data.len() as u64),
-            };
-            if plaintext_size == Some(size) {
-                return Ok(None);
-            }
+        // Match the core file reader: a Blob's declared size describes its
+        // plaintext leaf, regardless of the writer's chunk size. Authenticate
+        // keyed bytes before treating tree-shaped file contents as a leaf.
+        let plaintext_size = match cid.key.as_ref() {
+            Some(key) => decrypt_object(data, key)
+                .ok()
+                .map(|plaintext| plaintext.len() as u64),
+            None => Some(data.len() as u64),
+        };
+        if plaintext_size == Some(size) {
+            return Ok(None);
         }
     }
 
-    tree.get_node(cid)
-        .await
+    decode_tree_node_by_cid(cid, data.to_vec())
         .map_err(|err| anyhow::anyhow!("Failed to inspect {cid}: {err}"))
 }
 
@@ -99,21 +76,18 @@ pub(crate) async fn collect_cids_for_push(
     let mut visited = HashSet::new();
     let mut collected = HashSet::new();
     let mut queue = vec![(root_cid, None)];
-    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
 
     while let Some((cid, blob_size)) = queue.pop() {
         if !visited.insert((cid.hash, blob_size)) {
             continue;
         }
 
-        ensure_local_blob_for_push(store, fetcher, &cid).await?;
+        let data = load_local_blob_for_push(store, fetcher, &cid).await?;
         if collected.insert(cid.hash) {
             cids_to_push.push(cid.clone());
         }
 
-        let node = node_for_push(&tree, &cid, blob_size).await?;
-
-        if let Some(node) = node {
+        if let Some(node) = node_for_push_bytes(&cid, &data, blob_size)? {
             for link in &node.links {
                 queue.push((
                     child_cid(&cid, link),
@@ -162,7 +136,6 @@ async fn collect_incremental_cids(
     let mut visited_new = HashSet::new();
     let mut collected = HashSet::new();
     let mut queue = vec![(root_cid, Some(previous_root_cid), None)];
-    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
 
     while let Some((cid, old_cid, blob_size)) = queue.pop() {
         if old_cid.as_ref().is_some_and(|old| old.hash == cid.hash) {
@@ -172,38 +145,45 @@ async fn collect_incremental_cids(
             continue;
         }
 
-        ensure_local_blob_for_push(store, fetcher, &cid).await?;
+        let data = load_local_blob_for_push(store, fetcher, &cid).await?;
         if collected.insert(cid.hash) {
             cids_to_push.push(cid.clone());
         }
 
-        let node = node_for_push(&tree, &cid, blob_size).await?;
-        let Some(node) = node else {
+        let Some(node) = node_for_push_bytes(&cid, &data, blob_size)? else {
             continue;
         };
 
-        if require_previous_nodes {
-            if let Some(old_cid) = old_cid.as_ref() {
-                ensure_local_blob_for_push(store, fetcher, old_cid)
-                    .await
-                    .context("previous DAG is unavailable for a bounded delta push")?;
-            }
-        }
         let old_node = match old_cid.as_ref() {
-            Some(old_cid) => match node_for_push(&tree, old_cid, blob_size).await {
-                Ok(old_node) => old_node,
-                Err(err) if require_previous_nodes => {
-                    return Err(err).context("previous DAG is unreadable for a bounded delta push");
+            Some(old_cid) => {
+                let old_bytes = if require_previous_nodes {
+                    Some(
+                        load_local_blob_for_push(store, fetcher, old_cid)
+                            .await
+                            .context("previous DAG is unavailable for a bounded delta push")?,
+                    )
+                } else {
+                    store.get_blob(&old_cid.hash)?
+                };
+                match old_bytes {
+                    Some(old_bytes) => match node_for_push_bytes(old_cid, &old_bytes, blob_size) {
+                        Ok(old_node) => old_node,
+                        Err(err) if require_previous_nodes => {
+                            return Err(err)
+                                .context("previous DAG is unreadable for a bounded delta push");
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                "Failed to inspect previous Blossom DAG node {}; uploading changed subtree: {}",
+                                old_cid,
+                                err
+                            );
+                            None
+                        }
+                    },
+                    None => None,
                 }
-                Err(err) => {
-                    tracing::warn!(
-                        "Failed to inspect previous Blossom DAG node {}; uploading changed subtree: {}",
-                        old_cid,
-                        err
-                    );
-                    None
-                }
-            },
+            }
             None => None,
         };
 
@@ -235,34 +215,146 @@ async fn collect_incremental_cids(
     Ok(cids_to_push)
 }
 
-async fn upload_cids_with_client(
+enum BatchOutcome {
+    Done { uploaded: usize, existing: usize },
+    Unsupported,
+}
+
+async fn upload_batch_adaptive(
+    client: &BlossomClient,
+    server: &str,
+    items: Vec<BatchUploadItem>,
+) -> Result<BatchOutcome> {
+    let mut stack = vec![items];
+    let mut uploaded = 0usize;
+    let mut existing = 0usize;
+
+    while let Some(mut batch) = stack.pop() {
+        let mut last_err = None;
+        let attempts = if batch.len() > 1 { 2 } else { 3 };
+        let mut settled = false;
+        for attempt in 0..attempts {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(200 * attempt as u64)).await;
+            }
+            match client.upload_batch_to_server(server, &batch).await {
+                Ok(Some(res)) => {
+                    let count = res.uploaded.min(batch.len());
+                    uploaded += count;
+                    existing += batch.len().saturating_sub(count);
+                    settled = true;
+                    break;
+                }
+                Ok(None) => return Ok(BatchOutcome::Unsupported),
+                Err(err) => last_err = Some(err),
+            }
+        }
+        if settled {
+            continue;
+        }
+        if batch.len() > 1 {
+            let right = batch.split_off(batch.len() / 2);
+            stack.push(right);
+            stack.push(batch);
+        } else {
+            return Err(anyhow::anyhow!(
+                "{}",
+                last_err.expect("batch attempt recorded an error")
+            ));
+        }
+    }
+
+    Ok(BatchOutcome::Done { uploaded, existing })
+}
+
+#[derive(Default)]
+struct PushStats {
+    uploaded: usize,
+    skipped: usize,
+    errors: usize,
+    last_error: Option<String>,
+}
+
+impl PushStats {
+    fn merge(&mut self, other: Self) {
+        self.uploaded += other.uploaded;
+        self.skipped += other.skipped;
+        self.errors += other.errors;
+        if other.last_error.is_some() {
+            self.last_error = other.last_error;
+        }
+    }
+}
+
+enum SinglePushTarget {
+    Loaded(Vec<u8>),
+    Cid(Cid),
+}
+
+async fn take_next_batch(
+    pending: &mut std::collections::VecDeque<Cid>,
+    store: &HashtreeStore,
+    fetcher: Option<&Fetcher>,
+) -> Result<Vec<BatchUploadItem>> {
+    let mut batch = Vec::new();
+    let mut bytes = 0usize;
+
+    while batch.len() < BATCH_UPLOAD_MAX_BLOBS {
+        let Some(cid) = pending.front() else {
+            break;
+        };
+        if !batch.is_empty() {
+            let next_len = store.blob_size(&cid.hash)?.unwrap_or(0) as usize;
+            if bytes.saturating_add(next_len) > BLOSSOM_PUSH_BATCH_TARGET_BYTES {
+                break;
+            }
+        }
+        let cid = pending.pop_front().expect("checked non-empty");
+        let data = load_local_blob_for_push(store, fetcher, &cid).await?;
+        bytes = bytes.saturating_add(data.len());
+        batch.push(BatchUploadItem::new(to_hex(&cid.hash), data));
+        if bytes >= BLOSSOM_PUSH_BATCH_TARGET_BYTES {
+            break;
+        }
+    }
+
+    Ok(batch)
+}
+
+async fn upload_singles(
     store: Arc<HashtreeStore>,
     fetcher: Option<Arc<Fetcher>>,
-    client: hashtree_blossom::BlossomClient,
-    cids_to_push: Vec<Cid>,
+    client: BlossomClient,
+    preloaded: Vec<BatchUploadItem>,
+    cids: Vec<Cid>,
     force_upload: bool,
-) -> Result<(usize, usize)> {
-    let total = cids_to_push.len();
-    let mut total_uploaded = 0usize;
-    let mut total_skipped = 0usize;
-    let mut total_errors = 0usize;
-    let mut last_error = None;
-    let mut processed = 0usize;
+    servers_override: Option<Vec<String>>,
+) -> PushStats {
+    let targets = preloaded
+        .into_iter()
+        .map(|item| SinglePushTarget::Loaded(item.data))
+        .chain(cids.into_iter().map(SinglePushTarget::Cid));
 
-    let mut uploads = stream::iter(cids_to_push.into_iter().map(|cid| {
+    let mut uploads = stream::iter(targets.map(|target| {
         let store = Arc::clone(&store);
         let fetcher = fetcher.clone();
         let client = client.clone();
+        let servers_override = servers_override.clone();
         async move {
-            ensure_local_blob_for_push(store.as_ref(), fetcher.as_deref(), &cid).await?;
-            let data = store
-                .get_blob(&cid.hash)?
-                .ok_or_else(|| anyhow::anyhow!("missing local blob while uploading {}", cid))?;
+            let data = match target {
+                SinglePushTarget::Loaded(data) => data,
+                SinglePushTarget::Cid(cid) => {
+                    load_local_blob_for_push(store.as_ref(), fetcher.as_deref(), &cid).await?
+                }
+            };
             if force_upload {
+                let targets = servers_override
+                    .as_deref()
+                    .unwrap_or_else(|| client.write_servers());
                 client
-                    .upload_to_selected_servers(&data, client.write_servers())
+                    .upload_to_selected_servers(&data, targets)
                     .await
-                    .map(|(hash, _successes)| (hash, true))
+                    .map(|(hash, _)| (hash, true))
                     .map_err(|error| anyhow::anyhow!(error.to_string()))
             } else {
                 client
@@ -272,45 +364,293 @@ async fn upload_cids_with_client(
             }
         }
     }))
-    .buffer_unordered(BLOSSOM_PUSH_CONCURRENCY);
+    .buffer_unordered(BLOSSOM_PUSH_SINGLE_CONCURRENCY);
 
+    let mut stats = PushStats::default();
     while let Some(result) = uploads.next().await {
-        processed += 1;
         match result {
-            Ok((_hash, was_uploaded)) => {
-                if was_uploaded {
-                    total_uploaded += 1;
-                } else {
-                    total_skipped += 1;
-                }
-            }
+            Ok((_hash, true)) => stats.uploaded += 1,
+            Ok((_hash, false)) => stats.skipped += 1,
             Err(error) => {
                 tracing::warn!("Blossom upload failed: {}", error);
-                total_errors += 1;
-                last_error = Some(error.to_string());
+                stats.errors += 1;
+                stats.last_error = Some(error.to_string());
             }
         }
+    }
+    stats
+}
 
-        if processed.is_multiple_of(BLOSSOM_PUSH_PROGRESS_EVERY) || processed == total {
+async fn upload_remaining_batches_to_server(
+    store: &HashtreeStore,
+    fetcher: Option<&Fetcher>,
+    client: &BlossomClient,
+    server: &str,
+    pending: &mut std::collections::VecDeque<Cid>,
+    progress: Option<(usize, usize, usize)>,
+) -> Result<PushStats> {
+    use futures::stream::FuturesUnordered;
+
+    let mut stats = PushStats::default();
+    let (mut processed, base_uploaded, base_skipped, total) = match progress {
+        Some((up, skip, total)) => (up + skip, up, skip, total),
+        None => (0, 0, 0, 0),
+    };
+    let mut next_report =
+        ((processed / BLOSSOM_PUSH_PROGRESS_EVERY) + 1) * BLOSSOM_PUSH_PROGRESS_EVERY;
+    let mut in_flight = FuturesUnordered::new();
+
+    loop {
+        while in_flight.len() < BLOSSOM_PUSH_BATCH_CONCURRENCY && !pending.is_empty() {
+            let batch = take_next_batch(pending, store, fetcher).await?;
+            if batch.is_empty() {
+                break;
+            }
+            let len = batch.len();
+            let client = client.clone();
+            let server = server.to_string();
+            in_flight
+                .push(async move { (len, upload_batch_adaptive(&client, &server, batch).await) });
+        }
+
+        let Some((len, result)) = in_flight.next().await else {
+            break;
+        };
+        processed += len;
+        match result {
+            Ok(BatchOutcome::Done { uploaded, existing }) => {
+                stats.uploaded += uploaded;
+                stats.skipped += existing;
+            }
+            Ok(BatchOutcome::Unsupported) => {
+                stats.errors += len;
+                stats.last_error = Some("server stopped accepting batch uploads".to_string());
+            }
+            Err(err) => {
+                tracing::warn!("Blossom batch upload failed: {}", err);
+                stats.errors += len;
+                stats.last_error = Some(err.to_string());
+            }
+        }
+        if total > 0 && processed >= next_report && processed < total {
             println!(
-                "  file servers: {processed}/{total} processed ({total_uploaded} uploaded, {total_skipped} already exist, {total_errors} failed)",
+                "  file servers: {processed}/{total} processed ({} uploaded, {} already exist, {} failed)",
+                base_uploaded + stats.uploaded,
+                base_skipped + stats.skipped,
+                stats.errors,
             );
+            next_report =
+                ((processed / BLOSSOM_PUSH_PROGRESS_EVERY) + 1) * BLOSSOM_PUSH_PROGRESS_EVERY;
         }
     }
 
-    if total_errors > 0 {
-        let detail = last_error
+    Ok(stats)
+}
+
+async fn upload_cids_with_client(
+    store: Arc<HashtreeStore>,
+    fetcher: Option<Arc<Fetcher>>,
+    client: BlossomClient,
+    cids_to_push: Vec<Cid>,
+    force_upload: bool,
+) -> Result<(usize, usize)> {
+    use std::collections::VecDeque;
+
+    let total = cids_to_push.len();
+    if total == 0 {
+        return Ok((0, 0));
+    }
+
+    let mut stats = PushStats::default();
+
+    // 1. Pre-filter already-present blobs in one round trip via POST /upload/check,
+    //    and record which write servers support Hashtree's batch upload API.
+    let mut pending_cids = cids_to_push;
+    let mut batch_servers = Vec::new();
+    if !force_upload && pending_cids.len() >= 2 {
+        let hash_hexes: Vec<String> = pending_cids.iter().map(|cid| to_hex(&cid.hash)).collect();
+        let mut present = HashSet::new();
+        for server in client.write_servers() {
+            if let Some(server_present) = client.check_uploads_on_server(&hash_hexes, server).await
+            {
+                batch_servers.push(server.clone());
+                present.extend(server_present);
+            }
+        }
+        if !present.is_empty() {
+            let before = pending_cids.len();
+            pending_cids.retain(|cid| !present.contains(&to_hex(&cid.hash)));
+            stats.skipped += before - pending_cids.len();
+        }
+    }
+
+    if pending_cids.is_empty() {
+        println!(
+            "  file servers: {total}/{total} processed (0 uploaded, {} already exist, 0 failed)",
+            stats.skipped,
+        );
+        return Ok((0, stats.skipped));
+    }
+
+    // 2. Upload lazily in bounded 8 MiB batches (keeping peak RAM bounded even for multi-GiB trees).
+    if pending_cids.len() == 1 || (!force_upload && batch_servers.is_empty()) {
+        stats.merge(
+            upload_singles(
+                store,
+                fetcher,
+                client,
+                Vec::new(),
+                pending_cids,
+                force_upload,
+                None,
+            )
+            .await,
+        );
+    } else if !force_upload {
+        let mut pending: VecDeque<Cid> = pending_cids.into();
+        let first_batch = take_next_batch(&mut pending, store.as_ref(), fetcher.as_deref()).await?;
+        let first_len = first_batch.len();
+
+        let mut batch_server = None;
+        let mut saw_unsupported = false;
+        let mut probe_err = None;
+        for server in &batch_servers {
+            match upload_batch_adaptive(&client, server, first_batch.clone()).await {
+                Ok(BatchOutcome::Done { uploaded, existing }) => {
+                    stats.uploaded += uploaded;
+                    stats.skipped += existing;
+                    batch_server = Some(server.clone());
+                    break;
+                }
+                Ok(BatchOutcome::Unsupported) => saw_unsupported = true,
+                Err(err) => probe_err = Some(err.to_string()),
+            }
+        }
+
+        if let Some(server) = batch_server {
+            stats.merge(
+                upload_remaining_batches_to_server(
+                    store.as_ref(),
+                    fetcher.as_deref(),
+                    &client,
+                    &server,
+                    &mut pending,
+                    Some((stats.uploaded, stats.skipped, total)),
+                )
+                .await?,
+            );
+        } else if saw_unsupported {
+            stats.merge(
+                upload_singles(
+                    store,
+                    fetcher,
+                    client,
+                    first_batch,
+                    pending.into(),
+                    false,
+                    None,
+                )
+                .await,
+            );
+        } else {
+            stats.errors += first_len;
+            stats.last_error = probe_err;
+        }
+    } else {
+        // force_upload pushes every blob to all configured write servers.
+        let item_count = pending_cids.len();
+        let probe_hash = vec![to_hex(&pending_cids[0].hash)];
+        let mut any_server_succeeded = false;
+        for server in client.write_servers().to_vec() {
+            let supports_batch = client
+                .check_uploads_on_server(&probe_hash, &server)
+                .await
+                .is_some();
+            if !supports_batch {
+                let single = upload_singles(
+                    Arc::clone(&store),
+                    fetcher.clone(),
+                    client.clone(),
+                    Vec::new(),
+                    pending_cids.clone(),
+                    true,
+                    Some(vec![server]),
+                )
+                .await;
+                if single.errors == 0 {
+                    any_server_succeeded = true;
+                } else {
+                    stats.last_error = single.last_error;
+                }
+                continue;
+            }
+            let mut pending: VecDeque<Cid> = pending_cids.iter().cloned().collect();
+            let first = take_next_batch(&mut pending, store.as_ref(), fetcher.as_deref()).await?;
+            match upload_batch_adaptive(&client, &server, first.clone()).await {
+                Ok(BatchOutcome::Done { .. }) => {
+                    let rest = upload_remaining_batches_to_server(
+                        store.as_ref(),
+                        fetcher.as_deref(),
+                        &client,
+                        &server,
+                        &mut pending,
+                        None,
+                    )
+                    .await?;
+                    if rest.errors == 0 {
+                        any_server_succeeded = true;
+                    } else {
+                        stats.last_error = rest.last_error;
+                    }
+                }
+                Ok(BatchOutcome::Unsupported) => {
+                    let single = upload_singles(
+                        Arc::clone(&store),
+                        fetcher.clone(),
+                        client.clone(),
+                        first,
+                        pending.into(),
+                        true,
+                        Some(vec![server]),
+                    )
+                    .await;
+                    if single.errors == 0 {
+                        any_server_succeeded = true;
+                    } else {
+                        stats.last_error = single.last_error;
+                    }
+                }
+                Err(err) => {
+                    stats.last_error = Some(err.to_string());
+                }
+            }
+        }
+        if any_server_succeeded {
+            stats.uploaded += item_count;
+        } else {
+            stats.errors += item_count;
+        }
+    }
+
+    println!(
+        "  file servers: {total}/{total} processed ({} uploaded, {} already exist, {} failed)",
+        stats.uploaded, stats.skipped, stats.errors,
+    );
+
+    if stats.errors > 0 {
+        let detail = stats
+            .last_error
             .as_deref()
             .map(|err| format!(" (last error: {err})"))
             .unwrap_or_default();
         anyhow::bail!(
             "failed to upload {} blob(s) to configured file servers{}",
-            total_errors,
+            stats.errors,
             detail
         );
     }
 
-    Ok((total_uploaded, total_skipped))
+    Ok((stats.uploaded, stats.skipped))
 }
 
 /// Push content to Blossom servers.
@@ -322,7 +662,6 @@ pub async fn push_to_blossom(
     shallow: bool,
     previous_root: Option<&str>,
 ) -> Result<()> {
-    use hashtree_blossom::BlossomClient;
     use nostr::Keys;
 
     if shallow && previous_root.is_some() {
@@ -349,11 +688,11 @@ pub async fn push_to_blossom(
 
     let root_cid = parse_root_cid(cid_str)?;
     let cids_to_push = if shallow {
-        ensure_local_blob_for_push(store.as_ref(), Some(fetcher.as_ref()), &root_cid).await?;
+        load_local_blob_for_push(store.as_ref(), Some(fetcher.as_ref()), &root_cid).await?;
         vec![root_cid]
     } else if let Some(previous_root) = previous_root {
         let previous = parse_root_cid(previous_root)?;
-        ensure_local_blob_for_push(store.as_ref(), Some(fetcher.as_ref()), &previous).await?;
+        load_local_blob_for_push(store.as_ref(), Some(fetcher.as_ref()), &previous).await?;
         println!("Collecting blocks changed since the retained previous root...");
         // The caller must already retain the previous DAG on this server. A
         // collection error aborts this push rather than restarting a full scan.
@@ -896,5 +1235,159 @@ mod tests {
         assert!(hashes.contains(&new_subdir.hash));
         assert!(hashes.contains(&new_changed_file));
         assert!(!hashes.contains(&stable_file));
+    }
+
+    #[tokio::test]
+    async fn upload_cids_uses_check_and_binary_batch_with_single_put_fallback() {
+        use base64::Engine;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let tmp = tempdir().unwrap();
+        let store =
+            Arc::new(HashtreeStore::with_options(tmp.path(), None, 32 * 1024 * 1024).unwrap());
+        let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).public());
+        let mut cids = Vec::new();
+        for i in 0..5u8 {
+            let (cid, _) = tree.put(&vec![i + 1; 512]).await.unwrap();
+            cids.push(cid);
+        }
+        let preseeded = hashtree_core::to_hex(&cids[0].hash);
+
+        let check_reqs = Arc::new(AtomicUsize::new(0));
+        let batch_reqs = Arc::new(AtomicUsize::new(0));
+        let uploaded_count = Arc::new(AtomicUsize::new(0));
+        let check_reqs_r = Arc::clone(&check_reqs);
+        let batch_reqs_r = Arc::clone(&batch_reqs);
+        let uploaded_r = Arc::clone(&uploaded_count);
+        let preseeded_r = preseeded.clone();
+
+        let batch_app = axum::Router::new()
+            .route(
+                "/upload/check",
+                axum::routing::post(move |axum::Json(req): axum::Json<serde_json::Value>| {
+                    let check_reqs = Arc::clone(&check_reqs_r);
+                    let preseeded = preseeded_r.clone();
+                    async move {
+                        check_reqs.fetch_add(1, Ordering::SeqCst);
+                        let hashes = req["hashes"].as_array().cloned().unwrap_or_default();
+                        let mut bits = vec![0u8; hashes.len().div_ceil(8)];
+                        for (i, h) in hashes.iter().enumerate() {
+                            if h.as_str() == Some(preseeded.as_str()) {
+                                bits[i / 8] |= 1 << (i % 8);
+                            }
+                        }
+                        axum::Json(serde_json::json!({
+                            "count": hashes.len(),
+                            "present": base64::engine::general_purpose::STANDARD.encode(bits),
+                        }))
+                    }
+                }),
+            )
+            .route(
+                "/upload/batch-binary",
+                axum::routing::post(move |body: bytes::Bytes| {
+                    let batch_reqs = Arc::clone(&batch_reqs_r);
+                    let uploaded = Arc::clone(&uploaded_r);
+                    async move {
+                        batch_reqs.fetch_add(1, Ordering::SeqCst);
+                        assert_eq!(&body[..8], b"HTBBV1\0\0");
+                        let count = u32::from_be_bytes(body[8..12].try_into().unwrap()) as usize;
+                        let mut cursor = 12;
+                        let mut descriptors = Vec::with_capacity(count);
+                        for _ in 0..count {
+                            let hash = hex::encode(&body[cursor..cursor + 32]);
+                            cursor += 32;
+                            let ct_len =
+                                u16::from_be_bytes(body[cursor..cursor + 2].try_into().unwrap())
+                                    as usize;
+                            cursor += 2;
+                            let data_len =
+                                u64::from_be_bytes(body[cursor..cursor + 8].try_into().unwrap())
+                                    as usize;
+                            cursor += 8 + ct_len + data_len;
+                            descriptors.push(serde_json::json!({ "sha256": hash }));
+                        }
+                        uploaded.fetch_add(count, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({
+                            "uploaded": count,
+                            "blobs": descriptors,
+                        }))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, batch_app).await.unwrap() });
+
+        let client = hashtree_blossom::BlossomClient::new_empty(nostr::Keys::generate())
+            .with_write_servers(vec![format!("http://{addr}")]);
+        let (uploaded, skipped) =
+            super::upload_cids_with_client(store.clone(), None, client, cids.clone(), false)
+                .await
+                .expect("batch push succeeds");
+        assert_eq!((uploaded, skipped), (4, 1));
+        assert_eq!(check_reqs.load(Ordering::SeqCst), 1);
+        assert_eq!(batch_reqs.load(Ordering::SeqCst), 1);
+        assert_eq!(uploaded_count.load(Ordering::SeqCst), 4);
+        server.abort();
+        let _ = server.await;
+
+        // Plain Blossom server without /upload/check or /upload/batch* must fall back to PUT /upload
+        // without sending wasted batch upload payloads.
+        let single_puts = Arc::new(AtomicUsize::new(0));
+        let wasted_batches = Arc::new(AtomicUsize::new(0));
+        let single_puts_r = Arc::clone(&single_puts);
+        let wasted_b1 = Arc::clone(&wasted_batches);
+        let wasted_b2 = Arc::clone(&wasted_batches);
+        let plain_app = axum::Router::new()
+            .route(
+                "/upload",
+                axum::routing::put(move |_body: bytes::Bytes| {
+                    let single_puts = Arc::clone(&single_puts_r);
+                    async move {
+                        single_puts.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::CREATED
+                    }
+                }),
+            )
+            .route(
+                "/upload/batch-binary",
+                axum::routing::post(move |_body: bytes::Bytes| {
+                    let wasted = Arc::clone(&wasted_b1);
+                    async move {
+                        wasted.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::NOT_FOUND
+                    }
+                }),
+            )
+            .route(
+                "/upload/batch",
+                axum::routing::post(move |_body: bytes::Bytes| {
+                    let wasted = Arc::clone(&wasted_b2);
+                    async move {
+                        wasted.fetch_add(1, Ordering::SeqCst);
+                        axum::http::StatusCode::NOT_FOUND
+                    }
+                }),
+            );
+        let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr2 = listener2.local_addr().unwrap();
+        let server2 = tokio::spawn(async move { axum::serve(listener2, plain_app).await.unwrap() });
+        let client2 = hashtree_blossom::BlossomClient::new_empty(nostr::Keys::generate())
+            .with_write_servers(vec![format!("http://{addr2}")]);
+        let (uploaded2, skipped2) =
+            super::upload_cids_with_client(store, None, client2, cids, false)
+                .await
+                .expect("plain fallback succeeds");
+        assert_eq!((uploaded2, skipped2), (5, 0));
+        assert_eq!(single_puts.load(Ordering::SeqCst), 5);
+        assert_eq!(
+            wasted_batches.load(Ordering::SeqCst),
+            0,
+            "plain Blossom servers must not receive wasted batch bodies after /upload/check 404"
+        );
+        server2.abort();
+        let _ = server2.await;
     }
 }

@@ -36,11 +36,29 @@ grep -F "hashtree-fuse = { version = \"${fuse_version}\", path = \"../fuse\", op
 
 fake_bin="$(mktemp -d "${TMPDIR:-/tmp}/hashtree-publish-test.XXXXXX")"
 trap 'rm -rf "${fake_bin}"' EXIT
-printf '%s\n' '#!/bin/sh' 'echo "crate version already exists" >&2' 'exit 1' \
-    >"${fake_bin}/cargo"
+export REAL_CARGO
+REAL_CARGO="$(command -v cargo)"
+cat >"${fake_bin}/cargo" <<'STUB'
+#!/bin/bash
+if [[ "$1" == metadata ]]; then exec "$REAL_CARGO" "$@"; fi
+[[ "$1" == publish && "${*: -2:1}" == -p ]] || exit 2
+name="${*: -1}"
+version="$(python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]==sys.argv[1]))' "$name" < "$PUBLISH_METADATA")"
+echo "error: crate ${name}@${version} already exists on crates.io index" >&2
+exit 1
+STUB
 chmod +x "${fake_bin}/cargo"
-
-SKIP_OUTPUT="$(PATH="${fake_bin}:${PATH}" "${PUBLISH_SCRIPT}" --dry-run)"
+export PUBLISH_METADATA="${fake_bin}/metadata.json"
+cargo metadata --manifest-path "${RUST_DIR}/Cargo.toml" --no-deps --locked --format-version 1 > "$PUBLISH_METADATA"
+python3 - "$PUBLISH_METADATA" <<'PYTHON'
+import json, sys
+with open(sys.argv[1]) as metadata:
+    cli = next(p for p in json.load(metadata)["packages"] if p["name"] == "hashtree-cli")
+bins = {t["name"] for t in cli["targets"] if "bin" in t["kind"]
+        and set(t.get("required-features", [])) <= set(cli["features"]["default"])}
+assert {"htree", "git-remote-htree"} <= bins, "Both binaries must install by default"
+PYTHON
+SKIP_OUTPUT="$(PATH="${fake_bin}:${PATH}" "${PUBLISH_SCRIPT}")"
 planned_count="$(printf '%s\n' "$PLAN_OUTPUT" | awk 'NF { count++ } END { print count }')"
 skipped_count="$(printf '%s\n' "$SKIP_OUTPUT" | grep -cF 'already published at this version (skipping)')"
 if [ "$planned_count" -ne "$skipped_count" ]; then

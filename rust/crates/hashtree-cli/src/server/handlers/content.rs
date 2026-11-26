@@ -5,13 +5,13 @@ use crate::server::blob_read::{
     BlobIoTaskError, BLOB_READ_BUSY,
 };
 use crate::server::pooled_store::PooledReadStore;
+use hashtree_blossom::{
+    decode_binary_batch_download, BLOB_BATCH_DOWNLOAD_CONTENT_TYPE, BLOB_BATCH_DOWNLOAD_MAGIC,
+};
 use hashtree_core::{Link, TreeNode};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_COLD_READ_PREFETCH_CONCURRENCY: usize = 32;
-const BLOB_BATCH_DOWNLOAD_MAGIC: &[u8; 8] = b"HTBDV1\0\0";
-const BLOB_BATCH_DOWNLOAD_CONTENT_TYPE: &str =
-    "application/vnd.hashtree.blob-batch.v1+octet-stream";
 const DEFAULT_BLOB_BATCH_DOWNLOAD_MAX_HASHES: usize = 1024;
 const DEFAULT_BLOB_BATCH_DOWNLOAD_MAX_BYTES: usize = 64 * 1024 * 1024;
 const BLOB_BATCH_DOWNLOAD_MIN_BYTES: usize = 1024 * 1024;
@@ -336,52 +336,14 @@ pub(in crate::server) async fn download_blob_batch(
 pub(super) fn decode_blob_batch_download_response(
     bytes: &[u8],
 ) -> Result<Vec<BlobBatchDownloadItem>, String> {
-    if bytes.len() < 12 {
-        return Err("batch response too short".to_string());
-    }
-    if &bytes[..8] != BLOB_BATCH_DOWNLOAD_MAGIC {
-        return Err("invalid batch response magic".to_string());
-    }
-
-    let count = u32::from_be_bytes(
-        bytes[8..12]
-            .try_into()
-            .map_err(|_| "invalid batch response count".to_string())?,
-    ) as usize;
-    let mut offset = 12usize;
-    let mut items = Vec::with_capacity(count);
-
-    for _ in 0..count {
-        if bytes.len().saturating_sub(offset) < 40 {
-            return Err("truncated batch response entry header".to_string());
-        }
-        let hash: [u8; 32] = bytes[offset..offset + 32]
-            .try_into()
-            .map_err(|_| "invalid batch response hash".to_string())?;
-        offset += 32;
-        let len = u64::from_be_bytes(
-            bytes[offset..offset + 8]
-                .try_into()
-                .map_err(|_| "invalid batch response entry length".to_string())?,
-        );
-        offset += 8;
-        let len = usize::try_from(len)
-            .map_err(|_| "batch response entry length too large".to_string())?;
-        if bytes.len().saturating_sub(offset) < len {
-            return Err("truncated batch response entry body".to_string());
-        }
-        items.push(BlobBatchDownloadItem {
-            hash,
-            data: bytes[offset..offset + len].to_vec(),
-        });
-        offset += len;
-    }
-
-    if offset != bytes.len() {
-        return Err("batch response has trailing bytes".to_string());
-    }
-
-    Ok(items)
+    decode_binary_batch_download(bytes)
+        .map(|items| {
+            items
+                .into_iter()
+                .map(|(hash, data)| BlobBatchDownloadItem { hash, data })
+                .collect()
+        })
+        .map_err(|err| err.to_string())
 }
 
 async fn fetch_and_cache_blobs_from_upstream_batch(state: &AppState, hashes: &[[u8; 32]]) -> usize {

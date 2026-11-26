@@ -1905,7 +1905,7 @@ impl RemoteHelper {
             .map_err(|e| anyhow::anyhow!("Failed to publish repo metadata to relays: {}", e))?;
 
         let full_url = if let Some(secret) = self.url_secret {
-            format!("{}#k={}", npub_url, hex::encode(secret))
+            crate::keyed_clone_url(&npub_url, secret)
         } else {
             npub_url.clone()
         };

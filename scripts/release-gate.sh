@@ -154,6 +154,7 @@ run_rust_gate() {
     cargo fmt --all --check || exit $?
     if [[ "$mode" == "fast" ]]; then
       cargo nextest run --workspace --locked \
+        --exclude git-remote-htree \
         --exclude hashtree-fuser \
         --exclude hashtree-embedded \
         --exclude hashtree-embedded-ffi \
@@ -162,9 +163,11 @@ run_rust_gate() {
         --exclude hashtree-cashu-cli \
         --exclude tauri-plugin-hashtree-updater \
         --no-run || exit $?
+      cargo nextest run --locked -p git-remote-htree --no-run || exit $?
     else
       ensure_test_fd_limit || exit $?
       cargo nextest run --workspace --locked \
+        --exclude git-remote-htree \
         --exclude hashtree-fuser \
         --exclude hashtree-embedded \
         --exclude hashtree-embedded-ffi \
@@ -172,6 +175,7 @@ run_rust_gate() {
         --exclude hashtree-ffi \
         --exclude hashtree-cashu-cli \
         --exclude tauri-plugin-hashtree-updater || exit $?
+      cargo nextest run --locked -p git-remote-htree || exit $?
       # The library READMEs are included in Rustdoc, so these exercise the guides.
       cargo test --locked -p hashtree-core -p hashtree-lmdb -p hashtree-blossom \
         -p hashtree-resolver -p hashtree-nostr --features hashtree-resolver/nostr --doc || exit $?

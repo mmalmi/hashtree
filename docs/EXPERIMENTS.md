@@ -2,6 +2,57 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-26 - TypeScript peer retry bounds and corrupt-peer cooldown on 10,000-node layouts
+
+`TcpBlobTransport.get` previously ignored caller abort signals and treated downstream `AggregateError` results as retryable single-hop failures, amplifying multi-hop errors across hops (`2^htl`) and repeatedly querying peers that returned corrupt bytes.
+
+The updated transport honors an optional caller `AbortSignal` without allocating composite `AbortSignal.any` wrappers, restricts single-session retries to direct link errors (skipping both `PeerBlobHashMismatch` and downstream `AggregateError`), and defers directly observed corrupt peers for 30 seconds (bounded to 256 peers) whenever healthy alternatives exist while preserving uncertainty on misses and still allowing single-peer lookups.
+
+We developed the change on two layouts (`3217,3253`) and fixed it before testing twelve previously unused 10,000-node layouts (`3701,3733,3769,3803,3847,3881,3919,3967,4003,4049,4093,4133`) in four alternating serial pairs of three layouts on macOS ARM64. Each version ran 4,608 reads (2,304 direct, 2,304 five-hop) with the same graph, placements, faults, and 700 ms deadlines.
+
+| Workload | Verified / reachable (both) | Protocol MB, before → after | Attempts, before → after | Query CPU s, before → after | Successful p50 / p95 ms (both) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Direct, all | 1,069 / 1,069 | 4.07 → 4.06 | 7,406 → 7,405 | 0.51 → 0.48 | 32 / 48 |
+| Five-hop, all | 373 / 373 | 3,219.86 → 381.43 | 12,611,458 → 4,675,034 | 216.48 → 84.93 | 146 / 406 |
+| Five-hop, steady | 177 / 177 | 73.36 → 73.36 | 1,595,836 → 1,595,836 | 28.49 → 30.58 | 146 / 178 |
+| Five-hop, churn | 113 / 113 | 259.74 → 106.67 | 5,822,262 → 2,388,375 | 101.09 → 41.44 | 150 / 690 |
+| Five-hop, adversarial | 83 / 83 | 2,886.76 → 201.40 | 5,193,360 → 690,823 | 86.90 → 12.91 | 146 / 168 |
+
+Both versions verified identical reachable reads and distinct queries (635/635 direct, 310/310 five-hop) with zero unexpected misses and identical latency percentiles. Adversarial deadlines fell from 685 to 0 (all unreachable adversarial reads completed cleanly as incomplete instead of timing out), corrupt replies rejected fell from 650,184 to 41,666 (-93.6%), and five-hop aggregate traffic dropped from 62.25 to 17.42 Mbps. Across the four alternating serial pairs, total process CPU fell from 219.82 to 88.25 seconds (-59.9%) and max resident memory stayed bounded (637.3 → 671.3 MiB).
+
+```sh
+pnpm --dir ts --filter @hashtree/fips-transport build
+seeds=3701,3733,3769,3803,3847,3881,3919,3967,4003,4049,4093,4133
+node ts/packages/hashtree-fips-transport/scripts/mesh-scale/run.mjs baseline "$seeds" <baseline-commit>
+node ts/packages/hashtree-fips-transport/scripts/mesh-scale/run.mjs candidate "$seeds"
+```
+
+## 2026-11-26 - End-to-end CLI directory add, Blossom batch push/fetch, and fault recovery
+
+We measured four user-facing Rust CLI/Blossom flows on macOS ARM64 with matched release binaries (`htree`) against a real local `htree start` LMDB Blossom daemon behind an instrumented async HTTP/1.1 proxy injecting 20 ms RTT and deterministic faults. Workloads: a seeded 500-file nested encrypted directory (~6.9 MiB, 551 blobs), a 10-file incremental update to that directory, a 32 MiB multi-chunk encrypted file, and an 8 MiB encrypted file for fault injection. Both builds ran in alternating order (`baseline`, `candidate`, `candidate`, `baseline`) against the same baseline daemon binary, plus a plain-Blossom fallback run blocking `/upload/check`, `/upload/batch*`, and `/blob/batch` with HTTP 404.
+
+Changes evaluated:
+- Coalesced directory add writes (`upload_dir_with` and `upload_dir_cached_with_progress`) via `BufferedStore` (16 MiB flush threshold) instead of one durable LMDB commit per small file/node.
+- `htree push` and auto-push (`blossom_push.rs`): pre-filter present blobs via `POST /upload/check`, stream bounded 8 MiB batches via `POST /upload/batch-binary` (avoiding wasted batch bodies when `/upload/check` returns 404), and eliminate duplicate local store reads.
+- `Fetcher` (`fetch.rs`) and `BlossomClient` (`hashtree-blossom`): default fetch concurrency 1 → 16, `POST /blob/batch` for small/medium blobs with hedged multi-server `GET` (150 ms hedge delay) and transient retry (up to 3 attempts on 408/429/5xx/transport errors), in-memory node decoding skipping redundant leaf reads/decrypts, batched LMDB cache writes, explicit error return on missing chunks, bounded LRU cache on `BlossomStore` (64 MiB default), and bounded ordered chunk read-ahead in `HashTree::get_stream` (up to 8 chunks / 8 MiB).
+
+| Flow (20 ms RTT, full Blossom server) | Baseline (2 runs) | Candidate (2 runs) | Requests, before → after | Bytes / correctness |
+| --- | ---: | ---: | ---: | --- |
+| `htree add <dir>` (durable LMDB, 500 files) | 14,424 / 13,109 ms | 1,923 (cold) / 196 ms | local | identical root CID |
+| `htree push` cold (500-file encrypted dir) | 13,719 / 10,946 ms | 532 / 216 ms | 561 → 2 | 6.92 → 6.98 MB (framed) |
+| `htree push` incremental (10/500 files changed) | 1,704 / 1,688 ms | 174 / 166 ms | 559 → 2 | 6.36 MB → 103 KB (-98.4%) |
+| `htree get <dir>` (500 files) | 33,749 / 38,060 ms | 1,800 / 2,764 ms | 551 → 47 | 500/500 SHA-256 verified |
+| `htree get <32 MiB file>` | 2,499 / 3,344 ms | 1,290 / 799 ms | 17 → 17 | SHA-256 verified |
+| Fault: 3 s stalled primary + 15 ms secondary (8 MiB) | 15,356 / 15,752 ms | 892 / 658 ms | 5 stalled / 0 healthy → 5 / 5 | SHA-256 verified |
+| Fault: transient 503 during `htree load` (8 MiB) | exit 0, incomplete offline | exit 0, complete offline | 1 injected 503 | retries & verifies offline |
+| Fault: permanent 404 child during `htree load` | exit 0 (silent miss) | exit 1 (explicit error) | missing child | preserves valid chunks |
+
+On a plain Blossom server returning 404 for `/upload/check`, `/upload/batch*`, and `/blob/batch` (20 ms RTT):
+- Cold push fell from 15,805 ms (561 requests, 6.92 MB) to 7,763 ms (562 requests, 6.96 MB, zero wasted batch bodies).
+- Incremental push fell from 2,885 ms to 1,724 ms (560 requests).
+- Directory get (500 files) fell from 41,302 ms to 1,572 ms (552 requests, 500/500 SHA-256 verified).
+- 32 MiB file get fell from 3,508 ms to 485 ms (17 requests, SHA-256 verified).
+
 ## 2026-11-18 - TypeScript peer retries on fresh 10,000-node layouts
 
 Transport 0.5.2 starts the same peers in parallel as 0.5.1. Each stream

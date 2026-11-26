@@ -231,7 +231,8 @@ jobs:
         working-directory: rust
         run: |
           rm -f target/package/hashtree-cli-*.crate
-          cargo package --locked -p hashtree-cli
+          cargo package --locked -p hashtree-cli -p git-remote-htree \
+            -p hashtree-fips-credit-link -p hashtree-peer-payments -p hashtree-paid-retrieval
       - name: Preserve the verified package
         uses: actions/upload-artifact@v4
         with:
@@ -312,7 +313,7 @@ jobs:
 
       - name: Build release binaries on Windows
         if: ${{ !cancelled() && steps.rust_toolchain.conclusion == 'success' }}
-        run: cargo build --locked --bins -p git-remote-htree -p hashtree-cashu-cli -p hashtree-cli --features hashtree-cli/fips-webrtc
+        run: cargo build --locked --bins -p hashtree-cashu-cli -p hashtree-cli --features hashtree-cli/fips-webrtc
 
       - name: Smoke Windows CLI startup
         shell: pwsh

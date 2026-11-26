@@ -22,7 +22,7 @@ htree --version
 command -v git-remote-htree
 ```
 
-Or use `cargo install hashtree-cli git-remote-htree`. See
+Or use `cargo install hashtree-cli`. See
 [installation](../rust/crates/git-remote-htree/README.md#installation) for Windows
 archives and other options. A daemon is optional for this Git workflow.
 
