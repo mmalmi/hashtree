@@ -138,9 +138,12 @@ pub(super) async fn dispositions<S: Store>(
     root: &Cid,
     events: &[StoredNostrEvent],
 ) -> Result<Vec<Disposition>> {
+    let by_id = store
+        .get_verified_by_ids(Some(root), events.iter().map(|event| event.id.clone()))
+        .await?;
     let mut rows = Vec::with_capacity(events.len());
     for event in events {
-        let (status, retained_id) = match store.get_verified_by_id(Some(root), &event.id).await? {
+        let (status, retained_id) = match by_id.get(&event.id) {
             Some(retained) => {
                 ensure!(
                     retained.as_stored() == event,

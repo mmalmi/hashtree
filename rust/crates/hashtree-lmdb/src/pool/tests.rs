@@ -2206,3 +2206,89 @@ fn wait_for_file(path: &Path, child: &mut Child) {
     }
     panic!("timed out waiting for {}", path.display());
 }
+
+#[test]
+fn put_many_optimistic_large_packed_batch_verifies_and_detects_pack_corruption() {
+    let temp = TempDir::new().expect("tempdir");
+    let catalog = temp.path().join("catalog");
+    let member_dir = temp.path().join("member");
+    let files_dir = temp.path().join("files");
+    fs::create_dir_all(&catalog).unwrap();
+    fs::create_dir_all(&member_dir).unwrap();
+    fs::create_dir_all(&files_dir).unwrap();
+
+    let mut cfg = PoolStoreConfig::default();
+    cfg.temperature.enabled = false;
+    let pool = PoolStore::open(&catalog, cfg).expect("open pool");
+    let member_cfg = PoolMemberConfig::new(member_dir, 64 * 1024 * 1024)
+        .with_external_blobs(files_dir.clone(), 1, true, Some(64 * 1024));
+    let member_id = pool.add_member(member_cfg).expect("add packed member");
+
+    // 320 blobs crosses the >= 128 parallel lookup/prewarm threshold and spans multiple packs.
+    let items: Vec<(Hash, Vec<u8>)> = (0..320u32)
+        .map(|i| {
+            let mut data = vec![(i & 0xff) as u8; 1024];
+            data[..4].copy_from_slice(&i.to_le_bytes());
+            (sha256(&data), data)
+        })
+        .collect();
+    let inserted = pool
+        .put_many_optimistic_sync(&items)
+        .expect("put_many_optimistic large packed batch");
+    assert_eq!(inserted, 320);
+
+    // Repeating the batch is a no-op and returns 0 newly inserted.
+    assert_eq!(
+        pool.put_many_optimistic_sync(&items)
+            .expect("repeat optimistic batch"),
+        0
+    );
+
+    // Every item is readable and matches its exact bytes, and stored in the catalog.
+    let mut sorted_hashes: Vec<Hash> = items.iter().map(|(h, _)| *h).collect();
+    sorted_hashes.sort_unstable();
+    let member = pool.get_member(member_id).expect("member store");
+    assert_eq!(
+        member
+            .existing_hashes_in_sorted_candidates(&sorted_hashes)
+            .expect("parallel existing check"),
+        vec![true; 320]
+    );
+    assert!(matches!(
+        member
+            .verify_many_committed_sync(&sorted_hashes)
+            .expect("verify committed packed batch"),
+        crate::VerifyBatchOutcome::Verified
+    ));
+    for (hash, expected) in &items {
+        assert_eq!(pool.get_sync(hash).expect("get_sync").as_deref(), Some(expected.as_slice()));
+    }
+
+    // Corrupting a byte inside a pack file must be detected as Corrupt by verify_many_committed_sync.
+    let mut pack_file = None;
+    for entry in fs::read_dir(files_dir.join("packs")).unwrap() {
+        let dir = entry.unwrap().path();
+        if dir.is_dir() {
+            for pack in fs::read_dir(&dir).unwrap() {
+                let p = pack.unwrap().path();
+                if p.extension().and_then(|e| e.to_str()) == Some("pack") {
+                    pack_file = Some(p);
+                    break;
+                }
+            }
+        }
+        if pack_file.is_some() {
+            break;
+        }
+    }
+    let pack_path = pack_file.expect("at least one pack file");
+    let mut raw = fs::read(&pack_path).unwrap();
+    raw[0] ^= 0xff;
+    fs::write(&pack_path, raw).unwrap();
+    assert!(matches!(
+        member
+            .verify_many_committed_sync(&sorted_hashes)
+            .expect("verify corrupted pack"),
+        crate::VerifyBatchOutcome::Corrupt
+    ));
+}

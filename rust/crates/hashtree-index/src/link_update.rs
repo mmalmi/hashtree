@@ -21,8 +21,10 @@ impl<S: Store> BTree<S> {
                 let end = entries
                     .get(index + 1)
                     .map(|next| {
-                        let key = unescape_key(&next.name);
-                        start + changes[start..].partition_point(|(candidate, _)| candidate < &key)
+                        let key = unescape_key_cow(&next.name);
+                        start
+                            + changes[start..]
+                                .partition_point(|(candidate, _)| candidate.as_str() < key.as_ref())
                     })
                     .unwrap_or(changes.len());
                 let row = (

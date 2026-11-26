@@ -1762,23 +1762,65 @@ impl<S: Store> NostrEventStore<S> {
                 .collect::<BTreeSet<_>>();
 
             observe(NostrAppendPhase::ReadPreviousEvents);
-            let mut prepared_events = Vec::with_capacity(normalized_events.len());
+            let mut pending_existing: Vec<(usize, StoredNostrEvent, Option<Cid>)> =
+                Vec::with_capacity(normalized_events.len());
+            let mut existing_cids_to_load: Vec<(usize, Cid)> = Vec::new();
             for (sequence, normalized) in normalized_events {
                 let existing_cid = if is_replaceable_kind(normalized.kind) {
-                    existing_replaceable.get(&replaceable_key(&normalized.pubkey, normalized.kind))
+                    existing_replaceable
+                        .get(&replaceable_key(&normalized.pubkey, normalized.kind))
+                        .cloned()
                 } else if is_parameterized_replaceable_kind(normalized.kind) {
-                    existing_parameterized.get(&parameterized_replaceable_key(
-                        &normalized.pubkey,
-                        normalized.kind,
-                        &parameterized_replaceable_d_tag(&normalized),
-                    ))
+                    existing_parameterized
+                        .get(&parameterized_replaceable_key(
+                            &normalized.pubkey,
+                            normalized.kind,
+                            &parameterized_replaceable_d_tag(&normalized),
+                        ))
+                        .cloned()
                 } else {
-                    existing_by_id.get(&normalized.id)
+                    existing_by_id.get(&normalized.id).cloned()
                 };
+                if let Some(cid) = existing_cid.as_ref() {
+                    existing_cids_to_load.push((pending_existing.len(), cid.clone()));
+                }
+                pending_existing.push((sequence, normalized, existing_cid));
+            }
+            let mut loaded_existing: Vec<
+                Option<Result<StoredNostrEvent, NostrEventStoreError>>,
+            > = if existing_cids_to_load.is_empty() {
+                Vec::new()
+            } else {
+                let mut results: Vec<Option<Result<StoredNostrEvent, NostrEventStoreError>>> =
+                    std::iter::repeat_with(|| None)
+                        .take(pending_existing.len())
+                        .collect();
+                let writer_ref = &buffered_writer;
+                let fetched = stream::iter(existing_cids_to_load.into_iter().map(
+                    |(slot, cid)| async move {
+                        let res = writer_ref.read_stored_event(&cid).await;
+                        (slot, res)
+                    },
+                ))
+                .buffer_unordered(EVENT_BLOB_WRITE_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+                for (slot, res) in fetched {
+                    results[slot] = Some(res);
+                }
+                results
+            };
 
+            let mut prepared_events = Vec::with_capacity(pending_existing.len());
+            for (slot, (sequence, normalized, existing_cid)) in
+                pending_existing.into_iter().enumerate()
+            {
                 let previous = match existing_cid {
                     Some(existing_cid) => {
-                        match buffered_writer.read_stored_event(existing_cid).await {
+                        match loaded_existing[slot]
+                            .take()
+                            .expect("loaded existing event")
+                        {
                             Ok(existing)
                                 if is_replaceable_kind(normalized.kind)
                                     || is_parameterized_replaceable_kind(normalized.kind) =>
@@ -1786,7 +1828,7 @@ impl<S: Store> NostrEventStore<S> {
                                 if compare_replaceable_events(&normalized, &existing) <= 0 {
                                     continue;
                                 }
-                                obsolete_event_cids.push(existing_cid.clone());
+                                obsolete_event_cids.push(existing_cid);
                                 Some(existing)
                             }
                             Ok(_) => continue,
@@ -2307,6 +2349,44 @@ impl<S: Store> NostrEventStore<S> {
             .await?
             .map(VerifiedStoredNostrEvent::try_from)
             .transpose()
+    }
+
+    /// Batch-fetch and verify multiple events by ID using one manifest read,
+    /// one batched `by-id` B-tree lookup, and concurrent event-blob reads.
+    pub async fn get_verified_by_ids<I>(
+        &self,
+        root: Option<&Cid>,
+        event_ids: I,
+    ) -> Result<BTreeMap<String, VerifiedStoredNostrEvent>, NostrEventStoreError>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let mut ids = Vec::new();
+        for id in event_ids {
+            ids.push(validate_lower_hex(&id, 64, "event id")?);
+        }
+        if ids.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let manifest = self.get_manifest(root).await?;
+        let Some(by_id) = manifest.by_id.as_ref() else {
+            return Ok(BTreeMap::new());
+        };
+        let links = self.index.get_links(Some(by_id), ids).await?;
+        if links.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let entries: Vec<(String, Cid)> = links.into_iter().collect();
+        let blobs = self
+            .try_load_event_blobs(entries.iter().map(|(_, cid)| cid.clone()))
+            .await?;
+        let mut verified = BTreeMap::new();
+        for ((id, _), maybe_event) in entries.into_iter().zip(blobs) {
+            if let Some(event) = maybe_event {
+                verified.insert(id, VerifiedStoredNostrEvent::try_from(event)?);
+            }
+        }
+        Ok(verified)
     }
 
     pub async fn list_by_author(
@@ -2958,11 +3038,11 @@ impl<S: Store> NostrEventStore<S> {
         let normalized = self.validate_event_shape(event)?;
         let payload = serde_json::to_string(&(
             0u8,
-            normalized.pubkey.clone(),
+            &normalized.pubkey,
             normalized.created_at,
             normalized.kind,
-            normalized.tags.clone(),
-            normalized.content.clone(),
+            &normalized.tags,
+            &normalized.content,
         ))?;
         let computed = hex::encode(sha256(payload.as_bytes()));
         if computed != normalized.id {

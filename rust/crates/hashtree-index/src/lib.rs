@@ -6,6 +6,7 @@ mod link_update;
 mod search;
 pub use link_diff::{LinkComparisonLimits, LinkComparisonReport, LinkTreeVerifier};
 
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
@@ -21,7 +22,8 @@ pub use search::{
 
 const DEFAULT_ORDER: usize = 32;
 const UPDATE_CHILD_CONCURRENCY: usize = 4;
-const PARALLEL_UPDATE_MIN_CHANGES: usize = 256;
+const PARALLEL_UPDATE_MIN_CHANGES: usize = 2;
+const PARALLEL_STRING_UPDATE_MIN_CHANGES: usize = 256;
 
 #[derive(Debug, Clone, Default)]
 pub struct BTreeOptions {
@@ -696,7 +698,7 @@ impl<S: Store> BTree<S> {
                 .filter(|(_, change_start, change_end)| change_start != change_end)
                 .count();
             let children = if parallel_children
-                && changes.len() >= PARALLEL_UPDATE_MIN_CHANGES
+                && changes.len() >= PARALLEL_STRING_UPDATE_MIN_CHANGES
                 && touched_children > 1
             {
                 self.update_string_children_parallel(work, changes)?
@@ -1104,22 +1106,54 @@ impl<S: Store> BTree<S> {
         entries: Vec<TreeEntry>,
         changes: &[(String, Option<Cid>)],
     ) -> Result<Vec<BuiltNode>, BTreeError> {
-        let mut final_entries = entries
-            .into_iter()
-            .map(|entry| (unescape_key(&entry.name), entry_cid(&entry)))
-            .collect::<BTreeMap<_, _>>();
-        for (key, cid) in changes {
-            match cid {
-                Some(cid) => {
-                    final_entries.insert(key.clone(), cid.clone());
+        // Both `entries` (sorted by unescaped key) and `changes` (strictly
+        // sorted by key) are already ordered; merge linearly without building
+        // an intermediate BTreeMap.
+        let mut final_entries = Vec::with_capacity(entries.len() + changes.len());
+        let mut existing = entries.into_iter().peekable();
+        let mut change_idx = 0usize;
+        while existing.peek().is_some() || change_idx < changes.len() {
+            match (existing.peek(), changes.get(change_idx)) {
+                (Some(entry), Some((change_key, change_cid))) => {
+                    let entry_key = unescape_key_cow(&entry.name);
+                    match entry_key.as_ref().cmp(change_key.as_str()) {
+                        Ordering::Less => {
+                            let entry = existing.next().unwrap();
+                            let cid = entry_cid(&entry);
+                            let key = unescape_key_owned(entry.name);
+                            final_entries.push((key, cid));
+                        }
+                        Ordering::Equal => {
+                            let _ = existing.next();
+                            if let Some(cid) = change_cid {
+                                final_entries.push((change_key.clone(), cid.clone()));
+                            }
+                            change_idx += 1;
+                        }
+                        Ordering::Greater => {
+                            if let Some(cid) = change_cid {
+                                final_entries.push((change_key.clone(), cid.clone()));
+                            }
+                            change_idx += 1;
+                        }
+                    }
                 }
-                None => {
-                    final_entries.remove(key);
+                (Some(_), None) => {
+                    let entry = existing.next().unwrap();
+                    let cid = entry_cid(&entry);
+                    let key = unescape_key_owned(entry.name);
+                    final_entries.push((key, cid));
                 }
+                (None, Some((change_key, change_cid))) => {
+                    if let Some(cid) = change_cid {
+                        final_entries.push((change_key.clone(), cid.clone()));
+                    }
+                    change_idx += 1;
+                }
+                (None, None) => break,
             }
         }
 
-        let final_entries = final_entries.into_iter().collect::<Vec<_>>();
         let mut nodes = Vec::with_capacity(final_entries.len().div_ceil(self.max_keys));
         for chunk in final_entries.chunks(self.max_keys) {
             let cid = self.create_leaf_with_links(chunk).await?;
@@ -1964,16 +1998,47 @@ struct InsertResult {
 }
 
 pub fn escape_key(key: &str) -> String {
-    key.replace('%', "%25")
-        .replace('/', "%2F")
-        .replace('\0', "%00")
+    match escape_key_cow(key) {
+        Cow::Borrowed(s) => s.to_owned(),
+        Cow::Owned(s) => s,
+    }
+}
+
+pub(crate) fn escape_key_cow(key: &str) -> Cow<'_, str> {
+    if !key.bytes().any(|b| b == b'%' || b == b'/' || b == 0) {
+        return Cow::Borrowed(key);
+    }
+    Cow::Owned(
+        key.replace('%', "%25")
+            .replace('/', "%2F")
+            .replace('\0', "%00"),
+    )
 }
 
 pub fn unescape_key(name: &str) -> String {
-    name.replace("%2F", "/")
-        .replace("%2f", "/")
-        .replace("%00", "\0")
-        .replace("%25", "%")
+    match unescape_key_cow(name) {
+        Cow::Borrowed(s) => s.to_owned(),
+        Cow::Owned(s) => s,
+    }
+}
+
+pub(crate) fn unescape_key_cow(name: &str) -> Cow<'_, str> {
+    if !name.as_bytes().contains(&b'%') {
+        return Cow::Borrowed(name);
+    }
+    Cow::Owned(
+        name.replace("%2F", "/")
+            .replace("%2f", "/")
+            .replace("%00", "\0")
+            .replace("%25", "%"),
+    )
+}
+
+fn unescape_key_owned(name: String) -> String {
+    if !name.as_bytes().contains(&b'%') {
+        return name;
+    }
+    unescape_key(&name)
 }
 
 fn increment_prefix(value: &str) -> Option<String> {
@@ -1999,7 +2064,7 @@ fn validate_required_link_node(entries: &[TreeEntry]) -> Result<(), BTreeError> 
         || entries.iter().all(|entry| entry.link_type == LinkType::Dir))
         || entries
             .windows(2)
-            .any(|pair| unescape_key(&pair[0].name) >= unescape_key(&pair[1].name))
+            .any(|pair| compare_unescaped_names(&pair[0].name, &pair[1].name) != Ordering::Less)
     {
         return Err(BTreeError::InvalidLinkTree(
             "invalid node in required link traversal".into(),
@@ -2018,14 +2083,17 @@ fn sort_entries(mut entries: Vec<TreeEntry>) -> Vec<TreeEntry> {
 }
 
 fn compare_unescaped_names(left: &str, right: &str) -> Ordering {
-    unescape_key(left).cmp(&unescape_key(right))
+    if !left.as_bytes().contains(&b'%') && !right.as_bytes().contains(&b'%') {
+        return left.cmp(right);
+    }
+    unescape_key_cow(left).cmp(&unescape_key_cow(right))
 }
 
 fn find_child(entries: &[TreeEntry], key: &str) -> TreeEntry {
     let sorted = sort_entries(entries.to_vec());
     for window in sorted.windows(2) {
-        let next_name = unescape_key(&window[1].name);
-        if key < next_name.as_str() {
+        let next_name = unescape_key_cow(&window[1].name);
+        if key < next_name.as_ref() {
             return window[0].clone();
         }
     }

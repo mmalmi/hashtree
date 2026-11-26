@@ -112,6 +112,8 @@ impl Fixture {
             graph_authors_sha256: None,
             authors_file: temp.path().join("authors.txt"),
             min_free_bytes: 0,
+            read_cache_mib: 64,
+            index_write_buffer_mib: 16,
         };
         std::fs::write(&args.authors_file, &authors).unwrap();
         std::fs::write(&args.batch, &bytes).unwrap();
@@ -129,6 +131,7 @@ impl Fixture {
     async fn append(&self) -> Result<Vec<u8>> {
         append(
             &self.store,
+            true,
             &self.directory,
             &self.bytes,
             &self.events,
@@ -303,6 +306,7 @@ async fn recovers_reopened_storage_at_each_durable_commit_boundary() {
         if stage == "pending" {
             append(
                 &reopened,
+                true,
                 &f.directory,
                 &f.bytes,
                 &f.events,

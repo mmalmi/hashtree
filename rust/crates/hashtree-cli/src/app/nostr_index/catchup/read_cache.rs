@@ -13,7 +13,7 @@ use hashtree_core::store::StoreStats;
 use hashtree_core::{verify, Hash, Store, StoreError};
 use lru::LruCache;
 
-const MAX_ENTRIES: usize = 16_384;
+const MAX_ENTRIES: usize = 65_536;
 
 struct Cache {
     entries: LruCache<Hash, Vec<u8>>,

@@ -43,15 +43,15 @@ pub use self::reader::{
     PoolCatalogLocation, PoolManifestIdentity, PoolPhysicalAudit, PoolReadBatchItem,
     PoolStoreReader, PoolTerminalAudit,
 };
-use self::temperature::TemperatureRuntime;
+use self::temperature::{AccessRecord, TemperatureRuntime};
 use self::temperature_worker::TemperatureWorker;
-use crate::{managed_env::ManagedEnv, pinned_lmdb_data_len, LmdbBlobStore};
+use crate::{managed_env::ManagedEnv, pinned_lmdb_data_len, LmdbBlobStore, VerifyBatchOutcome};
 use async_trait::async_trait;
 use hashtree_core::store::{slice_blob_range, PutManyReport, Store, StoreError, StoreStats};
 use hashtree_core::{sha256, to_hex, types::Hash};
 use heed::types::{Bytes, Unit};
-use heed::{Database, EnvOpenOptions};
-use std::collections::{HashMap, HashSet};
+use heed::{Database, EnvOpenOptions, Error as HeedError, MdbError, PutFlags};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
@@ -895,11 +895,58 @@ impl PoolStore {
                 ordered.push((*hash, data.len() as u64));
             }
         }
+        // Sort unique hashes once so every catalog/member LMDB lookup and
+        // write walks B-tree pages monotonically left-to-right.
+        unique.sort_unstable_by_key(|(hash, _)| *hash);
 
         let mut inserted = HashSet::new();
         let mut existing_to_check = Vec::new();
         let mut missing = Vec::new();
-        {
+        if unique.len() >= 128 {
+            let workers = (unique.len() / 32).clamp(2, 8);
+            let chunk_len = unique.len().div_ceil(workers);
+            let chunk_results: Vec<Result<(Vec<(Hash, &Vec<u8>)>, Vec<(Hash, &Vec<u8>)>), StoreError>> =
+                std::thread::scope(|scope| {
+                    let handles = unique
+                        .chunks(chunk_len)
+                        .map(|chunk| {
+                            scope.spawn(move || {
+                                let rtxn = self.env.read_txn().map_err(map_heed)?;
+                                let mut chunk_existing = Vec::new();
+                                let mut chunk_missing = Vec::new();
+                                for &(hash, data) in chunk {
+                                    if let Some(encoded) =
+                                        self.locations.get(&rtxn, &hash).map_err(map_heed)?
+                                    {
+                                        let location = LocationRecord::decode(encoded)?;
+                                        if verify_existing
+                                            || matches!(location, LocationRecord::Pending { .. })
+                                        {
+                                            chunk_existing.push((hash, data));
+                                        }
+                                    } else {
+                                        chunk_missing.push((hash, data));
+                                    }
+                                }
+                                Ok((chunk_existing, chunk_missing))
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    handles
+                        .into_iter()
+                        .map(|handle| {
+                            handle
+                                .join()
+                                .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                        })
+                        .collect()
+                });
+            for result in chunk_results {
+                let (chunk_existing, chunk_missing) = result?;
+                existing_to_check.extend(chunk_existing);
+                missing.extend(chunk_missing);
+            }
+        } else {
             let rtxn = self.env.read_txn().map_err(map_heed)?;
             for (hash, data) in unique {
                 if let Some(encoded) = self.locations.get(&rtxn, &hash).map_err(map_heed)? {
@@ -923,25 +970,80 @@ impl PoolStore {
 
         let assignments = self.choose_write_members_for_batch(&missing)?;
 
+        // Prewarm cold by_member and last_accessed leaf pages in parallel
+        // read-only transactions before acquiring the single-threaded write txn.
+        if assignments.len() >= 128 {
+            let workers = (assignments.len() / 32).clamp(2, 8);
+            let chunk_len = assignments.len().div_ceil(workers);
+            std::thread::scope(|scope| {
+                let handles = assignments
+                    .chunks(chunk_len)
+                    .map(|chunk| {
+                        scope.spawn(move || -> Result<(), StoreError> {
+                            let rtxn = self.env.read_txn().map_err(map_heed)?;
+                            for &(hash, _, target) in chunk {
+                                let _ = self
+                                    .by_member
+                                    .get(&rtxn, &member_hash_key(target, hash))
+                                    .map_err(map_heed)?;
+                            }
+                            for &(hash, _, _) in chunk {
+                                let _ = self.last_accessed.get(&rtxn, &hash).map_err(map_heed)?;
+                            }
+                            Ok(())
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let mut first_err = None;
+                for handle in handles {
+                    if let Err(err) = handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                    {
+                        first_err.get_or_insert(err);
+                    }
+                }
+                if let Some(err) = first_err {
+                    return Err(err);
+                }
+                Ok(())
+            })?;
+        }
+
         let mut wtxn = self.env.write_txn().map_err(map_heed)?;
         let mut plans = Vec::with_capacity(assignments.len());
         let mut raced = Vec::new();
         for (hash, data, target) in assignments {
-            if self
-                .locations
-                .get(&wtxn, &hash)
-                .map_err(map_heed)?
-                .is_some()
-            {
-                raced.push((hash, data));
-                continue;
-            }
             let pending = LocationRecord::Pending {
                 member: target,
                 size: data.len() as u64,
             };
-            self.set_location_txn(&mut wtxn, hash, Some(pending))?;
-            plans.push((hash, data, target, pending));
+            let encoded = pending.encode();
+            match self
+                .locations
+                .put_with_flags(&mut wtxn, PutFlags::NO_OVERWRITE, &hash, &encoded)
+            {
+                Ok(()) => plans.push((hash, data, target, pending)),
+                Err(HeedError::Mdb(MdbError::KeyExist)) => raced.push((hash, data)),
+                Err(err) => return Err(map_heed(err)),
+            }
+        }
+        let mut by_member_plans: BTreeMap<PoolMemberId, Vec<Hash>> = BTreeMap::new();
+        for &(hash, _, target, _) in &plans {
+            by_member_plans.entry(target).or_default().push(hash);
+        }
+        for (target, hashes) in by_member_plans {
+            for hash in hashes {
+                self.by_member
+                    .put(&mut wtxn, &member_hash_key(target, hash), &())
+                    .map_err(map_heed)?;
+            }
+        }
+        let access_encoded = AccessRecord::new(unix_timestamp_now()).encode();
+        for &(hash, _, _, _) in &plans {
+            self.last_accessed
+                .put(&mut wtxn, &hash, &access_encoded)
+                .map_err(map_heed)?;
         }
         wtxn.commit().map_err(map_heed)?;
 
@@ -961,8 +1063,8 @@ impl PoolStore {
         for (target, batch) in by_target {
             let (store, gate) = self.get_member_and_gate(target, true)?;
             let permit = gate.acquire()?;
-            let mut sorted_hashes = batch.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
-            sorted_hashes.sort_unstable();
+            // `plans` is already sorted by hash, so `batch` is strictly sorted.
+            let sorted_hashes = batch.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
             let existing = store.existing_hashes_in_sorted_candidates(&sorted_hashes)?;
             for (hash, is_present) in sorted_hashes.iter().zip(existing) {
                 if is_present
@@ -1000,30 +1102,46 @@ impl PoolStore {
             };
             inserted.extend(report.inserted_hashes);
             let read_gate = self.member_gate(target, false)?;
-            for (hash, _) in &batch {
-                self.read_verified_member_with_gate(target, &store, &read_gate, hash)?
-                    .ok_or_else(|| {
-                        StoreError::Other(format!(
-                            "pool member {target} lost a committed batch write"
-                        ))
-                    })?;
+            let _read_permit = read_gate.acquire()?;
+            let verify_started = Instant::now();
+            match store.verify_many_committed_sync(&sorted_hashes) {
+                Ok(VerifyBatchOutcome::Verified) => {
+                    self.record_read(target, verify_started.elapsed(), true);
+                }
+                Ok(VerifyBatchOutcome::Missing) => {
+                    self.record_read(target, verify_started.elapsed(), true);
+                    return Err(StoreError::Other(format!(
+                        "pool member {target} lost a committed batch write"
+                    )));
+                }
+                Ok(VerifyBatchOutcome::Corrupt) => {
+                    self.record_read(target, verify_started.elapsed(), false);
+                    return Err(StoreError::Other(format!(
+                        "pool member {target} returned corrupt bytes"
+                    )));
+                }
+                Err(error) => {
+                    self.record_read(target, verify_started.elapsed(), false);
+                    return Err(error);
+                }
             }
         }
 
         let mut wtxn = self.env.write_txn().map_err(map_heed)?;
         for (hash, _, target, pending) in plans {
+            let pending_encoded = pending.encode();
             let Some(current) = self.locations.get(&wtxn, &hash).map_err(map_heed)? else {
                 continue;
             };
-            if LocationRecord::decode(current)? == pending {
-                self.set_location_txn(
-                    &mut wtxn,
-                    hash,
-                    Some(LocationRecord::Stored {
-                        member: target,
-                        size: pending.size(),
-                    }),
-                )?;
+            if current == pending_encoded.as_slice() {
+                let stored = LocationRecord::Stored {
+                    member: target,
+                    size: pending.size(),
+                }
+                .encode();
+                self.locations
+                    .put(&mut wtxn, &hash, &stored)
+                    .map_err(map_heed)?;
             }
         }
         wtxn.commit().map_err(map_heed)?;

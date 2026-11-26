@@ -223,16 +223,18 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         store.store_arc(),
         usize::from(args.read_cache_mib) * 1024 * 1024,
     ));
+    let local_only = config.storage.s3.is_none();
     let event_store = NostrEventStore::with_options(
         read_cache.clone(),
         NostrEventStoreOptions {
             index_commit_batch_size: Some(state.policy.index_commit_batch_size),
+            btree_update_concurrency: Some(if local_only { 8 } else { 4 }),
             ..Default::default()
         },
     )
     // The local router performs synchronous reads. Eight bounded workers won
     // the cold-Pool sweep; keep optional remote storage on its existing path.
-    .with_index_read_concurrency(if config.storage.s3.is_none() { 8 } else { 1 })
+    .with_index_read_concurrency(if local_only { 8 } else { 1 })
     .with_index_write_buffer_bytes(usize::from(args.index_write_buffer_mib) * 1024 * 1024);
     if repair_bridge_active {
         repair_witness

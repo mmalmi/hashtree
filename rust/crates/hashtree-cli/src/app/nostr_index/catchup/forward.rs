@@ -6,10 +6,11 @@ use hashtree_nostr::{NostrEventStore, NostrEventStoreOptions};
 use std::{
     io::Write,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use super::super::{cid_to_nhash, parse_root_text, persist_json_atomic, CrawlStateLock, INDEX_DIR};
-use super::coverage;
+use super::{coverage, read_cache};
 
 pub(super) mod bridge;
 mod input;
@@ -38,19 +39,27 @@ pub(crate) struct AppendForwardArgs {
     /// Forward event authors are not restricted to this census.
     #[arg(long)]
     authors_file: PathBuf,
+    /// Immutable read-cache payload budget in MiB (0 disables; runtime tuning only).
+    #[arg(long, default_value_t = 128, value_parser = clap::value_parser!(u16).range(0..=256))]
+    read_cache_mib: u16,
+    /// Coalesce index projection writes below this MiB threshold (0 disables; runtime tuning only).
+    #[arg(long, default_value_t = 16, value_parser = clap::value_parser!(u16).range(0..=64))]
+    index_write_buffer_mib: u16,
     #[arg(long, default_value_t = 10 * 1024 * 1024 * 1024u64)]
     min_free_bytes: u64,
 }
 
-fn open_store(data: &Path, min_free_bytes: u64) -> Result<HashtreeStore> {
+fn open_store(data: &Path, min_free_bytes: u64) -> Result<(HashtreeStore, bool)> {
     let config = Config::load()?;
-    HashtreeStore::with_catchup_physical_space(
+    let local_only = config.storage.s3.is_none();
+    let store = HashtreeStore::with_catchup_physical_space(
         data,
         config.storage.s3.as_ref(),
         config.storage.max_size_gb * 1024 * 1024 * 1024,
         min_free_bytes,
     )
-    .context("open forward archive storage")
+    .context("open forward archive storage")?;
+    Ok((store, local_only))
 }
 
 // Caller already holds CrawlStateLock. This performs no network fetch and no
@@ -62,7 +71,7 @@ pub(super) async fn recover_if_pending(
 ) -> Result<()> {
     let directory = data.join(INDEX_DIR);
     if journal::present(&directory.join(journal::PENDING))? {
-        let store = open_store(data, min_free_bytes)?;
+        let (store, _) = open_store(data, min_free_bytes)?;
         journal::recover(&store, &directory, authors).await?;
     }
     Ok(())
@@ -100,7 +109,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: AppendForwardArgs) -> Result<()
             .with_context(|| guard.status())?;
     }
     let _lock = CrawlStateLock::acquire(&data_dir)?;
-    let store = open_store(&data_dir, args.min_free_bytes)?;
+    let (store, local_only) = open_store(&data_dir, args.min_free_bytes)?;
     journal::recover(&store, &directory, &author_bytes).await?;
     let path = journal::receipt_path(&directory, &args.batch_sha256)?;
     let output = if journal::present(&path)? {
@@ -119,6 +128,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: AppendForwardArgs) -> Result<()
     } else {
         append(
             &store,
+            local_only,
             &directory,
             &batch,
             &validated.events,
@@ -135,6 +145,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: AppendForwardArgs) -> Result<()
 
 async fn append(
     store: &HashtreeStore,
+    local_only: bool,
     directory: &Path,
     batch: &[u8],
     events: &[hashtree_nostr::StoredNostrEvent],
@@ -150,14 +161,20 @@ async fn append(
     let coverage_directory = directory.join("catchup-coverage");
     coverage::validate_head(&coverage_directory, &before, &author_keys)?;
     let root = parse_root_text(&before.root)?;
-    let writer = NostrEventStore::with_options(
+    let read_cache = Arc::new(read_cache::CatchupReadCache::new(
         store.store_arc(),
+        usize::from(args.read_cache_mib) * 1024 * 1024,
+    ));
+    let writer = NostrEventStore::with_options(
+        read_cache,
         NostrEventStoreOptions {
             index_commit_batch_size: Some(32),
+            btree_update_concurrency: Some(if local_only { 8 } else { 4 }),
             ..Default::default()
         },
     )
-    .with_index_write_buffer_bytes(8 * 1024 * 1024);
+    .with_index_read_concurrency(if local_only { 8 } else { 1 })
+    .with_index_write_buffer_bytes(usize::from(args.index_write_buffer_mib) * 1024 * 1024);
     writer.validate_index_root(Some(&root)).await?;
     let batch_path = journal::batch_path(directory, &args.batch_sha256)?;
     coverage::persist_bytes(store, batch_path.parent().unwrap(), &batch_path, batch)?;

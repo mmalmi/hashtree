@@ -2,7 +2,7 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-const PARALLEL_READ_MIN_KEYS: usize = 32;
+const PARALLEL_READ_MIN_KEYS: usize = 2;
 
 enum LookupStep {
     Found(BTreeMap<String, Cid>),
@@ -25,15 +25,23 @@ impl<S: Store> BTree<S> {
             validate_required_link_node(&entries)?;
         }
         if is_leaf_node(&entries) {
-            let links = entries
-                .into_iter()
-                .map(|entry| (unescape_key(&entry.name), entry_cid(&entry)))
-                .collect::<BTreeMap<_, _>>();
-            return Ok(LookupStep::Found(
-                keys.iter()
-                    .filter_map(|key| links.get(key).cloned().map(|cid| (key.clone(), cid)))
-                    .collect(),
-            ));
+            let mut found = BTreeMap::new();
+            let mut entry_idx = 0usize;
+            for key in keys {
+                while entry_idx < entries.len() {
+                    let entry_key = unescape_key_cow(&entries[entry_idx].name);
+                    match entry_key.as_ref().cmp(key.as_str()) {
+                        std::cmp::Ordering::Less => entry_idx += 1,
+                        std::cmp::Ordering::Equal => {
+                            found.insert(key.clone(), entry_cid(&entries[entry_idx]));
+                            entry_idx += 1;
+                            break;
+                        }
+                        std::cmp::Ordering::Greater => break,
+                    }
+                }
+            }
+            return Ok(LookupStep::Found(found));
         }
         let mut work = Vec::new();
         let mut start = 0;
@@ -41,8 +49,8 @@ impl<S: Store> BTree<S> {
             let end = entries
                 .get(index + 1)
                 .map(|next| {
-                    let next_key = unescape_key(&next.name);
-                    start + keys[start..].partition_point(|key| key < &next_key)
+                    let next_key = unescape_key_cow(&next.name);
+                    start + keys[start..].partition_point(|key| key.as_str() < next_key.as_ref())
                 })
                 .unwrap_or(keys.len());
             if start < end {

@@ -411,3 +411,81 @@ fn empty_and_duplicate_required_queries_preserve_exact_results() {
         );
     });
 }
+
+#[test]
+fn small_batch_lookup_and_update_overlap_reads_and_preserve_escaped_key_parity() {
+    block_on(async {
+        let store = Arc::new(LocalStore::default());
+        let serial = BTree::new(store.clone(), BTreeOptions { order: Some(8) })
+            .with_read_concurrency(1)
+            .with_update_concurrency(1);
+        let parallel = BTree::new(store.clone(), BTreeOptions { order: Some(8) })
+            .with_read_concurrency(8)
+            .with_update_concurrency(8);
+
+        let initial_entries = (0..512usize).map(|n| {
+            let key = if n % 17 == 0 {
+                format!("k/{n:05}%25\0tag")
+            } else {
+                format!("k{n:05}")
+            };
+            (key, target(n))
+        });
+        let root = serial.build_links(initial_entries).await.unwrap().unwrap();
+
+        // 3-key lookup (below old threshold of 32) overlaps reads across workers.
+        let small_keys = vec![
+            "k/00000%25\0tag".to_string(),
+            "k00250".to_string(),
+            "k00511".to_string(),
+            "missing".to_string(),
+        ];
+        store.peak.store(0, Ordering::SeqCst);
+        store.probing.store(true, Ordering::SeqCst);
+        let found_parallel = parallel
+            .get_links(Some(&root), small_keys.clone())
+            .await
+            .unwrap();
+        let lookup_peak = store.peak.load(Ordering::SeqCst);
+        store.probing.store(false, Ordering::SeqCst);
+        let found_serial = serial.get_links(Some(&root), small_keys).await.unwrap();
+        assert_eq!(found_parallel, found_serial);
+        assert_eq!(found_parallel.len(), 3);
+        assert!(
+            lookup_peak >= 2,
+            "3-key lookup with 8 workers should overlap reads, peak={lookup_peak}"
+        );
+
+        // 16-key update (below old threshold of 256) with inserts, overwrites, deletes, and escaped keys.
+        let mut changes = Vec::new();
+        for i in 0..8usize {
+            let k = format!("k{:05}", i * 60 + 1);
+            changes.push((k, Some(target(10_000 + i))));
+        }
+        for i in 0..4usize {
+            let k = format!("k/{:05}%25\0tag", i * 17);
+            changes.push((k, None));
+        }
+        for i in 0..4usize {
+            let k = format!("k/{:05}%25\0new", i * 100 + 5);
+            changes.push((k, Some(target(20_000 + i))));
+        }
+        store.peak.store(0, Ordering::SeqCst);
+        store.probing.store(true, Ordering::SeqCst);
+        let upd_parallel = parallel
+            .update_links_with_superseded(Some(&root), changes.clone())
+            .await
+            .unwrap();
+        let update_peak = store.peak.load(Ordering::SeqCst);
+        store.probing.store(false, Ordering::SeqCst);
+        let upd_serial = serial
+            .update_links_with_superseded(Some(&root), changes)
+            .await
+            .unwrap();
+        assert_eq!(upd_parallel.root, upd_serial.root);
+        assert!(
+            update_peak >= 2,
+            "16-key update with 8 workers should overlap reads, peak={update_peak}"
+        );
+    });
+}

@@ -2439,6 +2439,46 @@ fn missing_parameterized_replaceable_winner_blob_does_not_block_new_winner() {
     });
 }
 
+#[test]
+fn get_verified_by_ids_matches_single_lookups_for_present_and_absent_events() {
+    block_on(async {
+        let store = NostrEventStore::new(Arc::new(MemoryStore::new())).with_index_read_concurrency(4);
+        let keys = Keys::parse(&format!("{:064x}", 42)).unwrap();
+        let events: Vec<StoredNostrEvent> = (0..12u64)
+            .map(|i| {
+                stored_event_from_nostr_sdk_event(
+                    &EventBuilder::new(Kind::TextNote, format!("batch id lookup {i}"))
+                        .custom_created_at(Timestamp::from_secs(1000 + i))
+                        .sign_with_keys(&keys)
+                        .unwrap(),
+                )
+            })
+            .collect();
+        let root = store
+            .build(None, events.clone())
+            .await
+            .unwrap()
+            .expect("built root");
+        let absent = "f".repeat(64);
+        let mut query_ids: Vec<String> = events.iter().map(|e| e.id.clone()).collect();
+        query_ids.push(absent.clone());
+        let batch = store
+            .get_verified_by_ids(Some(&root), query_ids)
+            .await
+            .unwrap();
+        assert_eq!(batch.len(), events.len());
+        assert!(!batch.contains_key(&absent));
+        for event in &events {
+            let single = store
+                .get_verified_by_id(Some(&root), &event.id)
+                .await
+                .unwrap()
+                .expect("single lookup");
+            assert_eq!(batch.get(&event.id).unwrap().as_stored(), single.as_stored());
+        }
+    });
+}
+
 fn cid_to_pair(cid: &Cid) -> (String, Option<String>) {
     (hex::encode(cid.hash), cid.key.map(hex::encode))
 }
