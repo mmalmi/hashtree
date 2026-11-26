@@ -171,3 +171,124 @@ fn git_storage_upload_includes_chunked_objects_and_multilevel_descendants() {
     assert!(expected.is_empty());
     assert!(blossom.get_request_count() > 0);
 }
+
+#[test]
+fn multi_ref_push_batches_ancestor_branches_and_tags_into_one_upload() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (home, repo, base_sha, master_sha, dev_sha) = create_repo_with_diverged_master_and_dev();
+    let _home = HomeGuard::set(home.path());
+    let _cwd = CwdGuard::set(repo.path());
+    let _git_dir = EnvGuard::clear("GIT_DIR");
+    let _mode = EnvGuard::clear("HTREE_GIT_REBUILD_FROM_LOCAL");
+    let data = TempDir::new().unwrap();
+    let _data = EnvGuard::set("HTREE_DATA_DIR", data.path().to_str().unwrap());
+
+    // Create an ancestor branch pointing to `base_sha` and two tags at `master_sha`.
+    for args in [
+        vec!["branch", "ancestor", &base_sha],
+        vec!["tag", "v0.1", &master_sha],
+        vec!["tag", "v0.2", &master_sha],
+    ] {
+        let out = std::process::Command::new("git")
+            .args(&args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    let blossom = CountingBlossomServer::new();
+    let mut config = Config::default();
+    config.nostr.relays.clear();
+    config.blossom.read_servers = vec![blossom.base_url().to_string()];
+    config.blossom.write_servers = config.blossom.read_servers.clone();
+    config.server.bind_address = blossom.base_url().trim_start_matches("http://").to_string();
+    let keys = nostr::Keys::generate();
+    let helper = RemoteHelper::new(
+        &keys.public_key().to_hex(),
+        "test-repo",
+        Some(hex::encode(keys.secret_key().to_secret_bytes())),
+        None,
+        false,
+        config.clone(),
+    )
+    .unwrap();
+
+    // Seed initial remote tree containing `refs/heads/master`.
+    let master_objects = helper
+        .list_objects_for_shas(std::slice::from_ref(&master_sha), &[])
+        .unwrap();
+    let master_contents = helper.read_git_objects_batch(&master_objects).unwrap();
+    helper
+        .storage
+        .write_raw_objects_batch(&master_contents)
+        .unwrap();
+    helper
+        .storage
+        .import_ref("refs/heads/master", &master_sha)
+        .unwrap();
+    helper
+        .storage
+        .import_ref("HEAD", "ref: refs/heads/master")
+        .unwrap();
+    let initial_root = helper.storage.build_tree().unwrap();
+    let seed_upload = helper.push_to_file_servers_with_diff(
+        &hex::encode(initial_root.hash),
+        initial_root.key.as_ref(),
+        None,
+        None,
+        false,
+    );
+    assert!(seed_upload.failed.is_empty(), "{:?}", seed_upload.failed);
+
+    // Fresh helper pushing 4 refs together (ancestor branch + diverged dev + 2 tags).
+    let mut pusher = RemoteHelper::new(
+        &keys.public_key().to_hex(),
+        "test-repo",
+        Some(hex::encode(keys.secret_key().to_secret_bytes())),
+        None,
+        false,
+        config.clone(),
+    )
+    .unwrap();
+    let remote_refs = HashMap::from([
+        ("HEAD".to_string(), "ref: refs/heads/master".to_string()),
+        ("refs/heads/master".to_string(), master_sha.clone()),
+    ]);
+    pusher.nostr.force_fetch_refs_success_for_test(
+        remote_refs,
+        Some(hex::encode(initial_root.hash)),
+        initial_root.key,
+    );
+    pusher
+        .queue_push("refs/heads/ancestor:refs/heads/ancestor")
+        .unwrap();
+    pusher.queue_push("refs/heads/dev:refs/heads/dev").unwrap();
+    pusher.queue_push("refs/tags/v0.1:refs/tags/v0.1").unwrap();
+    pusher.queue_push("refs/tags/v0.2:refs/tags/v0.2").unwrap();
+
+    let batch_before = blossom.get_batch_upload_request_count();
+    let _ = pusher.execute_push().unwrap();
+    let batch_after = blossom.get_batch_upload_request_count();
+    assert_eq!(
+        batch_after - batch_before,
+        1,
+        "4-ref push should upload in a single batched tree publish, not 4 separate uploads"
+    );
+
+    let new_root = pusher.storage.get_root_cid().unwrap().unwrap();
+    let fresh_data = TempDir::new().unwrap();
+    let _fresh_data = EnvGuard::set("HTREE_DATA_DIR", fresh_data.path().to_str().unwrap());
+    let fresh = create_test_helper_with_config(config).unwrap();
+    let fetched_refs = block_on_result(
+        fresh
+            .nostr
+            .fetch_refs_from_hashtree(&hex::encode(new_root.hash), new_root.key.as_ref()),
+    )
+    .unwrap();
+    assert_eq!(fetched_refs.get("refs/heads/master"), Some(&master_sha));
+    assert_eq!(fetched_refs.get("refs/heads/ancestor"), Some(&base_sha));
+    assert_eq!(fetched_refs.get("refs/heads/dev"), Some(&dev_sha));
+    assert_eq!(fetched_refs.get("refs/tags/v0.1"), Some(&master_sha));
+    assert_eq!(fetched_refs.get("refs/tags/v0.2"), Some(&master_sha));
+}

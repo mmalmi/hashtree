@@ -388,6 +388,8 @@ pub struct NostrClient {
     local_daemon_url: Option<String>,
     /// Require all root and blob reads to use the local daemon.
     local_daemon_only: bool,
+    /// Shared HTTP client for local daemon requests.
+    daemon_http: reqwest::Client,
     root_lookup: root_lookup::RootLookup,
     #[cfg(test)]
     forced_fetch_refs_results: std::collections::VecDeque<Result<FetchedRefs, String>>,
@@ -536,6 +538,7 @@ impl NostrClient {
 
         let root_lookup =
             root_lookup::RootLookup::new(config, local_daemon_url.clone(), local_daemon_only);
+        let daemon_http = reqwest::Client::new();
         Ok(Self {
             pubkey: pubkey.to_string(),
             keys,
@@ -549,6 +552,7 @@ impl NostrClient {
             is_private,
             local_daemon_url,
             local_daemon_only,
+            daemon_http,
             root_lookup,
             #[cfg(test)]
             forced_fetch_refs_results: std::collections::VecDeque::new(),
@@ -958,8 +962,13 @@ impl NostrClient {
             refresh,
         );
 
-        let client = reqwest::Client::builder().timeout(timeout).build().ok()?;
-        let response = client.get(&url).send().await.ok()?;
+        let response = self
+            .daemon_http
+            .get(&url)
+            .timeout(timeout)
+            .send()
+            .await
+            .ok()?;
         if !response.status().is_success() {
             return None;
         }
@@ -1029,18 +1038,14 @@ impl NostrClient {
             "visibility": "public",
         });
 
-        let client = match reqwest::Client::builder()
+        match self
+            .daemon_http
+            .post(url)
             .timeout(Duration::from_secs(2))
-            .build()
+            .json(&payload)
+            .send()
+            .await
         {
-            Ok(client) => client,
-            Err(err) => {
-                debug!("Could not build local daemon cache client: {}", err);
-                return;
-            }
-        };
-
-        match client.post(url).json(&payload).send().await {
             Ok(response) if response.status().is_success() => {
                 debug!("Cached repo root for {} in local daemon", repo_name);
             }
@@ -1086,7 +1091,9 @@ impl NostrClient {
         let author = PublicKey::from_hex(&self.pubkey)
             .map_err(|e| anyhow::anyhow!("Invalid pubkey: {}", e))?;
         let filter = build_repo_event_filter(author, repo_name);
-        let query_window = Duration::from_secs(timeout_secs.saturating_sub(2).max(3));
+        // Keep open subscription observation past EOSE across up to two attempts
+        // while staying within the caller's timeout budget (matching resolve_window = 3s).
+        let query_window = Duration::from_secs((timeout_secs / 2).clamp(2, 3));
         let mut root_data = None;
         let mut daemon_fallback = None;
         let mut query_error = None;
@@ -1361,32 +1368,39 @@ impl NostrClient {
                 .collect::<Vec<_>>()
         );
 
-        // Find refs directory
+        // Find refs and optional HEAD in .git directory and fetch them together.
         let refs_link = git_node
             .links
             .iter()
             .find(|l| l.name.as_deref() == Some("refs"));
-        let (refs_hash, refs_key) = match refs_link {
-            Some(link) => (hex::encode(link.hash), link.key),
-            None => {
-                debug!("No refs directory in .git");
-                return Ok(refs);
-            }
+        let Some(refs_link) = refs_link else {
+            debug!("No refs directory in .git");
+            return Ok(refs);
         };
-
-        // Look for HEAD in .git directory
-        if let Some(head_link) = git_node
+        let head_link = git_node
             .links
             .iter()
-            .find(|l| l.name.as_deref() == Some("HEAD"))
-        {
+            .find(|l| l.name.as_deref() == Some("HEAD"));
+
+        let mut batch_supported = true;
+        let mut initial_hashes = vec![refs_link.hash];
+        if let Some(head) = head_link {
+            initial_hashes.push(head.hash);
+        }
+        let mut initial_blobs = self
+            .download_blobs_batched(&initial_hashes, &mut batch_supported)
+            .await;
+
+        if let Some(head_link) = head_link {
             let head_hash = hex::encode(head_link.hash);
-            let head_data = self
-                .blossom
-                .download(&head_hash)
-                .await
-                .with_context(|| format!("Failed to download HEAD {}", &head_hash[..12]))?;
-            // HEAD is a blob, decrypt if needed
+            let head_data = match initial_blobs.remove(&head_link.hash) {
+                Some(data) => data,
+                None => self
+                    .blossom
+                    .download(&head_hash)
+                    .await
+                    .with_context(|| format!("Failed to download HEAD {}", &head_hash[..12]))?,
+            };
             let head_content = if let Some(k) = head_link.key.as_ref() {
                 let decrypted = decrypt_object(&head_data, k)
                     .with_context(|| format!("Failed to decrypt HEAD {}", &head_hash[..12]))?;
@@ -1397,64 +1411,85 @@ impl NostrClient {
             refs.insert("HEAD".to_string(), head_content);
         }
 
-        // Walk the root too: valid refs can be files directly under refs/.
-        self.collect_refs_recursive(&refs_hash, refs_key.as_ref(), "refs", &mut refs)
-            .await?;
+        // Walk refs/ level-by-level (BFS), batch-downloading every level's
+        // subtrees and ref leaf blobs in parallel instead of serially.
+        let mut dir_queue: Vec<(String, [u8; 32], Option<ObjectKey>)> =
+            vec![("refs".to_string(), refs_link.hash, refs_link.key)];
+        let mut preloaded = initial_blobs;
 
-        debug!("Found {} refs from hashtree", refs.len());
-        Ok(refs)
-    }
+        while !dir_queue.is_empty() {
+            let missing_dirs: Vec<[u8; 32]> = dir_queue
+                .iter()
+                .map(|(_, hash, _)| *hash)
+                .filter(|h| !preloaded.contains_key(h))
+                .collect();
+            if !missing_dirs.is_empty() {
+                let fetched = self
+                    .download_blobs_batched(&missing_dirs, &mut batch_supported)
+                    .await;
+                preloaded.extend(fetched);
+            }
 
-    /// Recursively collect refs from a directory
-    async fn collect_refs_recursive(
-        &self,
-        dir_hash: &str,
-        dir_key: Option<&ObjectKey>,
-        prefix: &str,
-        refs: &mut HashMap<String, String>,
-    ) -> Result<()> {
-        let dir_data = self
-            .blossom
-            .download(dir_hash)
-            .await
-            .with_context(|| format!("Failed to download refs subtree {}", &dir_hash[..12]))?;
+            let mut next_dirs = Vec::new();
+            let mut ref_files: Vec<(String, [u8; 32], Option<ObjectKey>)> = Vec::new();
 
-        let dir_node = self
-            .decrypt_and_decode(&dir_data, dir_key)
-            .with_context(|| {
-                format!(
-                    "Failed to decode refs subtree {} (encrypted: {})",
-                    &dir_hash[..12.min(dir_hash.len())],
-                    dir_key.is_some()
-                )
-            })?;
+            for (prefix, dir_hash_bytes, dir_key) in std::mem::take(&mut dir_queue) {
+                let dir_hash = hex::encode(dir_hash_bytes);
+                let dir_data = match preloaded.remove(&dir_hash_bytes) {
+                    Some(data) => data,
+                    None => self.blossom.download(&dir_hash).await.with_context(|| {
+                        format!("Failed to download refs subtree {}", &dir_hash[..12])
+                    })?,
+                };
+                let dir_node = self
+                    .decrypt_and_decode(&dir_data, dir_key.as_ref())
+                    .with_context(|| {
+                        format!(
+                            "Failed to decode refs subtree {} (encrypted: {})",
+                            &dir_hash[..12.min(dir_hash.len())],
+                            dir_key.is_some()
+                        )
+                    })?;
 
-        for link in &dir_node.links {
-            let name = match &link.name {
-                Some(n) => n.clone(),
-                None => continue,
-            };
-            let link_hash = hex::encode(link.hash);
-            let ref_path = format!("{}/{}", prefix, name);
+                for link in dir_node.links {
+                    let Some(name) = link.name else { continue };
+                    let ref_path = format!("{prefix}/{name}");
+                    if link.link_type == LinkType::Dir {
+                        next_dirs.push((ref_path, link.hash, link.key));
+                    } else {
+                        ref_files.push((ref_path, link.hash, link.key));
+                    }
+                }
+            }
 
-            if link.link_type == LinkType::Dir {
-                // Recurse into subdirectory
-                Box::pin(self.collect_refs_recursive(
-                    &link_hash,
-                    link.key.as_ref(),
-                    &ref_path,
-                    refs,
-                ))
-                .await?;
-            } else {
-                // This is a ref file - read the SHA
-                let ref_data = self
-                    .blossom
-                    .download(&link_hash)
-                    .await
-                    .with_context(|| format!("Failed to download ref {}", ref_path))?;
-                // Decrypt if needed
-                let sha = if let Some(k) = link.key.as_ref() {
+            // Prefetch next directory level and this level's ref leaves together.
+            let mut next_hashes: Vec<[u8; 32]> = next_dirs
+                .iter()
+                .map(|(_, h, _)| *h)
+                .chain(ref_files.iter().map(|(_, h, _)| *h))
+                .filter(|h| !preloaded.contains_key(h))
+                .collect();
+            next_hashes.sort_unstable();
+            next_hashes.dedup();
+            if !next_hashes.is_empty() {
+                let fetched = self
+                    .download_blobs_batched(&next_hashes, &mut batch_supported)
+                    .await;
+                preloaded.extend(fetched);
+            }
+
+            for (ref_path, link_hash_bytes, link_key) in ref_files {
+                let ref_data = match preloaded.get(&link_hash_bytes) {
+                    Some(data) => data.clone(),
+                    None => {
+                        let link_hash = hex::encode(link_hash_bytes);
+                        self.blossom
+                            .download(&link_hash)
+                            .await
+                            .with_context(|| format!("Failed to download ref {}", ref_path))?
+                    }
+                };
+                let sha = if let Some(k) = link_key.as_ref() {
                     let decrypted = decrypt_object(&ref_data, k)
                         .with_context(|| format!("Failed to decrypt ref {}", ref_path))?;
                     String::from_utf8_lossy(&decrypted).trim().to_string()
@@ -1467,9 +1502,67 @@ impl NostrClient {
                 debug!("Found ref {} -> {}", ref_path, sha);
                 refs.insert(ref_path, sha);
             }
+
+            dir_queue = next_dirs;
         }
 
-        Ok(())
+        debug!("Found {} refs from hashtree", refs.len());
+        Ok(refs)
+    }
+
+    async fn download_blobs_batched(
+        &self,
+        hashes: &[[u8; 32]],
+        batch_supported: &mut bool,
+    ) -> HashMap<[u8; 32], Vec<u8>> {
+        let mut results = HashMap::with_capacity(hashes.len());
+        if hashes.is_empty() {
+            return results;
+        }
+
+        let mut remaining: Vec<[u8; 32]> = Vec::new();
+        if *batch_supported && hashes.len() >= 2 {
+            for chunk in hashes.chunks(64) {
+                if !*batch_supported {
+                    remaining.extend_from_slice(chunk);
+                    continue;
+                }
+                let hexes: Vec<String> = chunk.iter().map(hex::encode).collect();
+                match self.blossom.download_batch(&hexes).await {
+                    Ok(Some(items)) => {
+                        for (h, data) in items {
+                            results.insert(h, data);
+                        }
+                        for &h in chunk {
+                            if !results.contains_key(&h) {
+                                remaining.push(h);
+                            }
+                        }
+                    }
+                    Ok(None) | Err(_) => {
+                        *batch_supported = false;
+                        remaining.extend_from_slice(chunk);
+                    }
+                }
+            }
+        } else {
+            remaining.extend_from_slice(hashes);
+        }
+
+        if !remaining.is_empty() {
+            let mut fetches = futures::stream::iter(remaining.into_iter().map(|h| async move {
+                let key = hex::encode(h);
+                self.blossom.try_download(&key).await.map(|data| (h, data))
+            }))
+            .buffer_unordered(16);
+            while let Some(item) = fetches.next().await {
+                if let Some((h, data)) = item {
+                    results.insert(h, data);
+                }
+            }
+        }
+
+        results
     }
 
     /// Update a ref in local cache (will be published with publish_repo)
@@ -1836,10 +1929,10 @@ impl NostrClient {
         let base = self.local_daemon_url.as_ref().ok_or_else(|| {
             anyhow::anyhow!("local-daemon-only publication requires a running htree daemon")
         })?;
-        let response = reqwest::Client::builder()
-            .timeout(Duration::from_secs(4))
-            .build()?
+        let response = self
+            .daemon_http
             .post(format!("{}/api/nostr/events", base.trim_end_matches('/')))
+            .timeout(Duration::from_secs(4))
             .json(event)
             .send()
             .await

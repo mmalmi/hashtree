@@ -2,6 +2,37 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-26 - `git-remote-htree` clone, fetch, push, and `ls-remote` optimization
+
+We measured end-to-end Git workflows (`git push`, `git clone`, `git fetch`, `git ls-remote`) on macOS ARM64 with matched release `git-remote-htree` binaries against the same local `htree start` LMDB Blossom daemon behind an instrumented async HTTP/1.1 proxy (20 ms RTT, plus a plain-Blossom 404 mode blocking `/blob/batch`, `/upload/check`, and `/upload/batch*`) and a local RFC 6455 Nostr relay. Both binaries ran in alternating order (`baseline`, `candidate`, `candidate`, `baseline`) across two seeded repositories:
+- **Loose-object repo** (below the 256-object pack checkpoint threshold): 120 files across 12 directories, 21 commits, 235 objects, 25 branches/tags (26 `ls-remote` refs including `HEAD`).
+- **Packed-checkpoint repo**: 480 files across 40 directories plus 10 binary assets (~8 MiB total), 36 commits, 784 objects.
+
+Changes evaluated:
+- **Eliminated hidden progress-reporter stalls (`PeriodicReporter`)**: fixed unconditional 5 s `sleep()` awaits in loose-object discovery and download and a `Notify::notify_waiters()` lost-wakeup race in pack installation that stalled incremental packed fetches by 10 s (15 s total per fetch).
+- **Single process-wide Tokio runtime and shared HTTP/Blossom clients**: replaced per-call Tokio runtime creation (with 500 ms shutdown waits) with a lazy `OnceLock<Runtime>`, reused a shared daemon `reqwest::Client`, and reused `NostrClient`'s `BlossomClient` when building `CachedStore`.
+- **Batch reads and LMDB commits**: added `CachedStore::prefetch_missing` (`POST /blob/batch` with plain-Blossom 404 auto-detection and batched `put_many` LMDB writes), level-by-level batched ref fetching in `fetch_refs_from_hashtree`, single `.git/objects` directory listing, pack/loose object batch prefetching, higher tree-walk/download concurrency (32), and a single `spawn_blocking` loose-object writer with cached 2-hex prefix directories.
+- **Push, multi-ref, and relay lookup improvements**: aligned open Nostr query windows to 3 s per attempt (still open past EOSE across 2 attempts), cached clean `RootNotObserved` from `list for-push` within the same helper process, batched multi-ref pushes (`git push --tags` / `--all`) into a single tree build/upload/publish (also fixing ancestor-branch validation failures), computed local PR merge candidates before querying Nostr relays, used 1 `POST /upload/check` for 32-hash server-coverage sampling with plain-Blossom fallback, remembered `/upload/batch*` 404/unsupported status to avoid wasted batch bodies on plain Blossom servers, and capped pending upload memory at 16 MiB.
+- **Local Git object & index building**: pipelined single-process `git cat-file --batch-check` / `--batch`, zero-copy zlib header inspection for blob sizes, parallel multi-core object compression (`write_raw_objects_batch`), `BufferedStore::new_optimistic`, and O(log N + k) `.git/index` subtree reuse from the previous root.
+
+| Flow (20 ms RTT) | Baseline median (2 runs) | Candidate median (2 runs) | Speedup | HTTP reqs, before → after | CPU median ms, before → after | Notes |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `fetch` delta (packed repo) | 15,311 ms (15,315 / 15,308) | 302 ms (316 / 289) | 50.6x | 22 → 11 | 49.0 → 41.6 | Fixes 5 s + 10 s stalls |
+| `fetch` delta (loose repo) | 5,867 ms (5,860 / 5,874) | 371 ms (450 / 293) | 15.8x | 45 → 11 | 59.2 → 55.0 | Fixes 5 s stall + batch fetch |
+| `clone` packed (plain Blossom) | 5,937 ms (5,932 / 5,941) | 580 ms (616 / 544) | 10.2x | 91 → 93 | 132.2 → 124.8 | Plain-Blossom fallback |
+| `clone` loose (full Blossom) | 7,402 ms (7,556 / 7,249) | 789 ms (1,145 / 432) | 9.4x | 437 → 16 (-96%) | 265.6 → 120.4 (-55%) | Batch read + batched LMDB |
+| `clone` packed (full Blossom) | 5,941 ms (5,976 / 5,906) | 643 ms (809 / 477) | 9.2x | 91 → 14 (-85%) | 132.2 → 123.0 | Pack + loose batch prefetch |
+| `push --tags` (12 tags) | 4,282 ms (4,309 / 4,256) | 496 ms (557 / 435) | 8.6x | 427 → 10 (-98%) | 588.2 → 150.2 (-74%) | Relay conns 14 → 1; 1 root build |
+| `clone` loose (plain Blossom) | 7,282 ms (7,377 / 7,186) | 988 ms (1,293 / 682) | 7.4x | 437 → 413 | 269.0 → 131.3 (-51%) | Auto-skips unsupported batch |
+| `push` initial (loose, 235 obj) | 33,100 ms (33,137 / 33,062) | 6,705 ms (6,808 / 6,601) | 4.9x | 8 → 6 | 102.1 → 83.0 | Relay conns 7 → 3 |
+| `push` initial (packed, 784 obj) | 33,691 ms (33,673 / 33,708) | 7,233 ms (7,381 / 7,085) | 4.7x | 10 → 8 | 629.6 → 554.2 | Relay conns 7 → 3 |
+| `push` initial (plain Blossom) | 36,118 ms (36,112 / 36,124) | 9,600 ms (9,588 / 9,612) | 3.8x | 570 → 562 | 132.8 → 107.5 | Skips 404 batch bodies (1.11 MB → 48.8 KB, -95.6%) |
+| `ls-remote` (26 refs) | 753 ms (759 / 746) | 241 ms (296 / 186) | 3.1x | 32 → 6 (-81%) | 27.0 → 23.4 | Level-batched ref BFS |
+| `push` delta (loose, 1 file) | 1,111 ms (1,123 / 1,099) | 515 ms (615 / 415) | 2.2x | 67 → 10 (-85%) | 120.4 → 126.0 | Relay conns 3 → 1 |
+| `push` delta (packed, 1 file) | 620 ms (590 / 649) | 409 ms (424 / 393) | 1.5x | 42 → 10 (-76%) | 118.9 → 89.4 (-25%) | Relay conns 3 → 1; index reuse |
+
+Every cloned and fetched repository passed `git fsck --full --strict` with identical `HEAD` and `HEAD^{tree}` hashes. All 278 unit and integration tests in `git-remote-htree` (including open-subscription late-event lookup, PR merge detection, P2P roundtrip, diff push, missing-chunk repair, visibility modes, and multi-ref ancestor-branch push) passed.
+
 ## 2026-11-26 - TypeScript peer retry bounds and corrupt-peer cooldown on 10,000-node layouts
 
 `TcpBlobTransport.get` previously ignored caller abort signals and treated downstream `AggregateError` results as retryable single-hop failures, amplifying multi-hop errors across hops (`2^htl`) and repeatedly querying peers that returned corrupt bytes.

@@ -102,39 +102,50 @@ impl RemoteHelper {
         &self,
         oids: impl Iterator<Item = &'a str>,
     ) -> Result<HashSet<String>> {
-        let mut existing = HashSet::new();
-        let oids: Vec<_> = oids.collect();
-
-        // Process in chunks to avoid memory issues with huge repos
-        const BATCH_SIZE: usize = 1000;
-        for chunk in oids.chunks(BATCH_SIZE) {
-            let mut child = Command::new("git")
-                .args(["cat-file", "--batch-check=%(objectname)"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .context("Failed to spawn git cat-file")?;
-
-            {
-                let stdin = child.stdin.as_mut().context("Failed to open stdin")?;
-                for oid in chunk {
-                    writeln!(stdin, "{}", oid)?;
-                }
-            }
-
-            let output = child
-                .wait_with_output()
-                .context("Failed to read git cat-file output")?;
-
-            // Parse output - valid objects return just the oid, missing ones return "oid missing"
-            for line in String::from_utf8_lossy(&output.stdout).lines() {
-                let line = line.trim();
-                if line.len() == 40 && !line.contains(' ') {
-                    existing.insert(line.to_string());
-                }
-            }
+        let oids: Vec<&'a str> = oids.collect();
+        if oids.is_empty() {
+            return Ok(HashSet::new());
         }
+
+        let mut child = Command::new("git")
+            .args(["cat-file", "--batch-check=%(objectname)"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Failed to spawn git cat-file")?;
+
+        let stdin = child.stdin.take().context("Failed to open stdin")?;
+        let stdout = child.stdout.take().context("Failed to open stdout")?;
+
+        let existing = std::thread::scope(|scope| -> Result<HashSet<String>> {
+            let writer = scope.spawn(move || -> std::io::Result<()> {
+                let mut w = std::io::BufWriter::new(stdin);
+                for oid in &oids {
+                    w.write_all(oid.as_bytes())?;
+                    w.write_all(b"\n")?;
+                }
+                w.flush()
+            });
+
+            let mut existing = HashSet::new();
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            while reader.read_line(&mut line)? > 0 {
+                let trimmed = line.trim();
+                if trimmed.len() == 40 && !trimmed.contains(' ') {
+                    existing.insert(trimmed.to_string());
+                }
+                line.clear();
+            }
+
+            writer
+                .join()
+                .map_err(|_| anyhow::anyhow!("git cat-file stdin writer panicked"))??;
+            Ok(existing)
+        })?;
+
+        let _ = child.wait();
         Ok(existing)
     }
 
@@ -144,7 +155,18 @@ impl RemoteHelper {
 
     /// Write loose object to a git object store.
     /// The data is zlib-compressed loose object format.
+    #[cfg(test)]
     pub(super) fn write_git_object_to_dir(git_dir: &Path, oid: &str, data: &[u8]) -> Result<()> {
+        let mut created_dirs = HashSet::new();
+        Self::write_git_object_to_dir_cached(git_dir, oid, data, &mut created_dirs)
+    }
+
+    pub(super) fn write_git_object_to_dir_cached(
+        git_dir: &Path,
+        oid: &str,
+        data: &[u8],
+        created_dirs: &mut HashSet<[u8; 2]>,
+    ) -> Result<()> {
         // Git objects are stored as .git/objects/xx/yy... where xx is first 2 chars
         if oid.len() < 3 {
             bail!("Invalid object id: {}", oid);
@@ -152,7 +174,18 @@ impl RemoteHelper {
 
         let (dir_name, file_name) = oid.split_at(2);
         let obj_dir = git_dir.join("objects").join(dir_name);
-        std::fs::create_dir_all(&obj_dir).context("Failed to create object directory")?;
+        let prefix_bytes = dir_name.as_bytes();
+        let dir_key = if prefix_bytes.len() == 2 {
+            Some([prefix_bytes[0], prefix_bytes[1]])
+        } else {
+            None
+        };
+        if dir_key.is_none_or(|k| !created_dirs.contains(&k)) {
+            std::fs::create_dir_all(&obj_dir).context("Failed to create object directory")?;
+            if let Some(k) = dir_key {
+                created_dirs.insert(k);
+            }
+        }
 
         let obj_path = obj_dir.join(file_name);
         if obj_path.exists() {
@@ -217,8 +250,8 @@ impl RemoteHelper {
         Ok(objects)
     }
 
-    /// Read multiple git objects using git cat-file --batch
-    /// Processes in batches to avoid pipe buffer deadlock
+    /// Read multiple git objects using a single pipelined `git cat-file --batch`
+    /// process with a scoped stdin writer thread to prevent pipe buffer deadlock.
     pub(super) fn read_git_objects_batch(
         &self,
         oids: &[String],
@@ -228,57 +261,64 @@ impl RemoteHelper {
         }
 
         let total = oids.len();
-        let mut results = Vec::with_capacity(total);
         let progress_interval = fetch_progress_interval();
-        let mut last_progress = Instant::now();
 
-        // Process in batches of 100 to avoid pipe buffer issues
-        const BATCH_SIZE: usize = 100;
+        let mut child = Self::git_command_for_push()
+            .args(["cat-file", "--batch"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()?;
 
-        for (batch_idx, batch) in oids.chunks(BATCH_SIZE).enumerate() {
-            let mut child = Self::git_command_for_push()
-                .args(["cat-file", "--batch"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Failed to open stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Failed to open stdout"))?;
 
-            let mut stdin = child
-                .stdin
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("Failed to open stdin"))?;
-            let stdout = child
-                .stdout
-                .take()
-                .ok_or_else(|| anyhow::anyhow!("Failed to open stdout"))?;
-
-            // Write batch OIDs to stdin
-            for oid in batch {
-                writeln!(stdin, "{}", oid)?;
-            }
-            drop(stdin);
-
-            // Read responses
-            let mut reader = BufReader::new(stdout);
-
-            for (i, oid) in batch.iter().enumerate() {
-                let mut header = String::new();
-                reader.read_line(&mut header)?;
-                let header = header.trim();
-
-                let parts: Vec<&str> = header.split_whitespace().collect();
-                if parts.len() < 3 {
-                    bail!("Object not found or invalid header for {}: {}", oid, header);
+        let results = std::thread::scope(|scope| -> Result<Vec<(ObjectType, Vec<u8>)>> {
+            let writer = scope.spawn(move || -> std::io::Result<()> {
+                let mut w = std::io::BufWriter::new(stdin);
+                for oid in oids {
+                    w.write_all(oid.as_bytes())?;
+                    w.write_all(b"\n")?;
                 }
+                w.flush()
+            });
 
-                let obj_type = match parts[1] {
+            let mut results = Vec::with_capacity(total);
+            let mut reader = BufReader::new(stdout);
+            let mut header = String::new();
+            let mut last_progress = Instant::now();
+
+            for (i, oid) in oids.iter().enumerate() {
+                header.clear();
+                reader.read_line(&mut header)?;
+                let trimmed = header.trim();
+
+                let mut parts = trimmed.split_whitespace();
+                let _returned_oid = parts.next();
+                let obj_type_str = parts.next();
+                let size_str = parts.next();
+                let (Some(obj_type_str), Some(size_str)) = (obj_type_str, size_str) else {
+                    bail!(
+                        "Object not found or invalid header for {}: {}",
+                        oid,
+                        trimmed
+                    );
+                };
+
+                let obj_type = match obj_type_str {
                     "blob" => ObjectType::Blob,
                     "tree" => ObjectType::Tree,
                     "commit" => ObjectType::Commit,
                     "tag" => ObjectType::Tag,
-                    _ => bail!("Unknown object type: {}", parts[1]),
+                    _ => bail!("Unknown object type: {}", obj_type_str),
                 };
 
-                let size: usize = parts[2].parse()?;
+                let size: usize = size_str.parse()?;
                 let mut content = vec![0u8; size];
                 reader.read_exact(&mut content)?;
 
@@ -288,17 +328,18 @@ impl RemoteHelper {
 
                 results.push((obj_type, content));
 
-                // Progress indicator
-                let done = batch_idx * BATCH_SIZE + i + 1;
+                let done = i + 1;
                 if done == total || last_progress.elapsed() >= progress_interval {
                     eprintln!("  Reading objects: {}/{}", done, total);
                     last_progress = Instant::now();
                 }
             }
 
-            child.wait()?;
-        }
+            let _ = writer.join();
+            Ok(results)
+        })?;
 
+        let _ = child.wait();
         Ok(results)
     }
 }

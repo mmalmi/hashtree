@@ -26,7 +26,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::Arc;
-use tokio::runtime::{Handle, Runtime};
 use tracing::{debug, info, warn};
 
 use super::object::{parse_tree, GitObject, ObjectId, ObjectType};
@@ -71,18 +70,12 @@ impl RefDirectory {
     }
 }
 
-/// Runtime executor - either owns a runtime or reuses an existing one
-enum RuntimeExecutor {
-    Owned(Runtime),
-    Handle(Handle),
-}
+/// Runtime executor - delegates to the shared process runtime or current handle.
+struct RuntimeExecutor;
 
 impl RuntimeExecutor {
     fn block_on<F: std::future::Future>(&self, f: F) -> F::Output {
-        match self {
-            RuntimeExecutor::Owned(rt) => rt.block_on(f),
-            RuntimeExecutor::Handle(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
-        }
+        crate::runtime::block_on(f).expect("tokio runtime")
     }
 }
 
@@ -367,14 +360,7 @@ impl GitStorage {
         backend: StorageBackend,
         max_size_bytes: u64,
     ) -> Result<Self> {
-        let runtime = match Handle::try_current() {
-            Ok(handle) => RuntimeExecutor::Handle(handle),
-            Err(_) => {
-                let rt = Runtime::new()
-                    .map_err(|e| Error::StorageError(format!("tokio runtime: {}", e)))?;
-                RuntimeExecutor::Owned(rt)
-            }
-        };
+        let runtime = RuntimeExecutor;
 
         let store_path = path.as_ref().join("blobs");
         let store = Arc::new(
@@ -389,8 +375,9 @@ impl GitStorage {
             Ok(quarter_limit) if quarter_limit > 0 => TREE_WRITE_BATCH_BYTES.min(quarter_limit),
             _ => TREE_WRITE_BATCH_BYTES,
         };
-        let write_buffer =
-            Arc::new(BufferedStore::new(store.clone()).with_flush_threshold(write_batch_bytes));
+        let write_buffer = Arc::new(
+            BufferedStore::new_optimistic(store.clone()).with_flush_threshold(write_batch_bytes),
+        );
         let tree = HashTree::new(
             HashTreeConfig::new(write_buffer.clone()).with_chunk_size(GIT_TREE_CHUNK_SIZE),
         );
@@ -415,15 +402,21 @@ impl GitStorage {
             .map_err(|e| Error::StorageError(format!("evict: {}", e)))
     }
 
-    /// Write an object, returning its ID
-    fn write_object(&self, obj: &GitObject) -> Result<ObjectId> {
-        let oid = obj.id();
-        let key = oid.to_hex();
-
-        let loose = obj.to_loose_format();
-        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
-        encoder.write_all(&loose)?;
+    /// Compress a git object directly from type + content without intermediate full-payload copies.
+    fn compress_raw_object(obj_type: ObjectType, content: &[u8]) -> Result<(ObjectId, Vec<u8>)> {
+        let oid = ObjectId::hash_object(obj_type, content);
+        let initial_cap = (content.len() / 2).clamp(64, 256 * 1024);
+        let mut encoder = ZlibEncoder::new(Vec::with_capacity(initial_cap), Compression::default());
+        write!(encoder, "{} {}\0", obj_type.as_str(), content.len())?;
+        encoder.write_all(content)?;
         let compressed = encoder.finish()?;
+        Ok((oid, compressed))
+    }
+
+    /// Write raw object data (type + content already parsed)
+    pub fn write_raw_object(&self, obj_type: ObjectType, content: &[u8]) -> Result<ObjectId> {
+        let (oid, compressed) = Self::compress_raw_object(obj_type, content)?;
+        let key = oid.to_hex();
 
         let mut objects = self
             .objects
@@ -439,10 +432,72 @@ impl GitStorage {
         Ok(oid)
     }
 
-    /// Write raw object data (type + content already parsed)
-    pub fn write_raw_object(&self, obj_type: ObjectType, content: &[u8]) -> Result<ObjectId> {
-        let obj = GitObject::new(obj_type, content.to_vec());
-        self.write_object(&obj)
+    /// Hash, zlib-compress (in parallel across CPU cores for large batches),
+    /// and insert multiple raw git objects under a single lock acquisition.
+    pub fn write_raw_objects_batch(&self, items: &[(ObjectType, Vec<u8>)]) -> Result<usize> {
+        if items.is_empty() {
+            return Ok(0);
+        }
+
+        let threads = if items.len() >= 16 {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+                .clamp(1, 8)
+                .min(items.len())
+        } else {
+            1
+        };
+
+        let compressed_entries: Vec<(String, Vec<u8>)> = if threads <= 1 {
+            let mut out = Vec::with_capacity(items.len());
+            for (obj_type, content) in items {
+                let (oid, compressed) = Self::compress_raw_object(*obj_type, content)?;
+                out.push((oid.to_hex(), compressed));
+            }
+            out
+        } else {
+            let chunk_size = items.len().div_ceil(threads);
+            std::thread::scope(|scope| -> Result<Vec<(String, Vec<u8>)>> {
+                let handles: Vec<_> = items
+                    .chunks(chunk_size)
+                    .map(|chunk| {
+                        scope.spawn(move || -> Result<Vec<(String, Vec<u8>)>> {
+                            let mut part = Vec::with_capacity(chunk.len());
+                            for (obj_type, content) in chunk {
+                                let (oid, compressed) =
+                                    Self::compress_raw_object(*obj_type, content)?;
+                                part.push((oid.to_hex(), compressed));
+                            }
+                            Ok(part)
+                        })
+                    })
+                    .collect();
+
+                let mut out = Vec::with_capacity(items.len());
+                for handle in handles {
+                    let part = handle.join().map_err(|_| {
+                        Error::StorageError("object compression worker panicked".into())
+                    })??;
+                    out.extend(part);
+                }
+                Ok(out)
+            })?
+        };
+
+        let count = compressed_entries.len();
+        let mut objects = self
+            .objects
+            .write()
+            .map_err(|e| Error::StorageError(format!("lock: {}", e)))?;
+        objects.reserve(count);
+        for (key, compressed) in compressed_entries {
+            objects.insert(key, compressed);
+        }
+        if let Ok(mut root) = self.root_cid.write() {
+            *root = None;
+        }
+        Ok(count)
     }
 
     /// Read an object by ID from in-memory cache
@@ -718,6 +773,29 @@ impl GitStorage {
     ) -> Option<(ObjectType, Vec<u8>)> {
         let compressed = objects.get(oid)?;
         Self::parse_compressed_object(compressed)
+    }
+
+    /// Read only the git loose object header (`"<type> <size>\0"`) from a
+    /// zlib stream without decompressing the full payload.
+    fn parse_compressed_object_header(compressed: &[u8]) -> Option<(ObjectType, usize)> {
+        let mut decoder = ZlibDecoder::new(compressed);
+        let mut header = [0u8; 64];
+        let mut len = 0usize;
+        while len < header.len() {
+            let n = decoder.read(&mut header[len..]).ok()?;
+            if n == 0 {
+                break;
+            }
+            if let Some(rel) = header[len..len + n].iter().position(|&b| b == 0) {
+                let header_str = std::str::from_utf8(&header[..len + rel]).ok()?;
+                let (kind, size_str) = header_str.split_once(' ')?;
+                let obj_type = ObjectType::parse(kind)?;
+                let size = size_str.parse::<usize>().ok()?;
+                return Some((obj_type, size));
+            }
+            len += n;
+        }
+        None
     }
 
     fn parse_compressed_object(compressed: &[u8]) -> Option<(ObjectType, Vec<u8>)> {
@@ -1194,6 +1272,22 @@ impl GitStorage {
             None
         };
 
+        // Load old `.git/index` once so incremental index builds can reuse
+        // unchanged subtrees in O(log N + k) without traversing untouched dirs.
+        let base_index_entries: Option<Vec<(String, [u8; 20], u32, u32)>> =
+            if let (Some(base_tree), Some(base_root)) = (base_tree, base_root) {
+                self.runtime.block_on(async {
+                    let cid = base_tree
+                        .resolve_path(base_root, ".git/index")
+                        .await
+                        .ok()??;
+                    let bytes = base_tree.get(&cid, None).await.ok()??;
+                    Self::parse_index_bytes(&bytes)
+                })
+            } else {
+                None
+            };
+
         let root_cid = loop {
             let objects_clone: &HashMap<String, Vec<u8>> =
                 seeded_objects.as_ref().unwrap_or(&objects);
@@ -1280,6 +1374,7 @@ impl GitStorage {
                             &sources,
                             base_tree_sha,
                             base_root_entries.as_ref(),
+                            base_index_entries.as_deref(),
                         )
                         .await
                     } else {
@@ -1736,6 +1831,14 @@ impl GitStorage {
 
         let packs_replace_loose_objects =
             !packed_object_ids.is_empty() && (!pack_files.is_empty() || base_objects_cid.is_some());
+        let packed_prefixes: HashSet<&str> = if packs_replace_loose_objects {
+            packed_object_ids
+                .iter()
+                .filter_map(|oid| oid.get(..2))
+                .collect()
+        } else {
+            HashSet::new()
+        };
         let mut buckets: BTreeMap<&str, Vec<(&str, &[u8])>> = BTreeMap::new();
         for (oid, data) in objects {
             if packs_replace_loose_objects && packed_object_ids.contains(oid) {
@@ -1781,7 +1884,9 @@ impl GitStorage {
                 }
 
                 let Some(delta_objects) = buckets.get(entry.name.as_str()) else {
-                    if !packs_replace_loose_objects {
+                    if !packs_replace_loose_objects
+                        || !packed_prefixes.contains(entry.name.as_str())
+                    {
                         top_entries
                             .insert(entry.name.clone(), Self::tree_entry_to_dir_entry(&entry));
                         continue;
@@ -2063,6 +2168,7 @@ impl GitStorage {
         sources: &BaseObjectSources<'_, S>,
         base_tree_oid: &str,
         base_root_entries: Option<&Vec<hashtree_core::TreeEntry>>,
+        base_index_entries: Option<&[(String, [u8; 20], u32, u32)]>,
     ) -> Result<Vec<u8>> {
         let mut entries: Vec<(String, [u8; 20], u32, u32)> = Vec::new();
         let root_entries = base_root_entries.map(|entries| {
@@ -2078,12 +2184,66 @@ impl GitStorage {
             sources,
             Some(base_tree_oid),
             root_entries.as_ref(),
+            base_index_entries,
             "",
             &mut entries,
         )
         .await?;
 
         self.build_index_bytes(entries)
+    }
+
+    /// Parse a Git v2 index file produced by `build_index_bytes`, verifying its
+    /// header and trailing SHA-1 checksum. Returns entries sorted by path.
+    fn parse_index_bytes(data: &[u8]) -> Option<Vec<(String, [u8; 20], u32, u32)>> {
+        if data.len() < 32 || &data[0..4] != b"DIRC" {
+            return None;
+        }
+        let version = u32::from_be_bytes(data[4..8].try_into().ok()?);
+        if version != 2 {
+            return None;
+        }
+        let body = &data[..data.len() - 20];
+        let expected_checksum = &data[data.len() - 20..];
+        let mut hasher = Sha1::new();
+        hasher.update(body);
+        if hasher.finalize().as_slice() != expected_checksum {
+            return None;
+        }
+
+        let count = u32::from_be_bytes(data[8..12].try_into().ok()?) as usize;
+        let mut entries = Vec::with_capacity(count);
+        let mut pos = 12usize;
+        for _ in 0..count {
+            let entry_start = pos;
+            if pos + 62 > body.len() {
+                return None;
+            }
+            let mode = u32::from_be_bytes(body[pos + 24..pos + 28].try_into().ok()?);
+            let size = u32::from_be_bytes(body[pos + 36..pos + 40].try_into().ok()?);
+            let mut sha1 = [0u8; 20];
+            sha1.copy_from_slice(&body[pos + 40..pos + 60]);
+            let flags = u16::from_be_bytes(body[pos + 60..pos + 62].try_into().ok()?);
+            // Extended/stage entries are never produced by us; fall back to walk.
+            if (flags & 0xF000) != 0 {
+                return None;
+            }
+            pos += 62;
+            let nul_rel = body[pos..].iter().position(|&b| b == 0)?;
+            let path = std::str::from_utf8(&body[pos..pos + nul_rel])
+                .ok()?
+                .to_string();
+            pos += nul_rel + 1;
+            let entry_len = pos - entry_start;
+            let pad = (8 - (entry_len % 8)) % 8;
+            pos = pos.checked_add(pad)?;
+            if pos > body.len() {
+                return None;
+            }
+            entries.push((path, sha1, mode, size));
+        }
+
+        Some(entries)
     }
 
     fn build_index_bytes(&self, mut entries: Vec<(String, [u8; 20], u32, u32)>) -> Result<Vec<u8>> {
@@ -2190,11 +2350,11 @@ impl GitStorage {
                 // Recursively process subdirectory
                 self.collect_tree_entries_for_index(&oid_hex, objects, &path, entries, progress)?;
             } else {
-                // Get blob content for size and SHA-1
-                if let Some((ObjectType::Blob, blob_content)) =
-                    self.get_object_content(&oid_hex, objects)
+                // Read only the zlib object header to avoid decompressing full blob bytes.
+                if let Some((ObjectType::Blob, size)) = objects
+                    .get(&oid_hex)
+                    .and_then(|compressed| Self::parse_compressed_object_header(compressed))
                 {
-                    // Convert hex SHA to bytes
                     let mut sha1_bytes = [0u8; 20];
                     if let Ok(bytes) = hex::decode(&oid_hex) {
                         if bytes.len() == 20 {
@@ -2202,11 +2362,7 @@ impl GitStorage {
                         }
                     }
 
-                    // Mode: use entry.mode or default to regular file
-                    let mode = entry.mode;
-                    let size = blob_content.len() as u32;
-
-                    entries.push((path, sha1_bytes, mode, size));
+                    entries.push((path, sha1_bytes, entry.mode, size as u32));
                     if let Some(progress) = progress {
                         progress.record_index_entry();
                     }
@@ -2223,10 +2379,40 @@ impl GitStorage {
         sources: &'a BaseObjectSources<'a, S>,
         old_tree_oid: Option<&'a str>,
         old_dir_entries: Option<&'a Vec<hashtree_core::TreeEntry>>,
+        base_index_entries: Option<&'a [(String, [u8; 20], u32, u32)]>,
         prefix: &'a str,
         entries: &'a mut Vec<(String, [u8; 20], u32, u32)>,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(async move {
+            // Fast path: when this entire tree matches the base commit tree and
+            // we have the parsed old index, copy its entries directly without
+            // traversing unchanged subdirectories.
+            if let (Some(old_oid), Some(old_entries)) = (old_tree_oid, base_index_entries) {
+                if old_oid == tree_oid {
+                    let slice = if prefix.is_empty() {
+                        old_entries
+                    } else {
+                        let dir_prefix = format!("{prefix}/");
+                        let start = old_entries
+                            .partition_point(|(p, _, _, _)| p.as_str() < dir_prefix.as_str());
+                        let mut end = start;
+                        while end < old_entries.len()
+                            && old_entries[end].0.starts_with(dir_prefix.as_str())
+                        {
+                            end += 1;
+                        }
+                        &old_entries[start..end]
+                    };
+                    entries.extend_from_slice(slice);
+                    if let Some(progress) = sources.progress {
+                        for _ in 0..slice.len() {
+                            progress.record_index_entry();
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+
             let tree_entries = self
                 .get_tree_entries_from_sources(
                     tree_oid,
@@ -2275,6 +2461,25 @@ impl GitStorage {
                         .as_ref()
                         .filter(|old| old.is_tree())
                         .map(|old| old.oid.to_hex());
+
+                    // Skip listing base working subdir when the subtree is unchanged
+                    // and covered by the parsed base index.
+                    if old_subtree_oid.as_deref() == Some(oid_hex.as_str())
+                        && base_index_entries.is_some()
+                    {
+                        self.collect_tree_entries_for_index_with_base_boxed(
+                            &oid_hex,
+                            sources,
+                            old_subtree_oid.as_deref(),
+                            None,
+                            base_index_entries,
+                            &path,
+                            entries,
+                        )
+                        .await?;
+                        continue;
+                    }
+
                     let old_subdir_entries = if let Some(old_dir_entry) = old_dir_entry.as_ref() {
                         if old_dir_entry.link_type == LinkType::Dir {
                             Some(
@@ -2304,6 +2509,7 @@ impl GitStorage {
                         sources,
                         old_subtree_oid.as_deref(),
                         old_subdir_entries.as_ref(),
+                        base_index_entries,
                         &path,
                         entries,
                     )
@@ -2362,12 +2568,16 @@ impl GitStorage {
         base_tree: Option<&HashTree<S>>,
         base_objects_cid: Option<&Cid>,
     ) -> Result<usize> {
-        let object = match self.get_object_content(oid, objects) {
-            Some(object) => Some(object),
+        let header = match objects
+            .get(oid)
+            .and_then(|compressed| Self::parse_compressed_object_header(compressed))
+        {
+            Some(header) => Some(header),
             None => {
                 if let (Some(base_tree), Some(base_objects_cid)) = (base_tree, base_objects_cid) {
-                    self.get_object_content_from_base(oid, base_tree, base_objects_cid)
+                    self.load_base_compressed_object(oid, base_tree, base_objects_cid)
                         .await?
+                        .and_then(|compressed| Self::parse_compressed_object_header(&compressed))
                 } else {
                     None
                 }
@@ -2375,14 +2585,14 @@ impl GitStorage {
         }
         .ok_or_else(|| Error::ObjectNotFound(oid.to_string()))?;
 
-        if object.0 != ObjectType::Blob {
+        if header.0 != ObjectType::Blob {
             return Err(Error::InvalidObjectType(format!(
                 "expected blob, got {:?}",
-                object.0
+                header.0
             )));
         }
 
-        Ok(object.1.len())
+        Ok(header.1)
     }
 
     /// Get the underlying store
@@ -3453,5 +3663,58 @@ mod tests {
             "validation error should mention missing commit oid: {}",
             err
         );
+    }
+
+    #[test]
+    fn test_parse_compressed_object_header_and_index_roundtrip() {
+        let (storage, _temp) = create_test_storage();
+        let payload = vec![b'z'; 128 * 1024];
+        let (oid, compressed) =
+            GitStorage::compress_raw_object(ObjectType::Blob, &payload).unwrap();
+        assert_eq!(
+            GitStorage::parse_compressed_object_header(&compressed),
+            Some((ObjectType::Blob, payload.len()))
+        );
+        assert_eq!(oid, ObjectId::hash_object(ObjectType::Blob, &payload));
+
+        let entries = vec![
+            ("a/file.rs".to_string(), [0x11; 20], 0o100644, 42),
+            ("b/longer-name.txt".to_string(), [0x22; 20], 0o100755, 1337),
+        ];
+        let raw_index = storage.build_index_bytes(entries.clone()).unwrap();
+        assert_eq!(GitStorage::parse_index_bytes(&raw_index), Some(entries));
+
+        // Corrupt checksum must fail parsing and fall back cleanly.
+        let mut corrupt = raw_index.clone();
+        *corrupt.last_mut().unwrap() ^= 0xFF;
+        assert_eq!(GitStorage::parse_index_bytes(&corrupt), None);
+    }
+
+    #[test]
+    fn test_write_raw_objects_batch_matches_single_write() {
+        let (batch_storage, _temp_a) = create_test_storage();
+        let (single_storage, _temp_b) = create_test_storage();
+        let items: Vec<(ObjectType, Vec<u8>)> = (0..40)
+            .map(|i| {
+                (
+                    ObjectType::Blob,
+                    format!("payload-{i}\n{}", "x".repeat(i * 37)).into_bytes(),
+                )
+            })
+            .collect();
+
+        let written = batch_storage.write_raw_objects_batch(&items).unwrap();
+        assert_eq!(written, items.len());
+        for (kind, data) in &items {
+            single_storage.write_raw_object(*kind, data).unwrap();
+        }
+        assert_eq!(
+            batch_storage.object_count().unwrap(),
+            single_storage.object_count().unwrap()
+        );
+        for (kind, data) in &items {
+            let oid = ObjectId::hash_object(*kind, data);
+            assert_eq!(batch_storage.read_object(&oid).unwrap().content, *data);
+        }
     }
 }

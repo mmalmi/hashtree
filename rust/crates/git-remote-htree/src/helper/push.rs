@@ -1,13 +1,13 @@
 use super::progress::{emit_upload_progress, UploadProgress};
 use super::storage_support::{build_repo_viewer_url, get_hashtree_data_dir};
-use super::{fetch_progress_interval, AncestorCheck, PushSpec, RemoteHelper};
+use super::{fetch_progress_interval, AncestorCheck, PeriodicReporter, PushSpec, RemoteHelper};
 use crate::git::progress::RepoTreeBuildProgress;
 use crate::git::refs::Ref;
 use crate::git::storage::GIT_TREE_CHUNK_SIZE;
 use crate::nostr_client::{
     resolve_identity, BlossomResult, PullRequestStateFilter, RepoAnnouncementOptions,
 };
-use crate::runtime::{block_on_result, new_multi_thread_runtime};
+use crate::runtime::{block_on, block_on_result};
 use anyhow::{bail, Context, Result};
 use flate2::{write::ZlibEncoder, Compression};
 use hashtree_core::{HashTree, LinkType, Store};
@@ -17,7 +17,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
-    Arc,
+    Arc, Condvar, Mutex,
 };
 use std::thread;
 use std::time::Duration;
@@ -25,6 +25,7 @@ use tracing::{debug, info, warn};
 
 const SERVER_COVERAGE_SAMPLE_SIZE: usize = 32;
 const UPLOAD_CHECK_BATCH_SIZE: usize = 10_000;
+const PENDING_UPLOAD_FLUSH_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_GIT_BATCH_UPLOAD_TARGET_BYTES: usize = 4 * 1024 * 1024;
 const GIT_BATCH_UPLOAD_TARGET_BYTES_ENV: &str = "HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES";
 const BATCH_UPLOAD_RETRIES: u32 = 4;
@@ -194,14 +195,14 @@ pub(super) struct GitPackCheckpointPackPlan {
 }
 
 struct RepoTreeProgressReporter {
-    stop: Arc<AtomicBool>,
+    stop: Arc<(Mutex<bool>, Condvar)>,
     printed: Arc<AtomicBool>,
     handle: thread::JoinHandle<()>,
 }
 
 impl RepoTreeProgressReporter {
     fn start(label: &str, progress: RepoTreeBuildProgress) -> Self {
-        let stop = Arc::new(AtomicBool::new(false));
+        let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let printed = Arc::new(AtomicBool::new(false));
         let thread_stop = Arc::clone(&stop);
         let thread_printed = Arc::clone(&printed);
@@ -209,21 +210,20 @@ impl RepoTreeProgressReporter {
 
         let handle = thread::spawn(move || {
             let interval = fetch_progress_interval();
-            while !thread_stop.load(Ordering::Relaxed) {
-                let mut slept = Duration::ZERO;
-                while slept < interval {
-                    if thread_stop.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    let step = Duration::from_millis(100).min(interval - slept);
-                    thread::sleep(step);
-                    slept += step;
-                }
-                if thread_stop.load(Ordering::Relaxed) {
+            let (lock, cvar) = &*thread_stop;
+            let mut stopped = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !*stopped {
+                let (guard, timeout) = cvar
+                    .wait_timeout(stopped, interval)
+                    .unwrap_or_else(|e| e.into_inner());
+                stopped = guard;
+                if *stopped {
                     return;
                 }
-                eprintln!("{}", progress.snapshot().format_for_label(&label));
-                thread_printed.store(true, Ordering::Relaxed);
+                if timeout.timed_out() {
+                    eprintln!("{}", progress.snapshot().format_for_label(&label));
+                    thread_printed.store(true, Ordering::Relaxed);
+                }
             }
         });
 
@@ -240,7 +240,11 @@ impl RepoTreeProgressReporter {
         progress: &RepoTreeBuildProgress,
         error: Option<&E>,
     ) {
-        self.stop.store(true, Ordering::Relaxed);
+        let (lock, cvar) = &*self.stop;
+        if let Ok(mut stopped) = lock.lock() {
+            *stopped = true;
+            cvar.notify_all();
+        }
         let _ = self.handle.join();
 
         if !self.printed.load(Ordering::Relaxed) {
@@ -362,19 +366,27 @@ pub(super) async fn collect_complete_hashes<S: Store>(
     root: &hashtree_core::Cid,
     concurrency: usize,
 ) -> Result<HashSet<[u8; 32]>, hashtree_core::HashTreeError> {
+    use futures::stream::{self, StreamExt};
+
     let hashes = hashtree_core::collect_hashes(tree, root, concurrency).await?;
     let store = tree.get_store();
-    for hash in &hashes {
-        match store.has(hash).await {
-            Ok(true) => {}
-            Ok(false) => {
-                return Err(hashtree_core::HashTreeError::MissingChunk(hex::encode(
-                    hash,
-                )));
+    let check_concurrency = concurrency.max(1);
+    {
+        let mut checks = stream::iter(hashes.iter().copied().map(|hash| {
+            let store = store.clone();
+            async move {
+                match store.has(&hash).await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(hashtree_core::HashTreeError::MissingChunk(hex::encode(
+                        hash,
+                    ))),
+                    Err(err) => Err(hashtree_core::HashTreeError::Store(err.to_string())),
+                }
             }
-            Err(err) => {
-                return Err(hashtree_core::HashTreeError::Store(err.to_string()));
-            }
+        }))
+        .buffer_unordered(check_concurrency);
+        while let Some(result) = checks.next().await {
+            result?;
         }
     }
     Ok(hashes)
@@ -471,25 +483,13 @@ fn spawn_periodic_upload_progress(
     counters: UploadCounters,
     discovery_complete: Arc<AtomicBool>,
     has_old_tree: bool,
-    mut done: tokio::sync::watch::Receiver<bool>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = tokio::time::sleep(fetch_progress_interval()) => {
-                    emit_upload_progress(upload_progress_from_counters(
-                        &counters,
-                        &discovery_complete,
-                        has_old_tree,
-                    ));
-                }
-                changed = done.changed() => {
-                    if changed.is_err() || *done.borrow() {
-                        break;
-                    }
-                }
-            }
-        }
+) -> PeriodicReporter {
+    PeriodicReporter::spawn(fetch_progress_interval(), move || {
+        emit_upload_progress(upload_progress_from_counters(
+            &counters,
+            &discovery_complete,
+            has_old_tree,
+        ));
     })
 }
 
@@ -683,18 +683,18 @@ async fn upload_pending_with_server_batches(
     let Some(mut first_batch) = batches.next() else {
         return Ok(Vec::new());
     };
+    let first_batch_len = first_batch.len();
 
     let mut selected_server = None;
     let mut last_error = None;
     let mut saw_unsupported = false;
-    for server in servers {
-        match upload_pending_batch_adaptive_to_server(
-            first_batch.clone(),
-            blossom,
-            server,
-            counters,
-        )
-        .await
+    for (idx, server) in servers.iter().enumerate() {
+        let probe_batch = if idx + 1 == servers.len() && !saw_unsupported {
+            std::mem::take(&mut first_batch)
+        } else {
+            first_batch.clone()
+        };
+        match upload_pending_batch_adaptive_to_server(probe_batch, blossom, server, counters).await
         {
             Ok(BatchUploadOutcome::Uploaded) => {
                 selected_server = Some(server.clone());
@@ -720,11 +720,10 @@ async fn upload_pending_with_server_batches(
             return Ok(fallback);
         }
         if let Some(err) = last_error {
-            record_batch_upload_failure(counters, first_batch.len());
+            record_batch_upload_failure(counters, first_batch_len);
             eprintln!(
                 "\n  Batch upload failed ({} blobs): {}",
-                first_batch.len(),
-                err
+                first_batch_len, err
             );
             return Err(err);
         }
@@ -770,11 +769,14 @@ impl PendingUploadPipeline<'_> {
     async fn flush(
         &self,
         pending: &mut Vec<PendingUpload>,
+        pending_bytes: &mut usize,
         upload_check_supported: &mut bool,
+        batch_upload_supported: &mut bool,
     ) -> bool {
         if pending.is_empty() {
             return true;
         }
+        *pending_bytes = 0;
 
         let mut present = HashSet::new();
         let mut checked_all_servers = false;
@@ -787,6 +789,9 @@ impl PendingUploadPipeline<'_> {
                 }
                 None => {
                     *upload_check_supported = false;
+                    // Plain Blossom servers returning 404 on `/upload/check` also
+                    // do not implement `/upload/batch*`; avoid wasting bandwidth on 404s.
+                    *batch_upload_supported = false;
                 }
             }
         }
@@ -803,7 +808,9 @@ impl PendingUploadPipeline<'_> {
             to_upload.push(item);
         }
 
-        let batch_servers = if self.all_servers.len() == 1 || !self.repairing_server_tree {
+        let batch_servers = if *batch_upload_supported
+            && (self.all_servers.len() == 1 || !self.repairing_server_tree)
+        {
             Some(self.all_servers)
         } else {
             None
@@ -833,6 +840,9 @@ impl PendingUploadPipeline<'_> {
             .await
             {
                 Ok(fallback) => {
+                    if !fallback.is_empty() {
+                        *batch_upload_supported = false;
+                    }
                     to_upload = fallback;
                     to_upload.extend(fallback_to_individual);
                 }
@@ -1170,16 +1180,22 @@ impl RemoteHelper {
         debug!(refs_count = self.push_specs.len(), "execute_push called");
         info!("Pushing {} refs", self.push_specs.len());
 
-        // First, load existing refs and objects from remote to preserve other branches
+        // First, load existing refs and objects from remote to preserve other branches.
+        // If `list for-push` just cleanly observed `RootNotObserved` in this same
+        // process, skip repeating the full relay lookup milliseconds later.
         let has_force_push = self.push_specs.iter().any(|s| s.force);
+        let unobserved_in_list = std::mem::take(&mut self.observed_unobserved_in_list);
         debug!(
             force = has_force_push,
-            "About to call load_existing_remote_state"
+            unobserved_in_list, "About to call load_existing_remote_state"
         );
 
         let loaded = if rebuild {
             self.load_existing_remote_state()
                 .context("local rebuild requires readable existing remote state")
+        } else if unobserved_in_list {
+            self.detail("  Reusing unobserved new-repository state from ref advertisement");
+            Ok(())
         } else {
             self.load_existing_remote_state_with_missing_root_repair()
         };
@@ -1231,6 +1247,14 @@ impl RemoteHelper {
         let mut results = Vec::new();
         let mut pushed_refs: Vec<(String, String)> = Vec::new();
         let specs: Vec<_> = std::mem::take(&mut self.push_specs);
+
+        struct PendingRefUpdate {
+            dst: String,
+            sha: String,
+            force: bool,
+            remote_tip: Option<String>,
+        }
+        let mut updates: Vec<PendingRefUpdate> = Vec::new();
 
         for spec in specs {
             debug!(
@@ -1287,12 +1311,55 @@ impl RemoteHelper {
                 }
 
                 let remote_tip = self.remote_refs.get(&spec.dst).cloned();
-                match self.push_objects(&sha, &spec.dst, spec.force, remote_tip.as_deref()) {
-                    Ok(()) => {
-                        results.push(format!("ok {}", spec.dst));
-                        pushed_refs.push((spec.dst, sha));
+                if !spec.force
+                    && !self.config.blossom.force_upload
+                    && remote_tip.as_deref() == Some(sha.as_str())
+                {
+                    debug!(
+                        "Skipping push for {} because remote tip already equals {}",
+                        spec.dst, sha
+                    );
+                    results.push(format!("ok {}", spec.dst));
+                    pushed_refs.push((spec.dst, sha));
+                    continue;
+                }
+
+                updates.push(PendingRefUpdate {
+                    dst: spec.dst,
+                    sha,
+                    force: spec.force,
+                    remote_tip,
+                });
+            }
+        }
+
+        if updates.len() == 1 {
+            let u = updates.pop().unwrap();
+            match self.push_objects(&u.sha, &u.dst, u.force, u.remote_tip.as_deref()) {
+                Ok(()) => {
+                    results.push(format!("ok {}", u.dst));
+                    pushed_refs.push((u.dst, u.sha));
+                }
+                Err(e) => results.push(push_error_status(&u.dst, &e)),
+            }
+        } else if !updates.is_empty() {
+            // Batch multi-ref pushes (`git push --all` / `--tags`) into a single
+            // tree build, Blossom diff upload, and Nostr publication.
+            let batch_args: Vec<(&str, &str, bool)> = updates
+                .iter()
+                .map(|u| (u.sha.as_str(), u.dst.as_str(), u.force))
+                .collect();
+            match self.push_ref_updates_batch(&batch_args) {
+                Ok(()) => {
+                    for u in updates {
+                        results.push(format!("ok {}", u.dst));
+                        pushed_refs.push((u.dst, u.sha));
                     }
-                    Err(e) => results.push(push_error_status(&spec.dst, &e)),
+                }
+                Err(e) => {
+                    for u in updates {
+                        results.push(push_error_status(&u.dst, &e));
+                    }
                 }
             }
         }
@@ -1762,9 +1829,9 @@ impl RemoteHelper {
             let base_has_pack_checkpoint = self.cached_remote_root_pack_checkpoint_available();
             let rebuild_checkpoint_from_first_bucket =
                 delta_base.is_some() && !base_has_pack_checkpoint;
-            let mut checkpoint_covered = match self.prepare_git_pack_checkpoint(
+            let mut checkpoint_covered = match self.prepare_git_pack_checkpoint_with_listed(
                 sha,
-                objects.len(),
+                &objects,
                 delta_base.as_deref(),
                 rebuild_checkpoint_from_first_bucket,
             ) {
@@ -1778,8 +1845,13 @@ impl RemoteHelper {
                     HashSet::new()
                 }
             };
-            let inherited_pack_covered = if base_has_pack_checkpoint {
-                self.inherited_pack_covered_imported_tree_ids(sha, &objects)?
+            let current_tree_trees = if base_has_pack_checkpoint {
+                Some(Self::current_tree_tree_object_ids(sha)?)
+            } else {
+                None
+            };
+            let inherited_pack_covered = if let Some(ref tree_ids) = current_tree_trees {
+                self.inherited_pack_covered_imported_tree_ids_from_set(tree_ids, &objects)?
             } else {
                 HashSet::new()
             };
@@ -1789,11 +1861,12 @@ impl RemoteHelper {
                 checkpoint_covered.extend(inherited_pack_covered.iter().cloned());
             }
 
-            let objects_to_import = self.select_objects_to_import_for_push(
+            let objects_to_import = self.select_objects_to_import_for_push_with_trees(
                 sha,
                 &objects,
                 &checkpoint_covered,
                 base_has_pack_checkpoint,
+                current_tree_trees.as_ref(),
             )?;
             if checkpoint_covered.is_empty() && !inherited_pack_covered.is_empty() {
                 self.storage
@@ -1857,6 +1930,172 @@ impl RemoteHelper {
                 .validate_root_contains_direct_refs(&root_cid)
                 .context("rebuilt repo tree is still missing ref objects")?;
         }
+        self.publish_built_root(root_cid, sha, rebuild)
+    }
+
+    /// Push multiple updated refs in one tree build, one Blossom diff upload,
+    /// and one Nostr root publication.
+    fn push_ref_updates_batch(&mut self, updates: &[(&str, &str, bool)]) -> Result<()> {
+        let any_force = updates.iter().any(|(_, _, force)| *force);
+        let can_merge_cached = !any_force
+            && !self.config.blossom.force_upload
+            && self.nostr.get_cached_root_hash(&self.repo_name).is_some();
+
+        let mut include_shas: Vec<String> = updates
+            .iter()
+            .map(|(sha, _, _)| (*sha).to_string())
+            .collect();
+        include_shas.sort();
+        include_shas.dedup();
+
+        let exclude_shas: Vec<String> = if can_merge_cached {
+            let remote_candidates: Vec<&str> =
+                self.remote_refs.values().map(String::as_str).collect();
+            let mut present: Vec<String> = self
+                .git_batch_check_objects(remote_candidates.into_iter())?
+                .into_iter()
+                .collect();
+            present.sort();
+            present
+        } else {
+            Vec::new()
+        };
+
+        eprintln!("  Listing objects...");
+        let objects = self.list_objects_for_shas(&include_shas, &exclude_shas)?;
+        eprintln!(
+            "  Listed {} object(s) across {} ref(s)",
+            objects.len(),
+            updates.len()
+        );
+
+        let mut parsed_refs = Vec::with_capacity(updates.len());
+        let mut head_branch: Option<(String, String)> = None;
+        for &(sha, dst_ref, _) in updates {
+            let oid = crate::git::object::ObjectId::from_hex(sha)
+                .ok_or_else(|| anyhow::anyhow!("Invalid object id: {}", sha))?;
+            parsed_refs.push((dst_ref, oid));
+            if dst_ref.starts_with("refs/heads/") {
+                head_branch = Some((dst_ref.to_string(), sha.to_string()));
+            }
+        }
+
+        // Preserve existing remote HEAD when pushing only tags or non-HEAD updates,
+        // and use the existing HEAD commit as the working-tree delta base.
+        let prev_head_tip = self
+            .storage
+            .default_branch()?
+            .and_then(|branch| self.remote_refs.get(&branch).cloned())
+            .or_else(|| {
+                head_branch
+                    .as_ref()
+                    .and_then(|(b, _)| self.remote_refs.get(b).cloned())
+            })
+            .or_else(|| exclude_shas.first().cloned());
+
+        for (dst_ref, oid) in parsed_refs {
+            self.storage.write_ref(dst_ref, &Ref::Direct(oid))?;
+        }
+        if let Some((ref branch, _)) = head_branch {
+            self.storage
+                .write_ref("HEAD", &Ref::Symbolic(branch.clone()))?;
+        }
+
+        let head_sha = head_branch
+            .as_ref()
+            .map(|(_, sha)| sha.as_str())
+            .or_else(|| prev_head_tip.as_deref())
+            .unwrap_or(updates[0].0);
+
+        let base_has_pack_checkpoint =
+            can_merge_cached && self.cached_remote_root_pack_checkpoint_available();
+        let current_tree_trees = if base_has_pack_checkpoint {
+            Some(Self::current_tree_tree_object_ids(head_sha)?)
+        } else {
+            None
+        };
+        let inherited_pack_covered = if let Some(ref tree_ids) = current_tree_trees {
+            self.inherited_pack_covered_imported_tree_ids_from_set(tree_ids, &objects)?
+        } else {
+            HashSet::new()
+        };
+
+        let objects_to_import = self.select_objects_to_import_for_push_with_trees(
+            head_sha,
+            &objects,
+            &HashSet::new(),
+            base_has_pack_checkpoint,
+            current_tree_trees.as_ref(),
+        )?;
+        if !inherited_pack_covered.is_empty() {
+            self.storage
+                .set_pack_checkpoint_files(BTreeMap::new(), inherited_pack_covered)?;
+        }
+
+        eprintln!("  Reading objects...");
+        let objects_with_content = self.read_git_objects_batch(&objects_to_import)?;
+        eprintln!("  Writing to local store...");
+        Self::write_objects_to_local_store(&self.storage, objects_with_content)?;
+        self.ensure_push_signing_key()?;
+
+        let mut root_cid = if can_merge_cached {
+            let delta_base = prev_head_tip.as_deref();
+            match self.build_tree_with_cached_remote_root(
+                "Merging delta with cached remote root",
+                delta_base,
+            ) {
+                Ok(Some(root_cid)) => root_cid,
+                Ok(None) => self.build_tree_with_progress("Building repo tree")?,
+                Err(err) => {
+                    if let Some(base) = delta_base {
+                        self.repair_delta_tree_build(
+                            head_sha,
+                            updates[0].1,
+                            base,
+                            "Cached-root merge incomplete",
+                            err.to_string(),
+                        )?
+                    } else {
+                        return Err(err);
+                    }
+                }
+            }
+        } else {
+            self.build_tree_with_progress("Building repo tree")?
+        };
+
+        if let Err(validation_err) = self.storage.validate_root_contains_direct_refs(&root_cid) {
+            eprintln!(
+                "  Built repo tree is missing ref object(s) ({}); rebuilding from full local import",
+                validation_err
+            );
+            let mut all_tips = include_shas;
+            for sha in self.storage.list_refs()?.into_values() {
+                if !sha.starts_with("ref: ") {
+                    all_tips.push(sha);
+                }
+            }
+            all_tips.sort();
+            all_tips.dedup();
+            let all_objects = self.list_objects_for_shas(&all_tips, &[])?;
+            let all_contents = self.read_git_objects_batch(&all_objects)?;
+            Self::write_objects_to_local_store(&self.storage, all_contents)?;
+            root_cid =
+                self.build_tree_with_progress("Rebuilding repo tree after full local import")?;
+            self.storage
+                .validate_root_contains_direct_refs(&root_cid)
+                .context("rebuilt repo tree is still missing ref objects")?;
+        }
+
+        self.publish_built_root(root_cid, head_sha, false)
+    }
+
+    fn publish_built_root(
+        &self,
+        root_cid: hashtree_core::Cid,
+        sha: &str,
+        rebuild: bool,
+    ) -> Result<()> {
         let root_hash_hex = hex::encode(root_cid.hash);
         let chk_key = root_cid.key;
         let is_link_visible = self.url_secret.is_some();
@@ -1960,19 +2199,52 @@ impl RemoteHelper {
         objects_with_content: Vec<(crate::git::object::ObjectType, Vec<u8>)>,
     ) -> Result<()> {
         let total = objects_with_content.len();
-        for (i, (obj_type, content)) in objects_with_content.into_iter().enumerate() {
-            storage.write_raw_object(obj_type, &content)?;
-            if (i + 1) % 1000 == 0 || i + 1 == total {
-                eprintln!("  Writing to local store: {}/{}", i + 1, total);
-            }
+        if total == 0 {
+            return Ok(());
         }
+        storage.write_raw_objects_batch(&objects_with_content)?;
+        eprintln!("  Writing to local store: {}/{}", total, total);
         Ok(())
     }
 
+    #[cfg(test)]
     pub(super) fn prepare_git_pack_checkpoint(
         &self,
         sha: &str,
         object_count: usize,
+        delta_base: Option<&str>,
+        rebuild_checkpoint_from_first_bucket: bool,
+    ) -> Result<Option<HashSet<String>>> {
+        self.prepare_git_pack_checkpoint_inner(
+            sha,
+            object_count,
+            None,
+            delta_base,
+            rebuild_checkpoint_from_first_bucket,
+        )
+    }
+
+    fn prepare_git_pack_checkpoint_with_listed(
+        &self,
+        sha: &str,
+        listed_objects: &[String],
+        delta_base: Option<&str>,
+        rebuild_checkpoint_from_first_bucket: bool,
+    ) -> Result<Option<HashSet<String>>> {
+        self.prepare_git_pack_checkpoint_inner(
+            sha,
+            listed_objects.len(),
+            Some(listed_objects),
+            delta_base,
+            rebuild_checkpoint_from_first_bucket,
+        )
+    }
+
+    fn prepare_git_pack_checkpoint_inner(
+        &self,
+        sha: &str,
+        object_count: usize,
+        listed_objects: Option<&[String]>,
         delta_base: Option<&str>,
         rebuild_checkpoint_from_first_bucket: bool,
     ) -> Result<Option<HashSet<String>>> {
@@ -1984,9 +2256,10 @@ impl RemoteHelper {
         }
         let underfull_min_objects = git_pack_checkpoint_underfull_min_objects();
 
-        let Some(plan) = Self::plan_git_pack_checkpoint(
+        let Some(plan) = Self::plan_git_pack_checkpoint_with_listed(
             sha,
             object_count,
+            listed_objects,
             delta_base,
             min_objects,
             underfull_min_objects,
@@ -2033,9 +2306,30 @@ impl RemoteHelper {
         Ok(Some(returned_covered_objects))
     }
 
+    #[cfg(test)]
     pub(super) fn plan_git_pack_checkpoint(
         sha: &str,
         object_count: usize,
+        delta_base: Option<&str>,
+        interval_objects: usize,
+        underfull_min_objects: usize,
+        rebuild_checkpoint_from_first_bucket: bool,
+    ) -> Result<Option<GitPackCheckpointPlan>> {
+        Self::plan_git_pack_checkpoint_with_listed(
+            sha,
+            object_count,
+            None,
+            delta_base,
+            interval_objects,
+            underfull_min_objects,
+            rebuild_checkpoint_from_first_bucket,
+        )
+    }
+
+    fn plan_git_pack_checkpoint_with_listed(
+        sha: &str,
+        object_count: usize,
+        listed_objects: Option<&[String]>,
         delta_base: Option<&str>,
         interval_objects: usize,
         underfull_min_objects: usize,
@@ -2052,12 +2346,16 @@ impl RemoteHelper {
                 && underfull_min_objects > 0
                 && total_objects >= underfull_min_objects
             {
+                let covered_objects = match listed_objects {
+                    Some(objects) => objects.iter().cloned().collect(),
+                    None => Self::reachable_git_object_ids(sha)?,
+                };
                 return Ok(Some(GitPackCheckpointPlan {
                     packs: vec![GitPackCheckpointPackPlan {
                         tip: sha.to_string(),
                         exclude_tip: None,
                     }],
-                    covered_objects: Self::reachable_git_object_ids(sha)?,
+                    covered_objects,
                     require_byte_savings: true,
                 }));
             }
@@ -2138,7 +2436,30 @@ impl RemoteHelper {
     }
 
     pub(super) fn reachable_git_object_count(sha: &str) -> Result<usize> {
-        Ok(Self::reachable_git_object_ids(sha)?.len())
+        let output = Command::new("git")
+            .args(["rev-list", "--objects", "--no-object-names", sha])
+            .output()
+            .context("run git rev-list for checkpoint interval")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            bail!(
+                "git rev-list failed while checking checkpoint interval{}",
+                if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {stderr}")
+                }
+            );
+        }
+
+        Ok(output
+            .stdout
+            .split(|&b| b == b'\n')
+            .filter(|line| {
+                let line = line.strip_suffix(b"\r").unwrap_or(line);
+                line.len() == 40 && line.iter().all(|byte| byte.is_ascii_hexdigit())
+            })
+            .count())
     }
 
     fn reachable_git_object_ids(sha: &str) -> Result<HashSet<String>> {
@@ -2237,16 +2558,25 @@ impl RemoteHelper {
         covered_objects: &HashSet<String>,
         pack_bytes: usize,
     ) -> Result<(bool, usize)> {
-        let loose_bytes = Self::git_loose_object_upload_bytes(covered_objects)?;
+        let loose_bytes =
+            Self::git_loose_object_upload_bytes_up_to(covered_objects, Some(pack_bytes))?;
         Ok((pack_bytes < loose_bytes, loose_bytes))
     }
 
+    #[cfg(test)]
     fn git_loose_object_upload_bytes(object_ids: &HashSet<String>) -> Result<usize> {
+        Self::git_loose_object_upload_bytes_up_to(object_ids, None)
+    }
+
+    fn git_loose_object_upload_bytes_up_to(
+        object_ids: &HashSet<String>,
+        stop_above: Option<usize>,
+    ) -> Result<usize> {
         if object_ids.is_empty() {
             return Ok(0);
         }
 
-        let mut sorted_ids: Vec<_> = object_ids.iter().map(String::as_str).collect();
+        let mut sorted_ids: Vec<&str> = object_ids.iter().map(String::as_str).collect();
         sorted_ids.sort_unstable();
 
         let mut child = Command::new("git")
@@ -2257,64 +2587,106 @@ impl RemoteHelper {
             .spawn()
             .context("spawn git cat-file for loose object byte accounting")?;
 
-        let mut stdin = child.stdin.take().context("open git cat-file stdin")?;
+        let stdin = child.stdin.take().context("open git cat-file stdin")?;
         let stdout = child.stdout.take().context("open git cat-file stdout")?;
-        let mut reader = BufReader::new(stdout);
-        let mut total = 0usize;
+        let stop_writer = AtomicBool::new(false);
 
-        for oid in &sorted_ids {
-            // Drain each response before another request can fill the input pipe.
-            writeln!(stdin, "{}", oid)?;
+        let (total, stopped_early) = std::thread::scope(|scope| -> Result<(usize, bool)> {
+            let stop_ref = &stop_writer;
+            let ids_ref = &sorted_ids;
+            let writer = scope.spawn(move || {
+                let mut w = std::io::BufWriter::new(stdin);
+                for oid in ids_ref {
+                    if stop_ref.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    if w.write_all(oid.as_bytes()).is_err() || w.write_all(b"\n").is_err() {
+                        break;
+                    }
+                }
+                let _ = w.flush();
+            });
+
+            let mut reader = BufReader::new(stdout);
+            let mut total = 0usize;
+            let mut stopped_early = false;
             let mut header = String::new();
-            reader
-                .read_line(&mut header)
-                .context("read git cat-file object header")?;
-            let header = header.trim_end();
-            let parts = header.split_whitespace().collect::<Vec<_>>();
-            if parts.len() < 3 {
-                bail!("git cat-file returned invalid header for {oid}: {header}");
-            }
-            if parts[0] != *oid {
-                bail!(
-                    "git cat-file returned object {} while accounting for {}",
-                    parts[0],
-                    oid
-                );
-            }
-            if parts[1] == "missing" {
-                bail!("git object {oid} is missing while accounting for loose bytes");
+
+            for oid in &sorted_ids {
+                header.clear();
+                reader
+                    .read_line(&mut header)
+                    .context("read git cat-file object header")?;
+                let trimmed = header.trim_end();
+                let mut parts = trimmed.split_whitespace();
+                let returned_oid = parts.next();
+                let object_type = parts.next();
+                let size_str = parts.next();
+                let (Some(returned_oid), Some(object_type), Some(size_str)) =
+                    (returned_oid, object_type, size_str)
+                else {
+                    stop_ref.store(true, Ordering::Relaxed);
+                    bail!("git cat-file returned invalid header for {oid}: {trimmed}");
+                };
+                if returned_oid != *oid {
+                    stop_ref.store(true, Ordering::Relaxed);
+                    bail!(
+                        "git cat-file returned object {} while accounting for {}",
+                        returned_oid,
+                        oid
+                    );
+                }
+                if object_type == "missing" {
+                    stop_ref.store(true, Ordering::Relaxed);
+                    bail!("git object {oid} is missing while accounting for loose bytes");
+                }
+
+                let size: usize = size_str
+                    .parse()
+                    .with_context(|| format!("parse git object size for {oid}"))?;
+                let mut encoder =
+                    ZlibEncoder::new(ByteCountWriter::default(), Compression::default());
+                write!(encoder, "{} {}\0", object_type, size)?;
+                let copied = {
+                    let mut content = reader.by_ref().take(size as u64);
+                    std::io::copy(&mut content, &mut encoder)
+                        .with_context(|| format!("compress git loose object content for {oid}"))?
+                };
+                if copied != size as u64 {
+                    stop_ref.store(true, Ordering::Relaxed);
+                    bail!(
+                        "git cat-file returned {} content bytes for {oid}, expected {size}",
+                        copied
+                    );
+                }
+                let mut newline = [0u8; 1];
+                reader
+                    .read_exact(&mut newline)
+                    .with_context(|| format!("read git object terminator for {oid}"))?;
+                if newline != [b'\n'] {
+                    stop_ref.store(true, Ordering::Relaxed);
+                    bail!("git cat-file returned invalid object terminator for {oid}");
+                }
+
+                total = total.saturating_add(encoder.finish()?.bytes);
+                if stop_above.is_some_and(|limit| total > limit) {
+                    stop_ref.store(true, Ordering::Relaxed);
+                    stopped_early = true;
+                    break;
+                }
             }
 
-            let object_type = parts[1];
-            let size: usize = parts[2]
-                .parse()
-                .with_context(|| format!("parse git object size for {oid}"))?;
-            let mut encoder = ZlibEncoder::new(ByteCountWriter::default(), Compression::default());
-            write!(encoder, "{} {}\0", object_type, size)?;
-            let copied = {
-                let mut content = reader.by_ref().take(size as u64);
-                std::io::copy(&mut content, &mut encoder)
-                    .with_context(|| format!("compress git loose object content for {oid}"))?
-            };
-            if copied != size as u64 {
-                bail!(
-                    "git cat-file returned {} content bytes for {oid}, expected {size}",
-                    copied
-                );
-            }
-            let mut newline = [0u8; 1];
-            reader
-                .read_exact(&mut newline)
-                .with_context(|| format!("read git object terminator for {oid}"))?;
-            if newline != [b'\n'] {
-                bail!("git cat-file returned invalid object terminator for {oid}");
-            }
+            drop(reader);
+            let _ = writer.join();
+            Ok((total, stopped_early))
+        })?;
 
-            total = total.saturating_add(encoder.finish()?.bytes);
+        if stopped_early {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(total);
         }
 
-        drop(stdin);
-        drop(reader);
         let output = child
             .wait_with_output()
             .context("wait for git cat-file loose byte accounting")?;
@@ -2540,6 +2912,7 @@ impl RemoteHelper {
         Self::current_tree_object_ids_for_push(sha, false)
     }
 
+    #[cfg(test)]
     pub(super) fn inherited_pack_covered_imported_tree_candidates(
         sha: &str,
         listed_objects: &[String],
@@ -2551,15 +2924,19 @@ impl RemoteHelper {
             .collect())
     }
 
-    fn inherited_pack_covered_imported_tree_ids(
+    fn inherited_pack_covered_imported_tree_ids_from_set(
         &self,
-        sha: &str,
+        tree_ids: &HashSet<String>,
         listed_objects: &[String],
     ) -> Result<HashSet<String>> {
-        let candidates =
-            Self::inherited_pack_covered_imported_tree_candidates(sha, listed_objects)?;
+        let listed: HashSet<&str> = listed_objects.iter().map(String::as_str).collect();
+        let candidates: Vec<String> = tree_ids
+            .iter()
+            .filter(|oid| !listed.contains(oid.as_str()))
+            .cloned()
+            .collect();
         if candidates.is_empty() {
-            return Ok(candidates);
+            return Ok(HashSet::new());
         }
 
         let Some(root_hash) = self.nostr.get_cached_root_hash(&self.repo_name).cloned() else {
@@ -2588,16 +2965,60 @@ impl RemoteHelper {
                 return Ok(HashSet::new());
             };
 
+            let objects_entries = cached_tree
+                .list_directory(&objects_cid)
+                .await
+                .context("list cached .git/objects")?;
+            let prefix_cids: HashMap<String, hashtree_core::Cid> = objects_entries
+                .into_iter()
+                .filter(|e| e.name.len() == 2 && e.link_type == LinkType::Dir)
+                .map(|e| {
+                    (
+                        e.name,
+                        hashtree_core::Cid {
+                            hash: e.hash,
+                            key: e.key,
+                        },
+                    )
+                })
+                .collect();
+
+            let mut by_prefix: HashMap<&str, Vec<&str>> = HashMap::new();
             let mut pack_covered = HashSet::new();
-            for oid in candidates {
-                let loose_path = format!("{}/{}", &oid[..2], &oid[2..]);
-                let loose_exists = cached_tree
-                    .resolve_path(&objects_cid, &loose_path)
-                    .await
-                    .with_context(|| format!("resolve cached loose object {oid}"))?
-                    .is_some();
-                if !loose_exists {
-                    pack_covered.insert(oid);
+            for oid in &candidates {
+                let prefix = &oid[..2];
+                if prefix_cids.contains_key(prefix) {
+                    by_prefix.entry(prefix).or_default().push(oid.as_str());
+                } else {
+                    // Prefix directory does not exist under `.git/objects`, so OID is not loose.
+                    pack_covered.insert(oid.clone());
+                }
+            }
+
+            if !by_prefix.is_empty() {
+                let prefetch_hashes: Vec<[u8; 32]> = by_prefix
+                    .keys()
+                    .filter_map(|p| prefix_cids.get(*p).map(|cid| cid.hash))
+                    .collect();
+                cached_tree
+                    .get_store()
+                    .prefetch_missing(&prefetch_hashes, 32)
+                    .await;
+
+                for (prefix, oids) in by_prefix {
+                    let prefix_cid = &prefix_cids[prefix];
+                    let loose_names: HashSet<String> = cached_tree
+                        .list_directory(prefix_cid)
+                        .await
+                        .with_context(|| format!("list cached .git/objects/{prefix}"))?
+                        .into_iter()
+                        .map(|e| e.name)
+                        .collect();
+                    for oid in oids {
+                        if !loose_names.contains(&oid[2..]) {
+                            pack_covered.insert(oid.to_string());
+                        }
+                    }
                 }
             }
 
@@ -2605,12 +3026,30 @@ impl RemoteHelper {
         })
     }
 
+    #[cfg(test)]
     pub(super) fn select_objects_to_import_for_push(
         &self,
         sha: &str,
         listed_objects: &[String],
         checkpoint_covered: &HashSet<String>,
         base_has_pack_checkpoint: bool,
+    ) -> Result<Vec<String>> {
+        self.select_objects_to_import_for_push_with_trees(
+            sha,
+            listed_objects,
+            checkpoint_covered,
+            base_has_pack_checkpoint,
+            None,
+        )
+    }
+
+    fn select_objects_to_import_for_push_with_trees(
+        &self,
+        sha: &str,
+        listed_objects: &[String],
+        checkpoint_covered: &HashSet<String>,
+        base_has_pack_checkpoint: bool,
+        precomputed_tree_ids: Option<&HashSet<String>>,
     ) -> Result<Vec<String>> {
         let mut selected = HashSet::new();
         for oid in listed_objects {
@@ -2622,7 +3061,11 @@ impl RemoteHelper {
         if !checkpoint_covered.is_empty() {
             let current_tree = Self::current_tree_object_ids(sha)?;
             if base_has_pack_checkpoint {
-                selected.extend(Self::current_tree_tree_object_ids(sha)?);
+                if let Some(tree_ids) = precomputed_tree_ids {
+                    selected.extend(tree_ids.iter().cloned());
+                } else {
+                    selected.extend(Self::current_tree_tree_object_ids(sha)?);
+                }
                 selected.extend(
                     current_tree
                         .into_iter()
@@ -2632,7 +3075,11 @@ impl RemoteHelper {
                 selected.extend(current_tree);
             }
         } else if base_has_pack_checkpoint {
-            selected.extend(Self::current_tree_tree_object_ids(sha)?);
+            if let Some(tree_ids) = precomputed_tree_ids {
+                selected.extend(tree_ids.iter().cloned());
+            } else {
+                selected.extend(Self::current_tree_tree_object_ids(sha)?);
+            }
         }
 
         let mut selected: Vec<String> = selected.into_iter().collect();
@@ -2674,22 +3121,9 @@ impl RemoteHelper {
 
     /// Detect merged PRs in pushed refs and publish status events
     pub(super) fn detect_and_mark_merged_prs(&self, pushed_refs: &[(String, String)]) {
-        let open_prs = match self
-            .nostr
-            .fetch_prs(&self.repo_name, PullRequestStateFilter::Open)
-        {
-            Ok(prs) => prs,
-            Err(e) => {
-                debug!("Failed to fetch open PRs: {}", e);
-                return;
-            }
-        };
-
-        if open_prs.is_empty() {
-            return;
-        }
-
-        let merge_candidates = pushed_refs
+        // Compute local merge candidates first so initial pushes, tag pushes,
+        // and non-merge commits skip Nostr relay queries entirely.
+        let merge_candidates: Vec<(&str, HashSet<String>)> = pushed_refs
             .iter()
             .filter_map(|(dst_ref, sha)| {
                 dst_ref
@@ -2725,7 +3159,27 @@ impl RemoteHelper {
                 );
 
                 Some((branch_name, merged_parent_shas))
-            });
+            })
+            .collect();
+
+        if merge_candidates.is_empty() {
+            return;
+        }
+
+        let open_prs = match self
+            .nostr
+            .fetch_prs(&self.repo_name, PullRequestStateFilter::Open)
+        {
+            Ok(prs) => prs,
+            Err(e) => {
+                debug!("Failed to fetch open PRs: {}", e);
+                return;
+            }
+        };
+
+        if open_prs.is_empty() {
+            return;
+        }
 
         for (branch_name, merged_parent_shas) in merge_candidates {
             let matching_prs = open_prs
@@ -2772,20 +3226,6 @@ impl RemoteHelper {
         let blossom = self.nostr.blossom();
         let configured: Vec<String> = blossom.write_servers().to_vec();
 
-        let rt = match new_multi_thread_runtime() {
-            Ok(rt) => rt,
-            Err(e) => {
-                warn!("Failed to create runtime for blossom upload: {}", e);
-                return BlossomResult {
-                    configured: configured.clone(),
-                    succeeded: vec![],
-                    failed: configured,
-                    local_complete: false,
-                    degraded: true,
-                };
-            }
-        };
-
         let root_bytes = match hex::decode(root_hash) {
             Ok(b) if b.len() == 32 => {
                 let mut arr = [0u8; 32];
@@ -2823,7 +3263,7 @@ impl RemoteHelper {
 
         let verbose = self.is_slow();
         let trust_server_old_tree_coverage = trust_server_old_tree_coverage && !force_upload;
-        let (local_complete, degraded_replication) = rt.block_on(async {
+        let (local_complete, degraded_replication) = match block_on(async {
             use hashtree_core::{Cid, HashTree, HashTreeConfig};
             use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
             use std::sync::Arc;
@@ -2871,9 +3311,9 @@ impl RemoteHelper {
                         }
                         hashes
                     }
-                    Err(local_err) => {
-                        match self.build_cached_fetch_tree() {
-                            Ok((cached_tree, _)) => match collect_complete_hashes(&cached_tree, &old_cid, 32).await {
+                    Err(local_err) => match self.build_cached_fetch_tree() {
+                        Ok((cached_tree, _)) => {
+                            match collect_complete_hashes(&cached_tree, &old_cid, 32).await {
                                 Ok(hashes) => {
                                     if verbose {
                                         eprintln!(
@@ -2887,22 +3327,25 @@ impl RemoteHelper {
                                 Err(cached_err) => {
                                     if verbose {
                                         eprintln!(" failed locally: {}", local_err);
-                                        eprintln!("  Cached old-tree walk failed too: {}", cached_err);
+                                        eprintln!(
+                                            "  Cached old-tree walk failed too: {}",
+                                            cached_err
+                                        );
                                         eprintln!("  Falling back to full upload");
                                     }
                                     HashSet::new()
                                 }
-                            },
-                            Err(build_err) => {
-                                if verbose {
-                                    eprintln!(" failed locally: {}", local_err);
-                                    eprintln!("  Could not build cached fetch tree: {}", build_err);
-                                    eprintln!("  Falling back to full upload");
-                                }
-                                HashSet::new()
                             }
                         }
-                    }
+                        Err(build_err) => {
+                            if verbose {
+                                eprintln!(" failed locally: {}", local_err);
+                                eprintln!("  Could not build cached fetch tree: {}", build_err);
+                                eprintln!("  Falling back to full upload");
+                            }
+                            HashSet::new()
+                        }
+                    },
                 }
             } else {
                 HashSet::new()
@@ -2911,68 +3354,83 @@ impl RemoteHelper {
             let has_old_tree = !old_hashes.is_empty();
             let old_tree_unavailable = old_root_bytes.is_some() && !has_old_tree;
             let all_servers: Vec<String> = blossom.write_servers().to_vec();
-            let servers_needing_full: Arc<Vec<String>> =
-                if has_old_tree && all_servers.len() == 1 {
-                    let old_root = old_root_bytes.unwrap();
-                    let sample_hashes: Vec<String> = old_hashes
-                        .iter()
-                        .filter(|h| **h != old_root)
-                        .take(SERVER_COVERAGE_SAMPLE_SIZE)
-                        .map(hex::encode)
-                        .collect();
-                    if sample_hashes.is_empty() {
-                        Arc::new(Vec::new())
-                    } else {
-                        let sample_refs: Vec<&str> =
-                            sample_hashes.iter().map(|s| s.as_str()).collect();
-                        match blossom
-                            .server_tree_sample_coverage(
-                                &all_servers[0],
-                                &sample_refs,
-                                SERVER_COVERAGE_SAMPLE_SIZE,
-                            )
-                            .await
-                        {
-                            hashtree_blossom::BlobAvailability::Missing => {
-                                if verbose {
-                                    let server_name = all_servers[0]
-                                        .trim_start_matches("https://")
-                                        .trim_start_matches("http://")
-                                        .split('/')
-                                        .next()
-                                        .unwrap_or(&all_servers[0]);
-                                    eprintln!(
-                                        "  Full upload needed: {} (missing old tree)",
-                                        server_name
-                                    );
-                                }
-                                Arc::new(all_servers.clone())
-                            }
-                            hashtree_blossom::BlobAvailability::Unknown => {
-                                if verbose {
-                                    let server_name = all_servers[0]
-                                        .trim_start_matches("https://")
-                                        .trim_start_matches("http://")
-                                        .split('/')
-                                        .next()
-                                        .unwrap_or(&all_servers[0]);
-                                    eprintln!(
-                                        "  Old-tree coverage probe inconclusive: {}",
-                                        server_name
-                                    );
-                                }
-                                Arc::new(Vec::new())
-                            }
-                            hashtree_blossom::BlobAvailability::Present => Arc::new(Vec::new()),
-                        }
-                    }
-                } else {
+            let servers_needing_full: Arc<Vec<String>> = if has_old_tree && all_servers.len() == 1 {
+                let old_root = old_root_bytes.unwrap();
+                let sample_hashes: Vec<String> = old_hashes
+                    .iter()
+                    .filter(|h| **h != old_root)
+                    .take(SERVER_COVERAGE_SAMPLE_SIZE)
+                    .map(hex::encode)
+                    .collect();
+                if sample_hashes.is_empty() {
                     Arc::new(Vec::new())
-                };
+                } else {
+                    // Prefer a single `POST /upload/check` probe over 32 parallel
+                    // `HEAD` requests when supported; fall back to `HEAD` sampling
+                    // on plain Blossom servers.
+                    let coverage = match blossom
+                        .check_uploads_on_server(&sample_hashes, &all_servers[0])
+                        .await
+                    {
+                        Some(present) => {
+                            if present.len() == sample_hashes.len() {
+                                hashtree_blossom::BlobAvailability::Present
+                            } else {
+                                hashtree_blossom::BlobAvailability::Missing
+                            }
+                        }
+                        None => {
+                            let sample_refs: Vec<&str> =
+                                sample_hashes.iter().map(|s| s.as_str()).collect();
+                            blossom
+                                .server_tree_sample_coverage(
+                                    &all_servers[0],
+                                    &sample_refs,
+                                    SERVER_COVERAGE_SAMPLE_SIZE,
+                                )
+                                .await
+                        }
+                    };
+                    match coverage {
+                        hashtree_blossom::BlobAvailability::Missing => {
+                            if verbose {
+                                let server_name = all_servers[0]
+                                    .trim_start_matches("https://")
+                                    .trim_start_matches("http://")
+                                    .split('/')
+                                    .next()
+                                    .unwrap_or(&all_servers[0]);
+                                eprintln!(
+                                    "  Full upload needed: {} (missing old tree)",
+                                    server_name
+                                );
+                            }
+                            Arc::new(all_servers.clone())
+                        }
+                        hashtree_blossom::BlobAvailability::Unknown => {
+                            if verbose {
+                                let server_name = all_servers[0]
+                                    .trim_start_matches("https://")
+                                    .trim_start_matches("http://")
+                                    .split('/')
+                                    .next()
+                                    .unwrap_or(&all_servers[0]);
+                                eprintln!(
+                                    "  Old-tree coverage probe inconclusive: {}",
+                                    server_name
+                                );
+                            }
+                            Arc::new(Vec::new())
+                        }
+                        hashtree_blossom::BlobAvailability::Present => Arc::new(Vec::new()),
+                    }
+                }
+            } else {
+                Arc::new(Vec::new())
+            };
             let prune_known_subtrees =
                 has_old_tree && trust_server_old_tree_coverage && servers_needing_full.is_empty();
-            let use_upload_check =
-                !force_upload && (old_tree_unavailable || !prune_known_subtrees);
+            let use_upload_check = !force_upload && (old_tree_unavailable || !prune_known_subtrees);
             if verbose && use_upload_check {
                 eprintln!("  Checking server blob inventory in upload batches");
             }
@@ -2995,27 +3453,38 @@ impl RemoteHelper {
 
                     let stream = ReceiverStream::new(rx);
                     stream
-                        .map(|IndividualUpload {
-                                  item,
-                                  head_fallback,
-                              }| {
-                            let PendingUpload {
-                                hash,
-                                data,
-                                from_old_tree,
-                                force_all_servers,
-                            } = item;
-                            let blossom = blossom.clone();
-                            let uploaded = Arc::clone(&uploaded);
-                            let skipped_server = Arc::clone(&skipped_server);
-                            let failed = Arc::clone(&failed);
-                            let completed = Arc::clone(&completed);
-                            let servers_needing_full = Arc::clone(&servers_needing_full);
-                            async move {
-                                let result = if head_fallback {
-                                    let hash_hex = hex::encode(hash);
-                                    if blossom.exists(&hash_hex).await {
-                                        Ok((hash_hex, false))
+                        .map(
+                            |IndividualUpload {
+                                 item,
+                                 head_fallback,
+                             }| {
+                                let PendingUpload {
+                                    hash,
+                                    data,
+                                    from_old_tree,
+                                    force_all_servers,
+                                } = item;
+                                let blossom = blossom.clone();
+                                let uploaded = Arc::clone(&uploaded);
+                                let skipped_server = Arc::clone(&skipped_server);
+                                let failed = Arc::clone(&failed);
+                                let completed = Arc::clone(&completed);
+                                let servers_needing_full = Arc::clone(&servers_needing_full);
+                                async move {
+                                    let result = if head_fallback {
+                                        let hash_hex = hex::encode(hash);
+                                        if blossom.exists(&hash_hex).await {
+                                            Ok((hash_hex, false))
+                                        } else {
+                                            upload_block_to_file_servers(
+                                                &blossom,
+                                                &data,
+                                                from_old_tree,
+                                                force_all_servers,
+                                                servers_needing_full.as_ref().as_slice(),
+                                            )
+                                            .await
+                                        }
                                     } else {
                                         upload_block_to_file_servers(
                                             &blossom,
@@ -3025,32 +3494,27 @@ impl RemoteHelper {
                                             servers_needing_full.as_ref().as_slice(),
                                         )
                                         .await
+                                    };
+                                    match result {
+                                        Ok((_, true)) => {
+                                            uploaded.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Ok((_, false)) => {
+                                            skipped_server.fetch_add(1, Ordering::Relaxed);
+                                        }
+                                        Err(e) => {
+                                            failed.fetch_add(1, Ordering::Relaxed);
+                                            eprintln!(
+                                                "\n  Upload failed ({} bytes): {}",
+                                                data.len(),
+                                                e
+                                            );
+                                        }
                                     }
-                                } else {
-                                    upload_block_to_file_servers(
-                                        &blossom,
-                                        &data,
-                                        from_old_tree,
-                                        force_all_servers,
-                                        servers_needing_full.as_ref().as_slice(),
-                                    )
-                                    .await
-                                };
-                                match result {
-                                    Ok((_, true)) => {
-                                        uploaded.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    Ok((_, false)) => {
-                                        skipped_server.fetch_add(1, Ordering::Relaxed);
-                                    }
-                                    Err(e) => {
-                                        failed.fetch_add(1, Ordering::Relaxed);
-                                        eprintln!("\n  Upload failed ({} bytes): {}", data.len(), e);
-                                    }
+                                    completed.fetch_add(1, Ordering::Relaxed);
                                 }
-                                completed.fetch_add(1, Ordering::Relaxed);
-                            }
-                        })
+                            },
+                        )
                         .buffer_unordered(upload_concurrency)
                         .for_each(|_| async {})
                         .await;
@@ -3061,7 +3525,9 @@ impl RemoteHelper {
             let mut queued: HashSet<[u8; 32]> = HashSet::new();
             let mut queue: Vec<UploadQueueItem> = Vec::new();
             let mut pending_uploads = Vec::with_capacity(UPLOAD_CHECK_BATCH_SIZE.min(1024));
+            let mut pending_bytes = 0usize;
             let mut upload_check_supported = true;
+            let mut batch_upload_supported = true;
             let upload_pipeline = PendingUploadPipeline {
                 blossom,
                 all_servers: &all_servers,
@@ -3077,12 +3543,10 @@ impl RemoteHelper {
                 UploadQueueItem::root(root_bytes, encryption_key.copied()),
             );
 
-            let (progress_done_tx, progress_done_rx) = tokio::sync::watch::channel(false);
-            let progress_handle = spawn_periodic_upload_progress(
+            let progress_reporter = spawn_periodic_upload_progress(
                 counters.clone(),
                 Arc::clone(&discovery_complete),
                 has_old_tree,
-                progress_done_rx,
             );
             emit_upload_progress(upload_progress_from_counters(
                 &counters,
@@ -3131,12 +3595,21 @@ impl RemoteHelper {
                     let plaintext = if let Some(k) = item.key {
                         match decrypt_object(&data, &k) {
                             Ok(p) => p,
-                            Err(_) if k.mode() == hashtree_core::EncryptionMode::LegacyChk && try_decode_tree_node(&data).is_some() => data.clone(),
+                            Err(_)
+                                if k.mode() == hashtree_core::EncryptionMode::LegacyChk
+                                    && try_decode_tree_node(&data).is_some() =>
+                            {
+                                data.clone()
+                            }
                             Err(error) => {
                                 failed.fetch_add(1, Ordering::Relaxed);
                                 local_failed.fetch_add(1, Ordering::Relaxed);
                                 completed.fetch_add(1, Ordering::Relaxed);
-                                eprintln!("\n  Cannot decrypt object {}: {}", hex::encode(hash), error);
+                                eprintln!(
+                                    "\n  Cannot decrypt object {}: {}",
+                                    hex::encode(hash),
+                                    error
+                                );
                                 continue;
                             }
                         }
@@ -3156,15 +3629,22 @@ impl RemoteHelper {
                     }
                 }
 
+                pending_bytes = pending_bytes.saturating_add(data.len());
                 pending_uploads.push(PendingUpload {
                     hash,
                     data,
                     from_old_tree,
                     force_all_servers: force_all_servers_for_hash,
                 });
-                if pending_uploads.len() >= UPLOAD_CHECK_BATCH_SIZE
+                if (pending_uploads.len() >= UPLOAD_CHECK_BATCH_SIZE
+                    || pending_bytes >= PENDING_UPLOAD_FLUSH_BYTES)
                     && !upload_pipeline
-                        .flush(&mut pending_uploads, &mut upload_check_supported)
+                        .flush(
+                            &mut pending_uploads,
+                            &mut pending_bytes,
+                            &mut upload_check_supported,
+                            &mut batch_upload_supported,
+                        )
                         .await
                 {
                     break;
@@ -3172,7 +3652,12 @@ impl RemoteHelper {
             }
 
             let _ = upload_pipeline
-                .flush(&mut pending_uploads, &mut upload_check_supported)
+                .flush(
+                    &mut pending_uploads,
+                    &mut pending_bytes,
+                    &mut upload_check_supported,
+                    &mut batch_upload_supported,
+                )
                 .await;
 
             discovery_complete.store(true, Ordering::Relaxed);
@@ -3191,8 +3676,7 @@ impl RemoteHelper {
 
             drop(tx);
             let _ = upload_handle.await;
-            let _ = progress_done_tx.send(true);
-            let _ = progress_handle.await;
+            progress_reporter.finish().await;
 
             let final_uploaded = uploaded.load(Ordering::Relaxed);
             let final_skipped_diff = skipped_diff.load(Ordering::Relaxed);
@@ -3221,7 +3705,19 @@ impl RemoteHelper {
             let local_complete = final_local_failed == 0 && final_completed == final_total_seen;
             let degraded_replication = final_failed > final_local_failed;
             (local_complete, degraded_replication)
-        });
+        }) {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                warn!("Failed to run blossom upload on tokio runtime: {}", e);
+                return BlossomResult {
+                    configured: configured.clone(),
+                    succeeded: vec![],
+                    failed: configured,
+                    local_complete: false,
+                    degraded: true,
+                };
+            }
+        };
 
         if local_complete {
             BlossomResult {

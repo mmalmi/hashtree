@@ -30,10 +30,10 @@ use storage_support::{build_repo_viewer_url, queue_hash_if_new};
 
 /// Threshold for showing detailed progress (3 seconds)
 const VERBOSE_THRESHOLD: Duration = Duration::from_secs(3);
-const DEFAULT_GIT_TREE_WALK_CONCURRENCY: usize = 4;
-const MAX_GIT_TREE_WALK_CONCURRENCY: usize = 32;
+const DEFAULT_GIT_TREE_WALK_CONCURRENCY: usize = 32;
+const MAX_GIT_TREE_WALK_CONCURRENCY: usize = 64;
 const DEFAULT_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 64;
-const DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 16;
+const DEFAULT_DIRECT_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 32;
 const MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY: usize = 256;
 const DEFAULT_FETCH_PROGRESS_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_GIT_PACK_PROGRESS_INTERVAL: Duration = Duration::from_secs(10);
@@ -44,6 +44,45 @@ const GIT_DIRECTORY_DISCOVERY_MAX_ATTEMPTS: usize = 3;
 const GIT_PACK_PHASE_IDLE: usize = 0;
 const GIT_PACK_PHASE_DOWNLOADING: usize = 1;
 const GIT_PACK_PHASE_INDEXING: usize = 2;
+
+/// Periodic background reporter that wakes immediately on `finish()` without
+/// ever losing a cancellation signal or stalling for an unused timer interval.
+pub(super) struct PeriodicReporter {
+    done_tx: tokio::sync::watch::Sender<bool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl PeriodicReporter {
+    pub(super) fn spawn<F>(interval: Duration, mut on_tick: F) -> Self
+    where
+        F: FnMut() + Send + 'static,
+    {
+        let (done_tx, mut done_rx) = tokio::sync::watch::channel(false);
+        let handle = tokio::spawn(async move {
+            while !*done_rx.borrow() {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {
+                        if *done_rx.borrow() {
+                            break;
+                        }
+                        on_tick();
+                    }
+                    changed = done_rx.changed() => {
+                        if changed.is_err() || *done_rx.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        Self { done_tx, handle }
+    }
+
+    pub(super) async fn finish(self) {
+        let _ = self.done_tx.send(true);
+        let _ = self.handle.await;
+    }
+}
 
 struct GitPackProgressSnapshot {
     processed_packs: usize,
@@ -133,6 +172,9 @@ pub struct RemoteHelper {
     is_private: bool,
     /// Start time for current operation (for conditional verbose logging)
     op_start: Option<Instant>,
+    /// True when `list for-push` cleanly observed no existing remote root in
+    /// this process, avoiding a duplicate back-to-back relay wait in `execute_push`.
+    observed_unobserved_in_list: bool,
     #[cfg(test)]
     cached_root_build_attempts: std::sync::atomic::AtomicUsize,
 }
@@ -321,6 +363,7 @@ impl RemoteHelper {
             url_secret,
             is_private,
             op_start: None,
+            observed_unobserved_in_list: false,
             #[cfg(test)]
             cached_root_build_attempts: std::sync::atomic::AtomicUsize::new(0),
         })
@@ -435,6 +478,7 @@ impl RemoteHelper {
 
         // Advertise refs for clone/pull and for ordinary pushes so Git can skip true no-ops.
         self.remote_refs.clear();
+        self.observed_unobserved_in_list = false;
         let refs = match self.nostr.fetch_refs(&self.repo_name) {
             Ok(refs) => refs,
             Err(err) if rebuild => {
@@ -444,6 +488,7 @@ impl RemoteHelper {
                 debug!(
                     "No repository root observed during push ref advertisement; treating as empty"
                 );
+                self.observed_unobserved_in_list = true;
                 HashMap::new()
             }
             Err(err) if for_push => {
@@ -660,22 +705,86 @@ impl RemoteHelper {
         use hashtree_blossom::BlossomStore;
         use hashtree_core::{HashTree, HashTreeConfig};
 
-        let blossom = self.nostr.blossom();
-        let servers = blossom.read_servers().to_vec();
+        let blossom = self.nostr.blossom().clone();
         info!(
             "Creating CachedStore with local + Blossom (servers: {:?})",
-            servers
+            blossom.read_servers()
         );
 
         let local_store: std::sync::Arc<dyn Store + Send + Sync> = self.storage.store().clone();
         let local_store_for_eviction = local_store.clone();
 
-        let blossom_store =
-            BlossomStore::with_servers(nostr::Keys::generate(), servers).with_max_cache_bytes(0);
+        // Reuse NostrClient's BlossomClient to keep HTTP/TLS connections warm
+        // and avoid reloading config from disk on every tree fetch.
+        let blossom_store = BlossomStore::new(blossom).with_max_cache_bytes(0);
 
         let store = cached_store::CachedStore::new(local_store, blossom_store);
         let tree = HashTree::new(HashTreeConfig::new(std::sync::Arc::new(store)));
         Ok((tree, local_store_for_eviction))
+    }
+
+    /// Prefetch all chunks of one or more file CIDs into `CachedStore`'s local
+    /// store using `POST /blob/batch` and batched `put_many` transactions.
+    async fn prefetch_file_cids_to_cache(
+        tree: &hashtree_core::HashTree<cached_store::CachedStore>,
+        cids: &[Cid],
+        concurrency: usize,
+    ) {
+        use hashtree_core::{decode_tree_node_by_cid, LinkType};
+        use std::collections::HashSet;
+
+        if cids.is_empty() {
+            return;
+        }
+        let store = tree.get_store();
+        let mut level: Vec<Cid> = cids.to_vec();
+        let mut visited: HashSet<[u8; 32]> = HashSet::new();
+
+        while !level.is_empty() {
+            let mut hashes_to_fetch: Vec<[u8; 32]> = Vec::new();
+            let mut active = Vec::new();
+            for cid in std::mem::take(&mut level) {
+                if visited.insert(cid.hash) {
+                    hashes_to_fetch.push(cid.hash);
+                    active.push(cid);
+                }
+            }
+            if hashes_to_fetch.is_empty() {
+                break;
+            }
+
+            store.prefetch_missing(&hashes_to_fetch, concurrency).await;
+
+            let mut leaf_hashes: Vec<[u8; 32]> = Vec::new();
+            let mut next_internal: Vec<Cid> = Vec::new();
+
+            for cid in active {
+                let Ok(Some(raw)) = store.get(&cid.hash).await else {
+                    continue;
+                };
+                let Ok(Some(node)) = decode_tree_node_by_cid(&cid, raw) else {
+                    continue;
+                };
+                for link in node.links {
+                    let child_cid = Cid {
+                        hash: link.hash,
+                        key: link.key,
+                    };
+                    if link.link_type == LinkType::Blob {
+                        if visited.insert(link.hash) {
+                            leaf_hashes.push(link.hash);
+                        }
+                    } else {
+                        next_internal.push(child_cid);
+                    }
+                }
+            }
+
+            if !leaf_hashes.is_empty() {
+                store.prefetch_missing(&leaf_hashes, concurrency).await;
+            }
+            level = next_internal;
+        }
     }
 
     async fn collect_git_object_locations_async(
@@ -713,64 +822,78 @@ impl RemoteHelper {
         };
 
         info!("Resolved .git/objects: {}", hex::encode(objects_cid.hash));
+        // List `.git/objects` once, batch-prefetch `pack`/`info` + all loose
+        // 2-hex prefix dirs in one sweep, then parse both packs and loose objects.
+        let objects_entries = Self::list_required_git_directory(
+            &tree,
+            &objects_cid,
+            ".git/objects directory while looking for packs",
+        )
+        .await?;
+
+        let walk_concurrency = git_tree_walk_concurrency();
+        let mut prefetch_hashes: Vec<[u8; 32]> = Vec::new();
+        for entry in &objects_entries {
+            if entry.name == "pack" || entry.name == "info" || is_git_hex_name(&entry.name, 2) {
+                prefetch_hashes.push(entry.hash);
+            }
+        }
+        if !prefetch_hashes.is_empty() {
+            tree.get_store()
+                .prefetch_missing(&prefetch_hashes, walk_concurrency)
+                .await;
+        }
+
         let pack_locations = self
-            .collect_git_pack_locations_async(&tree, &objects_cid)
+            .collect_git_pack_locations_from_entries(&tree, &objects_entries)
             .await?;
 
         let fetch_tasks = self
-            .collect_git_loose_object_locations_async(&tree, &objects_cid)
+            .collect_git_loose_object_locations_from_entries(&tree, &objects_entries)
             .await?;
 
         Ok((tree, fetch_tasks, pack_locations, local_store_for_eviction))
     }
 
+    #[cfg(test)]
     async fn collect_git_loose_object_locations_async<S: Store>(
         &self,
         tree: &hashtree_core::HashTree<S>,
         objects_cid: &Cid,
     ) -> Result<Vec<GitObjectLocation>> {
-        use futures::stream::{self, StreamExt};
-        use hashtree_core::LinkType;
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-        use std::sync::Arc as StdArc;
-
-        let progress = StdArc::new(AtomicUsize::new(0));
-        let done = StdArc::new(AtomicBool::new(false));
-
-        eprintln!("  Loading objects tree...");
-        let progress_clone = progress.clone();
-        let done_clone = done.clone();
-        let progress_task = tokio::spawn(async move {
-            let mut last = 0;
-            loop {
-                tokio::time::sleep(fetch_progress_interval()).await;
-                if done_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-                let current = progress_clone.load(Ordering::Relaxed);
-                if current != last {
-                    eprintln!("  Loading objects tree... {} entries", current);
-                    last = current;
-                }
-            }
-        });
-
-        let objects_entries = match Self::list_required_git_directory(
+        let objects_entries = Self::list_required_git_directory(
             tree,
             objects_cid,
             ".git/objects directory while looking for loose objects",
         )
-        .await
-        {
-            Ok(entries) => entries,
-            Err(e) => {
-                done.store(true, Ordering::Relaxed);
-                let _ = progress_task.await;
-                eprintln!("  Loading objects tree... failed: {}", e);
-                warn!("Failed to list objects directory: {}", e);
-                bail!("Failed to list objects directory: {}", e);
+        .await?;
+        self.collect_git_loose_object_locations_from_entries(tree, &objects_entries)
+            .await
+    }
+
+    async fn collect_git_loose_object_locations_from_entries<S: Store>(
+        &self,
+        tree: &hashtree_core::HashTree<S>,
+        objects_entries: &[TreeEntry],
+    ) -> Result<Vec<GitObjectLocation>> {
+        use futures::stream::{self, StreamExt};
+        use hashtree_core::LinkType;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc as StdArc;
+
+        let progress = StdArc::new(AtomicUsize::new(objects_entries.len()));
+
+        eprintln!("  Loading objects tree...");
+        let progress_clone = progress.clone();
+        let mut last = 0usize;
+        let reporter = PeriodicReporter::spawn(fetch_progress_interval(), move || {
+            let current = progress_clone.load(Ordering::Relaxed);
+            if current != last {
+                eprintln!("  Loading objects tree... {} entries", current);
+                last = current;
             }
-        };
+        });
+
         debug!(
             ".git/objects entries while looking for loose objects: {:?}",
             objects_entries
@@ -778,14 +901,13 @@ impl RemoteHelper {
                 .map(|entry| entry.name.as_str())
                 .collect::<Vec<_>>()
         );
-        progress.fetch_add(objects_entries.len(), Ordering::Relaxed);
 
         let mut fetch_tasks: Vec<GitObjectLocation> = Vec::new();
         let mut loose_prefixes = Vec::new();
         for entry in objects_entries {
             if is_git_hex_name(&entry.name, 2) {
                 loose_prefixes.push((
-                    entry.name,
+                    entry.name.clone(),
                     Cid {
                         hash: entry.hash,
                         key: entry.key,
@@ -796,7 +918,7 @@ impl RemoteHelper {
 
             if is_git_hex_name(&entry.name, 40) {
                 fetch_tasks.push(GitObjectLocation {
-                    oid: entry.name,
+                    oid: entry.name.clone(),
                     cid: Cid {
                         hash: entry.hash,
                         key: entry.key,
@@ -805,6 +927,7 @@ impl RemoteHelper {
             }
         }
 
+        let walk_concurrency = git_tree_walk_concurrency();
         let tree_ref = tree;
         let prefix_results =
             stream::iter(loose_prefixes.into_iter().map(|(prefix, prefix_cid)| {
@@ -832,12 +955,11 @@ impl RemoteHelper {
                     Ok::<Vec<GitObjectLocation>, anyhow::Error>(locations)
                 }
             }))
-            .buffer_unordered(git_tree_walk_concurrency())
+            .buffer_unordered(walk_concurrency)
             .collect::<Vec<_>>()
             .await;
 
-        done.store(true, Ordering::Relaxed);
-        let _ = progress_task.await;
+        reporter.finish().await;
 
         for result in prefix_results {
             fetch_tasks.extend(result?);
@@ -853,6 +975,7 @@ impl RemoteHelper {
         Ok(fetch_tasks)
     }
 
+    #[cfg(test)]
     async fn collect_git_pack_locations_async<S: Store>(
         &self,
         tree: &hashtree_core::HashTree<S>,
@@ -864,6 +987,15 @@ impl RemoteHelper {
             ".git/objects directory while looking for packs",
         )
         .await?;
+        self.collect_git_pack_locations_from_entries(tree, &objects_entries)
+            .await
+    }
+
+    async fn collect_git_pack_locations_from_entries<S: Store>(
+        &self,
+        tree: &hashtree_core::HashTree<S>,
+        objects_entries: &[TreeEntry],
+    ) -> Result<Vec<GitPackLocation>> {
         debug!(
             ".git/objects entries while looking for packs: {:?}",
             objects_entries
@@ -879,6 +1011,7 @@ impl RemoteHelper {
             hash: pack_dir_entry.hash,
             key: pack_dir_entry.key,
         };
+        let info_dir_entry = objects_entries.iter().find(|entry| entry.name == "info");
 
         let pack_entries: HashMap<_, _> =
             Self::list_required_git_directory(tree, &pack_dir_cid, ".git/objects/pack directory")
@@ -893,7 +1026,7 @@ impl RemoteHelper {
 
         let mut info_packs_available = false;
         let mut pack_names = Vec::new();
-        if let Some(info_dir_entry) = objects_entries.iter().find(|entry| entry.name == "info") {
+        if let Some(info_dir_entry) = info_dir_entry {
             let info_dir_cid = Cid {
                 hash: info_dir_entry.hash,
                 key: info_dir_entry.key,
@@ -1154,12 +1287,42 @@ impl RemoteHelper {
         Ok(written)
     }
 
+    async fn prefetch_missing_pack_files(
+        &self,
+        tree: &hashtree_core::HashTree<cached_store::CachedStore>,
+        pack_locations: &[GitPackLocation],
+    ) {
+        if pack_locations.is_empty() {
+            return;
+        }
+        let git_pack_dir = Self::git_dir_path().join("objects").join("pack");
+        let mut prefetch_cids = Vec::new();
+        for location in pack_locations {
+            let pack_path = git_pack_dir.join(&location.pack_name);
+            let idx_path = git_pack_dir.join(&location.idx_name);
+            if !pack_path.exists() {
+                prefetch_cids.push(location.pack_cid.clone());
+            }
+            if let Some(idx_cid) = &location.idx_cid {
+                if !idx_path.exists() {
+                    prefetch_cids.push(idx_cid.clone());
+                }
+            }
+        }
+        if !prefetch_cids.is_empty() {
+            let concurrency = git_object_download_concurrency_for_read_servers(
+                self.nostr.blossom().read_servers(),
+            );
+            Self::prefetch_file_cids_to_cache(tree, &prefetch_cids, concurrency).await;
+        }
+    }
+
     async fn install_git_pack_files_async<S: Store>(
         &self,
         tree: &hashtree_core::HashTree<S>,
         pack_locations: &[GitPackLocation],
     ) -> Result<usize> {
-        use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
         use std::sync::Arc as StdArc;
 
         if pack_locations.is_empty() {
@@ -1175,8 +1338,6 @@ impl RemoteHelper {
             .sum();
         let total_packs = pack_locations.len();
 
-        let progress_done = StdArc::new(AtomicBool::new(false));
-        let progress_notify = StdArc::new(tokio::sync::Notify::new());
         let processed_packs = StdArc::new(AtomicUsize::new(0));
         let current_pack = StdArc::new(AtomicUsize::new(0));
         let phase = StdArc::new(AtomicUsize::new(GIT_PACK_PHASE_IDLE));
@@ -1197,38 +1358,25 @@ impl RemoteHelper {
         });
         Self::emit_git_pack_progress_line(&initial_line, stderr_is_terminal, false);
 
-        let progress_task = {
-            let progress_done = StdArc::clone(&progress_done);
-            let progress_notify = StdArc::clone(&progress_notify);
+        let reporter = {
             let processed_packs = StdArc::clone(&processed_packs);
             let current_pack = StdArc::clone(&current_pack);
             let phase = StdArc::clone(&phase);
             let loaded_pack_bytes = StdArc::clone(&loaded_pack_bytes);
             let current_pack_bytes = StdArc::clone(&current_pack_bytes);
-            tokio::spawn(async move {
-                let interval = git_pack_progress_interval(stderr_is_terminal);
-                loop {
-                    tokio::select! {
-                        _ = tokio::time::sleep(interval) => {}
-                        _ = progress_notify.notified() => {}
-                    }
-                    if progress_done.load(Ordering::Relaxed) {
-                        break;
-                    }
-                    let line =
-                        RemoteHelper::format_git_pack_progress_line(GitPackProgressSnapshot {
-                            processed_packs: processed_packs.load(Ordering::Relaxed),
-                            total_packs,
-                            loaded_pack_bytes: loaded_pack_bytes.load(Ordering::Relaxed)
-                                + current_pack_bytes.load(Ordering::Relaxed),
-                            total_pack_bytes: total_pack_size,
-                            current_pack: current_pack.load(Ordering::Relaxed),
-                            phase: phase.load(Ordering::Relaxed),
-                            done: false,
-                            elapsed: install_start.elapsed(),
-                        });
-                    RemoteHelper::emit_git_pack_progress_line(&line, stderr_is_terminal, false);
-                }
+            PeriodicReporter::spawn(git_pack_progress_interval(stderr_is_terminal), move || {
+                let line = RemoteHelper::format_git_pack_progress_line(GitPackProgressSnapshot {
+                    processed_packs: processed_packs.load(Ordering::Relaxed),
+                    total_packs,
+                    loaded_pack_bytes: loaded_pack_bytes.load(Ordering::Relaxed)
+                        + current_pack_bytes.load(Ordering::Relaxed),
+                    total_pack_bytes: total_pack_size,
+                    current_pack: current_pack.load(Ordering::Relaxed),
+                    phase: phase.load(Ordering::Relaxed),
+                    done: false,
+                    elapsed: install_start.elapsed(),
+                });
+                RemoteHelper::emit_git_pack_progress_line(&line, stderr_is_terminal, false);
             })
         };
 
@@ -1313,9 +1461,7 @@ impl RemoteHelper {
         }
         .await;
 
-        progress_done.store(true, Ordering::Relaxed);
-        progress_notify.notify_waiters();
-        let _ = progress_task.await;
+        reporter.finish().await;
 
         match &install_result {
             Ok(_) => {
@@ -1355,33 +1501,29 @@ impl RemoteHelper {
             .collect_git_object_locations_async(root_hash, encryption_key)
             .await?;
         use futures::stream::{self, StreamExt};
-        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc as StdArc;
 
         let total_objects = fetch_tasks.len();
 
         let downloaded = StdArc::new(AtomicUsize::new(0));
-        let download_done = StdArc::new(AtomicBool::new(false));
-
-        // Spawn progress reporter
         let downloaded_clone = downloaded.clone();
-        let download_done_clone = download_done.clone();
         let total_for_timer = total_objects;
         eprintln!("  Loading {} loose git object(s)", total_objects);
-        let timer_task = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(fetch_progress_interval()).await;
-                if download_done_clone.load(Ordering::Relaxed) {
-                    break;
-                }
-                let count = downloaded_clone.load(Ordering::Relaxed);
-                eprintln!("  Loading loose git objects: {}/{}", count, total_for_timer);
-            }
+        let reporter = PeriodicReporter::spawn(fetch_progress_interval(), move || {
+            let count = downloaded_clone.load(Ordering::Relaxed);
+            eprintln!("  Loading loose git objects: {}/{}", count, total_for_timer);
         });
 
-        // Parallel fetch with concurrency limit
+        // Parallel fetch with concurrency limit + batched prefetch
         let concurrency =
             git_object_download_concurrency_for_read_servers(self.nostr.blossom().read_servers());
+        if !fetch_tasks.is_empty() {
+            let hashes: Vec<[u8; 32]> = fetch_tasks.iter().map(|loc| loc.cid.hash).collect();
+            tree.get_store()
+                .prefetch_missing(&hashes, concurrency)
+                .await;
+        }
         type FetchObjectResult = std::result::Result<(String, Vec<u8>), (String, Cid)>;
 
         // First pass: fetch all objects with normal timeout
@@ -1403,8 +1545,7 @@ impl RemoteHelper {
             .collect()
             .await;
 
-        download_done.store(true, Ordering::Relaxed);
-        let _ = timer_task.await;
+        reporter.finish().await;
 
         // Collect successes and failures
         let mut failed: Vec<(String, Cid)> = Vec::new();
@@ -1514,6 +1655,8 @@ impl RemoteHelper {
         }
 
         let pack_error = if !pack_locations.is_empty() {
+            self.prefetch_missing_pack_files(&tree, &pack_locations)
+                .await;
             let error = self
                 .install_git_pack_files_async(&tree, &pack_locations)
                 .await
@@ -1576,52 +1719,59 @@ impl RemoteHelper {
         const WRITE_QUEUE_CAPACITY: usize = 256;
         let git_dir = Self::git_dir_path();
         let (write_tx, mut write_rx) = mpsc::channel::<(String, Vec<u8>)>(WRITE_QUEUE_CAPACITY);
-        let writer_task = tokio::spawn(async move {
+        let writer_task = tokio::task::spawn_blocking(move || {
             let mut written = 0usize;
-            while let Some((oid, content)) = write_rx.recv().await {
-                let writer_git_dir = git_dir.clone();
-                tokio::task::spawn_blocking(move || {
-                    Self::write_git_object_to_dir(&writer_git_dir, &oid, &content)
-                })
-                .await
-                .context("git object writer task panicked")??;
+            let mut created_dirs = std::collections::HashSet::new();
+            while let Some((oid, content)) = write_rx.blocking_recv() {
+                Self::write_git_object_to_dir_cached(&git_dir, &oid, &content, &mut created_dirs)?;
                 written += 1;
             }
             Ok::<usize, anyhow::Error>(written)
         });
 
-        let mut results = stream::iter(pending.into_iter().map(|location| {
-            let tree_ref = &tree;
-            async move {
-                match tree_ref.get(&location.cid, None).await {
-                    Ok(Some(content)) => Ok((location.oid, content)),
-                    Ok(None) => Err((location.oid, location.cid)),
-                    Err(_) => Err((location.oid, location.cid)),
-                }
-            }
-        }))
-        .buffer_unordered(concurrency);
-
+        // Prefetch missing loose-object root blobs in batches via `POST /blob/batch`
+        // + batched `put_many` LMDB writes before reading & writing to `.git/objects`.
         eprintln!("  Fetching {} loose git object(s)", total_to_write);
-        while let Some(result) = results.next().await {
-            completed += 1;
-            match result {
-                Ok((oid, content)) => {
-                    write_tx
-                        .send((oid, content))
-                        .await
-                        .map_err(|_| anyhow::anyhow!("git object writer stopped unexpectedly"))?;
-                    queued_writes += 1;
-                }
-                Err((oid, cid)) => failed.push((oid, cid)),
-            }
+        const LOOSE_PREFETCH_WINDOW: usize = 256;
+        for window in pending.chunks(LOOSE_PREFETCH_WINDOW) {
+            let hashes: Vec<[u8; 32]> = window.iter().map(|loc| loc.cid.hash).collect();
+            tree.get_store()
+                .prefetch_missing(&hashes, concurrency)
+                .await;
 
-            if completed < total_to_write && last_progress.elapsed() >= progress_interval {
-                eprintln!(
-                    "  Fetching loose git objects: {}/{}",
-                    completed, total_to_write
-                );
-                last_progress = Instant::now();
+            let mut results = stream::iter(window.iter().map(|location| {
+                let tree_ref = &tree;
+                let oid = location.oid.clone();
+                let cid = location.cid.clone();
+                async move {
+                    match tree_ref.get(&cid, None).await {
+                        Ok(Some(content)) => Ok((oid, content)),
+                        Ok(None) => Err((oid, cid)),
+                        Err(_) => Err((oid, cid)),
+                    }
+                }
+            }))
+            .buffer_unordered(concurrency);
+
+            while let Some(result) = results.next().await {
+                completed += 1;
+                match result {
+                    Ok((oid, content)) => {
+                        write_tx.send((oid, content)).await.map_err(|_| {
+                            anyhow::anyhow!("git object writer stopped unexpectedly")
+                        })?;
+                        queued_writes += 1;
+                    }
+                    Err((oid, cid)) => failed.push((oid, cid)),
+                }
+
+                if completed < total_to_write && last_progress.elapsed() >= progress_interval {
+                    eprintln!(
+                        "  Fetching loose git objects: {}/{}",
+                        completed, total_to_write
+                    );
+                    last_progress = Instant::now();
+                }
             }
         }
 

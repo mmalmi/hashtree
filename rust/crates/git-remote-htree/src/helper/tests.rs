@@ -3519,3 +3519,20 @@ fn test_git_object_download_concurrency_defaults_and_caps_env() {
         MAX_GIT_OBJECT_DOWNLOAD_CONCURRENCY
     );
 }
+
+#[test]
+fn test_periodic_reporter_finishes_promptly_without_losing_cancel() {
+    crate::runtime::block_on(async {
+        let start = Instant::now();
+        // Even with a 60s interval, immediate finish (before the spawned task
+        // even reaches `select!`) must return in milliseconds, not stall.
+        let reporter = PeriodicReporter::spawn(Duration::from_secs(60), || {});
+        reporter.finish().await;
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "PeriodicReporter stalled on immediate finish: {:?}",
+            start.elapsed()
+        );
+    })
+    .unwrap();
+}
