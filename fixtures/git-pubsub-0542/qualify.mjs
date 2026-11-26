@@ -32,7 +32,7 @@ run('install',['pnpm','install','--frozen-lockfile']);
 run('installed-package',['python3','/stage/verify-package.py']);
 run('unit',['pnpm','run','test:unit']);
 const {createReleasePlan, parseArgs} = await import(pathToFileURL(resolve('scripts/release-site.mjs')));
-const plan = createReleasePlan(parseArgs(['git']));
+const plan = createReleasePlan(parseArgs(['git','--dry-run']));
 for (const step of plan.steps) {
   if (['install','publish','deploy'].includes(step.id)) continue;
   run(step.id,step.command);
