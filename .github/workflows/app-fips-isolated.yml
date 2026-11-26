@@ -10,9 +10,9 @@ jobs:
   qualify:
     runs-on: ubuntu-24.04
     timeout-minutes: 70
-    env:
-      FIPS_STAGE: ${{ runner.temp }}/iris-git-pubsub-0542
     steps:
+      - name: Set stage
+        run: echo "FIPS_STAGE=$RUNNER_TEMP/iris-git-pubsub-0542" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
