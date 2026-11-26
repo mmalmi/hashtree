@@ -33,16 +33,16 @@ struct Receipt {
     pubsub: Option<super::pubsub::Receipt>,
 }
 
-fn sha(bytes: &[u8]) -> String {
+pub(super) fn sha(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
-fn is_sha(value: &str) -> bool {
+pub(super) fn is_sha(value: &str) -> bool {
     value.len() == 64
         && value
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
-fn canonical(value: &serde_json::Value) -> Result<String> {
+pub(super) fn canonical(value: &serde_json::Value) -> Result<String> {
     Ok(match value {
         serde_json::Value::Object(values) => {
             let mut keys = values.keys().collect::<Vec<_>>();
@@ -70,23 +70,24 @@ fn canonical(value: &serde_json::Value) -> Result<String> {
         _ => serde_json::to_string(value)?,
     })
 }
-fn receipt_path(directory: &Path, head: &str) -> Result<PathBuf> {
+pub(super) fn receipt_path(directory: &Path, head: &str) -> Result<PathBuf> {
     ensure!(is_sha(head), "invalid catchup coverage head");
     Ok(directory.join(format!("{head}.json")))
 }
-fn read(path: &Path) -> Result<Vec<u8>> {
+pub(super) fn read(path: &Path) -> Result<Vec<u8>> {
+    read_bounded(path, MAX_BYTES)
+}
+pub(super) fn read_bounded(path: &Path, limit: usize) -> Result<Vec<u8>> {
     let metadata = std::fs::symlink_metadata(path)?;
     ensure!(
-        metadata.is_file()
-            && !metadata.file_type().is_symlink()
-            && metadata.len() <= MAX_BYTES as u64,
+        metadata.is_file() && !metadata.file_type().is_symlink() && metadata.len() <= limit as u64,
         "invalid coverage receipt file"
     );
     let mut bytes = Vec::new();
     File::open(path)?
-        .take(MAX_BYTES as u64 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
-    ensure!(bytes.len() <= MAX_BYTES, "coverage receipt exceeds limit");
+    ensure!(bytes.len() <= limit, "checkpoint input exceeds limit");
     Ok(bytes)
 }
 fn check_directory(directory: &Path) -> Result<()> {
@@ -102,6 +103,17 @@ fn check_directory(directory: &Path) -> Result<()> {
 }
 
 pub(super) fn validate_head(
+    directory: &Path,
+    state: &CatchupState,
+    authors: &[String],
+) -> Result<()> {
+    if let Some(bridge) = super::forward::bridge::load(directory, state)? {
+        return bridge.validate(directory, state, authors);
+    }
+    validate_historical_head(directory, state, authors)
+}
+
+pub(super) fn validate_historical_head(
     directory: &Path,
     state: &CatchupState,
     authors: &[String],
@@ -294,11 +306,19 @@ fn commit(
     )
 }
 
-fn persist_bytes(store: &HashtreeStore, directory: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+pub(super) fn persist_bytes(
+    store: &HashtreeStore,
+    directory: &Path,
+    path: &Path,
+    bytes: &[u8],
+) -> Result<()> {
     check_directory(directory)?;
     match std::fs::symlink_metadata(path) {
         Ok(_) => {
-            ensure!(read(path)? == bytes, "existing coverage receipt differs");
+            ensure!(
+                read_bounded(path, bytes.len())? == bytes,
+                "existing immutable checkpoint input differs"
+            );
             // A previous attempt may have synced the receipt but failed before
             // checkpoint replacement. Exact replay requires no new allocation.
             File::open(path)?.sync_all()?;

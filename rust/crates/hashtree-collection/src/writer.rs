@@ -9,8 +9,9 @@ use crate::manifest::write_collection_manifest_metadata;
 use crate::schema::normalize_typed_collection_item;
 use crate::{
     create_empty_collection_state, default_search_prefix, load_collection_state,
-    CollectionDefinition, CollectionEntryContext, CollectionError, CollectionOptions,
-    CollectionState, CollectionWriteContext, COLLECTION_MANIFEST_METADATA_FILE, MANIFEST_BY_ID,
+    CollectionBatchObserver, CollectionBatchPhase, CollectionDefinition, CollectionEntryContext,
+    CollectionError, CollectionOptions, CollectionState, CollectionWriteContext,
+    COLLECTION_MANIFEST_METADATA_FILE, MANIFEST_BY_ID,
 };
 
 pub struct CollectionWriter<S: Store, T> {
@@ -83,6 +84,12 @@ impl<S: Store, T> CollectionWriter<S, T> {
             state,
             superseded_index_nodes: Vec::new(),
         }
+    }
+
+    /// Opt into scoped bulk-read workers for synchronous local stores.
+    pub fn with_read_concurrency(mut self, concurrency: usize) -> Self {
+        self.index = self.index.with_read_concurrency(concurrency);
+        self
     }
 
     pub async fn from_root(
@@ -281,6 +288,27 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
         I: IntoIterator<Item = (T, Cid, Option<T>)>,
         K: IntoIterator<Item = String>,
     {
+        self.put_batch_with_known_absent_ids_and_observer(entries, known_absent_ids, None)
+            .await
+    }
+
+    /// Observe phases before their work without additional index or store reads.
+    pub async fn put_batch_with_known_absent_ids_and_observer<I, K>(
+        &mut self,
+        entries: I,
+        known_absent_ids: K,
+        observer: Option<&CollectionBatchObserver<'_>>,
+    ) -> Result<CollectionState, CollectionError>
+    where
+        I: IntoIterator<Item = (T, Cid, Option<T>)>,
+        K: IntoIterator<Item = String>,
+    {
+        let observe = |phase| {
+            if let Some(observer) = observer {
+                observer(phase);
+            }
+        };
+        observe(CollectionBatchPhase::Prepare);
         if !self.definition.search_indexes().is_empty() {
             return Err(CollectionError::Validation(
                 "batch collection updates do not support search indexes".to_string(),
@@ -313,6 +341,7 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
         }
         normalized_entries.sort_by(|left, right| left.0.cmp(&right.0));
 
+        observe(CollectionBatchPhase::LookupExistingIds);
         let existing_without_previous = self
             .index
             .get_links(self.state.by_id_root.as_ref(), ids_without_previous)
@@ -321,6 +350,7 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
             return Err(CollectionError::MissingPreviousForOverwrite { id: id.clone() });
         }
 
+        observe(CollectionBatchPhase::PrepareIndex { index: 0 });
         let mut by_id_changes = BTreeMap::<String, Option<Cid>>::new();
         for (_, _, _, previous) in &normalized_entries {
             if let Some((previous_id, _)) = previous {
@@ -331,6 +361,10 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
             by_id_changes.insert(id.clone(), Some(cid.clone()));
         }
 
+        observe(CollectionBatchPhase::UpdateIndex {
+            index: 0,
+            changes: by_id_changes.len(),
+        });
         let by_id_update = self
             .index
             .update_links_with_superseded(self.state.by_id_root.as_ref(), by_id_changes)
@@ -338,8 +372,10 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
         self.state.by_id_root = by_id_update.root;
         self.superseded_index_nodes
             .extend(by_id_update.superseded_nodes);
+        observe(CollectionBatchPhase::FlushIndex { index: 0 });
         self.flush_index_writes().await?;
-        for index in self.definition.key_indexes() {
+        for (ordinal, index) in self.definition.key_indexes().iter().enumerate() {
+            observe(CollectionBatchPhase::PrepareIndex { index: ordinal + 1 });
             let mut changes = BTreeMap::<String, Option<Cid>>::new();
             for (_, _, _, previous) in &normalized_entries {
                 if let Some((_, previous)) = previous {
@@ -353,6 +389,10 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
                     changes.insert(key, Some(cid.clone()));
                 }
             }
+            observe(CollectionBatchPhase::UpdateIndex {
+                index: ordinal + 1,
+                changes: changes.len(),
+            });
             let update = self
                 .index
                 .update_links_with_superseded(self.state.key_root(index.name()), changes)
@@ -361,6 +401,7 @@ impl<S: Store, T: Clone> CollectionWriter<S, T> {
                 .key_roots
                 .insert(index.name().to_string(), update.root);
             self.superseded_index_nodes.extend(update.superseded_nodes);
+            observe(CollectionBatchPhase::FlushIndex { index: ordinal + 1 });
             self.flush_index_writes().await?;
         }
 

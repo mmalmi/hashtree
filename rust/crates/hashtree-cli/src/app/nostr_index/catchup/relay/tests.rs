@@ -469,9 +469,14 @@ fn tls_and_other_protocol_errors_are_terminal() {
 async fn wss_source_starts_tls_before_websocket_handshake() {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("wss://localhost:{}", listener.local_addr().unwrap().port());
+    // Use the bound address: this local TLS test must not depend on DNS or
+    // /etc/hosts, including inside a network-isolated qualification namespace.
+    let url = format!("wss://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.unwrap();
+        let (mut socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+            .await
+            .expect("TLS connection timeout")
+            .unwrap();
         let mut header = [0; 5];
         tokio::time::timeout(Duration::from_secs(5), socket.read_exact(&mut header))
             .await

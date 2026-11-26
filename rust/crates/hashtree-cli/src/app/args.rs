@@ -1329,6 +1329,11 @@ pub(crate) struct SocialGraphIndexArgs {
 
 #[derive(Subcommand)]
 pub(crate) enum NostrIndexCommands {
+    /// Durably append a bounded public forward batch without advancing historical coverage
+    AppendForward {
+        #[command(flatten)]
+        options: super::nostr_index::catchup::forward::AppendForwardArgs,
+    },
     /// Restore one proven missing by-ID entry without advancing catch-up state
     RepairId {
         #[command(flatten)]

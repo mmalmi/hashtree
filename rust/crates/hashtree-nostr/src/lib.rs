@@ -1,5 +1,10 @@
 //! Hashtree-native Nostr event indexes.
 
+mod id_reconcile;
+pub use id_reconcile::NostrIdReconciliation;
+mod append_progress;
+pub use append_progress::{NostrAppendObserver, NostrAppendPhase, NostrAppendProgress};
+
 pub mod catchup;
 pub mod crawl;
 pub mod tree_event_snapshots;
@@ -460,6 +465,7 @@ pub struct NostrEventStore<S: Store> {
     index: BTree<S>,
     options: NostrEventStoreOptions,
     index_write_buffer_bytes: usize,
+    index_read_concurrency: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -947,15 +953,26 @@ impl<S: Store> NostrEventStore<S> {
             index,
             options,
             index_write_buffer_bytes: 0,
+            index_read_concurrency: 1,
         }
     }
 
-    /// Retain event payloads and index nodes up to this threshold between append
-    /// write stages. A single stage may exceed it before the next flush hint.
+    /// Retain at most this payload threshold between append index projections.
+    /// A single projection may exceed it, just as with per-projection flushing.
     /// Every event commit still flushes unconditionally before returning its
     /// root. Zero preserves the default per-projection flush behavior.
     pub fn with_index_write_buffer_bytes(mut self, bytes: usize) -> Self {
         self.index_write_buffer_bytes = bytes;
+        self
+    }
+
+    /// Opt into bounded bulk-read workers for synchronous local stores.
+    /// The same limit follows buffered writers and collection lookups.
+    pub fn with_index_read_concurrency(mut self, concurrency: usize) -> Self {
+        self.index_read_concurrency = concurrency.clamp(1, 16);
+        self.index = self
+            .index
+            .with_read_concurrency(self.index_read_concurrency);
         self
     }
 
@@ -1435,7 +1452,8 @@ impl<S: Store> NostrEventStore<S> {
     ) -> Result<Cid, NostrEventStoreError> {
         let buffered_store = Arc::new(BufferedStore::new_optimistic(Arc::clone(&self.store)));
         let buffered_writer =
-            NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone());
+            NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone())
+                .with_index_read_concurrency(self.index_read_concurrency);
         let normalized = {
             let _profile = ProfileGuard::new("nostr.add.validate_event");
             buffered_writer.validate_event(event).await?
@@ -1510,6 +1528,21 @@ impl<S: Store> NostrEventStore<S> {
     where
         I: IntoIterator<Item = StoredNostrEvent>,
     {
+        self.build_with_superseded_nodes_and_observer(root, events, None)
+            .await
+    }
+
+    /// Observe bounded append phases without changing the returned root or
+    /// adding store reads. Observations do not acknowledge an author checkpoint.
+    pub async fn build_with_superseded_nodes_and_observer<I>(
+        &self,
+        root: Option<&Cid>,
+        events: I,
+        observer: Option<&NostrAppendObserver<'_>>,
+    ) -> Result<NostrEventBuildReport, NostrEventStoreError>
+    where
+        I: IntoIterator<Item = StoredNostrEvent>,
+    {
         let mut events: Vec<StoredNostrEvent> = events.into_iter().collect();
         if events.is_empty() {
             return Ok(NostrEventBuildReport {
@@ -1526,14 +1559,31 @@ impl<S: Store> NostrEventStore<S> {
             .max(1);
         let mut current_root = root.cloned();
         let mut superseded_nodes = Vec::new();
+        let batches = events.len().div_ceil(batch_size);
+        let mut completed_batches = 0;
         let mut pending = events.into_iter();
         loop {
             let batch = pending.by_ref().take(batch_size).collect::<Vec<_>>();
             if batch.is_empty() {
                 break;
             }
+            let events = batch.len();
+            let observe = |phase| {
+                if let Some(observer) = observer {
+                    observer(NostrAppendProgress {
+                        batch: completed_batches + 1,
+                        batches,
+                        events,
+                        completed_batches: completed_batches
+                            + usize::from(phase == NostrAppendPhase::Complete),
+                        phase,
+                    });
+                }
+            };
+            let phase_observer: Option<&(dyn Fn(NostrAppendPhase) + Send + Sync)> =
+                observer.map(|_| &observe as _);
             let report = self
-                .build_index_commit(current_root.as_ref(), batch)
+                .build_index_commit(current_root.as_ref(), batch, phase_observer)
                 .await?;
             current_root = report.root;
             superseded_nodes.extend(report.superseded_nodes);
@@ -1542,6 +1592,8 @@ impl<S: Store> NostrEventStore<S> {
             // the remaining commits in a large author, defeating the bounded
             // commit size and eventually exhausting a crawler cgroup.
             trim_index_commit_allocations();
+            observe(NostrAppendPhase::Complete);
+            completed_batches += 1;
         }
         let mut seen_superseded = HashSet::new();
         superseded_nodes.retain(|candidate| seen_superseded.insert(candidate.hash));
@@ -1571,7 +1623,8 @@ impl<S: Store> NostrEventStore<S> {
     {
         let buffered_store = Arc::new(BufferedStore::new_optimistic(Arc::clone(&self.store)));
         let buffered_writer =
-            NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone());
+            NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone())
+                .with_index_read_concurrency(self.index_read_concurrency);
         let mut manifest = buffered_writer.get_manifest(Some(root)).await?;
         let mut prepared_events = Vec::new();
         for (sequence, event) in events.into_iter().enumerate() {
@@ -1627,25 +1680,36 @@ impl<S: Store> NostrEventStore<S> {
         &self,
         root: Option<&Cid>,
         events: Vec<StoredNostrEvent>,
+        observer: Option<&(dyn Fn(NostrAppendPhase) + Send + Sync)>,
     ) -> Result<NostrEventBuildReport, NostrEventStoreError> {
+        let observe = |phase| {
+            if let Some(observer) = observer {
+                observer(phase);
+            }
+        };
         let buffered_store = Arc::new(
             BufferedStore::new_optimistic(Arc::clone(&self.store))
                 .with_flush_threshold(self.index_write_buffer_bytes),
         );
         let buffered_writer =
-            NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone());
+            NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone())
+                .with_index_read_concurrency(self.index_read_concurrency);
         let mut obsolete_event_cids = Vec::new();
         let mut superseded_nodes = Vec::new();
         let next_root = if root.is_none() {
+            observe(NostrAppendPhase::BuildInitial);
             buffered_writer.build_manifest_from_events(events).await?
         } else {
+            observe(NostrAppendPhase::ReadManifest);
             let mut manifest = buffered_writer.get_manifest(root).await?;
+            observe(NostrAppendPhase::ValidateEvents);
             let mut normalized_events = Vec::with_capacity(events.len());
             for (sequence, event) in events.into_iter().enumerate() {
                 let normalized = buffered_writer.validate_event(event).await?;
                 normalized_events.push((sequence, normalized));
             }
 
+            observe(NostrAppendPhase::LookupIds);
             let existing_by_id = buffered_writer
                 .index
                 .get_links(
@@ -1659,6 +1723,7 @@ impl<S: Store> NostrEventStore<S> {
                         .map(|(_, event)| event.id.clone()),
                 )
                 .await?;
+            observe(NostrAppendPhase::LookupReplaceable);
             let existing_replaceable = buffered_writer
                 .index
                 .get_links(
@@ -1669,6 +1734,7 @@ impl<S: Store> NostrEventStore<S> {
                         .map(|(_, event)| replaceable_key(&event.pubkey, event.kind)),
                 )
                 .await?;
+            observe(NostrAppendPhase::LookupParameterized);
             let existing_parameterized = buffered_writer
                 .index
                 .get_links(
@@ -1695,6 +1761,7 @@ impl<S: Store> NostrEventStore<S> {
                 .map(|(_, event)| event.id.clone())
                 .collect::<BTreeSet<_>>();
 
+            observe(NostrAppendPhase::ReadPreviousEvents);
             let mut prepared_events = Vec::with_capacity(normalized_events.len());
             for (sequence, normalized) in normalized_events {
                 let existing_cid = if is_replaceable_kind(normalized.kind) {
@@ -1737,9 +1804,11 @@ impl<S: Store> NostrEventStore<S> {
                     .push(buffered_writer.prepare_event_blob(sequence, normalized, previous)?);
             }
 
+            observe(NostrAppendPhase::BufferEvents);
             let indexed_events = buffered_writer
                 .put_prepared_event_blobs_parallel(prepared_events)
                 .await?;
+            observe(NostrAppendPhase::FlushPayload);
             buffered_store
                 .flush_pending_if_needed()
                 .await
@@ -1748,19 +1817,23 @@ impl<S: Store> NostrEventStore<S> {
                 })?;
             if !indexed_events.is_empty() {
                 let mut collection = buffered_writer.collection_writer_from_manifest(&manifest);
+                let collection_observer = |phase| observe(NostrAppendPhase::Collection(phase));
                 collection
-                    .put_batch_with_known_absent_ids(
+                    .put_batch_with_known_absent_ids_and_observer(
                         indexed_events.into_iter().map(
                             |(_sequence, event, event_cid, previous)| (event, event_cid, previous),
                         ),
                         known_absent_by_id,
+                        observer.map(|_| &collection_observer as _),
                     )
                     .await?;
                 superseded_nodes.extend(collection.take_superseded_index_nodes());
                 manifest = nostr_manifest_from_collection_state(collection.state());
             }
+            observe(NostrAppendPhase::WriteManifest);
             buffered_writer.write_manifest(&manifest).await?
         };
+        observe(NostrAppendPhase::FlushCommit);
         buffered_store
             .flush()
             .await
@@ -1793,7 +1866,8 @@ impl<S: Store> NostrEventStore<S> {
         let manifest = self.get_manifest(Some(root)).await?;
         let buffered_store = Arc::new(BufferedStore::new_optimistic(Arc::clone(&self.store)));
         let buffered_writer =
-            NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone());
+            NostrEventStore::with_options(Arc::clone(&buffered_store), self.options.clone())
+                .with_index_read_concurrency(self.index_read_concurrency);
 
         let Some(next_manifest) = buffered_writer
             .upgrade_manifest_with_missing_indexes(&manifest)
@@ -2727,7 +2801,8 @@ impl<S: Store> NostrEventStore<S> {
             Arc::clone(&self.store),
             nostr_collection_definition(),
             nostr_collection_options(&self.options),
-        );
+        )
+        .with_read_concurrency(self.index_read_concurrency);
         collection.rebuild(indexed_events).await?;
         collection.write_root().await.map_err(Into::into)
     }
@@ -2873,6 +2948,7 @@ impl<S: Store> NostrEventStore<S> {
             collection_state_from_nostr_manifest(manifest),
             nostr_collection_options(&self.options),
         )
+        .with_read_concurrency(self.index_read_concurrency)
     }
 
     async fn validate_event(

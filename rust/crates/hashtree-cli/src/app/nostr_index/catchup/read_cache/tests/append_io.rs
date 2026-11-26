@@ -19,6 +19,8 @@ mod cold_mappings;
 #[cfg(target_os = "linux")]
 mod cold_pool;
 mod os_io;
+#[cfg(target_os = "linux")]
+mod parallel_lookup;
 
 #[derive(Clone, Default, Serialize)]
 struct Counts {
@@ -344,15 +346,19 @@ async fn measure<S: Store>(
     let preparation = prepare();
     {
         let mut t = trace.lock().unwrap();
-        t.phase("existing-lookups");
+        t.phase("reconciliation");
         t.enabled = true;
     }
     let start = Instant::now();
-    // Canonical catch-up directly appends. The separate deployed legacy
-    // diagnostic includes repair reconciliation; do not import that runtime
-    // path or compare its timing/counters as if these were identical builds.
+    let reconciled = writer
+        .reconcile_author_note_ids_for_append(root, &incoming[0].pubkey, &incoming)
+        .await
+        .unwrap();
+    assert_eq!(reconciled.entries_scanned, 0);
+    assert_eq!(reconciled.ids_restored, 0);
+    trace.lock().unwrap().phase("existing-lookups");
     let next = writer
-        .build(Some(root), incoming.clone())
+        .build(Some(&reconciled.root), incoming.clone())
         .await
         .unwrap()
         .unwrap();
@@ -400,7 +406,7 @@ async fn measure<S: Store>(
     for stored in verified {
         hashtree_nostr::VerifiedStoredNostrEvent::try_from(stored).unwrap();
     }
-    let result = serde_json::json!({ "append_path": "canonical-direct-build", "backend": backend, "events": incoming.len(), "tags_per_event": tags,
+    let result = serde_json::json!({ "backend": backend, "events": incoming.len(), "tags_per_event": tags,
         "historical_events": historical.len(), "append_us": elapsed, "hits": hits, "misses": misses,
         "root_hash": hex::encode(next.hash),
         "cache_bytes": bytes, "cache_entries": entries, "phases": phases, "preparation": preparation, "retained_history_verified": true });

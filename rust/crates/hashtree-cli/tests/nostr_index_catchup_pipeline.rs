@@ -59,7 +59,7 @@ impl Relay {
             authors,
             barrier_enabled: AtomicBool::new(true),
             barrier_seen: Mutex::new(BTreeSet::new()),
-            barrier: Barrier::new(2),
+            barrier: Barrier::new(4),
             fail_second: AtomicBool::new(false),
             failed_socket_dropped: Notify::new(),
             filters: Mutex::new(Vec::new()),
@@ -91,10 +91,10 @@ impl Relay {
                                 state.filters.lock().unwrap().push(filter.clone());
                                 let _active = ActiveQuery::new(&state);
                                 let at_barrier = state.barrier_enabled.load(Ordering::SeqCst)
-                                    && state.authors[..2].iter().any(|key| key == author)
+                                    && state.authors[..4].iter().any(|key| key == author)
                                     && state.barrier_seen.lock().unwrap().insert(author.to_owned());
                                 if at_barrier {
-                                    // A serial fetcher cannot receive either initial EOSE.
+                                    // All four slots must query before any initial EOSE.
                                     state.barrier.wait().await;
                                 }
                                 let fail = state.fail_second.load(Ordering::SeqCst);
@@ -120,7 +120,7 @@ impl Relay {
                                     )).await;
                                     // Observe the client's invalidation before allowing author 0
                                     // to finish. This makes the later failure known before the
-                                    // prior checkpoint can release a slot for author 2.
+                                    // prior checkpoint can release a fifth slot.
                                     while let Some(Ok(_)) = socket.next().await {}
                                     state.failed_socket_dropped.notify_one();
                                     return;
@@ -278,7 +278,7 @@ fn sorted_filters(mut filters: Vec<Value>) -> Vec<Value> {
 }
 
 fn fixture() -> (Vec<String>, Vec<Event>, Vec<Event>) {
-    let keys = (1..=3)
+    let keys = (1..=6)
         .map(|key| Keys::parse(&format!("{key:064x}")).unwrap())
         .collect::<Vec<_>>();
     let authors = keys.iter().map(|keys| keys.public_key().to_hex()).collect();
@@ -301,7 +301,72 @@ fn fixture() -> (Vec<String>, Vec<Event>, Vec<Event>) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cli_fetches_two_authors_concurrently_with_sequential_root_and_history() {
+async fn cli_append_trace_preserves_checkpoint_and_exposes_numeric_phases() {
+    let (authors, historical, incoming) = fixture();
+    let plain = TempDir::new().unwrap();
+    let traced = TempDir::new().unwrap();
+    let root = seed(&plain, &historical, &authors).await;
+    assert_eq!(seed(&traced, &historical, &authors).await, root);
+    let relay = Relay::new(incoming.clone(), authors.clone()).await;
+    relay.disable_barrier();
+    let mut plain_command = catchup(&plain, &root, &relay);
+    plain_command.args(["--source-mode", "best-effort"]);
+    let plain_output = output(plain_command).await;
+    assert!(!String::from_utf8_lossy(&plain_output.stderr).contains("Nostr catchup phase:"));
+    let plain_result = success(plain_output);
+    let plain_filters = sorted_filters(relay.filters());
+    relay.state.filters.lock().unwrap().clear();
+    let mut command = catchup(&traced, &root, &relay);
+    command.args(["--source-mode", "best-effort", "--trace-append"]);
+    let traced_output = output(command).await;
+    let stderr = String::from_utf8_lossy(&traced_output.stderr).into_owned();
+    let traced_result = success(traced_output);
+    assert_eq!(traced_result, plain_result);
+    assert_eq!(checkpoint_bytes(&traced), checkpoint_bytes(&plain));
+    assert_eq!(sorted_filters(relay.filters()), plain_filters);
+    let phases = stderr
+        .lines()
+        .filter(|line| line.starts_with("Nostr catchup phase:"))
+        .collect::<Vec<_>>();
+    assert!(phases.len() > authors.len());
+    assert!(phases.iter().any(|line| line.contains("phase=Reconcile")));
+    assert!(phases.iter().any(|line| line.contains("phase=LookupIds")));
+    assert!(phases
+        .iter()
+        .any(|line| line.contains("UpdateIndex { index: 6,")));
+    assert!(phases.iter().any(|line| line.contains("phase=FlushCommit")));
+    assert!(phases.iter().any(|line| line.contains("phase=Sync")));
+    assert!(phases.iter().any(|line| line.contains("phase=Checkpoint")));
+    assert!(phases
+        .iter()
+        .any(|line| line.contains("completed_batches=1")));
+    // This fixture has one event batch per author. No row is emitted per
+    // event, blob, B-tree node, read, write or timer tick.
+    assert!(phases.len() <= authors.len() * 46);
+    println!(
+        "append-phase-cli-evidence {}",
+        json!({
+            "authors": authors.len(), "events": incoming.len(),
+            "phase_rows": phases.len(),
+            "phase_bytes": phases.iter().map(|line| line.len() + 1).sum::<usize>(),
+            "largest_phase_row_bytes": phases.iter().map(|line| line.len() + 1).max().unwrap(),
+            "same_checkpoint_bytes": true, "same_result": true, "same_source_filters": true,
+            "source_mode": "best-effort",
+        })
+    );
+    for line in phases {
+        for event in historical.iter().chain(&incoming) {
+            assert!(!line.contains(&event.id.to_hex()));
+            assert!(!line.contains(&event.pubkey.to_hex()));
+            assert!(!line.contains(&event.content));
+        }
+        assert!(!line.contains(&root));
+        assert!(!line.contains(&relay.url));
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cli_fetches_four_authors_concurrently_with_sequential_root_and_history() {
     let (authors, historical, incoming) = fixture();
     let parallel = TempDir::new().unwrap();
     let sequential = TempDir::new().unwrap();
@@ -311,22 +376,22 @@ async fn cli_fetches_two_authors_concurrently_with_sequential_root_and_history()
 
     let completed = success(output(catchup(&parallel, &root, &relay)).await);
     assert_eq!(completed["complete"], true);
-    assert_eq!(completed["next_author"], 3);
-    assert_eq!(completed["events_received"], 6);
-    assert_eq!(relay.state.barrier_seen.lock().unwrap().len(), 2);
-    assert_eq!(relay.state.max_active.load(Ordering::SeqCst), 2);
-    assert_eq!(relay.state.connections.load(Ordering::SeqCst), 2);
+    assert_eq!(completed["next_author"], 6);
+    assert_eq!(completed["events_received"], 12);
+    assert_eq!(relay.state.barrier_seen.lock().unwrap().len(), 4);
+    assert_eq!(relay.state.max_active.load(Ordering::SeqCst), 4);
+    assert_eq!(relay.state.connections.load(Ordering::SeqCst), 4);
     let parallel_filters = relay.filters();
     assert_eq!(
         parallel_filters.len(),
-        9,
+        18,
         "one broad, boundary, and empty page per author"
     );
 
     relay.disable_barrier();
     relay.state.filters.lock().unwrap().clear();
     let mut serial_result = Value::Null;
-    for ordinal in 1..=3 {
+    for ordinal in 1..=6 {
         let mut cmd = catchup(&sequential, &root, &relay);
         cmd.args(["--max-authors-per-run", "1"]);
         serial_result = success(output(cmd).await);
@@ -380,19 +445,17 @@ async fn cli_later_author_failure_keeps_prior_checkpoint_and_resumes_exactly() {
     );
     assert_eq!(checkpoint(&parallel)["next_author"], 1);
     assert_eq!(checkpoint(&parallel)["events_received"], 2);
-    assert_eq!(relay.state.max_active.load(Ordering::SeqCst), 2);
-    assert_eq!(relay.state.connections.load(Ordering::SeqCst), 2);
+    assert_eq!(relay.state.max_active.load(Ordering::SeqCst), 4);
+    assert_eq!(relay.state.connections.load(Ordering::SeqCst), 4);
     assert!(
-        relay
-            .filters()
+        relay.filters().iter().all(|filter| !authors[4..]
             .iter()
-            .all(|filter| filter["authors"][0] != authors[2]),
-        "known failure must stop author 2 admission"
+            .any(|author| filter["authors"][0] == *author)),
+        "known failure must stop admission beyond the four occupied slots"
     );
-    assert_eq!(
-        relay.filters().len(),
-        4,
-        "prior author completes three pages, failed author only one"
+    assert!(
+        (6..=10).contains(&relay.filters().len()),
+        "prior author completes three pages, failed author one; two later slots are cancelled"
     );
     let durable = checkpoint_bytes(&parallel);
 
@@ -410,7 +473,7 @@ async fn cli_later_author_failure_keeps_prior_checkpoint_and_resumes_exactly() {
         query(&parallel, first["root"].as_str().unwrap()).await,
         query(&sequential, first["root"].as_str().unwrap()).await
     );
-    for _ in 1..3 {
+    for _ in 1..6 {
         let mut cmd = catchup(&sequential, &root, &relay);
         cmd.args(["--max-authors-per-run", "1"]);
         success(output(cmd).await);
@@ -421,7 +484,7 @@ async fn cli_later_author_failure_keeps_prior_checkpoint_and_resumes_exactly() {
     assert_eq!(resumed["pass_since"], 10);
     assert_eq!(resumed["pass_until"], 100);
     assert_eq!(checkpoint_bytes(&parallel), checkpoint_bytes(&sequential));
-    assert_eq!(relay.filters().len(), 6);
+    assert_eq!(relay.filters().len(), 15);
     assert!(
         relay
             .filters()

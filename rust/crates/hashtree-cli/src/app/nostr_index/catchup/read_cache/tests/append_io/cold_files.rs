@@ -6,6 +6,7 @@ use std::io::{self, Seek, SeekFrom};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 
+#[path = "cold_files/mapped_tests.rs"]
 mod mapped_tests;
 
 #[derive(Debug, Serialize)]

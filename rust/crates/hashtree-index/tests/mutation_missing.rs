@@ -372,3 +372,50 @@ fn legitimate_empty_trees_splits_and_unchanged_values_remain_supported() {
         );
     });
 }
+
+#[test]
+fn required_link_reads_reject_missing_children_but_distinguish_real_absence() {
+    block_on(async {
+        let store = Arc::new(MemoryStore::new());
+        let index = BTree::new(store.clone(), BTreeOptions { order: Some(4) });
+        let tree = HashTree::new(HashTreeConfig::new(store.clone()));
+        let root = index
+            .build_links((0..24).map(|i| (format!("k{i:03}"), target(i))))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(index
+            .get_links_required(&root, ["j999".to_string()])
+            .await
+            .unwrap()
+            .is_empty());
+        let first = index
+            .range_links_required(&root, "k000", "l", 3, false)
+            .await
+            .unwrap();
+        let second = index
+            .range_links_required(&root, &first[2].0, "l", 3, true)
+            .await
+            .unwrap();
+        assert_eq!(
+            first
+                .iter()
+                .chain(&second)
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            ["k000", "k001", "k002", "k003", "k004", "k005"]
+        );
+        let leaf = first_leaf(&tree, &root).await;
+        store.delete(&leaf.hash).await.unwrap();
+        missing(
+            index.get_links_required(&root, ["k000".to_string()]).await,
+            &leaf,
+        );
+        missing(
+            index
+                .range_links_required(&root, "k000", "l", 3, false)
+                .await,
+            &leaf,
+        );
+    });
+}

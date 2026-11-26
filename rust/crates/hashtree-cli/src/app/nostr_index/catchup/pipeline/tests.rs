@@ -21,14 +21,14 @@ impl Drop for Occupied {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn out_of_order_fetches_commit_in_order_with_only_two_total_author_slots() {
+async fn out_of_order_fetches_commit_in_order_with_only_four_total_author_slots() {
     let active = Arc::new(AtomicUsize::new(0));
     let peak = Arc::new(AtomicUsize::new(0));
     let (started, mut starts) = mpsc::unbounded_channel();
     let (release, hold) = oneshot::channel::<()>();
     let mut hold = Some(hold);
     let future = run(
-        [0usize, 1],
+        [0usize, 1, 2, 3],
         0..6,
         |source, index| {
             let occupied = Occupied::new(&active, &peak);
@@ -51,17 +51,18 @@ async fn out_of_order_fetches_commit_in_order_with_only_two_total_author_slots()
         },
     );
     tokio::pin!(future);
-    let first = tokio::select! { _=&mut future=>panic!("blocked first author"), request=starts.recv()=>request.unwrap() };
-    let second = tokio::select! { _=&mut future=>panic!("blocked first author"), request=starts.recv()=>request.unwrap() };
-    let mut observed = [first, second];
+    let mut observed = Vec::new();
+    for _ in 0..4 {
+        observed.push(tokio::select! { _=&mut future=>panic!("blocked first author"), request=starts.recv()=>request.unwrap() });
+    }
     observed.sort();
-    assert_eq!(observed, [(0, 0), (1, 1)]);
-    assert_eq!(active.load(Ordering::SeqCst), 2);
-    // Finishing author1 cannot admit author2 while author0 still occupies its slot.
-    tokio::select! { _=&mut future=>panic!("blocked first author"), request=starts.recv()=>panic!("third slot: {request:?}"), _=tokio::task::yield_now()=>{} }
+    assert_eq!(observed, [(0, 0), (1, 1), (2, 2), (3, 3)]);
+    assert_eq!(active.load(Ordering::SeqCst), 4);
+    // Finished later authors cannot admit a fifth while author0 owns its slot.
+    tokio::select! { _=&mut future=>panic!("blocked first author"), request=starts.recv()=>panic!("fifth slot: {request:?}"), _=tokio::task::yield_now()=>{} }
     release.send(()).unwrap();
     assert_eq!(future.await.unwrap(), vec![0, 1, 2, 3, 4, 5]);
-    assert_eq!(peak.load(Ordering::SeqCst), 2);
+    assert_eq!(peak.load(Ordering::SeqCst), 4);
     assert_eq!(active.load(Ordering::SeqCst), 0);
 }
 
@@ -70,7 +71,7 @@ async fn next_author_failure_preserves_successful_earlier_commit_and_stops_admis
     let commits = Arc::new(AtomicUsize::new(0));
     let requested = Arc::new(AtomicUsize::new(0));
     let result = run(
-        [0usize, 1],
+        [0usize, 1, 2, 3],
         0..5,
         |source, index| {
             requested.fetch_add(1, Ordering::SeqCst);
@@ -101,7 +102,7 @@ async fn next_author_failure_preserves_successful_earlier_commit_and_stops_admis
     .await;
     assert!(result.unwrap_err().to_string().contains("source failed"));
     assert_eq!(commits.load(Ordering::SeqCst), 1);
-    assert_eq!(requested.load(Ordering::SeqCst), 2);
+    assert_eq!(requested.load(Ordering::SeqCst), 4);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -111,14 +112,14 @@ async fn writer_failure_and_cancellation_drop_all_fetches_without_detached_work(
         let peak = Arc::new(AtomicUsize::new(0));
         let (started, mut starts) = mpsc::unbounded_channel();
         let mut future = Box::pin(run(
-            [0usize, 1],
+            [0usize, 1, 2, 3],
             0..4,
             |source, index| {
                 let occupied = Occupied::new(&active, &peak);
                 let started = started.clone();
                 async move {
                     started.send(index).unwrap();
-                    if index == 1 {
+                    if index >= 1 {
                         std::future::pending::<()>().await;
                     }
                     (source, Ok(occupied))
@@ -152,7 +153,7 @@ async fn writer_failure_and_cancellation_drop_all_fetches_without_detached_work(
             .unwrap();
         }
         assert_eq!(active.load(Ordering::SeqCst), 0);
-        assert!(peak.load(Ordering::SeqCst) <= 2);
+        assert!(peak.load(Ordering::SeqCst) <= 4);
     }
 }
 
@@ -162,8 +163,8 @@ async fn slow_writer_applies_backpressure_and_fetches_continue_while_it_waits() 
     let (release, hold) = oneshot::channel::<()>();
     let mut hold = Some(hold);
     let future = run(
-        [0usize, 1],
-        0..3,
+        [0usize, 1, 2, 3],
+        0..5,
         |source, index| {
             let started = started.clone();
             async move {
@@ -185,14 +186,14 @@ async fn slow_writer_applies_backpressure_and_fetches_continue_while_it_waits() 
     );
     tokio::pin!(future);
     let mut observed = Vec::new();
-    for _ in 0..2 {
+    for _ in 0..4 {
         tokio::select! {_=&mut future=>panic!("writer blocked"), value=starts.recv()=>observed.push(value.unwrap())}
     }
     observed.sort();
-    assert_eq!(observed, vec![0, 1]);
+    assert_eq!(observed, vec![0, 1, 2, 3]);
     tokio::select! {_=&mut future=>panic!("writer blocked"), value=starts.recv()=>panic!("unbounded prefetch: {value:?}"), _=tokio::task::yield_now()=>{}}
     release.send(()).unwrap();
-    assert_eq!(future.await.unwrap(), vec![0, 1, 2]);
+    assert_eq!(future.await.unwrap(), vec![0, 1, 2, 3, 4]);
 }
 
 // The production CLI's block_on writer runs outside the runtime worker pool.

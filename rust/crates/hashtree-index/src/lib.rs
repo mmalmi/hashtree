@@ -1,6 +1,10 @@
 //! Content-addressed B-tree indexes backed by hashtree.
 
+mod link_diff;
+mod link_lookup;
+mod link_update;
 mod search;
+pub use link_diff::{LinkComparisonLimits, LinkComparisonReport, LinkTreeVerifier};
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -94,6 +98,7 @@ pub struct BTree<S: Store> {
     tree: HashTree<S>,
     max_keys: usize,
     update_child_concurrency: usize,
+    read_child_concurrency: usize,
 }
 
 /// Incremental builder for an already sorted CID-link stream.
@@ -124,6 +129,7 @@ impl<S: Store> BTree<S> {
             tree: HashTree::new(HashTreeConfig::new(store)),
             max_keys: order - 1,
             update_child_concurrency: UPDATE_CHILD_CONCURRENCY,
+            read_child_concurrency: 1,
         }
     }
 
@@ -134,6 +140,14 @@ impl<S: Store> BTree<S> {
     /// a tight memory cgroup trade throughput for a lower peak working set.
     pub fn with_update_concurrency(mut self, concurrency: usize) -> Self {
         self.update_child_concurrency = concurrency.max(1);
+        self
+    }
+
+    /// Bound scoped workers for bulk required reads from a synchronous local store.
+    /// Defaults to one; opt in only when store futures can run on scoped workers.
+    /// Descendant reads share this bound rather than spawning at every depth.
+    pub fn with_read_concurrency(mut self, concurrency: usize) -> Self {
+        self.read_child_concurrency = concurrency.clamp(1, 16);
         self
     }
 
@@ -243,8 +257,35 @@ impl<S: Store> BTree<S> {
         if keys.is_empty() {
             return Ok(BTreeMap::new());
         }
-        self.get_links_recursive(root.clone(), &keys.into_iter().collect::<Vec<_>>())
-            .await
+        self.get_links_recursive(
+            root.clone(),
+            &keys.into_iter().collect::<Vec<_>>(),
+            false,
+            true,
+        )
+        .await
+    }
+
+    /// Resolve link keys without interpreting unavailable existing nodes as misses.
+    pub async fn get_links_required<I>(
+        &self,
+        root: &Cid,
+        keys: I,
+    ) -> Result<BTreeMap<String, Cid>, BTreeError>
+    where
+        I: IntoIterator<Item = String>,
+    {
+        let keys = keys.into_iter().collect::<BTreeSet<_>>();
+        if keys.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        self.get_links_recursive(
+            root.clone(),
+            &keys.into_iter().collect::<Vec<_>>(),
+            true,
+            true,
+        )
+        .await
     }
 
     pub async fn entries(&self, root: Option<&Cid>) -> Result<Vec<(String, String)>, BTreeError> {
@@ -275,7 +316,7 @@ impl<S: Store> BTree<S> {
         let Some(root) = root else {
             return Ok(Vec::new());
         };
-        self.range_link_traverse_limited(root.clone(), None, None, limit)
+        self.range_link_traverse_limited(root.clone(), None, None, limit, false)
             .await
     }
 
@@ -393,7 +434,7 @@ impl<S: Store> BTree<S> {
             return Ok(Vec::new());
         }
         let end = increment_prefix(prefix);
-        self.range_link_traverse_limited(root.clone(), Some(prefix.to_string()), end, limit)
+        self.range_link_traverse_limited(root.clone(), Some(prefix.to_string()), end, limit, false)
             .await
     }
 
@@ -417,6 +458,7 @@ impl<S: Store> BTree<S> {
             start.map(ToOwned::to_owned),
             end.map(ToOwned::to_owned),
             limit,
+            false,
         )
         .await
     }
@@ -442,11 +484,41 @@ impl<S: Store> BTree<S> {
                 after.map(ToOwned::to_owned),
                 end.map(ToOwned::to_owned),
                 fetch_limit,
+                false,
             )
             .await?;
         Ok(page
             .into_iter()
             .filter(|(key, _)| after.is_none_or(|after| key.as_str() > after))
+            .take(limit)
+            .collect())
+    }
+
+    /// Read a bounded link page while requiring every visited node to exist.
+    /// `after` switches the inclusive start into an exclusive continuation.
+    pub async fn range_links_required(
+        &self,
+        root: &Cid,
+        start: &str,
+        end: &str,
+        limit: usize,
+        after: bool,
+    ) -> Result<Vec<(String, Cid)>, BTreeError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let page = self
+            .range_link_traverse_limited(
+                root.clone(),
+                Some(start.to_owned()),
+                Some(end.to_owned()),
+                limit.saturating_add(usize::from(after)),
+                true,
+            )
+            .await?;
+        Ok(page
+            .into_iter()
+            .filter(|(key, _)| !after || key.as_str() > start)
             .take(limit)
             .collect())
     }
@@ -982,29 +1054,7 @@ impl<S: Store> BTree<S> {
                     superseded_nodes: Vec::new(),
                 }
             } else {
-                let mut work = Vec::with_capacity(entries.len());
-                let mut change_start = 0;
-                for (child_index, entry) in entries.iter().enumerate() {
-                    let change_end = entries
-                        .get(child_index + 1)
-                        .map(|next| {
-                            let next_key = unescape_key(&next.name);
-                            change_start
-                                + changes[change_start..]
-                                    .partition_point(|(key, _)| key < &next_key)
-                        })
-                        .unwrap_or(changes.len());
-                    work.push((
-                        BuiltNode {
-                            first_key: unescape_key(&entry.name),
-                            cid: entry_cid(entry),
-                            count: stored_link_subtree_count(entry),
-                        },
-                        change_start,
-                        change_end,
-                    ));
-                    change_start = change_end;
-                }
+                let work = Self::link_child_work(&entries, changes);
 
                 let touched_children = work
                     .iter()
@@ -1015,7 +1065,7 @@ impl<S: Store> BTree<S> {
                     && changes.len() >= PARALLEL_UPDATE_MIN_CHANGES
                     && touched_children > 1
                 {
-                    self.update_link_children_parallel(work, changes)?
+                    self.update_link_children_parallel(work, changes).await?
                 } else {
                     let mut update = LinkNodeUpdate::default();
                     for (child, change_start, change_end) in work {
@@ -1044,65 +1094,7 @@ impl<S: Store> BTree<S> {
                 }
             };
 
-            // A split can retain the original node verbatim as one output
-            // chunk while adding siblings around it. Content addressing then
-            // gives that retained chunk the same CID as `node`; deleting it as
-            // superseded would corrupt the new root. Reclaim the old hash only
-            // when none of the replacement nodes still references it.
-            if !update
-                .nodes
-                .iter()
-                .any(|replacement| replacement.cid == node)
-            {
-                update.superseded_nodes.push(node);
-            }
-            Ok(update)
-        })
-    }
-
-    fn update_link_children_parallel(
-        &self,
-        work: Vec<(BuiltNode, usize, usize)>,
-        changes: &[(String, Option<Cid>)],
-    ) -> Result<LinkNodeUpdate, BTreeError> {
-        let worker_count = self.update_child_concurrency.min(work.len()).max(1);
-        let work_per_worker = work.len().div_ceil(worker_count);
-        std::thread::scope(|scope| {
-            let handles = work
-                .chunks(work_per_worker)
-                .map(|work_chunk| {
-                    scope.spawn(move || {
-                        let mut update = LinkNodeUpdate::default();
-                        for (child, change_start, change_end) in work_chunk {
-                            if change_start == change_end {
-                                update.nodes.push(child.clone());
-                            } else {
-                                let child_update =
-                                    futures::executor::block_on(self.update_link_node(
-                                        child.cid.clone(),
-                                        &changes[*change_start..*change_end],
-                                        false,
-                                    ))?;
-                                update.nodes.extend(child_update.nodes);
-                                update
-                                    .superseded_nodes
-                                    .extend(child_update.superseded_nodes);
-                            }
-                        }
-                        Ok::<_, BTreeError>(update)
-                    })
-                })
-                .collect::<Vec<_>>();
-            let mut update = LinkNodeUpdate::default();
-            for handle in handles {
-                let child_update = handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic))?;
-                update.nodes.extend(child_update.nodes);
-                update
-                    .superseded_nodes
-                    .extend(child_update.superseded_nodes);
-            }
+            Self::record_replaced_link_node(node, &mut update);
             Ok(update)
         })
     }
@@ -1222,46 +1214,6 @@ impl<S: Store> BTree<S> {
 
             let child = find_child(&entries, &key);
             self.get_link_recursive(entry_cid(&child), key).await
-        })
-    }
-
-    fn get_links_recursive<'a>(
-        &'a self,
-        root: Cid,
-        keys: &'a [String],
-    ) -> BTreeFuture<'a, BTreeMap<String, Cid>> {
-        Box::pin(async move {
-            let entries = sort_entries(self.tree.list_directory(&root).await?);
-            if is_leaf_node(&entries) {
-                let links = entries
-                    .into_iter()
-                    .map(|entry| (unescape_key(&entry.name), entry_cid(&entry)))
-                    .collect::<BTreeMap<_, _>>();
-                return Ok(keys
-                    .iter()
-                    .filter_map(|key| links.get(key).cloned().map(|cid| (key.clone(), cid)))
-                    .collect());
-            }
-
-            let mut found = BTreeMap::new();
-            let mut key_start = 0;
-            for (child_index, entry) in entries.iter().enumerate() {
-                let key_end = entries
-                    .get(child_index + 1)
-                    .map(|next| {
-                        let next_key = unescape_key(&next.name);
-                        key_start + keys[key_start..].partition_point(|key| key < &next_key)
-                    })
-                    .unwrap_or(keys.len());
-                if key_start < key_end {
-                    found.extend(
-                        self.get_links_recursive(entry_cid(entry), &keys[key_start..key_end])
-                            .await?,
-                    );
-                }
-                key_start = key_end;
-            }
-            Ok(found)
         })
     }
 
@@ -1733,10 +1685,18 @@ impl<S: Store> BTree<S> {
         start: Option<String>,
         end: Option<String>,
         limit: usize,
+        required: bool,
     ) -> BTreeFuture<'a, Vec<(String, Cid)>> {
         Box::pin(async move {
-            let entries = self.tree.list_directory(&node).await?;
+            let entries = if required {
+                self.tree.list_directory_required(&node).await?
+            } else {
+                self.tree.list_directory(&node).await?
+            };
             let sorted = sort_entries(entries);
+            if required {
+                validate_required_link_node(&sorted)?;
+            }
             let mut out = Vec::new();
 
             if is_leaf_node(&sorted) {
@@ -1784,6 +1744,7 @@ impl<S: Store> BTree<S> {
                         start.clone(),
                         end.clone(),
                         remaining,
+                        required,
                     )
                     .await?,
                 );
@@ -2029,6 +1990,22 @@ fn increment_prefix(value: &str) -> Option<String> {
 
 fn cid_equals(left: &Cid, right: &Cid) -> bool {
     left.hash == right.hash && left.key == right.key
+}
+
+fn validate_required_link_node(entries: &[TreeEntry]) -> Result<(), BTreeError> {
+    if !(entries
+        .iter()
+        .all(|entry| entry.link_type == LinkType::File)
+        || entries.iter().all(|entry| entry.link_type == LinkType::Dir))
+        || entries
+            .windows(2)
+            .any(|pair| unescape_key(&pair[0].name) >= unescape_key(&pair[1].name))
+    {
+        return Err(BTreeError::InvalidLinkTree(
+            "invalid node in required link traversal".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn is_leaf_node(entries: &[TreeEntry]) -> bool {

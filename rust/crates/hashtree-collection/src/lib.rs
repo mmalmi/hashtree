@@ -14,6 +14,7 @@ mod error;
 mod federated;
 mod helpers;
 mod manifest;
+mod progress;
 mod schema;
 mod source;
 mod state;
@@ -33,6 +34,7 @@ pub use manifest::{
     load_collection_manifest_metadata, CollectionManifestMetadata,
     COLLECTION_MANIFEST_METADATA_FILE,
 };
+pub use progress::{CollectionBatchObserver, CollectionBatchPhase};
 pub use schema::{
     get_collection_schema, get_schema_version, normalize_collection_item, CollectionSchema,
     NormalizeCollectionItemOptions,
