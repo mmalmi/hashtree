@@ -2,6 +2,39 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-26 - LMDB, `PoolStore`, HTTP blob serving, and Nostr relay hot-path optimization
+
+We profiled and benchmarked a live multi-terabyte `htree` daemon on an 8-core / 16-thread Linux x86_64 host (60 GiB RAM, NVMe catalog/member LMDB tier plus mirrored HDD external-blob and read-only fallback tiers, ~128.9 million blobs / ~5.78 TB logical bytes) across three matched release stages:
+- **Stage A (Baseline)**: current upstream release binary under existing configuration.
+- **Stage B (Codebase-only)**: optimized release binary under the identical existing configuration.
+- **Stage C (Codebase + host/daemon tuning)**: optimized release binary with `HTREE_LMDB_NO_READ_AHEAD=1`, `MALLOC_ARENA_MAX=4`, expanded zero-copy blob caches (`HTREE_BLOB_BODY_CACHE_BYTES=1 GiB`, `HTREE_BLOB_SIZE_CACHE_ENTRIES=262144`), origin `fetch_from_fips_peers = false` (keeping FIPS peer serving enabled), removal of a self-referencing Nostr relay entry, `vm.swappiness=1`, `vm.vfs_cache_pressure=50`, and HDD block readahead lowered from 8 MiB to 128 KiB.
+
+Codebase changes evaluated:
+- **`hashtree-lmdb` eviction & reads**: replaced full-table `Vec<Vec<u8>>` allocation in `LmdbBlobStore::evict_to_target` with O(1) all-pinned short-circuiting and streaming cursor batches of stack `[u8; 40]` keys; skipped redundant `metadata` B-tree lookups in `get_sync` for inline and packed blobs; dropped LMDB `rtxn` before blocking external-file reads in `get_sync` and `get_range_sync`; switched Unix external blob/pack reads to `FileExt::read_exact_at` (`pread`) with single `metadata().len()` verification.
+- **`PoolStore` locking, catalog writes, and O(1) stats**: cached raw manifest bytes + decoded `PoolManifest` in `RuntimeMembers` so unchanged `refresh_members()` calls take only a shared read lock (zero deserialization, zero SHA-256, zero write-lock contention) while remaining immediately reactive to cross-process manifest updates; added `get_member_and_gate`, eliminated `adaptive` mutex acquisition on single-member reads, batched location checks / write-member selection / candidate existence checks in `put_many`, diffed `by_member` updates and gated `temperature_state` cleanup in `set_location_txn` (reducing `Pending -> Stored` finalization from 6 B-tree ops to 1), and added O(1) `PoolStore::members_summary()` and `PoolStore::stats_bounded(50_000)`.
+- **HTTP server, cache, and batch I/O**: switched `BlobCache` body storage and `inflight_blob_reads` to zero-copy `bytes::Bytes`; wrapped per-request cloned `AppState` collections/credentials in `Arc`; collapsed plain `GET /<sha256>` (no `Range`, not `HEAD`) from two blocking dispatches (`blob_size` + `get_blob`) to one; removed unused per-request client-IP string allocation; offloaded `/api/stats` to `run_blob_metadata_read` with bounded pool stats; parallelized `POST /blob/batch` reads with bounded concurrency (16, preserving request order and truncation); gated Blossom batch replication payload cloning behind replication eligibility; fixed `PoolStoreWithFallbacks::get_range_sync` not to re-query primary on fallback misses; raised `BlobIoLimits::metadata_read_limit` ceiling from 4 to 8.
+- **Nostr relay & social graph**: cached a shared `OnceLock<Arc<rustls::ClientConfig>>` WebPKI TLS connector for upstream WebSocket relays; parsed incoming upstream `NostrRelayMessage` once per frame; replaced per-query Tokio runtime creation in `HistoricalNostrIndex` with `Handle::current().block_on`; guarded per-query `/proc/self/status` snapshots behind `DEBUG` level; rate-limited hot-path `malloc_trim(0)` to 30 s intervals; wrapped `SocialGraphStore`'s `DistanceCache` in `Arc`.
+
+| Metric (live multi-TB workload) | Stage A (Baseline) | Stage B (Code only) | Stage C (Code + config/OS) | Net Change |
+| --- | ---: | ---: | ---: | ---: |
+| `GET /health` p50 (20x) | 0.30 ms | 0.15 ms | 0.15 ms | 2.0x faster |
+| `GET /api/status` p50 (10x) | 0.41 ms | 0.20 ms | 0.20 ms | 2.0x faster |
+| `GET /api/stats` (128.9M blobs) | >5,000 ms timeout | 0.19 ms | 0.19 ms | >25,000x faster |
+| `htree storage pool status` | >45 s hang (20.1 GiB faulted) | 15 ms | ~15 ms | >3,000x faster |
+| `GET /<missing>.bin` (cold) | 5,503 ms (HTTP 503) | 5,546 ms (HTTP 503) | 18.85 ms p50 (HTTP 404) | 292x faster; 0 5xx |
+| Live HTTP `5xx` (60 s window) | ~15–20+/min | 18 (incl. 3 probe) | 0 (1,013 total reqs / 81 s) | Eliminated |
+| `HEAD /<cold-random>.bin` (20x) | 48.6 ms p50 / 130.6 ms max | 59.8 ms p50 / 140.2 ms max | 36.1 ms p50 / 79.8 ms max | 1.35x p50 / 1.6x max |
+| `POST /upload/check` (1,000 cold) | 248–263 ms | 331 ms | 90.1 ms (warm 2.6 ms) | 2.8x faster |
+| `POST /blob/batch` (50 cold random) | 2,509.8 ms | 847.4 ms | 619.2 ms (warm 0.7 ms) | 4.1x faster |
+| NVMe read throughput (`iostat`) | 110.6 MB/s (62.3 KB/req) | 45.7 MB/s (48.6 KB/req) | 2.9 MB/s (10.3 KB/req) | 38x lower read BW |
+| Process disk reads (`/proc/io`) | 37.6 MB/s | 47.1 MB/s | 2.2 MB/s | 17x fewer bytes read |
+| Process disk writes (`/proc/io`) | 12.4 MB/s | 12.3 MB/s | 2.1 MB/s | 5.9x fewer bytes written |
+| HDD RAID1 `%util` / `w_await` | 96.5–97.8% / 23 ms | 99.8% / 22.8 ms | 70.9% / 11.7 ms | -27% util, 2x lower await |
+| Process `perf stat` CPU (5 s) | — | 382.3 ms (0.08 CPU) | 228.5 ms (0.05 CPU) | -40% vs Stage B |
+| Process `VmRSS` / `RssAnon` / swap | 11.8 GiB / 154 MiB (2.45 GiB + 532 MiB swap over 7 d) | 2.25 GiB / 104 MiB / 0 | 0.92–1.19 GiB / 51–56 MiB / 0 | Bounded RSS, 0 swap |
+
+Note: live traffic varies between 5-second sampling windows, so disk and CPU counters reflect representative steady-state observations alongside the deterministic synthetic HTTP probes. All 124 unit tests and 46 integration tests (excluding subprocess helpers) in `hashtree-lmdb`, plus targeted `hashtree-cli` unit/server/relay runs (71 and 19 tests across touched modules) and `storage_quota_report` (including new regression tests for streaming pinned eviction, inline/loose/packed reads and corruption detection, cross-process pool manifest cache reload, bounded pool stats and member summaries, concurrent ordered batch downloads, single-dispatch plain GET caching, shared TLS connector reuse, and throttled allocation trimming) passed.
+
 ## 2026-11-26 - `git-remote-htree` clone, fetch, push, and `ls-remote` optimization
 
 We measured end-to-end Git workflows (`git push`, `git clone`, `git fetch`, `git ls-remote`) on macOS ARM64 with matched release `git-remote-htree` binaries against the same local `htree start` LMDB Blossom daemon behind an instrumented async HTTP/1.1 proxy (20 ms RTT, plus a plain-Blossom 404 mode blocking `/blob/batch`, `/upload/check`, and `/upload/batch*`) and a local RFC 6455 Nostr relay. Both binaries ran in alternating order (`baseline`, `candidate`, `candidate`, `baseline`) across two seeded repositories:
