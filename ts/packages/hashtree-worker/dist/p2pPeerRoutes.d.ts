@@ -1,4 +1,4 @@
-import { type BlobRequest, type BlobRoute, type BlobRouteContext } from '@hashtree/core';
+import { type BlobRequest, type BlobReply, type BlobRoute, type BlobRouteContext } from '@hashtree/core';
 import type { P2PBridge } from './p2pBridge.js';
 /** One route over listed peers, or an aggregate provider that owns peer discovery. */
 export declare class P2PPeerRoutes implements BlobRoute {
@@ -15,7 +15,7 @@ export declare class P2PPeerRoutes implements BlobRoute {
     constructor(bridge: P2PBridge, cacheMs?: number);
     isAvailable: () => boolean;
     setEnabled(enabled: boolean, peerListSupported?: boolean): void;
-    read(request: BlobRequest, context?: BlobRouteContext): Promise<import("@hashtree/core").BlobReply>;
+    read(request: BlobRequest, context?: BlobRouteContext): Promise<BlobReply>;
     peerList(): Promise<string[]>;
     private syncPeerRoutes;
 }

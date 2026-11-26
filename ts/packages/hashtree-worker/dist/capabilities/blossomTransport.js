@@ -1,6 +1,7 @@
 import { BlossomStore, fromHex, } from '@hashtree/core';
 import { finalizeEvent, generateSecretKey } from 'nostr-tools/pure';
 import { BlossomBandwidthTracker, } from './blossomBandwidthTracker.js';
+import { InFlightReads, copyBlobBytes } from '../inFlightReads.js';
 export const DEFAULT_BLOSSOM_SERVERS = [];
 const MAX_CONCURRENT_READ_FETCHES = 32;
 const MAX_CONCURRENT_HEAD_FETCHES = 64;
@@ -101,7 +102,7 @@ export class BlossomTransport {
     servers;
     signer;
     bandwidthTracker;
-    inflightFetches = new Map();
+    inflightFetches = new InFlightReads(copyBlobBytes);
     fetchTimeoutMs;
     store;
     constructor(servers, onBandwidthUpdate, fetchTimeoutMs = DEFAULT_FETCH_TIMEOUT_MS) {
@@ -151,28 +152,15 @@ export class BlossomTransport {
         }
         await this.store.put(fromHex(hashHex), data, uploadMimeType);
     }
-    async fetch(hashHex) {
-        const inflight = this.inflightFetches.get(hashHex);
-        if (inflight) {
-            return inflight;
-        }
-        const pending = this.fetchInternal(hashHex, () => this.store.get(fromHex(hashHex)));
-        this.inflightFetches.set(hashHex, pending);
-        return await pending;
+    fetch(hashHex) {
+        return this.inflightFetches.read(hashHex, () => this.fetchInternal(() => this.store.get(fromHex(hashHex))));
     }
     async fetchFromServer(hashHex, serverUrl) {
         const normalizedServerUrl = normalizeServerUrl(serverUrl.trim());
         if (!normalizedServerUrl) {
             return null;
         }
-        const key = `${normalizedServerUrl}::${hashHex}`;
-        const inflight = this.inflightFetches.get(key);
-        if (inflight) {
-            return inflight;
-        }
-        const pending = this.fetchInternal(key, () => this.store.getFromServers(fromHex(hashHex), [normalizedServerUrl]));
-        this.inflightFetches.set(key, pending);
-        return await pending;
+        return await this.inflightFetches.read(`${normalizedServerUrl}::${hashHex}`, () => this.fetchInternal(() => this.store.getFromServers(fromHex(hashHex), [normalizedServerUrl])));
     }
     async stat(hashHex) {
         for (const server of this.getReadServers()) {
@@ -192,7 +180,7 @@ export class BlossomTransport {
         }
         return null;
     }
-    fetchInternal(inflightKey, loader) {
+    fetchInternal(loader) {
         return withReadFetchSlot(() => new Promise((resolve, reject) => {
             let settled = false;
             const timeoutId = setTimeout(() => {
@@ -216,10 +204,7 @@ export class BlossomTransport {
                 clearTimeout(timeoutId);
                 reject(error);
             });
-        }))
-            .finally(() => {
-            this.inflightFetches.delete(inflightKey);
-        });
+        }));
     }
 }
 //# sourceMappingURL=blossomTransport.js.map

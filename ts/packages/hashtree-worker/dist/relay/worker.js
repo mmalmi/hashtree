@@ -1,4 +1,3 @@
-// @ts-nocheck
 /**
  * Hashtree Worker
  *
@@ -9,7 +8,7 @@
  * Main thread communicates via postMessage.
  * NIP-07 signing/encryption delegated back to main thread.
  */
-import { BLOB_NO_RESULT, HashTree, BlossomStore, blobReplyFromNullable } from '@hashtree/core';
+import { BLOB_NO_RESULT, HashTree, BlossomStore, blobReplyFromNullable, toHex } from '@hashtree/core';
 import { BlobRouter } from '@hashtree/mesh';
 import { DexieStore } from '@hashtree/dexie';
 import { initTreeRootCache, getCachedRootInfo, setCachedRoot, mergeCachedRootKey, clearMemoryCache } from './treeRootCache';
@@ -19,7 +18,9 @@ import { initIdentity, setIdentity, clearIdentity } from './identity';
 import { setResponseSender, signEvent, handleSignedResponse, handleEncryptedResponse, handleDecryptedResponse, } from './signing';
 import { SocialGraph } from 'nostr-social-graph';
 import { loadGraphBootstrap, startGraphSync } from 'nostr-social-graph/publicGraphSync';
+import { loadBundledGraphBootstrap } from './graphBootstrap.js';
 import { cloneTransferableBytes } from '../transferableBytes';
+import { InFlightReads, copyBlobBytes } from '../inFlightReads';
 import Dexie from 'dexie';
 import { getErrorMessage } from './utils/errorMessage';
 import { DEFAULT_BOOTSTRAP_PUBKEY } from './utils/constants';
@@ -48,6 +49,7 @@ import { P2PPeerRoutes } from '../p2pPeerRoutes';
 let tree = null;
 let store = null;
 let blobRouter = null;
+const sharedBlobReads = new WeakMap();
 let blossomStore = null;
 const blossomBandwidthTracker = new BlossomBandwidthTracker((stats) => {
     respond({ type: 'blossomBandwidth', stats });
@@ -354,28 +356,51 @@ async function configureGraphBootstrap() {
     const cfg = _config;
     if (cfg?.graphBootstrap !== true || !cfg.relays.length || !graphBootstrapEligible)
         return;
-    const generation = graphBootstrapGeneration, expectedGraph = socialGraph, version = socialGraphVersion;
+    const generation = graphBootstrapGeneration, lifecycle = graphLifecycleGeneration;
     const abort = graphBootstrapAbort = new AbortController();
-    const current = () => generation === graphBootstrapGeneration && _config === cfg &&
-        cfg.graphBootstrap === true && cfg.relays.length > 0 && graphBootstrapEligible &&
-        socialGraph === expectedGraph && socialGraphVersion === version;
-    try {
-        const fresh = await loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY, signal: abort.signal });
+    // Eligibility is checked before starting. A seed or newly received local list
+    // may then be saved while this already-authorized signed upgrade is in flight.
+    const current = () => generation === graphBootstrapGeneration && lifecycle === graphLifecycleGeneration &&
+        _config === cfg && cfg.graphBootstrap === true && cfg.relays.length > 0 && !abort.signal.aborted;
+    const install = async (fresh, persist = true) => {
         if (!current())
-            return;
-        // Prepare away from the active graph: a policy change or local event wins even
-        // while the asynchronous merge is in progress.
+            return false;
+        const expectedGraph = socialGraph, version = socialGraphVersion;
+        // Merge the latest local state, including lists received during the download.
+        // Keep the active graph untouched if a local edit arrives during the merge.
         await fresh.setRoot(expectedGraph.getRoot());
         await fresh.merge(expectedGraph);
-        if (!current())
-            return;
+        if (!current() || socialGraph !== expectedGraph || socialGraphVersion !== version)
+            return false;
         socialGraph = fresh;
-        notifySocialGraphVersionUpdate();
-    }
-    catch { /* Configured-relay catch-up remains available without an HTTP seed. */ }
-    finally {
-        if (graphBootstrapAbort === abort)
+        notifySocialGraphVersionUpdate(persist);
+        return true;
+    };
+    const upgrade = async (restartCatchup = false) => {
+        try {
+            const fresh = await loadGraphBootstrap({ root: DEFAULT_BOOTSTRAP_PUBKEY, signal: abort.signal });
+            if (await install(fresh) && restartCatchup)
+                configureGraphCatchup();
+        }
+        catch { /* Keep the local graph when signed discovery is unavailable or invalid. */ }
+        finally {
+            if (graphBootstrapAbort === abort)
+                graphBootstrapAbort = undefined;
+        }
+    };
+    if (cfg.graphBootstrapFallback) {
+        try {
+            await install(await loadBundledGraphBootstrap(cfg.graphBootstrapFallback, abort.signal), false);
+        }
+        catch { /* A missing packaged asset must not prevent configured-relay catch-up. */ }
+        if (current())
+            void upgrade(true);
+        else if (graphBootstrapAbort === abort)
             graphBootstrapAbort = undefined;
+    }
+    else {
+        // Existing clients without a packaged fallback retain their initialization order.
+        await upgrade();
     }
 }
 function configureGraphCatchup() {
@@ -390,16 +415,46 @@ function configureGraphCatchup() {
             return;
         stopGraphCatchup = startGraphSync({ getGraph: () => socialGraph, relays,
             maxAuthors: 500, maxBytes: 2 * 1024 * 1024,
-            onChange: notifySocialGraphVersionUpdate,
+            onChange: () => { notifySocialGraphVersionUpdate(); scheduleFollowDistanceRefresh(); },
             onError: error => console.warn('[Worker] Public graph catch-up unavailable', error),
         });
     }).catch(error => console.warn('[Worker] Public graph catch-up unavailable', error));
 }
-function notifySocialGraphVersionUpdate() {
-    graphBootstrapEligible = false;
+const FOLLOW_DISTANCE_SETTLE_MS = 1000;
+let followDistanceTimer = null;
+function cancelFollowDistanceRefresh() {
+    if (followDistanceTimer)
+        clearTimeout(followDistanceTimer);
+    followDistanceTimer = null;
+}
+/**
+ * A follow-list change moves only the followed account itself in the graph library;
+ * everyone reached through that account keeps the old distance until a full pass.
+ * Run it once incoming lists have settled: a pass interrupted by a change starts over.
+ */
+function scheduleFollowDistanceRefresh() {
+    cancelFollowDistanceRefresh();
+    const graph = socialGraph, lifecycle = graphLifecycleGeneration;
+    followDistanceTimer = setTimeout(() => {
+        followDistanceTimer = null;
+        const current = () => graph === socialGraph && lifecycle === graphLifecycleGeneration;
+        if (!current())
+            return;
+        graph.recalculateFollowDistances(1_000, 100_000, () => { })
+            .then(() => { if (current())
+            notifySocialGraphVersionUpdate(); })
+            .catch(error => console.warn('[Worker] Follow distance refresh failed', error));
+    }, FOLLOW_DISTANCE_SETTLE_MS);
+}
+function notifySocialGraphVersionUpdate(persist = true) {
     socialGraphVersion++;
-    socialGraphDirty = true;
     self.postMessage({ type: 'socialGraphVersion', version: socialGraphVersion });
+    // A packaged-only first visit must remain eligible for signed discovery next
+    // time. Real local changes and accepted signed snapshots still become durable.
+    if (!persist)
+        return;
+    graphBootstrapEligible = false;
+    socialGraphDirty = true;
     // Debounce save - save 5 seconds after last update
     if (socialGraphSaveTimeout) {
         clearTimeout(socialGraphSaveTimeout);
@@ -800,6 +855,7 @@ async function handleInit(id, cfg, hasP2PProvider, peerListSupported = true) {
             store,
             storeName,
             reconciliation: cfg.reconciliation,
+            indexedEventCache: cfg.indexedEventCache,
             onStorePersisted: runEvictionCheck,
         });
         if (!current())
@@ -807,18 +863,14 @@ async function handleInit(id, cfg, hasP2PProvider, peerListSupported = true) {
         runEvictionCheck();
         console.log('[Worker] Nostr runtime initialized with', cfg.relays.length, 'relays');
         // Set up unified event handler for all subscriptions
-        setOnEvent(async (subId, event, info) => {
-            const isTreeRoot = isTreeRootEvent(event);
-            if (isTreeRoot) {
-                try {
-                    await handleTreeRootEvent(event);
-                }
-                catch (err) {
-                    console.warn('[Worker] Failed to handle tree root event:', err);
-                }
-            }
-            // Forward to main thread
+        setOnEvent((subId, event, info) => {
+            // Forward to main thread first: delivery never waits on root persistence.
             respond({ type: 'event', subId, event, info });
+            if (isTreeRootEvent(event)) {
+                handleTreeRootEvent(event).catch((err) => {
+                    console.warn('[Worker] Failed to handle tree root event:', err);
+                });
+            }
             // Route to SocialGraph handler (all socialgraph-* subscriptions)
             if (subId.startsWith('socialgraph-') && (event.kind === KIND_CONTACTS || event.kind === 10000)) {
                 handleSocialGraphEvent(event);
@@ -890,6 +942,7 @@ async function handleSetIdentity(id, pubkey, nsec) {
         return;
     }
     const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
+    cancelFollowDistanceRefresh();
     stopSocialGraphSubscriptions();
     socialGraphLoading = false;
     graphCatchupGeneration++;
@@ -914,7 +967,7 @@ async function handleSetIdentity(id, pubkey, nsec) {
     }
     setupSocialGraphSubscription(pubkey);
     configureGraphCatchup();
-    notifySocialGraphVersionUpdate();
+    notifySocialGraphVersionUpdate(socialGraphDirty);
     console.log('[Worker] SocialGraph root updated:', pubkey.slice(0, 16) + '...');
     // Reinitialize Blossom with new signer and progress callback
     if (_config?.blossomServers && _config.blossomServers.length > 0) {
@@ -968,10 +1021,22 @@ function createBlobRouter(primary) {
         requestTimeoutMs: REMOTE_READ_TIMEOUT_MS,
     });
 }
+/**
+ * Concurrent reads of one hash share a single router search, so a block that
+ * several readers need at once is looked up and downloaded once.
+ */
+function readRoutedBlob(router, hash) {
+    let reads = sharedBlobReads.get(router);
+    if (!reads) {
+        reads = new InFlightReads(copyBlobBytes);
+        sharedBlobReads.set(router, reads);
+    }
+    return reads.read(toHex(hash), () => router.get(hash, ['idb']));
+}
 function createRoutedStore(primary, router) {
     return {
         put: (hash, data) => primary.put(hash, data),
-        get: (hash) => router.get(hash, ['idb']),
+        get: (hash) => readRoutedBlob(router, hash),
         has: (hash) => primary.has(hash),
         delete: (hash) => primary.delete(hash),
     };
@@ -981,6 +1046,7 @@ function emitBlossomBandwidthSnapshot() {
 }
 async function handleClose(id) {
     graphLifecycleGeneration++;
+    cancelFollowDistanceRefresh();
     stopSocialGraphSubscriptions();
     socialGraphLoading = false;
     cancelGraphBootstrap();
@@ -1022,7 +1088,7 @@ async function handleGet(id, hash) {
         respond({ type: 'result', id, error: 'Store not initialized' });
         return;
     }
-    const data = await blobRouter.get(hash, ['idb']);
+    const data = await readRoutedBlob(blobRouter, hash);
     if (data) {
         const transferableData = cloneTransferableBytes(data);
         respondWithTransfer({ type: 'result', id, data: transferableData }, [transferableData.buffer]);
@@ -1210,7 +1276,7 @@ async function handleSetTreeRootCache(message) {
             throw new Error('Invalid tree root cache source');
         }
         if ((source === 'remote' || updatedAt !== undefined)
-            && (!Number.isSafeInteger(updatedAt) || updatedAt < 0)) {
+            && (updatedAt === undefined || !Number.isSafeInteger(updatedAt) || updatedAt < 0)) {
             throw new Error('Tree root cache requires a nonnegative integer timestamp');
         }
         await setCachedRoot(npub, treeName, { hash, key }, visibility, {
@@ -1418,6 +1484,7 @@ async function changeSocialGraphRoot(pubkey) {
     if (pubkey === socialGraph.getRoot())
         return true;
     const lifecycle = ++graphLifecycleGeneration, wasLoading = socialGraphLoading;
+    cancelFollowDistanceRefresh();
     stopSocialGraphSubscriptions();
     socialGraphLoading = false;
     cancelGraphBootstrap();
@@ -1437,14 +1504,14 @@ async function changeSocialGraphRoot(pubkey) {
     }
     setupSocialGraphSubscription(pubkey);
     configureGraphCatchup();
-    notifySocialGraphVersionUpdate();
+    notifySocialGraphVersionUpdate(socialGraphDirty);
     return true;
 }
 async function handleInitSocialGraph(id, rootPubkey) {
     try {
         if (rootPubkey && !await changeSocialGraphRoot(rootPubkey))
             return;
-        const size = socialGraph.size();
+        const size = socialGraph.size().users;
         respond({ type: 'socialGraphInit', id, version: socialGraphVersion, size });
     }
     catch (err) {
@@ -1463,13 +1530,14 @@ async function handleSetSocialGraphRoot(id, pubkey) {
 }
 function handleSocialGraphEvents(id, events) {
     try {
-        let updated = false;
+        let changed = false;
         for (const event of events) {
-            socialGraph.handleEvent(event);
-            updated = true;
+            if (socialGraph.handleEvent(event))
+                changed = true;
         }
-        if (updated) {
+        if (changed) {
             notifySocialGraphVersionUpdate();
+            scheduleFollowDistanceRefresh();
         }
         respond({ type: 'void', id });
     }
@@ -1515,7 +1583,7 @@ function handleGetFollowers(id, pubkey) {
 }
 function handleGetFollowedByFriends(id, pubkey) {
     try {
-        const friendsFollowing = socialGraph.getFollowedByFriends(pubkey);
+        const friendsFollowing = socialGraph.followedByFriends(pubkey);
         respond({ type: 'pubkeyList', id, pubkeys: Array.from(friendsFollowing) });
     }
     catch (err) {
@@ -1524,7 +1592,7 @@ function handleGetFollowedByFriends(id, pubkey) {
 }
 function handleGetSocialGraphSize(id) {
     try {
-        const size = socialGraph.size();
+        const size = socialGraph.size().users;
         respond({ type: 'socialGraphSize', id, size });
     }
     catch (err) {
@@ -1650,6 +1718,7 @@ function handleSocialGraphEvent(event) {
             }
         }
         notifySocialGraphVersionUpdate();
+        scheduleFollowDistanceRefresh();
     }
 }
 /**

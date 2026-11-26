@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/worker",
-  "version": "0.4.33",
+  "version": "0.4.34",
   "description": "Modular browser worker for hashtree blob caching, tree-root state, and Blossom connectivity",
   "type": "module",
   "main": "dist/index.js",
@@ -96,8 +96,8 @@
     "@msgpack/msgpack": "^3.1.2",
     "dexie": "4.4.2",
     "nostr-tools": "^2.23.3",
-    "nostr-pubsub": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.40/nostr-pubsub-0.5.40.tgz",
-    "@hashtree/nostr-pubsub": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.52/hashtree-nostr-pubsub-0.1.11.tgz"
+    "nostr-pubsub": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.42/nostr-pubsub-0.5.42.tgz",
+    "@hashtree/nostr-pubsub": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.53/hashtree-nostr-pubsub-0.1.12.tgz"
   },
   "peerDependencies": {
     "nostr-social-graph": ">=4.2.5"
@@ -110,7 +110,7 @@
   "devDependencies": {
     "nostr-pubsub-reconcile": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-reconcile-ts-v0.1.2/nostr-pubsub-reconcile-0.1.2.tgz",
     "fake-indexeddb": "^6.2.5",
-    "nostr-social-graph": "https://github.com/mmalmi/nostr-social-graph/releases/download/v4.2.5/nostr-social-graph-4.2.5.tgz",
+    "nostr-social-graph": "https://github.com/mmalmi/nostr-social-graph/releases/download/v4.2.6/nostr-social-graph-4.2.6.tgz",
     "typescript": "^5.3.0",
     "vitest": "^4.1.10"
   }

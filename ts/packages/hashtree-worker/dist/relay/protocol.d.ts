@@ -222,6 +222,7 @@ export type WorkerRequest = {
 } | {
     type: 'republishTrees';
     id: string;
+    prefix?: string;
 } | {
     type: 'republishTree';
     id: string;
@@ -267,6 +268,14 @@ export type WorkerRequest = {
     type: 'getSocialGraphSize';
     id: string;
 } | {
+    type: 'fetchUserFollows';
+    id: string;
+    pubkey: string;
+} | {
+    type: 'fetchUserFollowers';
+    id: string;
+    pubkey: string;
+} | {
     type: 'signed';
     id: string;
     event?: SignedEvent;
@@ -306,11 +315,19 @@ export interface WorkerConfig {
     blossomServers?: BlossomServerConfig[];
     pubkey: string;
     nsec?: string;
+    /** Keep incoming events in local IndexedDB indexes; existing portable history and the outbox stay readable. */
+    indexedEventCache?: boolean;
     storeName?: string;
     /** Set false to disable bounded public follow/mute catch-up on the configured relays. */
     graphReconciliation?: boolean;
-    /** Explicitly allow the fixed public HTTP seed when no local graph is retained. Defaults to false. */
+    /** Allow signed public discovery only when no graph is retained. Defaults to false. */
     graphBootstrap?: boolean;
+    /** App-bundled seed, verified against its shipped receipt before the signed update.
+     * Ignored unless graphBootstrap is true and no local graph is retained. */
+    graphBootstrapFallback?: {
+        url: string;
+        receipt: import('nostr-social-graph/mobileGraphSnapshot').MobileGraphReceipt;
+    };
     /** Opt-in background NIP-77 recovery against the worker's retained event store. */
     reconciliation?: Omit<RuntimeReconciliationOptions, 'fetch'>;
 }
@@ -470,6 +487,10 @@ export type WorkerResponse = {
     type: 'socialGraphSize';
     id: string;
     size: number;
+    error?: string;
+} | {
+    type: 'ack';
+    id: string;
     error?: string;
 } | {
     type: 'signEvent';

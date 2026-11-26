@@ -43,6 +43,14 @@ export declare function subscribeToTreeRoots(pubkeyHex: string): () => void;
  * Unsubscribe from tree roots for a specific pubkey
  */
 export declare function unsubscribeFromTreeRoots(pubkeyHex: string): void;
+/**
+ * Accept a tree root event without waiting on the store.
+ *
+ * Events that carry nothing new for the cached root are dropped at once.
+ * Otherwise the newest event per tree is applied to the in-memory cache and
+ * reported, and its snapshot and root record are persisted in grouped
+ * writes. The returned promise resolves once that persistence has finished.
+ */
 export declare function handleTreeRootEvent(event: SignedEvent): Promise<void>;
 /**
  * Check if an event is a tree root event

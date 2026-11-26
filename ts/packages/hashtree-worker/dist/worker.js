@@ -12,6 +12,7 @@ import { isTransientMediaReadError, MEDIA_READ_RETRY_DELAYS_MS, readFileStreamWi
 import { streamFileRangeChunks } from './mediaStreaming.js';
 import { parseHttpByteRange } from './httpRange.js';
 import { cloneTransferableBytes } from './transferableBytes.js';
+import { InFlightReads } from './inFlightReads.js';
 import { P2PBridge } from './p2pBridge.js';
 import { P2PPeerRoutes } from './p2pPeerRoutes.js';
 const DEFAULT_STORE_NAME = 'hashtree-worker';
@@ -292,11 +293,32 @@ function toBlobSource(sourceId) {
             ? 'blossom'
             : 'p2p';
 }
-async function loadBlobData(hashHex, options = {}) {
-    if (!blobRouter)
-        return null;
+const sharedBlobLoads = new WeakMap();
+/**
+ * Concurrent loads of one hash with identical read options share a single
+ * router search. Loads with different source selections stay separate, so a
+ * restricted read never receives bytes found through a broader one.
+ */
+function loadBlobData(hashHex, options = {}) {
+    const router = blobRouter;
+    if (!router)
+        return Promise.resolve(null);
+    let loads = sharedBlobLoads.get(router);
+    if (!loads) {
+        loads = new InFlightReads((loaded) => loaded && { ...loaded, data: loaded.data.slice() });
+        sharedBlobLoads.set(router, loads);
+    }
+    const key = JSON.stringify([
+        hashHex,
+        options.skipPrimary === true,
+        options.htl ?? null,
+        options.sourceIds ?? null,
+    ]);
+    return loads.read(key, () => loadRoutedBlobData(router, hashHex, options));
+}
+async function loadRoutedBlobData(router, hashHex, options) {
     const targetStorage = storage;
-    const result = await blobRouter.getDetailed(fromHex(hashHex), toRouterOptions(options));
+    const result = await router.getDetailed(fromHex(hashHex), toRouterOptions(options));
     if (!result) {
         emitDiagnostic('debug', 'mesh', 'blob-load-miss', 'Blob was not available from any source', {
             hashHex: hashHex.slice(0, 16),

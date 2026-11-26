@@ -5,6 +5,7 @@ export const DEFAULT_ROOT_RESOLVE_TIMEOUT_MS = 15_000;
 export const DEFAULT_ROOT_RESOLVE_SETTLE_MS = 500;
 const MAX_TREE_ROOT_EVENTS = 8;
 const DEFAULT_ROOT_RESOLVE_RELAYS = [
+    'wss://relay.ditto.pub',
     'wss://relay.damus.io',
     'wss://relay.primal.net',
     'wss://relay.nostr.band',
@@ -13,10 +14,7 @@ const DEFAULT_ROOT_RESOLVE_RELAYS = [
 function withUniqueRelays(relays) {
     const seen = new Set();
     const result = [];
-    const configuredRelays = (relays ?? []).map((relay) => relay.trim()).filter(Boolean);
-    const relayCandidates = configuredRelays.length > 0
-        ? configuredRelays
-        : DEFAULT_ROOT_RESOLVE_RELAYS;
+    const relayCandidates = relays === undefined ? DEFAULT_ROOT_RESOLVE_RELAYS : relays;
     for (const relay of relayCandidates) {
         const normalized = relay.trim();
         if (!normalized || seen.has(normalized))

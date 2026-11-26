@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.53 - 2026-11-26
+
+- FIPS transport 0.5.4 stops connection and stream work when its caller cancels,
+  without interrupting independent requests. It retains bounded direct retries,
+  per-lookup miss tracking, and hash verification before returning or caching bytes.
+- Nostr pubsub adapter 0.1.12 stops an injected verifier when the query timer
+  expires, even if the wall clock has not yet reached the deadline.
+- FIPS transport uses FIPS runtime 0.0.66, including its 64-hop discovery budget
+  and correction for malformed retained peer announcements. Transport, adapter,
+  and worker 0.4.34 pin nostr-pubsub 0.5.42. Worker checks use social graph 4.2.6.
+
 ## TypeScript runtime 0.5.52 - 2026-11-22
 
 - FIPS transport 0.5.3 uses the authenticated Nostr key to count peers reached

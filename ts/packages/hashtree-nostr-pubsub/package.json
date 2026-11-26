@@ -1,6 +1,6 @@
 {
   "name": "@hashtree/nostr-pubsub",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Hashtree Nostr event-index reader for nostr-pubsub",
   "type": "module",
   "main": "dist/index.js",
@@ -44,7 +44,7 @@
   "dependencies": {
     "@hashtree/core": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-core-0.4.0.tgz",
     "@hashtree/nostr": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-nostr-0.2.6.tgz",
-    "nostr-pubsub": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.40/nostr-pubsub-0.5.40.tgz"
+    "nostr-pubsub": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.42/nostr-pubsub-0.5.42.tgz"
   },
   "peerDependencies": {
     "nostr-tools": ">=2.18.2 <3"
