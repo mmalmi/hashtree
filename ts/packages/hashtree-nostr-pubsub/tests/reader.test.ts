@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   MemoryStore,
   type CID,
@@ -437,6 +437,44 @@ describe('HashtreeNostrEventReader', () => {
 
     await expect(query).rejects.toMatchObject({ name: 'TimeoutError' });
     await stopped;
+  });
+
+  it('stops the verifier when the query timer expires before the wall clock deadline', async () => {
+    const index = await buildIndex([event(aliceKey, 10)]);
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    const timers = vi.spyOn(globalThis, 'setTimeout');
+    const now = Date.now();
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    const deadline = now + 100;
+    let markStarted!: () => void;
+    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    let verifierSignal: AbortSignal | undefined;
+    try {
+      const reader = new HashtreeNostrEventReader({
+        store: index.store,
+        roots: index.root,
+        verifyEvents: async (_events, context) => {
+          verifierSignal = context.signal;
+          markStarted();
+          return await new Promise<boolean[]>((_resolve, reject) => {
+            context.signal!.addEventListener('abort', () => reject(context.signal!.reason), { once: true });
+          });
+        },
+      });
+      const query = reader.query([{}], { deadline });
+      await started;
+      // Timers use a monotonic clock; the wall clock can still be before deadline.
+      // Deliver the query timeout before the separately scheduled verifier timer.
+      const timeout = timers.mock.calls.at(-1)?.[0];
+      expect(timeout).toBeTypeOf('function');
+      (timeout as () => void)();
+      await expect(query).rejects.toMatchObject({ name: 'TimeoutError' });
+      expect(verifierSignal?.aborted).toBe(true);
+      expect(verifierSignal?.reason).toMatchObject({ name: 'TimeoutError' });
+    } finally {
+      vi.restoreAllMocks();
+      vi.useRealTimers();
+    }
   });
 
   it('does not invoke the verifier after the query deadline has elapsed', async () => {

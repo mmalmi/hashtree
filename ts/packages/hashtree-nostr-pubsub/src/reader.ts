@@ -41,7 +41,7 @@ interface PartitionResult {
 
 interface VerifierCancellation {
   signal?: AbortSignal;
-  dispose(): void;
+  dispose(reason?: unknown): void;
 }
 
 const DEFAULT_LOCAL_INDEX_PRIORITY = 300;
@@ -215,6 +215,7 @@ export class HashtreeNostrEventReader implements NostrEventReaderContract {
 
     const verifierCancellation = createVerifierCancellation(cancellation);
     let validity: readonly boolean[];
+    let verificationError: unknown;
     try {
       cancellation.throwIfCancelled();
       validity = await cancellation.wait(Promise.resolve(this.verifyEvents(
@@ -226,11 +227,12 @@ export class HashtreeNostrEventReader implements NostrEventReaderContract {
       )));
       cancellation.throwIfCancelled();
     } catch (error) {
+      verificationError = error;
       cancellation.throwIfCancelled();
       if (isCancellationError(error) || cancellation.signal?.aborted) throw error;
       throw new HashtreeNostrVerifierUnavailableError(error);
     } finally {
-      verifierCancellation.dispose();
+      verifierCancellation.dispose(verificationError);
     }
 
     try {
@@ -283,11 +285,13 @@ function createVerifierCancellation(
 
   return {
     signal: controller.signal,
-    dispose() {
+    dispose(reason) {
       clearTimeout(timer);
       sourceSignal?.removeEventListener('abort', abortFromSource);
-      if (!controller.signal.aborted && Date.now() >= deadline) {
-        controller.abort(verifierDeadlineError());
+      // The query timer can expire before the wall clock reaches its deadline.
+      // Preserve that cancellation when retiring the verifier's separate timer.
+      if (!controller.signal.aborted && (isCancellationError(reason) || Date.now() >= deadline)) {
+        controller.abort(isCancellationError(reason) ? reason : verifierDeadlineError());
       }
     },
   };

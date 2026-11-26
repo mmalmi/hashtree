@@ -4290,3 +4290,13 @@ remote before resolving local refs. Existing explicit repair behavior is unchang
 Nine standalone root-discovery cases and four focused push checks pass. Quiet
 new-repository pushes can take longer because they again observe the remote before
 writing; a short quiet window cannot establish that a repository does not exist.
+
+## 2026-11-26: Propagate an elapsed query timer to its verifier
+
+The Nostr reader's existing deadline test exposed a timer-ordering race. The
+query could return a timeout while its injected verifier remained active: cleanup
+cancelled the verifier's separate timer while the wall clock was still before the
+deadline. A deterministic check delivers the query timer first with the wall clock
+held before that deadline. It failed before the fix and now observes the verifier's
+abort signal and timeout reason. All 29 adapter tests, type checks, and lint pass.
+This corrects existing reader behavior and does not change query deadlines.
