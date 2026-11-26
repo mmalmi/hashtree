@@ -10,7 +10,7 @@ async function run(name,cwd,args){
  writeFileSync('/stage/evidence/diagnosis.json',JSON.stringify(results,null,2));
  console.log(name,status);return status;
 }
-for(const name of ['baseline','app']){
+for(const name of ['app']){
  const cwd='/stage/'+name;
  if(await run(name+'-install',cwd,['pnpm','install','--frozen-lockfile'])!==0)process.exit(1);
  await run(name+'-issue-owner',cwd,['pnpm','exec','playwright','test','e2e/git-collaboration-privacy.spec.ts','-g','repository owner can close','--retries=0','--max-failures=1']);
