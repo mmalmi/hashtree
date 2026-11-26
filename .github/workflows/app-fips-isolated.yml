@@ -1,35 +1,37 @@
-name: Fresh git runtime61 complete release qualification
+name: Iris Git reviewed fixes qualification
 on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: iris-git-review-fixes
+  cancel-in-progress: false
 jobs:
   qualify:
-    strategy:
-      fail-fast: false
-      max-parallel: 2
-      matrix:
-        app: [git]
     runs-on: ubuntu-24.04
     timeout-minutes: 70
-    env:
-      FIPS_APPS: ${{ matrix.app }}
     steps:
-      - name: Set task-exclusive stage
-        run: echo "FIPS_STAGE=$RUNNER_TEMP/app-graph404-${{ matrix.app }}" >> "$GITHUB_ENV"
+      - name: Set stage
+        run: echo "FIPS_STAGE=$RUNNER_TEMP/iris-git-review-fixes" >> "$GITHUB_ENV"
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
-      - name: Prepare pinned inputs before isolation
-        run: timeout --signal=TERM --kill-after=15s 900s python3 fixtures/app-fips-isolated/controller.py prepare
-      - name: Build and qualify after independent unsigned denial controls
-        run: timeout --signal=TERM --kill-after=15s 3090s python3 fixtures/app-fips-isolated/controller.py test
-      - name: Preserve logs and exact qualified distribution
+      - name: Prepare verified immutable inputs
+        run: python3 fixtures/git-review-fixes/prepare.py
+      - name: Run focused red and green checks within existing lane limits
+        run: |
+          IMAGE=mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9
+          docker pull "$IMAGE"
+          test "$(df --output=avail -B1 "$FIPS_STAGE" | tail -1)" -gt 8589934592
+          SOURCE_DATE_EPOCH=$(python3 -c 'import json;print(json.load(open("fixtures/git-review-fixes/manifest.json"))["epoch"])')
+          timeout --signal=TERM --kill-after=15s 3600s docker run --rm --name iris-git-review-fixes --cpus 2 --memory 4g --memory-swap 4g --pids-limit 512 --shm-size 512m --init --cap-drop ALL --security-opt no-new-privileges --user "$(id -u):$(id -g)" --mount "type=bind,src=$FIPS_STAGE,dst=/stage" --workdir /stage/app -e HOME=/stage/home -e PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin -e PLAYWRIGHT_BROWSERS_PATH=/ms-playwright -e PW_WORKERS=1 -e NODE_OPTIONS=--max-old-space-size=1024 -e DEBUG=pw:webserver -e PW_APP_PORT=49173 -e CI=true -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" -e HTREE_BIN=/stage/tools/native/hashtree/htree -e GIT_REMOTE_HTREE_BIN=/stage/tools/native/hashtree/git-remote-htree "$IMAGE" node /stage/qualify.mjs
+      - name: Preserve exact artifact and test evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: app-graph404-${{ matrix.app }}-${{ github.sha }}
-          path: ${{ runner.temp }}/app-graph404-${{ matrix.app }}/evidence
+          name: iris-git-review-fixes-${{ github.sha }}
+          path: |
+            ${{ runner.temp }}/iris-git-review-fixes/evidence
+            ${{ runner.temp }}/iris-git-review-fixes/app/test-results
           if-no-files-found: error
           retention-days: 7
-          include-hidden-files: true
