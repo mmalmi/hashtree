@@ -7,6 +7,7 @@ for (const [name,args] of [ ['lock',['install','--lockfile-only','--no-frozen-lo
  const r=spawnSync('pnpm',args,{stdio:['ignore',fd,fd],env:process.env,timeout:300000});closeSync(fd);
  steps.push({name,status:r.status});
  writeFileSync('/stage/evidence/lock-generation.json',JSON.stringify({source:JSON.parse(readFileSync('/stage/manifest.json')).source,steps},null,2));
+ if(name==='lock' && r.status===0){const check=spawnSync('python3',['/stage/verify-cohort.py','lock'],{stdio:'inherit'});copyFileSync('pnpm-lock.yaml','/stage/evidence/pnpm-lock.yaml');if(check.status!==0)process.exit(1);}
  if(r.status!==0){console.log(readFileSync(`/stage/evidence/${name}.log`,'utf8'));process.exit(1);}
 }
 copyFileSync('pnpm-lock.yaml','/stage/evidence/pnpm-lock.yaml');

@@ -21,7 +21,7 @@ extract(HERE/'baseline.tar.gz',STAGE/'baseline')
 for name in ['pnpm','native']:
  file=STAGE/(name+'.tgz');fetch(M[name],file);extract(file,STAGE/'tools'/name)
 for name,sha in M['native']['executables'].items():assert digest(STAGE/'tools/native/hashtree'/name)==sha
-for file in ['qualify.mjs','manifest.json','consumer-pins.json']:
+for file in ['qualify.mjs','manifest.json','consumer-pins.json','verify-cohort.py']:
  shutil.copyfile(HERE/file,STAGE/file)
 wrapper=STAGE/'tools/bin/pnpm'
 wrapper.write_text('#!/bin/sh\nexec node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');wrapper.chmod(0o755)
