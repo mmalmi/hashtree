@@ -1,0 +1,148 @@
+{
+  "status": "RELEASE ACCEPTED: exact public archives and npm bytes verified; consumer owners may adopt under existing product gates/holds",
+  "source": "7d82faefc71cba160f417f8588c667b611383016",
+  "tag": "hashtree-ts-runtime-v0.5.53",
+  "packages": {
+    "@hashtree/core": {
+      "version": "0.4.2",
+      "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.42/hashtree-core-0.4.2.tgz",
+      "sha256": "9d6b87aa9503d793c4cad53c3cffa66cd5372fd87c70e194ddbbc968ffda168b",
+      "integrity": "sha512-9gPIe39QJoCUtVo8VhbDOX5bHAtGlJ2EZlQJqKh3l9++2CY1Njg2LINXQWBgKRqB0P2LBKoDpyYz1XIBoJ/SMw=="
+    },
+    "@hashtree/index": {
+      "version": "0.1.15",
+      "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-index-0.1.15.tgz",
+      "sha256": "f2d76a8c5245d29fa1f3a099be9db605ebb0568c10b77e3b95a4ebf39d1e80ef",
+      "integrity": "sha512-EnXs4hE0fxCzQfruEsjO9YVBTpzb3Rr1k1vF6p7gLgpZ2oIEg4DEv/pZji9uj7/qJYqOa+EsZTjA0lT0SZozdA=="
+    },
+    "@hashtree/collection": {
+      "version": "0.2.11",
+      "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-collection-0.2.11.tgz",
+      "sha256": "587d5a7bdacb0bb1c8f29507f86afb1e278ff8ef9b1c685eff9255f596365f23",
+      "integrity": "sha512-FI6cVBneXSgOEAEeZH6Yv12eC+pZpG2kTCHc9Bt4+bW6Vu0nVNo5V3Gtt5Dk9p8l7G47sq/R9CBbo6A0D+dVwA=="
+    },
+    "@hashtree/dexie": {
+      "version": "0.1.15",
+      "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.46/hashtree-dexie-0.1.15.tgz",
+      "sha256": "aede1fd3e0fcb86d237edd5b3dc3a63161d14ac12d78aa5e224f61379b376155",
+      "integrity": "sha512-YPn2gh0QQQRMcZY3zYmkycLqBjKJhA8GEmWq2/LPSbD0441YEQPCkWvTfAgRUsXA+gvjxB51tvqev1caXylp8A=="
+    },
+    "@hashtree/git": {
+      "version": "0.1.10",
+      "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-git-0.1.10.tgz",
+      "sha256": "d522cd415aeb119d5ff963ae80f132037056804a1da27d6f4e49c80f4a81c891",
+      "integrity": "sha512-fhSXJCF6h6iG9d3PYFehptTDAYda8fCgfy/DhunKiRzj8UAsDa1LufFOf4l+EC4QdsBXi3btr+U6F1SNRIK4cA=="
+    },
+    "@hashtree/merge": {
+      "version": "0.1.2",
+      "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.7/hashtree-merge-0.1.2.tgz",
+      "sha256": "10c2773cf7a053bd4cf0258a501407e62a9b1ab85deafe156b240d1441aa79fe",
+      "integrity": "sha512-TYivnXdItDtgt8YphIxpzWMPs3k620FS8mpz9hywSiGE820gIGSDxpoGI4PtfCVLI3UTRXupOtjRP8QAg6G5iw=="
+    },
+    "@hashtree/mesh": {
+      "version": "0.3.3",
+      "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.27/hashtree-mesh-0.3.3.tgz",
+      "sha256": "c5f900bd31ad0cfb126bdd5797fc7660f569d2b8fed5b349bcda7248463eee3d",
+      "integrity": "sha512-fiLvKjbEO1J/fuj6wcLGjI3RPsPrGgSuc2O+QqN/vX3OSHI7uPS+feH49vFduUMHYM79Yvsrq6MV2XDUiGq59A=="
+    },
+    "@hashtree/nostr": {
+      "version": "0.2.7",
+      "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.40/hashtree-nostr-0.2.7.tgz",
+      "sha256": "36ef662470e349af9e8a51d8b4a67ac7fffa7bb36a19b82e38c05bc4bd54040d",
+      "integrity": "sha512-ah0pS1PDckTkz/QntsNn9D9aFPcJWb7BDjBvaVtY9gaWryiWMvXv0QaGbTU5aGIqRd32BLmnojNDXHPJ/IkIhQ=="
+    },
+    "@hashtree/fips-transport": {
+      "version": "0.5.4",
+      "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.53/hashtree-fips-transport-0.5.4.tgz",
+      "sha256": "b95bae2fceee48d45ddb945b309872e9c096230853a82c8298d24358f98b22f8",
+      "integrity": "sha512-gLIkAlZxL5Wm44VZwujDY7/qiu5nNBiaTp+r+tIt/Ujh9fWM7h1THZgXS3k6uZuHxEKGo89zCKg1DsGzFLMGAQ=="
+    },
+    "@hashtree/nostr-pubsub": {
+      "version": "0.1.12",
+      "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.53/hashtree-nostr-pubsub-0.1.12.tgz",
+      "sha256": "8064f860e7e189a120bc9d723ab3a50675fcaf90be545b325b7ec027630c15fc",
+      "integrity": "sha512-nwn5lRLx9RqVLFmsDmLc/eXq43L46DcSBecrYqu4Lh2lMe6VLDaL8LkqPdfmAnSUMqyfmePYT/OVsNqBdYG7Nw=="
+    },
+    "@hashtree/worker": {
+      "version": "0.4.34",
+      "url": "https://github.com/mmalmi/hashtree/releases/download/hashtree-ts-runtime-v0.5.53/hashtree-worker-0.4.34.tgz",
+      "sha256": "a894b9b0f35a982fc23fb1d2bff89deb61c1083f351c5966ac77ca74f2e51339",
+      "integrity": "sha512-ULYVXSmGJl2+1n+5JoYkdsZJQN7nq5JXNRGtkqPpkVoBjzSC1SGHQKVtgLi5qt2u5C6mRwVHdl6r3jfJQHIBAA=="
+    },
+    "@fips/core": {
+      "version": "0.0.61",
+      "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.66/fips-core-0.0.61.tgz",
+      "sha256": "a58d333616a2ef9287c64216704d0f8f459a92b7a168dbffd8aed15417efa125",
+      "integrity": "sha512-r85Uz4ptVFAlxD10xe+XWx34uZbUG9rLyo9bHYgYbOQ8uVg/DEc55jb2RmkQ2VWx6YUUSsRn7W4Rq4ArD7iyNQ=="
+    },
+    "@fips/browser": {
+      "version": "0.0.26",
+      "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.66/fips-browser-0.0.26.tgz",
+      "sha256": "bcdfbcf26f830817b8ad07d2160227d89f648cde8986dc2feaea54a899a6d0ae",
+      "integrity": "sha512-L8kguXxpwMqdgPy+UOFUSk0CZRrsPX08bbOoomiwOHC0TzKaNfp+V4dxXTClTAITqOIQOie9KLlMMRKFb7UcZg=="
+    },
+    "@fips/transport-ethernet": {
+      "version": "0.0.43",
+      "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.66/fips-transport-ethernet-0.0.43.tgz",
+      "sha256": "a6bdca5998cb26a7089fc8ef8caf380c140e45f8ccaed5006a2d0edabf0d8255",
+      "integrity": "sha512-pvpU7NvXkrLiEfp34/8t+ttfOHfjeb2K8IMgd36LxSvY4CAx/X4t17fOd3FDOV4WidJJKhhVlKQEgqsbuzvCiA=="
+    },
+    "@fips/transport-memory": {
+      "version": "0.0.21",
+      "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.66/fips-transport-memory-0.0.21.tgz",
+      "sha256": "3e24b6a92852a4d46c4cafe4f7c7b2b79055bfbb8451d88abfe03cbf01e04d68",
+      "integrity": "sha512-btRHy8QkDR4rwhW4JhEMDmjfbXJZulE6vvrdLH2939joB3i8buGrCY3kFmglp6Z7vRoa/PER3A/zu67RHdei5w=="
+    },
+    "@fips/transport-webrtc": {
+      "version": "0.0.65",
+      "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.66/fips-transport-webrtc-0.0.65.tgz",
+      "sha256": "24021ee8fd3d4d027d0bd6338d00f3cdab1e3390d3d177bb4a2afd53f952c6e3",
+      "integrity": "sha512-EV0S9/8gjIrgHQFlCDDkxDQYzPe3UPMOoGo0Gbz5soQuAZkFWN53bwGDu6dfcRT0LJKT1Hku9ds1+rr2GqVU7g=="
+    },
+    "@fips/transport-websocket": {
+      "version": "0.0.19",
+      "url": "https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.66/fips-transport-websocket-0.0.19.tgz",
+      "sha256": "1d84ad1916e20605e51f0cde4cacb5e0ee2dda0e99684339e1f7b34533478c75",
+      "integrity": "sha512-wUOCsTkRMr16x0yjEy1OEqD10c4Znq/P7cVeG2bcZPANbMznkbBsk33otGaQGPdTS68bX36lW278WaKbtSjwqg=="
+    },
+    "nostr-pubsub": {
+      "version": "0.5.42",
+      "url": "https://github.com/mmalmi/nostr-pubsub/releases/download/nostr-pubsub-ts-v0.5.42/nostr-pubsub-0.5.42.tgz",
+      "sha256": "8181645e74f3e5971a7bef55cceab24c0cee882b0a8eacc9c89657a03729a523",
+      "integrity": "sha512-kuEV8FVRU3zPtwTgG95JhztEkPBPV4wQ8Jv+pD6EHF/UfKS/3RpsB/q/+yd6ms9CM/obdbh6xNItOUrSvvBusw=="
+    },
+    "nostr-social-graph": {
+      "version": "4.2.6",
+      "url": "https://github.com/mmalmi/nostr-social-graph/releases/download/v4.2.6/nostr-social-graph-4.2.6.tgz",
+      "sha256": "cf4886537524813cc6e2f0dbcdd962d573a7552c8025dd3cbcd53c46b865dd7f",
+      "integrity": "sha512-JND4ImunW/tH8SotXjWqvgXH0sCEX2xYiRHwAWnBRN2zkDk0WPmMcrK3qBIztGML03uMv4Dfjl8M5K/ykBKz1A=="
+    },
+    "@fips/tcp": {
+      "version": "0.2.6",
+      "url": "https://github.com/mmalmi/fips-tcp/releases/download/fips-tcp-ts-v0.2.6/fips-tcp-0.2.6.tgz",
+      "sha256": "1945546264027dce605aaff4ff5cb535a56b847af263f90119d8cf691fa1b8d7",
+      "integrity": "sha512-lXQHNwTZEyXGYWqzRlNyKpb2UgNWJOon6HljbY1F1Ey49Q9IoE/kdF84gaTkrCpMPS8M/A6y5FTaFPOLl60+bw=="
+    }
+  },
+  "coherence": [
+    "Use the complete applicable cohort across direct and nested paths, including root/workspace overrides. Preserve unrelated pins and integrity values.",
+    "Worker0.4.34 was qualified with core0.4.2, dexie0.1.15, nostr0.2.7, adapter0.1.12, nostr-pubsub0.5.42 and graph4.2.6. Do not force its nested dependencies back to older overrides.",
+    "FIPS packages must stay in the accepted runtime66 cohort. TCP0.2.6 is unchanged and qualified against core0.0.61.",
+    "Existing newer dependencies or API adaptations need owner review; do not blindly downgrade them.",
+    "Graph-only products can adopt4.2.6 without Hashtree/FIPS. Pubsub-only TypeScript consumers already on0.5.42 need no redundant release.",
+    "Iris Kit uses compatible peers; no Iris Kit cohort release is required. Native binaries and existing product holds remain with their owners."
+  ],
+  "qualification": {
+    "core": 398,
+    "scriptTests": 7,
+    "fipsTransport": 72,
+    "worker": 313,
+    "workerOptionalSkipped": 1,
+    "adapter": 29,
+    "docsExamples": 19,
+    "realBrowserWebRtcBlobDelivery": true,
+    "all339PackageMembersVerified": true,
+    "unchangedCohortRuntimePayloadsMatched": 8
+  },
+  "acceptedReleaseUrl": "https://github.com/mmalmi/hashtree/releases/tag/hashtree-ts-runtime-v0.5.53"
+}
