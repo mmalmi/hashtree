@@ -11,6 +11,7 @@ fetch() {
   curl --fail --location --retry 2 --connect-timeout 10 --max-time 240 \
     --output "$root/downloads/$name" "$url"
   echo "$digest  $root/downloads/$name" | sha256sum --check --strict
+  echo "$digest  $name" >> "$root/archive-sha256.txt"
 }
 fetch node.tar.xz 48cc0e21e048790e54c0cf5749c2725005313d652651c40b7a21feb9697aaf75 \
   https://nodejs.org/dist/v24.22.2/node-v24.22.2-linux-x64.tar.xz
@@ -24,6 +25,7 @@ export PATH="$root/bin:$root/node-v24.22.2-linux-x64/bin:$PATH"
 printf '%s\n' "$root/node-v24.22.2-linux-x64/bin" "$root/bin" >> "$GITHUB_PATH"
 test "$(node --version)" = v24.22.2
 test "$(npm --version)" = 12.0.2
+{ node --version; npm --version; } > "$root/tool-versions.txt"
 [[ "$mode" == verify ]] || exit 0
 
 fetch pnpm.tgz a1cdd7b468386a9d78a081da05d6049d7e598db62a299db92df21a7062a4b183 \
@@ -45,6 +47,7 @@ for component in rustc cargo rust-std; do
   bash "$root/$archive/install.sh" --prefix="$root/rust" --disable-ldconfig
 done
 printf '%s\n' "$root/rust/bin" >> "$GITHUB_PATH"
+{ pnpm --version; "$root/rust/bin/rustc" --version; "$root/rust/bin/cargo" --version; } >> "$root/tool-versions.txt"
 
 # Extract the exact D-Bus headers and shared library without package hooks or
 # changing the runner. pkg-config, the C linker, and browser system libraries

@@ -56,6 +56,14 @@ jobs:
           pnpm test:browser
       - name: Check examples and build API reference
         run: node scripts/check-doc-examples.mjs && pnpm docs:api
+      - name: Retain verified tool and system inventories
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: typescript-release-tools
+          path: ${{ runner.temp }}/hashtree-ts-tools/*.txt
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: npm-packages
