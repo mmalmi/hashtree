@@ -1,7 +1,8 @@
 import pathlib,tarfile,hashlib,json
 archive=pathlib.Path('/stage/nostr-pubsub-0.5.42.tgz')
 assert hashlib.sha256(archive.read_bytes()).hexdigest()=='8181645e74f3e5971a7bef55cceab24c0cee882b0a8eacc9c89657a03729a523'
-packages=list(pathlib.Path('node_modules/.pnpm').glob('*/node_modules/nostr-pubsub/package.json'))
+references=list(pathlib.Path('node_modules/.pnpm').glob('*/node_modules/nostr-pubsub/package.json'))
+packages={p.resolve() for p in references}
 assert len(packages)==1, 'Expected exactly one verified nostr-pubsub package'
 for p in packages:
  assert json.loads(p.read_text())['version']=='0.5.42'
