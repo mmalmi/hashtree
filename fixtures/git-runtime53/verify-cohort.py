@@ -22,7 +22,7 @@ for name,s in pins.items():
   package=expected/'package'
   if name=='@fips/transport-webrtc':
    with (E/'verified-replay-patch.log').open('w') as log:
-    subprocess.run(['patch','--batch','--forward','-p1','-i',str(APP/'patches/fips-transport-webrtc-bounded-replay.patch')],cwd=package,stdout=log,stderr=log,check=True)
+    subprocess.run(['git','apply','--unsafe-paths',str(APP/'patches/fips-transport-webrtc-bounded-replay.patch')],cwd=package,stdout=log,stderr=log,check=True)
    record['patchSHA256']=digest((APP/'patches/fips-transport-webrtc-bounded-replay.patch').read_bytes())
   paths=list((APP/'node_modules/.pnpm').glob('*/node_modules/'+name+'/package.json'))
   canonical={p.resolve().parent for p in paths};assert len(canonical)==1,(name,canonical)

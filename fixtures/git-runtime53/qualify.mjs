@@ -53,6 +53,14 @@ function cases(report, requirePassed=false) {
 await run('install',['pnpm','install','--frozen-lockfile']);
 await run('installed-package',['python3','/stage/verify-cohort.py','installed']);
 await run('unit',['pnpm','run','test:unit']);
+// Same deterministic packed fixture, isolated storage, same runner and origin.
+await run('baseline-install',['pnpm','install','--frozen-lockfile'],{},'/stage/baseline');
+for(const [label,cwd] of [['before','/stage/baseline'],['after','/stage/app']]){
+  cpSync('/stage/runtime53-performance.spec.ts',cwd+'/e2e/runtime53-performance.spec.ts');
+  const id='performance-'+label;
+  try{await run(id,['pnpm','exec','playwright','test','e2e/runtime53-performance.spec.ts','--retries=0','--reporter=list,json'],{PLAYWRIGHT_JSON_OUTPUT_FILE:`${evidence}/${id}.json`},cwd);}
+  finally{try{cpSync(cwd+'/test-results',`${evidence}/${id}-results`,{recursive:true});}catch{}}
+}
 const {createReleasePlan,parseArgs} = await import(pathToFileURL(resolve('scripts/release-site.mjs')));
 const plan = createReleasePlan(parseArgs(['git','--dry-run']));
 for(const step of plan.steps){
@@ -77,14 +85,6 @@ for(const step of plan.steps){
   writeFileSync(`${evidence}/test-2.log`,JSON.stringify(coverage,null,2)+'\n');
   result.steps.push({id:step.id,command:step.command,status:0,seconds:(Date.now()-started)/1000,logSha256:digest(`${evidence}/test-2.log`),coverage});
   save();console.log('All 97 browser cases passed across 8 fresh-server shards');
-}
-// Same deterministic packed fixture, isolated storage, same runner and origin.
-await run('baseline-install',['pnpm','install','--frozen-lockfile'],{},'/stage/baseline');
-for(const [label,cwd] of [['before','/stage/baseline'],['after','/stage/app']]){
-  cpSync('/stage/runtime53-performance.spec.ts',cwd+'/e2e/runtime53-performance.spec.ts');
-  const id='performance-'+label;
-  try{await run(id,['pnpm','exec','playwright','test','e2e/runtime53-performance.spec.ts','--retries=0','--reporter=list,json'],{PLAYWRIGHT_JSON_OUTPUT_FILE:`${evidence}/${id}.json`},cwd);}
-  finally{try{cpSync(cwd+'/test-results',`${evidence}/${id}-results`,{recursive:true});}catch{}}
 }
 const files={};
 function walk(directory,prefix=''){
