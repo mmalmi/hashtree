@@ -358,12 +358,43 @@ impl PoolStoreWithFallbacks {
         start: u64,
         end_inclusive: u64,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        if let Ok(Some(data)) = self.primary.get_range_sync(hash, start, end_inclusive) {
-            return Ok(Some(data));
+        let mut first_error = None;
+        match self.primary.get_range_sync(hash, start, end_inclusive) {
+            Ok(Some(data)) => return Ok(Some(data)),
+            Ok(None) => {}
+            Err(error) => first_error = Some(error),
         }
-        self.get_sync(hash)?
-            .map(|data| slice_blob_range(&data, start, end_inclusive))
-            .transpose()
+
+        for fallback in &self.fallbacks {
+            match fallback.get_sync(hash) {
+                Ok(Some(data)) if sha256(&data) == *hash => {
+                    return slice_blob_range(&data, start, end_inclusive).map(Some);
+                }
+                Ok(Some(_)) if first_error.is_none() => {
+                    first_error = Some(StoreError::Other(format!(
+                        "legacy fallback returned corrupt blob {}",
+                        to_hex(hash)
+                    )));
+                }
+                Ok(Some(_)) | Ok(None) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        if let Some(fallback) = &self.pool_read_fallback {
+            match fallback.store.get_sync(hash) {
+                Ok(Some(data)) => {
+                    return slice_blob_range(&data, start, end_inclusive).map(Some);
+                }
+                Ok(None) => {}
+                Err(error) if first_error.is_none() => first_error = Some(error),
+                Err(_) => {}
+            }
+        }
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(None),
+        }
     }
 
     fn blob_size_sync(&self, hash: &Hash) -> Result<Option<u64>, StoreError> {
@@ -1301,6 +1332,21 @@ impl LocalStore {
         }
     }
 
+    /// Get storage statistics, using bounded catalog accounting for large pools.
+    pub fn stats_bounded(&self, max_scan_entries: u64) -> Result<LocalStoreStats, StoreError> {
+        match self {
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(store) => {
+                let stats = store.stats_bounded(max_scan_entries)?;
+                Ok(LocalStoreStats {
+                    count: stats.count as usize,
+                    total_bytes: stats.bytes,
+                })
+            }
+            _ => self.stats(),
+        }
+    }
+
     /// Get storage statistics for the canonical writable store.
     pub fn writable_stats(&self) -> Result<LocalStoreStats, StoreError> {
         match self {
@@ -2062,6 +2108,23 @@ impl StorageRouter {
         let quota_used_bytes = match self.local.as_ref() {
             // These backends already counted the writable store. In particular,
             // avoid a second filesystem walk just to report the same size.
+            LocalStore::Fs(_) => inventory.total_bytes,
+            #[cfg(feature = "lmdb")]
+            LocalStore::Lmdb(_) => inventory.total_bytes,
+            #[cfg(feature = "lmdb")]
+            LocalStore::Pool(_) | LocalStore::ReadOnlyPool(_) => self.writable_stats()?.total_bytes,
+        };
+        Ok((inventory, quota_used_bytes))
+    }
+
+    /// Report bounded inventory alongside the bytes charged by retention so
+    /// live HTTP stats never scan a multi-GB pool catalog.
+    fn stats_with_quota_usage_bounded(
+        &self,
+        max_scan_entries: u64,
+    ) -> Result<(LocalStoreStats, u64), StoreError> {
+        let inventory = self.local.stats_bounded(max_scan_entries)?;
+        let quota_used_bytes = match self.local.as_ref() {
             LocalStore::Fs(_) => inventory.total_bytes,
             #[cfg(feature = "lmdb")]
             LocalStore::Lmdb(_) => inventory.total_bytes,

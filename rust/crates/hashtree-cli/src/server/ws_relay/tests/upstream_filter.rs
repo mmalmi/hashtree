@@ -64,8 +64,7 @@ async fn slow_relay_family_and_unverified_events_do_not_reach_the_client() -> Re
     let _silent_ipv6 =
         TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, delayed_address.port())).await?;
     let mut state = test_app_state(&tmp, relay.clone(), relay_url)?;
-    state
-        .nostr_relay_urls
+    Arc::make_mut(&mut state.nostr_relay_urls)
         .push(format!("ws://localhost:{}", delayed_address.port()));
 
     let client_id = 12_u64;
@@ -108,7 +107,8 @@ async fn slow_relay_family_and_unverified_events_do_not_reach_the_client() -> Re
     // and never reaches the local relay.
     let unrequested = EventBuilder::new(Kind::TextNote, "unrequested").sign_with_keys(&keys)?;
     let text = NostrRelayMessage::event(subscription_id.clone(), unrequested.clone()).as_json();
-    forward_upstream_nostr_message(&state, client_id, &subscription_id, &filters, &text).await;
+    let parsed = NostrRelayMessage::from_json(text.as_str())?;
+    forward_upstream_nostr_message(&state, client_id, &subscription_id, &filters, parsed).await;
     assert!(ws_rx.try_recv().is_err());
     let stored = relay
         .query_events(&Filter::new().ids(vec![unrequested.id]), 10)

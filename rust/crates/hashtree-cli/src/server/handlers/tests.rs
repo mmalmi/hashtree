@@ -268,8 +268,8 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         optimistic_blossom_uploads: false,
         optimistic_upload_queue_bytes: 256 * 1024 * 1024,
         optimistic_upload_queue: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
-        allowed_pubkeys: HashSet::new(),
-        upstream_blossom,
+        allowed_pubkeys: Arc::new(HashSet::new()),
+        upstream_blossom: Arc::new(upstream_blossom),
         upstream_http_client: crate::server::new_upstream_http_client(),
         upstream_blossom_miss_cache: Arc::new(std::sync::Mutex::new(
             crate::server::new_lookup_cache(),
@@ -277,7 +277,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         upstream_blossom_fetch_metrics: Arc::new(
             crate::server::auth::UpstreamBlossomFetchMetrics::default(),
         ),
-        blossom_upload_replicas: Vec::new(),
+        blossom_upload_replicas: Arc::new(Vec::new()),
         blossom_upload_replica_queue_bytes: 256 * 1024 * 1024,
         blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
         blossom_upload_replica_keys: None,
@@ -291,7 +291,7 @@ fn test_app_state(store: Arc<HashtreeStore>, upstream_blossom: Vec<String>) -> A
         nostr_relay: None,
         nostr_provider: None,
         nostr_event_transport: None,
-        nostr_relay_urls: Vec::new(),
+        nostr_relay_urls: Arc::new(Vec::new()),
         public_root_read_relays: Default::default(),
         tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         inflight_blob_fetches: Default::default(),
@@ -457,7 +457,7 @@ async fn blob_batch_download_serves_present_hashes_in_binary_frame() {
 
 fn allow_plaintext_read_author(state: &mut AppState, keys: &Keys) -> String {
     let npub = keys.public_key().to_bech32().unwrap();
-    state.allowed_pubkeys.insert(keys.public_key().to_hex());
+    Arc::make_mut(&mut state.allowed_pubkeys).insert(keys.public_key().to_hex());
     npub
 }
 
@@ -557,10 +557,10 @@ async fn daemon_status_exposes_fips_relay_and_queue_metadata() {
     let temp = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp.path()).unwrap());
     let mut state = test_app_state(store, vec![]);
-    state.nostr_relay_urls = vec![
+    state.nostr_relay_urls = Arc::new(vec![
         "wss://relay.damus.io".to_string(),
         "wss://nos.lol".to_string(),
-    ];
+    ]);
     state.ws_relay.note_upstream_relay_send(512);
     state.ws_relay.note_upstream_relay_receive(1024);
     crate::server::status_metrics::record_http_status_for_test(StatusCode::SWITCHING_PROTOCOLS);
@@ -3134,7 +3134,7 @@ async fn nostr_profile_queries_upstream_relays_after_local_miss() {
             .await
             .unwrap(),
     ));
-    state.nostr_relay_urls = vec![upstream_url];
+    state.nostr_relay_urls = Arc::new(vec![upstream_url]);
 
     let response = nostr_profile(AxumState(state), AxumPath(keys.public_key().to_hex()))
         .await
@@ -3167,14 +3167,14 @@ fn resolver_config_prefers_state_relay_urls() {
     let temp_dir = TempDir::new().unwrap();
     let store = Arc::new(HashtreeStore::new(temp_dir.path().join("db")).unwrap());
     let mut state = test_app_state(store, Vec::new());
-    state.nostr_relay_urls = vec![
+    state.nostr_relay_urls = Arc::new(vec![
         "wss://temp.iris.to".to_string(),
         "wss://upload.iris.to/nostr".to_string(),
-    ];
+    ]);
 
     let config = resolver_config(&state);
 
-    assert_eq!(config.relays, state.nostr_relay_urls);
+    assert_eq!(config.relays, *state.nostr_relay_urls);
     assert_eq!(config.resolve_timeout, HTTP_RESOLVER_TIMEOUT);
 }
 
@@ -3211,7 +3211,7 @@ async fn public_root_read_relay_only_queries_configured_names_and_preserves_newe
         .query(&state, "guide", &guide)
         .await
         .is_none());
-    state.nostr_relay_urls.push("ws://127.0.0.1:1".into());
+    Arc::make_mut(&mut state.nostr_relay_urls).push("ws://127.0.0.1:1".into());
     state.nostr_event_transport = Some(crate::config::NostrEventTransport::FipsLocalOnly);
     assert!(state
         .public_root_read_relays
@@ -3299,7 +3299,7 @@ async fn resolve_refresh_filters_relay_results_before_root_selection_and_limit()
     );
     let mut state = test_app_state(store, Vec::new());
     state.nostr_provider = Some(provider.clone());
-    state.nostr_relay_urls = vec![upstream_url];
+    state.nostr_relay_urls = Arc::new(vec![upstream_url]);
     let npub = keys.public_key().to_bech32().unwrap();
     let response = timeout(
         Duration::from_secs(5),
@@ -3775,7 +3775,7 @@ async fn resolve_to_hash_refresh_uses_upstream_relays_after_local_miss() {
             .await
             .unwrap(),
     ));
-    state.nostr_relay_urls = vec![upstream_url];
+    state.nostr_relay_urls = Arc::new(vec![upstream_url]);
 
     let refresh = resolve_to_hash(
         State(state),
@@ -4042,4 +4042,87 @@ async fn cached_root_preserves_encrypted_key_metadata_for_followup_resolves() {
             .and_then(|root| root.encrypted_key.as_deref()),
         Some(encrypted_key.as_str())
     );
+}
+
+#[tokio::test]
+async fn download_blob_batch_concurrent_preserves_order_and_skips_missing() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), Vec::new());
+
+    let mut request_hashes = Vec::new();
+    let mut expected = Vec::new();
+    for i in 0u32..32 {
+        let data = format!("concurrent-batch-item-{i:04}").into_bytes();
+        let hash_hex = store.put_blob(&data).unwrap();
+        let hash = from_hex(&hash_hex).unwrap();
+        request_hashes.push(hash_hex);
+        expected.push((hash, data));
+        if i % 4 == 0 {
+            let missing = sha256(format!("missing-item-{i}").as_bytes());
+            request_hashes.push(to_hex(&missing));
+        }
+    }
+
+    let response = download_blob_batch(
+        AxumState(state),
+        Json(BlobBatchDownloadRequest {
+            hashes: request_hashes,
+        }),
+    )
+    .await
+    .into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let entries = decode_blob_batch_download_response(&body).unwrap();
+    assert_eq!(entries.len(), expected.len());
+    for (actual, (exp_hash, exp_data)) in entries.into_iter().zip(expected) {
+        assert_eq!(actual.hash, exp_hash);
+        assert_eq!(actual.data, exp_data);
+    }
+}
+
+#[tokio::test]
+async fn serve_raw_blob_plain_get_populates_cache_in_single_read() {
+    let temp_dir = TempDir::new().unwrap();
+    let store = Arc::new(HashtreeStore::new(temp_dir.path().join("store")).unwrap());
+    let state = test_app_state(store.clone(), Vec::new());
+    let data = b"single-dispatch-plain-get-payload";
+    let hash_hex = store.put_blob(data).unwrap();
+    let hash = from_hex(&hash_hex).unwrap();
+
+    let first = serve_raw_blob_with_range(
+        &state,
+        hash,
+        HeaderMap::new(),
+        true,
+        true,
+        false,
+        false,
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::OK);
+    let first_body = to_bytes(first.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(first_body.as_ref(), data);
+    assert_eq!(
+        state.blob_cache.get_body(&hash_hex).as_deref(),
+        Some(data.as_slice())
+    );
+
+    // Delete from store to prove subsequent plain GET serves straight from zero-copy cache.
+    assert!(store.router().delete_sync(&hash).unwrap());
+    let second = serve_raw_blob_with_range(
+        &state,
+        hash,
+        HeaderMap::new(),
+        true,
+        true,
+        false,
+        false,
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let second_body = to_bytes(second.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(second_body.as_ref(), data);
 }

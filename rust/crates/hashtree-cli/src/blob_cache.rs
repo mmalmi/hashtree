@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use lru::LruCache;
 use std::num::NonZeroUsize;
 use std::sync::Mutex;
@@ -86,7 +87,7 @@ impl BlobSizeCache {
 }
 
 struct BlobBodyEntry {
-    bytes: Vec<u8>,
+    bytes: Bytes,
 }
 
 struct BlobBodyCache {
@@ -106,11 +107,11 @@ impl BlobBodyCache {
         }
     }
 
-    fn get(&mut self, key: &str) -> Option<Vec<u8>> {
+    fn get(&mut self, key: &str) -> Option<Bytes> {
         self.cache.get(key).map(|entry| entry.bytes.clone())
     }
 
-    fn put(&mut self, key: String, bytes: &[u8]) {
+    fn put_bytes(&mut self, key: String, bytes: Bytes) {
         if self.max_bytes == 0 || self.max_item_bytes == 0 || bytes.len() > self.max_item_bytes {
             return;
         }
@@ -119,9 +120,7 @@ impl BlobBodyCache {
             self.current_bytes = self.current_bytes.saturating_sub(previous.bytes.len());
         }
 
-        let entry = BlobBodyEntry {
-            bytes: bytes.to_vec(),
-        };
+        let entry = BlobBodyEntry { bytes };
         self.current_bytes = self.current_bytes.saturating_add(entry.bytes.len());
         self.cache.put(key, entry);
 
@@ -174,7 +173,7 @@ impl BlobCache {
         }
     }
 
-    pub(crate) fn get_body(&self, hash_hex: &str) -> Option<Vec<u8>> {
+    pub(crate) fn get_body(&self, hash_hex: &str) -> Option<Bytes> {
         self.bodies
             .lock()
             .ok()
@@ -192,7 +191,19 @@ impl BlobCache {
 
     pub(crate) fn put_body(&self, hash_hex: String, bytes: &[u8]) {
         if let Ok(mut cache) = self.bodies.lock() {
-            cache.put(hash_hex, bytes);
+            if cache.max_bytes == 0
+                || cache.max_item_bytes == 0
+                || bytes.len() > cache.max_item_bytes
+            {
+                return;
+            }
+            cache.put_bytes(hash_hex, Bytes::copy_from_slice(bytes));
+        }
+    }
+
+    pub(crate) fn put_body_bytes(&self, hash_hex: String, bytes: Bytes) {
+        if let Ok(mut cache) = self.bodies.lock() {
+            cache.put_bytes(hash_hex, bytes);
         }
     }
 
@@ -238,7 +249,7 @@ mod tests {
         cache.put_body("b".to_string(), b"56");
 
         assert!(cache.get_body("a").is_none());
-        assert_eq!(cache.get_body("b"), Some(b"56".to_vec()));
+        assert_eq!(cache.get_body("b"), Some(Bytes::from_static(b"56")));
     }
 
     #[test]

@@ -110,6 +110,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # TLS crypto provider
 rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "0.26"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 fuser = { package = "hashtree-fuser", version = "=0.14.0-hashtree.1", path = "../../vendor/fuser", optional = true, default-features = false }

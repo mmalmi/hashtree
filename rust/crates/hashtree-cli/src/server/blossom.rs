@@ -1448,7 +1448,7 @@ fn prepare_blossom_upload_replication(
         }
     };
     Some(PreparedBlossomUploadReplication {
-        servers: state.blossom_upload_replicas.clone(),
+        servers: (*state.blossom_upload_replicas).clone(),
         keys,
         permit,
         total_bytes,
@@ -2203,15 +2203,6 @@ async fn upload_decoded_blob_batch(
             }
             let uploaded = report.inserted;
             if uploaded > 0 {
-                let inserted: HashSet<_> = report.inserted_hashes.iter().copied().collect();
-                let replica_items = replica_specs
-                    .iter()
-                    .zip(items.iter())
-                    .filter(|&((_, _), (hash, _))| inserted.contains(hash))
-                    .map(|((sha256_hex, content_type), (_, data))| {
-                        replica_item(sha256_hex.clone(), data.clone(), content_type.clone())
-                    })
-                    .collect::<Vec<_>>();
                 let replication =
                     usize::try_from(report.inserted_bytes)
                         .ok()
@@ -2219,6 +2210,15 @@ async fn upload_decoded_blob_batch(
                             prepare_blossom_upload_replication(&state, inserted_bytes)
                         });
                 if let Some(replication) = replication {
+                    let inserted: HashSet<_> = report.inserted_hashes.iter().copied().collect();
+                    let replica_items = replica_specs
+                        .iter()
+                        .zip(items.iter())
+                        .filter(|&((_, _), (hash, _))| inserted.contains(hash))
+                        .map(|((sha256_hex, content_type), (_, data))| {
+                            replica_item(sha256_hex.clone(), data.clone(), content_type.clone())
+                        })
+                        .collect::<Vec<_>>();
                     schedule_prepared_blossom_upload_replication(
                         &state,
                         replication,
@@ -2637,14 +2637,14 @@ mod tests {
             optimistic_blossom_uploads: false,
             optimistic_upload_queue_bytes: 256 * 1024 * 1024,
             optimistic_upload_queue: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
-            allowed_pubkeys: HashSet::new(),
-            upstream_blossom: Vec::new(),
+            allowed_pubkeys: Arc::new(HashSet::new()),
+            upstream_blossom: Arc::new(Vec::new()),
             upstream_http_client: super::super::new_upstream_http_client(),
             upstream_blossom_miss_cache: Arc::new(StdMutex::new(crate::server::new_lookup_cache())),
             upstream_blossom_fetch_metrics: Arc::new(
                 crate::server::auth::UpstreamBlossomFetchMetrics::default(),
             ),
-            blossom_upload_replicas: Vec::new(),
+            blossom_upload_replicas: Arc::new(Vec::new()),
             blossom_upload_replica_queue_bytes: 256 * 1024 * 1024,
             blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
             blossom_upload_replica_keys: None,
@@ -2656,7 +2656,7 @@ mod tests {
             nostr_relay: None,
             nostr_provider: None,
             nostr_event_transport: None,
-            nostr_relay_urls: Vec::new(),
+            nostr_relay_urls: Arc::new(Vec::new()),
             public_root_read_relays: Default::default(),
             tree_root_cache: Arc::new(StdMutex::new(std::collections::HashMap::new())),
             inflight_blob_fetches: Default::default(),
@@ -3159,7 +3159,7 @@ mod tests {
             .expect("prestore first blob");
         let mut state = test_app_state(Arc::clone(&store));
         state.require_random_untrusted_ingest = false;
-        state.blossom_upload_replicas = vec![format!("http://{replica_addr}")];
+        state.blossom_upload_replicas = Arc::new(vec![format!("http://{replica_addr}")]);
         state.blossom_upload_replica_keys = Some(Arc::new(nostr::Keys::generate()));
 
         let keys = nostr::Keys::generate();
@@ -3252,7 +3252,7 @@ mod tests {
         );
         let mut state = test_app_state(store);
         state.require_random_untrusted_ingest = false;
-        state.blossom_upload_replicas = vec![format!("http://{replica_addr}")];
+        state.blossom_upload_replicas = Arc::new(vec![format!("http://{replica_addr}")]);
         state.blossom_upload_replica_keys = Some(Arc::new(nostr::Keys::generate()));
         let metrics_before = blossom_upload_replica_queue_snapshot(&state);
 
@@ -3419,7 +3419,7 @@ mod tests {
         let store = Arc::new(HashtreeStore::new(temp.path()).expect("store"));
         let mut state = test_app_state(store);
         state.require_random_untrusted_ingest = false;
-        state.blossom_upload_replicas = vec![format!("http://{replica_addr}")];
+        state.blossom_upload_replicas = Arc::new(vec![format!("http://{replica_addr}")]);
         state.blossom_upload_replica_keys = Some(Arc::new(nostr::Keys::generate()));
 
         let keys = nostr::Keys::generate();
@@ -3477,7 +3477,7 @@ mod tests {
         store.put_cached_blob(&data).expect("seed duplicate blob");
         let mut state = test_app_state(store);
         state.require_random_untrusted_ingest = false;
-        state.blossom_upload_replicas = vec![format!("http://{replica_addr}")];
+        state.blossom_upload_replicas = Arc::new(vec![format!("http://{replica_addr}")]);
         state.blossom_upload_replica_keys = Some(Arc::new(nostr::Keys::generate()));
 
         let keys = nostr::Keys::generate();
@@ -3716,7 +3716,7 @@ mod tests {
         let mut state = test_app_state(store);
         state.optimistic_blossom_uploads = true;
         state.require_random_untrusted_ingest = false;
-        state.blossom_upload_replicas = vec![format!("http://{replica_addr}")];
+        state.blossom_upload_replicas = Arc::new(vec![format!("http://{replica_addr}")]);
         state.blossom_upload_replica_keys = Some(Arc::new(nostr::Keys::generate()));
 
         let keys = nostr::Keys::generate();

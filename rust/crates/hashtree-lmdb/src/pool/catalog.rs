@@ -108,15 +108,30 @@ impl PoolStore {
             .map(LocationRecord::decode)
             .transpose()?;
         let had_previous = previous.is_some();
-        if let Some(previous) = previous {
-            let (members, len) = previous.members();
-            for member in members.into_iter().take(len) {
+        let (prev_members, prev_len) = match previous {
+            Some(previous) => previous.members(),
+            None => ([PoolMemberId::ZERO; 2], 0),
+        };
+        let (next_members, next_len) = match location {
+            Some(location) => location.members(),
+            None => ([PoolMemberId::ZERO; 2], 0),
+        };
+        let prev_slice = &prev_members[..prev_len];
+        let next_slice = &next_members[..next_len];
+
+        for member in prev_slice {
+            if !next_slice.contains(member) {
                 self.by_member
-                    .delete(txn, &member_hash_key(member, hash))
+                    .delete(txn, &member_hash_key(*member, hash))
                     .map_err(map_heed)?;
             }
         }
-        if previous != location {
+
+        let mut deleted_cleanup_source = None;
+        if previous != location
+            && !matches!(previous, None | Some(LocationRecord::Pending { .. }))
+            && !self.temperature_state.is_empty(txn).map_err(map_heed)?
+        {
             if let Some(LocationRecord::Moving { source, .. }) = self
                 .temperature_state
                 .get(txn, &move_cleanup_state_key(hash))
@@ -127,23 +142,27 @@ impl PoolStore {
                 self.by_member
                     .delete(txn, &member_hash_key(source, hash))
                     .map_err(map_heed)?;
+                deleted_cleanup_source = Some(source);
+                self.temperature_state
+                    .delete(txn, &move_cleanup_state_key(hash))
+                    .map_err(map_heed)?;
             }
-            self.temperature_state
-                .delete(txn, &move_state_key(hash))
-                .map_err(map_heed)?;
-            self.temperature_state
-                .delete(txn, &move_cleanup_state_key(hash))
-                .map_err(map_heed)?;
+            if matches!(previous, Some(LocationRecord::Moving { .. })) {
+                self.temperature_state
+                    .delete(txn, &move_state_key(hash))
+                    .map_err(map_heed)?;
+            }
         }
         match location {
             Some(location) => {
                 let encoded = location.encode();
                 self.locations.put(txn, &hash, &encoded).map_err(map_heed)?;
-                let (members, len) = location.members();
-                for member in members.into_iter().take(len) {
-                    self.by_member
-                        .put(txn, &member_hash_key(member, hash), &())
-                        .map_err(map_heed)?;
+                for member in next_slice {
+                    if !prev_slice.contains(member) || deleted_cleanup_source == Some(*member) {
+                        self.by_member
+                            .put(txn, &member_hash_key(*member, hash), &())
+                            .map_err(map_heed)?;
+                    }
                 }
                 if !had_previous {
                     let access = AccessRecord::new(unix_timestamp_now()).encode();

@@ -70,6 +70,17 @@ async fn working_ipv6_websocket_is_used() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn shared_tls_connector_reuses_cached_client_config() {
+    let Connector::Rustls(first) = shared_tls_connector() else {
+        panic!("expected rustls connector");
+    };
+    let Connector::Rustls(second) = shared_tls_connector() else {
+        panic!("expected rustls connector");
+    };
+    assert!(Arc::ptr_eq(&first, &second));
+}
+
 // The handshake callback's error type is fixed by tungstenite.
 #[allow(clippy::result_large_err)]
 #[tokio::test]

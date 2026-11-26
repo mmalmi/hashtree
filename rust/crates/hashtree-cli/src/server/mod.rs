@@ -218,14 +218,14 @@ impl HashtreeServer {
                 optimistic_upload_queue: Arc::new(tokio::sync::Semaphore::new(
                     DEFAULT_OPTIMISTIC_UPLOAD_QUEUE_BYTES,
                 )),
-                allowed_pubkeys: HashSet::new(), // No pubkeys allowed by default (use public_writes)
-                upstream_blossom: Vec::new(),
+                allowed_pubkeys: Arc::new(HashSet::new()), // No pubkeys allowed by default (use public_writes)
+                upstream_blossom: Arc::new(Vec::new()),
                 upstream_http_client: new_upstream_http_client(),
                 upstream_blossom_miss_cache: Arc::new(std::sync::Mutex::new(new_lookup_cache())),
                 upstream_blossom_fetch_metrics: Arc::new(
                     auth::UpstreamBlossomFetchMetrics::default(),
                 ),
-                blossom_upload_replicas: Vec::new(),
+                blossom_upload_replicas: Arc::new(Vec::new()),
                 blossom_upload_replica_queue_bytes: DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES,
                 blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(
                     DEFAULT_BLOSSOM_UPLOAD_REPLICA_QUEUE_BYTES,
@@ -241,7 +241,7 @@ impl HashtreeServer {
                 nostr_relay: None,
                 nostr_provider: None,
                 nostr_event_transport: None,
-                nostr_relay_urls: Vec::new(),
+                nostr_relay_urls: Arc::new(Vec::new()),
                 public_root_read_relays: Default::default(),
                 tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
                 inflight_blob_fetches: Default::default(),
@@ -328,19 +328,19 @@ impl HashtreeServer {
     }
 
     pub fn with_auth(mut self, username: String, password: String) -> Self {
-        self.state.auth = Some(AuthCredentials { username, password });
+        self.state.auth = Some(Arc::new(AuthCredentials { username, password }));
         self
     }
 
     /// Set allowed pubkeys for blossom write access (hex format)
     pub fn with_allowed_pubkeys(mut self, pubkeys: HashSet<String>) -> Self {
-        self.state.allowed_pubkeys = pubkeys;
+        self.state.allowed_pubkeys = Arc::new(pubkeys);
         self
     }
 
     /// Set upstream Blossom servers for cascade fetching
     pub fn with_upstream_blossom(mut self, servers: Vec<String>) -> Self {
-        self.state.upstream_blossom = servers;
+        self.state.upstream_blossom = Arc::new(servers);
         self
     }
 
@@ -360,7 +360,7 @@ impl HashtreeServer {
         servers.sort();
         servers.dedup();
         let replica_keys = (!servers.is_empty()).then(|| Arc::new(keys));
-        self.state.blossom_upload_replicas = servers;
+        self.state.blossom_upload_replicas = Arc::new(servers);
         self.state.blossom_upload_replica_queue_bytes = queue_bytes;
         self.state.blossom_upload_replica_queue =
             Arc::new(tokio::sync::Semaphore::new(queue_bytes));
@@ -409,7 +409,7 @@ impl HashtreeServer {
 
     /// Set active upstream Nostr relays for HTTP resolver operations.
     pub fn with_nostr_relay_urls(mut self, relays: Vec<String>) -> Self {
-        self.state.nostr_relay_urls = relays;
+        self.state.nostr_relay_urls = Arc::new(relays);
         self
     }
 

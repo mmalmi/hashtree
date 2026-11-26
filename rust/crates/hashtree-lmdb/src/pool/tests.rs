@@ -2070,6 +2070,92 @@ fn normal_writes_preserve_member_high_watermark_when_capacity_exists() {
     );
 }
 
+#[test]
+fn pool_manifest_cache_reloads_cross_process_member_updates() {
+    let temp = TempDir::new().expect("temp dir");
+    let catalog = temp.path().join("catalog");
+    let pool_a = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("pool a");
+    let m1 = pool_a
+        .add_member(PoolMemberConfig::new(temp.path().join("m1"), 1024 * 1024))
+        .expect("m1");
+    let first = b"first-member-blob";
+    let first_hash = sha256(first);
+    pool_a.put_sync(first_hash, first).expect("put first");
+
+    let pool_b = PoolStore::open(&catalog, PoolStoreConfig::default()).expect("pool b");
+    // Warm pool_b's cached manifest bytes with an initial read.
+    assert_eq!(pool_b.get_sync(&first_hash).expect("get first"), Some(first.to_vec()));
+
+    // Add a second member through pool_a, drain m1, and write a new blob to m2.
+    let m2 = pool_a
+        .add_member(PoolMemberConfig::new(temp.path().join("m2"), 1024 * 1024))
+        .expect("m2");
+    pool_a.begin_drain(m1).expect("drain m1");
+    let second = b"second-member-blob";
+    let second_hash = sha256(second);
+    pool_a.put_sync(second_hash, second).expect("put second");
+    assert_eq!(pool_a.blob_location(&second_hash).expect("loc"), Some(m2));
+
+    // pool_b must observe the updated manifest bytes and read from m2.
+    assert_eq!(
+        pool_b.get_sync(&second_hash).expect("get second on pool_b"),
+        Some(second.to_vec())
+    );
+}
+
+#[test]
+fn pool_stats_bounded_and_members_summary_match_exact_counts() {
+    let temp = TempDir::new().expect("temp dir");
+    let pool =
+        PoolStore::open(temp.path().join("catalog"), PoolStoreConfig::default()).expect("pool");
+    let m1 = pool
+        .add_member(PoolMemberConfig::new(temp.path().join("m1"), 1024 * 1024))
+        .expect("m1");
+
+    let items = (0u8..24)
+        .map(|i| {
+            let data = vec![i; 64 + usize::from(i)];
+            (sha256(&data), data)
+        })
+        .collect::<Vec<_>>();
+    let report = pool.put_many_sync(&items).expect("put many");
+    assert_eq!(report, items.len());
+
+    let exact = pool.stats().expect("exact stats");
+    let bounded_exact = pool.stats_bounded(1000).expect("bounded exact");
+    let bounded_fast = pool.stats_bounded(1).expect("bounded fast");
+    assert_eq!(bounded_exact.count, exact.count);
+    assert_eq!(bounded_exact.bytes, exact.bytes);
+    assert_eq!(bounded_fast.count, exact.count);
+    assert_eq!(bounded_fast.bytes, exact.bytes);
+
+    let single_members = pool.members().expect("single members");
+    let single_summary = pool.members_summary().expect("single summary");
+    assert_eq!(single_members.len(), 1);
+    assert_eq!(single_members[0].id, m1);
+    assert_eq!(single_members[0].located_blobs, items.len() as u64);
+    assert_eq!(single_summary[0].located_blobs, single_members[0].located_blobs);
+    assert_eq!(single_summary[0].logical_bytes, single_members[0].logical_bytes);
+
+    let m2 = pool
+        .add_member(PoolMemberConfig::new(temp.path().join("m2"), 1024 * 1024))
+        .expect("m2");
+    pool.begin_drain(m1).expect("drain m1");
+    let extra = b"extra-on-m2";
+    pool.put_sync(sha256(extra), extra).expect("put extra");
+
+    let multi_members = pool.members().expect("multi members");
+    let multi_summary = pool.members_summary().expect("multi summary");
+    assert_eq!(multi_members.len(), 2);
+    assert_eq!(multi_summary.len(), 2);
+    for (exact_member, fast_member) in multi_members.iter().zip(&multi_summary) {
+        assert_eq!(exact_member.id, fast_member.id);
+        assert_eq!(exact_member.located_blobs, fast_member.located_blobs);
+        assert_eq!(exact_member.logical_bytes, fast_member.logical_bytes);
+    }
+    assert!(multi_summary.iter().any(|m| m.id == m2 && m.located_blobs == 1));
+}
+
 #[cfg(unix)]
 fn spawn_pending_helper(mode: &str, catalog: &Path, ready: &Path, hash: Hash) -> Child {
     Command::new(std::env::current_exe().expect("test binary"))

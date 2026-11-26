@@ -71,7 +71,7 @@ impl BlobIoLimits {
             read_limit = read_limit.min(storage_capacity.saturating_sub(write_limit).max(1));
         }
 
-        let metadata_read_limit = read_limit.div_ceil(4).clamp(1, 4).min(read_limit);
+        let metadata_read_limit = read_limit.div_ceil(4).clamp(1, 8).min(read_limit);
         let data_read_limit = read_limit.saturating_sub(metadata_read_limit);
         let bulk_limit = data_read_limit.saturating_add(write_limit);
         let total_limit = metadata_read_limit.saturating_add(bulk_limit);

@@ -1247,7 +1247,7 @@ pub struct SocialGraphStore {
     // managed clone makes Rust drop the graph first, then close Heed's cache.
     _graph_env_lifecycle: ManagedEnv,
     ambient_store: Arc<StorageRouter>,
-    distance_cache: StdMutex<Option<DistanceCache>>,
+    distance_cache: StdMutex<Option<Arc<DistanceCache>>>,
     public_events: EventIndexBucket,
     ambient_events: EventIndexBucket,
     profile_index: ProfileIndexBucket,
@@ -1864,17 +1864,17 @@ impl SocialGraphStore {
         })
     }
 
-    fn load_distance_cache(&self) -> Result<DistanceCache> {
-        if let Some(cache) = self.distance_cache.lock().unwrap().clone() {
-            return Ok(cache);
+    fn load_distance_cache(&self) -> Result<Arc<DistanceCache>> {
+        if let Some(cache) = self.distance_cache.lock().unwrap().as_ref() {
+            return Ok(Arc::clone(cache));
         }
 
         let state = {
             let graph = self.graph.lock().unwrap();
             graph.export_state().context("export social graph state")?
         };
-        let cache = Self::build_distance_cache(state)?;
-        *self.distance_cache.lock().unwrap() = Some(cache.clone());
+        let cache = Arc::new(Self::build_distance_cache(state)?);
+        *self.distance_cache.lock().unwrap() = Some(Arc::clone(&cache));
         Ok(cache)
     }
 
@@ -1905,7 +1905,7 @@ impl SocialGraphStore {
     }
 
     fn stats(&self) -> Result<SocialGraphStats> {
-        Ok(self.load_distance_cache()?.stats)
+        Ok(self.load_distance_cache()?.stats.clone())
     }
 
     fn follow_distance(&self, pk_bytes: &[u8; 32]) -> Result<Option<u32>> {

@@ -2513,7 +2513,7 @@ fn run_pool_command(data_dir: &Path, command: PoolCommands) -> Result<()> {
         match command {
             PoolCommands::Status => {
                 let pool = open_existing()?;
-                let members = pool.members()?;
+                let members = pool.members_summary()?;
                 println!("Storage pool: {}", pool_path.display());
                 println!("Catalog LMDB map: {} bytes", pool.catalog_map_size_bytes());
                 match pool.delete_protection_status()? {

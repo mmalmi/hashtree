@@ -19,7 +19,7 @@ mod upstream_connect;
 
 use super::auth::{AppState, UpstreamNostrSubscription};
 use crate::diagnostics::{
-    nostr_filters_summary, process_memory_snapshot, trim_process_allocations,
+    nostr_filters_summary, process_memory_snapshot, trim_process_allocations_throttled,
 };
 #[derive(Debug)]
 enum WsTextMessage<'a> {
@@ -166,12 +166,8 @@ async fn forward_upstream_nostr_message(
     client_id: u64,
     subscription_id: &SubscriptionId,
     filters: &[NostrFilter],
-    text: &str,
+    message: NostrRelayMessage<'_>,
 ) {
-    let Ok(message) = NostrRelayMessage::from_json(text) else {
-        return;
-    };
-
     match message {
         NostrRelayMessage::Event {
             subscription_id: sid,
@@ -305,9 +301,12 @@ async fn run_upstream_nostr_subscription(
                         state
                             .ws_relay
                             .note_upstream_relay_receive(text.len());
+                        let Ok(parsed) = NostrRelayMessage::from_json(text.as_str()) else {
+                            continue;
+                        };
                         if matches!(
-                            NostrRelayMessage::from_json(text.as_str()),
-                            Ok(NostrRelayMessage::EndOfStoredEvents(sid)) if sid.as_ref() == &subscription_id
+                            &parsed,
+                            NostrRelayMessage::EndOfStoredEvents(sid) if sid.as_ref() == &subscription_id
                         ) {
                             if !relay_complete {
                                 relay_complete = true;
@@ -315,7 +314,7 @@ async fn run_upstream_nostr_subscription(
                             }
                             continue;
                         }
-                        forward_upstream_nostr_message(&state, client_id, &subscription_id, &filters, &text).await;
+                        forward_upstream_nostr_message(&state, client_id, &subscription_id, &filters, parsed).await;
                     }
                     Some(Ok(TungsteniteMessage::Ping(payload))) => {
                         let _ = write.send(TungsteniteMessage::Pong(payload)).await;
@@ -345,10 +344,14 @@ async fn start_upstream_nostr_subscription(
     subscription_id: SubscriptionId,
     filters: Vec<NostrFilter>,
 ) -> usize {
-    let memory_before = process_memory_snapshot();
+    let debug_upstream = tracing::enabled!(
+        target: "hashtree_cli::server::ws_relay::upstream",
+        tracing::Level::DEBUG
+    );
+    let memory_before = debug_upstream.then(process_memory_snapshot);
     close_upstream_nostr_subscription(state, client_id, &subscription_id).await;
     if state.nostr_relay_urls.is_empty() || filters.is_empty() {
-        tracing::info!(
+        tracing::debug!(
             "upstream nostr relay skipped: client_id={} subscription_id={} relays={} filters={}",
             client_id,
             subscription_id,
@@ -360,7 +363,7 @@ async fn start_upstream_nostr_subscription(
 
     let mut relay_urls = Vec::new();
     let mut seen = HashSet::new();
-    for relay in &state.nostr_relay_urls {
+    for relay in state.nostr_relay_urls.iter() {
         let relay = relay.trim();
         if relay.is_empty() || !seen.insert(relay.to_string()) {
             continue;
@@ -368,7 +371,7 @@ async fn start_upstream_nostr_subscription(
         relay_urls.push(relay.to_string());
     }
     if relay_urls.is_empty() {
-        tracing::info!(
+        tracing::debug!(
             "upstream nostr relay skipped after normalization: client_id={} subscription_id={}",
             client_id,
             subscription_id,
@@ -376,14 +379,13 @@ async fn start_upstream_nostr_subscription(
         return 0;
     }
 
-    tracing::info!(
+    tracing::debug!(
         "upstream nostr relay start: client_id={} subscription_id={} relays={}",
         client_id,
         subscription_id,
         relay_urls.len(),
     );
 
-    let filter_summary = nostr_filters_summary(&filters);
     let key = (client_id, subscription_id.to_string());
     state
         .ws_relay
@@ -411,18 +413,21 @@ async fn start_upstream_nostr_subscription(
         )));
     }
 
-    tracing::info!(
-        target: "hashtree_cli::server::ws_relay::upstream",
-        client_id,
-        subscription_id = %subscription_id,
-        relays = relay_urls.len(),
-        tasks = tasks.len(),
-        filters = filters.len(),
-        filter = %filter_summary,
-        memory_before = ?memory_before,
-        memory_after = ?process_memory_snapshot(),
-        "upstream nostr relay tasks spawned",
-    );
+    if debug_upstream {
+        let filter_summary = nostr_filters_summary(&filters);
+        tracing::debug!(
+            target: "hashtree_cli::server::ws_relay::upstream",
+            client_id,
+            subscription_id = %subscription_id,
+            relays = relay_urls.len(),
+            tasks = tasks.len(),
+            filters = filters.len(),
+            filter = %filter_summary,
+            memory_before = ?memory_before,
+            memory_after = ?process_memory_snapshot(),
+            "upstream nostr relay tasks spawned",
+        );
+    }
 
     state
         .ws_relay
@@ -496,7 +501,7 @@ async fn handle_message(client_id: u64, msg: Message, state: &AppState) {
                                         )
                                         .await;
                                     }
-                                    trim_process_allocations();
+                                    trim_process_allocations_throttled();
                                     if upstream_relays == 0 {
                                         send_nostr(
                                             state,
@@ -766,8 +771,8 @@ mod tests {
             optimistic_blossom_uploads: false,
             optimistic_upload_queue_bytes: 256 * 1024 * 1024,
             optimistic_upload_queue: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
-            allowed_pubkeys: HashSet::new(),
-            upstream_blossom: Vec::new(),
+            allowed_pubkeys: Arc::new(HashSet::new()),
+            upstream_blossom: Arc::new(Vec::new()),
             upstream_http_client: super::super::new_upstream_http_client(),
             upstream_blossom_miss_cache: Arc::new(std::sync::Mutex::new(
                 super::super::auth::new_lookup_cache(),
@@ -775,7 +780,7 @@ mod tests {
             upstream_blossom_fetch_metrics: Arc::new(
                 super::super::auth::UpstreamBlossomFetchMetrics::default(),
             ),
-            blossom_upload_replicas: Vec::new(),
+            blossom_upload_replicas: Arc::new(Vec::new()),
             blossom_upload_replica_queue_bytes: 256 * 1024 * 1024,
             blossom_upload_replica_queue: Arc::new(tokio::sync::Semaphore::new(256 * 1024 * 1024)),
             blossom_upload_replica_keys: None,
@@ -789,7 +794,7 @@ mod tests {
             nostr_relay: Some(relay),
             nostr_provider: None,
             nostr_event_transport: None,
-            nostr_relay_urls: vec![relay_url],
+            nostr_relay_urls: Arc::new(vec![relay_url]),
             public_root_read_relays: Default::default(),
             tree_root_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             inflight_blob_fetches: Default::default(),

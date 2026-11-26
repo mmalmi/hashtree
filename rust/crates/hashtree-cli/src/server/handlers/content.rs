@@ -289,10 +289,17 @@ pub(in crate::server) async fn download_blob_batch(
     body.extend_from_slice(BLOB_BATCH_DOWNLOAD_MAGIC);
     body.extend_from_slice(&0u32.to_be_bytes());
 
+    const BLOB_BATCH_DOWNLOAD_CONCURRENCY: usize = 16;
+    let mut reads = futures::stream::iter(hashes.into_iter().map(|hash| {
+        let state = state.clone();
+        async move { (hash, get_blob_without_blocking_runtime(&state, hash).await) }
+    }))
+    .buffered(BLOB_BATCH_DOWNLOAD_CONCURRENCY);
+
     let mut included = 0u32;
     let mut truncated = false;
-    for hash in hashes {
-        let data = match get_blob_without_blocking_runtime(&state, hash).await {
+    while let Some((hash, result)) = reads.next().await {
+        let data = match result {
             Ok(Some(data)) => data,
             Ok(None) => continue,
             Err(error) => {
@@ -464,7 +471,7 @@ async fn put_cached_blobs_without_blocking_runtime(
 pub(in crate::server) async fn get_blob_without_blocking_runtime(
     state: &AppState,
     hash: [u8; 32],
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Option<Bytes>, String> {
     let hash_hex = to_hex(&hash);
     if let Some(data) = state.blob_cache.get_body(&hash_hex) {
         return Ok(Some(data));
@@ -530,10 +537,11 @@ pub(in crate::server) async fn get_blob_range_without_blocking_runtime(
 async fn get_blob_once_without_blocking_runtime(
     state: &AppState,
     hash: [u8; 32],
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Option<Bytes>, String> {
     let store = state.store.clone();
     match run_blob_read(move || store.get_blob(&hash).map_err(|e| e.to_string())).await {
         Ok(result) => {
+            let result = result.map(|opt| opt.map(Bytes::from));
             if let Ok(data) = &result {
                 match data {
                     Some(data) => {
@@ -541,7 +549,7 @@ async fn get_blob_once_without_blocking_runtime(
                         state
                             .blob_cache
                             .put_size(hash_hex.clone(), Some(data.len() as u64));
-                        state.blob_cache.put_body(hash_hex, data);
+                        state.blob_cache.put_body_bytes(hash_hex, data.clone());
                     }
                     None => {
                         state.blob_cache.put_size(to_hex(&hash), None);

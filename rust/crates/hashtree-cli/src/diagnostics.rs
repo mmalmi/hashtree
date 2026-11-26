@@ -1,4 +1,9 @@
 use nostr::Filter;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+const ALLOCATION_TRIM_MIN_INTERVAL_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ProcessMemorySnapshot {
@@ -84,6 +89,57 @@ pub fn trim_process_allocations() {
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 pub fn trim_process_allocations() {}
+
+fn should_trim_now(last_trim_ms: &AtomicU64, elapsed_ms: u64, min_interval_ms: u64) -> bool {
+    let now_token = elapsed_ms.saturating_add(1);
+    let mut prev = last_trim_ms.load(Ordering::Relaxed);
+    loop {
+        if prev != 0 && now_token.saturating_sub(prev) < min_interval_ms {
+            return false;
+        }
+        match last_trim_ms.compare_exchange_weak(
+            prev,
+            now_token,
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => return true,
+            Err(current) => prev = current,
+        }
+    }
+}
+
+/// Rate-limited variant of [`trim_process_allocations`] for hot request paths
+/// so concurrent queries do not repeatedly lock every glibc arena.
+pub fn trim_process_allocations_throttled() {
+    static START: OnceLock<Instant> = OnceLock::new();
+    static LAST_TRIM_MS: AtomicU64 = AtomicU64::new(0);
+
+    let elapsed_ms = START
+        .get_or_init(Instant::now)
+        .elapsed()
+        .min(Duration::from_millis(u64::MAX - 1))
+        .as_millis() as u64;
+    if should_trim_now(&LAST_TRIM_MS, elapsed_ms, ALLOCATION_TRIM_MIN_INTERVAL_MS) {
+        trim_process_allocations();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn throttled_trim_enforces_minimum_interval() {
+        let last = AtomicU64::new(0);
+        assert!(should_trim_now(&last, 0, 30_000));
+        assert!(!should_trim_now(&last, 5_000, 30_000));
+        assert!(!should_trim_now(&last, 29_999, 30_000));
+        assert!(should_trim_now(&last, 30_000, 30_000));
+        assert!(!should_trim_now(&last, 45_000, 30_000));
+        assert!(should_trim_now(&last, 60_000, 30_000));
+    }
+}
 
 #[cfg(target_os = "linux")]
 fn parse_status_kb(value: &str) -> Option<u64> {

@@ -242,7 +242,7 @@ impl WsRelayState {
 #[derive(Clone)]
 pub struct AppState {
     pub store: Arc<HashtreeStore>,
-    pub auth: Option<AuthCredentials>,
+    pub auth: Option<Arc<AuthCredentials>>,
     /// Unix timestamp when this daemon state was created.
     pub daemon_started_at: u64,
     pub peer_mode: crate::config::ServerMode,
@@ -277,9 +277,9 @@ pub struct AppState {
     pub optimistic_upload_queue_bytes: usize,
     pub optimistic_upload_queue: Arc<Semaphore>,
     /// Pubkeys allowed to write (hex format, from config allowed_npubs)
-    pub allowed_pubkeys: HashSet<String>,
+    pub allowed_pubkeys: Arc<HashSet<String>>,
     /// Upstream Blossom servers for cascade fetching
-    pub upstream_blossom: Vec<String>,
+    pub upstream_blossom: Arc<Vec<String>>,
     /// Shared HTTP client for upstream Blossom reads, so cold cache misses can
     /// reuse connections instead of rebuilding a client per blob.
     pub upstream_http_client: reqwest::Client,
@@ -290,7 +290,7 @@ pub struct AppState {
     /// Counters for upstream Blossom read-through decisions.
     pub upstream_blossom_fetch_metrics: Arc<UpstreamBlossomFetchMetrics>,
     /// Write-behind Blossom servers for blobs accepted by this server.
-    pub blossom_upload_replicas: Vec<String>,
+    pub blossom_upload_replicas: Arc<Vec<String>>,
     /// Background replication queue byte budget. Each queued body holds one
     /// permit per byte until the remote upload attempt finishes.
     pub blossom_upload_replica_queue_bytes: usize,
@@ -315,7 +315,7 @@ pub struct AppState {
     /// Configured transport of the active event provider, when known.
     pub nostr_event_transport: Option<crate::config::NostrEventTransport>,
     /// Active upstream Nostr relays for HTTP resolver operations.
-    pub nostr_relay_urls: Vec<String>,
+    pub nostr_relay_urls: Arc<Vec<String>>,
     pub(super) public_root_read_relays: super::root_read_relays::RootReadRelays,
     /// In-process cache for resolved mutable tree roots, keyed by npub/tree(+key)
     pub tree_root_cache: Arc<StdMutex<HashMap<String, CachedTreeRootEntry>>>,
@@ -323,7 +323,7 @@ pub struct AppState {
     pub(super) inflight_blob_fetches: InFlight<Result<Option<bytes::Bytes>, String>>,
     /// Shared in-flight local blob reads so request bursts for the same hash
     /// only spend one blocking storage read.
-    pub(super) inflight_blob_reads: InFlight<Result<Option<Vec<u8>>, String>>,
+    pub(super) inflight_blob_reads: InFlight<Result<Option<bytes::Bytes>, String>>,
     /// Bounded hot cache for immutable blob bodies and metadata probes.
     pub(super) blob_cache: Arc<BlobCache>,
     /// Immutable directory listings keyed by CID

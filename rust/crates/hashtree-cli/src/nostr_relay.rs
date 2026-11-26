@@ -64,7 +64,7 @@ mod imp {
 
     use crate::diagnostics::{
         nostr_filter_summary, nostr_filters_summary, process_memory_snapshot,
-        trim_process_allocations,
+        trim_process_allocations_throttled,
     };
     use crate::socialgraph::{EventStorageClass, SocialGraphAccessControl, SocialGraphBackend};
     use crate::storage::StorageRouter;
@@ -73,7 +73,7 @@ mod imp {
         is_parameterized_replaceable_kind, is_replaceable_kind, NostrEventStore, VerifiedEvent,
         VerifiedStoredNostrEvent,
     };
-    use tracing::{info, warn};
+    use tracing::warn;
 
     const NOSTR_INDEX_DIR: &str = "nostr-index";
     const NOSTR_INDEX_LATEST_ROOT_FILE: &str = "latest-root.txt";
@@ -166,8 +166,12 @@ mod imp {
 
         async fn query(&self, filter: NostrFilter, limit: usize) -> Vec<Event> {
             let store = Arc::clone(&self.store);
-            let filter_summary = nostr_filter_summary(&filter);
-            let memory_before = process_memory_snapshot();
+            let debug_query = tracing::enabled!(
+                target: "hashtree_cli::nostr_relay::query",
+                tracing::Level::DEBUG
+            );
+            let filter_summary = debug_query.then(|| nostr_filter_summary(&filter));
+            let memory_before = debug_query.then(process_memory_snapshot);
             let started = Instant::now();
             let Ok(_permit) = self.blocking_permits.clone().acquire_owned().await else {
                 warn!("trusted nostr store query skipped: blocking semaphore closed");
@@ -179,16 +183,18 @@ mod imp {
             .await;
             match result {
                 Ok(events) => {
-                    info!(
-                        target: "hashtree_cli::nostr_relay::query",
-                        limit,
-                        events = events.len(),
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        filter = %filter_summary,
-                        memory_before = ?memory_before,
-                        memory_after = ?process_memory_snapshot(),
-                        "trusted nostr store query completed",
-                    );
+                    if debug_query {
+                        tracing::debug!(
+                            target: "hashtree_cli::nostr_relay::query",
+                            limit,
+                            events = events.len(),
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            filter = %filter_summary.as_deref().unwrap_or_default(),
+                            memory_before = ?memory_before,
+                            memory_after = ?process_memory_snapshot(),
+                            "trusted nostr store query completed",
+                        );
+                    }
                     events
                 }
                 Err(err) => {
@@ -223,14 +229,12 @@ mod imp {
         async fn ingest(&self, event: Event) -> Result<()> {
             let root = self.load_existing_root().await?;
             let store = Arc::clone(&self.store);
+            let handle = tokio::runtime::Handle::current();
             let Ok(_permit) = self.blocking_permits.clone().acquire_owned().await else {
                 anyhow::bail!("historical nostr index ingest skipped: blocking semaphore closed");
             };
             let next_root = tokio::task::spawn_blocking(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?;
-                runtime.block_on(async move {
+                handle.block_on(async move {
                     let event_store = NostrEventStore::new(store);
                     let stored = VerifiedEvent::try_from(event)?
                         .to_stored_event()
@@ -263,20 +267,22 @@ mod imp {
                 }
             };
 
-            let filter_summary = nostr_filter_summary(filter);
-            let memory_before = process_memory_snapshot();
+            let debug_query = tracing::enabled!(
+                target: "hashtree_cli::nostr_relay::query",
+                tracing::Level::DEBUG
+            );
+            let filter_summary = debug_query.then(|| nostr_filter_summary(filter));
+            let memory_before = debug_query.then(process_memory_snapshot);
             let started = Instant::now();
             let store = Arc::clone(&self.store);
             let filter = filter.clone();
+            let handle = tokio::runtime::Handle::current();
             let Ok(_permit) = self.blocking_permits.clone().acquire_owned().await else {
                 warn!("historical nostr index query skipped: blocking semaphore closed");
                 return Vec::new();
             };
             let result = tokio::task::spawn_blocking(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()?;
-                let stored_events = runtime.block_on(async move {
+                let stored_events = handle.block_on(async move {
                     let event_store = NostrEventStore::new(store);
                     event_store.query_events(Some(&root), &filter, limit).await
                 })?;
@@ -304,16 +310,18 @@ mod imp {
                             }
                         }
                     }
-                    info!(
-                        target: "hashtree_cli::nostr_relay::query",
-                        limit,
-                        events = events.len(),
-                        elapsed_ms = started.elapsed().as_millis() as u64,
-                        filter = %filter_summary,
-                        memory_before = ?memory_before,
-                        memory_after = ?process_memory_snapshot(),
-                        "historical nostr index query completed",
-                    );
+                    if debug_query {
+                        tracing::debug!(
+                            target: "hashtree_cli::nostr_relay::query",
+                            limit,
+                            events = events.len(),
+                            elapsed_ms = started.elapsed().as_millis() as u64,
+                            filter = %filter_summary.as_deref().unwrap_or_default(),
+                            memory_before = ?memory_before,
+                            memory_after = ?process_memory_snapshot(),
+                            "historical nostr index query completed",
+                        );
+                    }
                     events
                 }
                 Err(err) => {
@@ -1227,9 +1235,13 @@ mod imp {
 
             let mut seen: HashSet<EventId> = HashSet::new();
             let mut events = Vec::new();
-            let memory_before = process_memory_snapshot();
+            let debug_query = tracing::enabled!(
+                target: "hashtree_cli::nostr_relay::query",
+                tracing::Level::DEBUG
+            );
+            let memory_before = debug_query.then(process_memory_snapshot);
             let started = Instant::now();
-            let filter_summary = nostr_filters_summary(&filters);
+            let filter_summary = debug_query.then(|| nostr_filters_summary(&filters));
             for filter in &filters {
                 let remaining = self.config.max_query_limit.saturating_sub(events.len());
                 if remaining == 0 {
@@ -1244,18 +1256,20 @@ mod imp {
                     .await;
             }
 
-            info!(
-                target: "hashtree_cli::nostr_relay::query",
-                client_id,
-                subscription_id = %subscription_id,
-                filters = filters.len(),
-                events = events.len(),
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                filter = %filter_summary,
-                memory_before = ?memory_before,
-                memory_after = ?process_memory_snapshot(),
-                "nostr relay local subscription query completed",
-            );
+            if debug_query {
+                tracing::debug!(
+                    target: "hashtree_cli::nostr_relay::query",
+                    client_id,
+                    subscription_id = %subscription_id,
+                    filters = filters.len(),
+                    events = events.len(),
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    filter = %filter_summary.as_deref().unwrap_or_default(),
+                    memory_before = ?memory_before,
+                    memory_after = ?process_memory_snapshot(),
+                    "nostr relay local subscription query completed",
+                );
+            }
             Ok(events)
         }
 
@@ -1369,7 +1383,7 @@ mod imp {
                         )
                         .await;
                     }
-                    trim_process_allocations();
+                    trim_process_allocations_throttled();
 
                     self.send_to_client(client_id, NostrRelayMessage::eose(subscription_id))
                         .await;

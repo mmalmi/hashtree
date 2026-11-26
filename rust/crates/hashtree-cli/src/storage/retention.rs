@@ -1936,6 +1936,26 @@ impl HashtreeStore {
             quota_limit_bytes: self.max_size_bytes,
         })
     }
+
+    /// Get storage statistics without scanning multi-million-entry pool catalogs.
+    pub fn get_storage_stats_bounded(&self) -> Result<StorageStats> {
+        const MAX_LIVE_POOL_STATS_SCAN_ENTRIES: u64 = 50_000;
+        let rtxn = self.env.read_txn()?;
+        let total_pins = self.pins.len(&rtxn)? as usize;
+
+        let (stats, quota_used_bytes) = self
+            .router
+            .stats_with_quota_usage_bounded(MAX_LIVE_POOL_STATS_SCAN_ENTRIES)
+            .map_err(|e| anyhow::anyhow!("Failed to get stats: {}", e))?;
+
+        Ok(StorageStats {
+            total_dags: stats.count,
+            pinned_dags: total_pins,
+            total_bytes: stats.total_bytes,
+            quota_used_bytes,
+            quota_limit_bytes: self.max_size_bytes,
+        })
+    }
 }
 
 #[cfg(test)]

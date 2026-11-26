@@ -66,6 +66,8 @@ const MEMBER_MARKER_NAME: &str = ".hashtree-pool-member-v1";
 const EXTERNAL_MARKER_NAME: &str = ".hashtree-pool-external-v1";
 const MAX_STALE_PENDING_CLEANUP_ITEMS: usize = 4_096;
 
+type BatchWriteAssignment<'a> = (Hash, &'a Vec<u8>, PoolMemberId);
+
 fn align_catalog_map_size_bytes(bytes: u64) -> Result<u64, StoreError> {
     let page_size = (page_size::get() as u64).max(4_096);
     let remainder = bytes % page_size;
@@ -81,6 +83,8 @@ fn align_catalog_map_size_bytes(bytes: u64) -> Result<u64, StoreError> {
 #[derive(Default)]
 struct RuntimeMembers {
     generation: Option<u64>,
+    manifest_bytes: Option<Vec<u8>>,
+    manifest: Option<PoolManifest>,
     stores: HashMap<PoolMemberId, Arc<LmdbBlobStore>>,
     read_gates: HashMap<PoolMemberId, Arc<ConcurrencyGate>>,
     write_gates: HashMap<PoolMemberId, Arc<ConcurrencyGate>>,
@@ -541,7 +545,10 @@ impl PoolStore {
             config,
         });
         manifest.generation = manifest.generation.saturating_add(1);
-        self.put_manifest_txn(&mut wtxn, &manifest)?;
+        let encoded_manifest = encode_manifest(&manifest)?;
+        self.manifest_db
+            .put(&mut wtxn, MANIFEST_KEY, encoded_manifest.as_slice())
+            .map_err(map_heed)?;
         wtxn.commit().map_err(map_heed)?;
 
         let mut runtime = self
@@ -564,6 +571,8 @@ impl PoolStore {
             Arc::new(ConcurrencyGate::new(member.config.max_write_concurrency)),
         );
         runtime.errors.remove(&id);
+        runtime.manifest_bytes = Some(encoded_manifest);
+        runtime.manifest = Some(manifest);
         Ok(Some(id))
     }
 
@@ -683,7 +692,12 @@ impl PoolStore {
             .iter()
             .find(|member| member.id == id)
             .ok_or_else(|| StoreError::Other(format!("unknown pool member {id}")))?;
-        let located_blobs = self.count_member_locations(id)?;
+        let located_blobs = if manifest.members.len() == 1 {
+            let rtxn = self.env.read_txn().map_err(map_heed)?;
+            self.by_member.len(&rtxn).map_err(map_heed)?
+        } else {
+            self.count_member_locations(id)?
+        };
         let runtime = self
             .runtime
             .read()
@@ -723,6 +737,58 @@ impl PoolStore {
             .iter()
             .map(|member| self.member(member.id))
             .collect()
+    }
+
+    /// Constant-time member status summary that avoids scanning `by_member`.
+    ///
+    /// Single-member pools report exact `by_member.len()`; multi-member pools
+    /// report each open member's transactional LMDB blob count.
+    pub fn members_summary(&self) -> Result<Vec<PoolMemberStatus>, StoreError> {
+        self.refresh_members()?;
+        let manifest = self.read_manifest()?;
+        let single_member_count = if manifest.members.len() == 1 {
+            let rtxn = self.env.read_txn().map_err(map_heed)?;
+            Some(self.by_member.len(&rtxn).map_err(map_heed)?)
+        } else {
+            None
+        };
+        let runtime = self
+            .runtime
+            .read()
+            .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
+        let mut statuses = Vec::with_capacity(manifest.members.len());
+        for member in &manifest.members {
+            let (logical_bytes, member_blob_count, available, last_error) =
+                match runtime.stores.get(&member.id) {
+                    Some(store) => match store.stats() {
+                        Ok(stats) => (stats.total_bytes, stats.count as u64, true, None),
+                        Err(error) => (0, 0, false, Some(error.to_string())),
+                    },
+                    None => (0, 0, false, runtime.errors.get(&member.id).cloned()),
+                };
+            statuses.push(PoolMemberStatus {
+                id: member.id,
+                state: member.state,
+                path: member.config.path.clone(),
+                capacity_bytes: member.config.capacity_bytes,
+                map_size_bytes: member.config.map_size_bytes,
+                external_blob_dir: member.config.external_blob_dir.clone(),
+                external_blob_min_bytes: member.config.external_blob_min_bytes,
+                external_blob_sync: member.config.external_blob_sync,
+                external_pack_target_bytes: member.config.external_pack_target_bytes,
+                max_read_concurrency: member.config.max_read_concurrency,
+                max_write_concurrency: member.config.max_write_concurrency,
+                temperature_low_watermark_percent: member.config.temperature_low_watermark_percent,
+                temperature_high_watermark_percent: member
+                    .config
+                    .temperature_high_watermark_percent,
+                logical_bytes,
+                located_blobs: single_member_count.unwrap_or(member_blob_count),
+                available,
+                last_error,
+            });
+        }
+        Ok(statuses)
     }
 
     pub fn blob_location(&self, hash: &Hash) -> Result<Option<PoolMemberId>, StoreError> {
@@ -831,31 +897,31 @@ impl PoolStore {
         }
 
         let mut inserted = HashSet::new();
+        let mut existing_to_check = Vec::new();
         let mut missing = Vec::new();
-        for (hash, data) in unique {
-            if let Some(location) = self.read_location(&hash)? {
-                if (verify_existing || matches!(location, LocationRecord::Pending { .. }))
-                    && self.put_sync(hash, data)?
-                {
-                    inserted.insert(hash);
+        {
+            let rtxn = self.env.read_txn().map_err(map_heed)?;
+            for (hash, data) in unique {
+                if let Some(encoded) = self.locations.get(&rtxn, &hash).map_err(map_heed)? {
+                    let location = LocationRecord::decode(encoded)?;
+                    if verify_existing || matches!(location, LocationRecord::Pending { .. }) {
+                        existing_to_check.push((hash, data));
+                    }
+                } else {
+                    missing.push((hash, data));
                 }
-            } else {
-                missing.push((hash, data));
+            }
+        }
+        for (hash, data) in existing_to_check {
+            if self.put_sync(hash, data)? {
+                inserted.insert(hash);
             }
         }
         if missing.is_empty() {
             return Ok(put_many_report(items.len(), &ordered, &inserted));
         }
 
-        let mut reserved_bytes = HashMap::new();
-        let mut assignments = Vec::with_capacity(missing.len());
-        for (hash, data) in missing {
-            let target =
-                self.choose_write_member_with_reserved(data.len() as u64, None, &reserved_bytes)?;
-            let reserved = reserved_bytes.entry(target).or_insert(0u64);
-            *reserved = reserved.saturating_add(data.len() as u64);
-            assignments.push((hash, data, target));
-        }
+        let assignments = self.choose_write_members_for_batch(&missing)?;
 
         let mut wtxn = self.env.write_txn().map_err(map_heed)?;
         let mut plans = Vec::with_capacity(assignments.len());
@@ -893,13 +959,16 @@ impl PoolStore {
                 .push((*hash, data.as_slice()));
         }
         for (target, batch) in by_target {
-            let store = self.get_member(target)?;
-            let gate = self.member_gate(target, true)?;
+            let (store, gate) = self.get_member_and_gate(target, true)?;
             let permit = gate.acquire()?;
-            for (hash, _) in &batch {
-                if store
-                    .get_sync(hash)?
-                    .is_some_and(|existing| sha256(&existing) != *hash)
+            let mut sorted_hashes = batch.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
+            sorted_hashes.sort_unstable();
+            let existing = store.existing_hashes_in_sorted_candidates(&sorted_hashes)?;
+            for (hash, is_present) in sorted_hashes.iter().zip(existing) {
+                if is_present
+                    && store
+                        .get_sync(hash)?
+                        .is_some_and(|existing| sha256(&existing) != *hash)
                 {
                     store.delete_sync(hash)?;
                 }
@@ -930,8 +999,9 @@ impl PoolStore {
                 }
             };
             inserted.extend(report.inserted_hashes);
+            let read_gate = self.member_gate(target, false)?;
             for (hash, _) in &batch {
-                self.read_verified_member(target, &store, hash)?
+                self.read_verified_member_with_gate(target, &store, &read_gate, hash)?
                     .ok_or_else(|| {
                         StoreError::Other(format!(
                             "pool member {target} lost a committed batch write"
@@ -1593,6 +1663,22 @@ impl PoolStore {
         Ok(stats)
     }
 
+    /// Return exact catalog stats for pools with at most `max_scan_entries`
+    /// locations, and fall back to O(1) catalog count plus member physical
+    /// counters above that threshold so live HTTP stats never scan a multi-GB
+    /// catalog.
+    pub fn stats_bounded(&self, max_scan_entries: u64) -> Result<StoreStats, StoreError> {
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        let location_count = self.locations.len(&rtxn).map_err(map_heed)?;
+        drop(rtxn);
+        if location_count <= max_scan_entries {
+            return self.stats();
+        }
+        let mut stats = self.writable_physical_stats()?;
+        stats.count = location_count;
+        Ok(stats)
+    }
+
     /// Return conservative physical usage for quota admission without scanning
     /// the logical Pool catalog.
     ///
@@ -1757,8 +1843,28 @@ impl PoolStore {
     }
 
     fn refresh_members(&self) -> Result<(), StoreError> {
-        let (manifest, manifest_sha256) = self.read_manifest_with_identity()?;
+        let rtxn = self.env.read_txn().map_err(map_heed)?;
+        let bytes = self
+            .manifest_db
+            .get(&rtxn, MANIFEST_KEY)
+            .map_err(map_heed)?
+            .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
+        {
+            let runtime = self
+                .runtime
+                .read()
+                .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
+            if runtime.manifest_bytes.as_deref() == Some(bytes) {
+                return Ok(());
+            }
+        }
+
+        let manifest = decode_manifest(bytes)?;
+        let manifest_bytes = bytes.to_vec();
+        drop(rtxn);
+
         if let Some(expected) = self.expected_manifest_sha256 {
+            let manifest_sha256 = sha256(&manifest_bytes);
             if manifest_sha256 != expected {
                 return Err(StoreError::Other(format!(
                     "live pool manifest SHA-256 differs from controlled authority: expected {}, found {}",
@@ -1772,7 +1878,12 @@ impl PoolStore {
             .runtime
             .write()
             .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
+        if runtime.manifest_bytes.as_deref() == Some(manifest_bytes.as_slice()) {
+            return Ok(());
+        }
         if runtime.generation == Some(manifest.generation) {
+            runtime.manifest_bytes = Some(manifest_bytes);
+            runtime.manifest = Some(manifest);
             return Ok(());
         }
 
@@ -1832,6 +1943,8 @@ impl PoolStore {
             }
         }
         runtime.generation = Some(manifest.generation);
+        runtime.manifest_bytes = Some(manifest_bytes);
+        runtime.manifest = Some(manifest);
         drop(runtime);
         self.adaptive
             .lock()
@@ -1942,6 +2055,112 @@ impl PoolStore {
             .get(&id)
             .cloned()
             .ok_or_else(|| StoreError::Other(format!("unknown pool member {id}")))
+    }
+
+    fn get_member_and_gate(
+        &self,
+        id: PoolMemberId,
+        write: bool,
+    ) -> Result<(Arc<LmdbBlobStore>, Arc<ConcurrencyGate>), StoreError> {
+        self.refresh_members()?;
+        {
+            let runtime = self
+                .runtime
+                .read()
+                .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
+            let gates = if write {
+                &runtime.write_gates
+            } else {
+                &runtime.read_gates
+            };
+            if let (Some(store), Some(gate)) = (runtime.stores.get(&id), gates.get(&id)) {
+                return Ok((Arc::clone(store), Arc::clone(gate)));
+            }
+        }
+        let store = self.get_member(id)?;
+        let gate = self.member_gate(id, write)?;
+        Ok((store, gate))
+    }
+
+    fn choose_write_members_for_batch<'a>(
+        &self,
+        missing: &[(Hash, &'a Vec<u8>)],
+    ) -> Result<Vec<BatchWriteAssignment<'a>>, StoreError> {
+        self.refresh_members()?;
+        let mut active_members = {
+            let runtime = self
+                .runtime
+                .read()
+                .map_err(|_| StoreError::Other("pool runtime lock poisoned".into()))?;
+            let manifest = runtime
+                .manifest
+                .as_ref()
+                .ok_or_else(|| StoreError::Other("pool manifest is missing".into()))?;
+            let mut active = Vec::with_capacity(manifest.members.len());
+            for member in manifest
+                .members
+                .iter()
+                .filter(|member| member.state == PoolMemberState::Active)
+            {
+                let Some(store) = runtime.stores.get(&member.id) else {
+                    continue;
+                };
+                let Ok(stats) = store.stats() else {
+                    continue;
+                };
+                active.push((
+                    member.id,
+                    stats.total_bytes,
+                    member.config.capacity_bytes,
+                    member.config.temperature_high_watermark_percent,
+                ));
+            }
+            active
+        };
+
+        let mut adaptive = self
+            .adaptive
+            .lock()
+            .map_err(|_| StoreError::Other("pool adaptive lock poisoned".into()))?;
+        let mut candidates = Vec::with_capacity(active_members.len());
+        let mut below_high_watermark = Vec::with_capacity(active_members.len());
+        let mut assignments = Vec::with_capacity(missing.len());
+
+        for (hash, data) in missing {
+            let incoming_bytes = data.len() as u64;
+            candidates.clear();
+            below_high_watermark.clear();
+            for &(id, effective_bytes, capacity_bytes, high_watermark) in &active_members {
+                if capacity_bytes > 0
+                    && effective_bytes.saturating_add(incoming_bytes) > capacity_bytes
+                {
+                    continue;
+                }
+                candidates.push((id, effective_bytes, capacity_bytes));
+                let projected_fill = effective_bytes
+                    .saturating_add(incoming_bytes)
+                    .saturating_mul(100)
+                    .saturating_div(capacity_bytes)
+                    .min(100);
+                if projected_fill <= u64::from(high_watermark) {
+                    below_high_watermark.push((id, effective_bytes, capacity_bytes));
+                }
+            }
+            let pool = if below_high_watermark.is_empty() {
+                candidates.as_slice()
+            } else {
+                below_high_watermark.as_slice()
+            };
+            let target = adaptive
+                .choose_write(pool)
+                .ok_or_else(|| StoreError::Other("no writable pool member has capacity".into()))?;
+            if let Some(entry) = active_members.iter_mut().find(|entry| entry.0 == target) {
+                entry.1 = entry.1.saturating_add(incoming_bytes);
+            }
+            assignments.push((*hash, *data, target));
+        }
+
+        Ok(assignments)
     }
 
     fn choose_write_member(
@@ -2107,27 +2326,36 @@ impl PoolStore {
         hash: &Hash,
         location: LocationRecord,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let mut ids = match location {
+        let mut ids_buf = [PoolMemberId::ZERO; 2];
+        let ids_len = match location {
             LocationRecord::Pending { member, .. } | LocationRecord::Stored { member, .. } => {
-                vec![member]
+                ids_buf[0] = member;
+                1
             }
-            LocationRecord::Moving { source, target, .. } => vec![target, source],
+            LocationRecord::Moving { source, target, .. } => {
+                ids_buf[0] = target;
+                ids_buf[1] = source;
+                2
+            }
         };
-        self.adaptive
-            .lock()
-            .map_err(|_| StoreError::Other("pool adaptive lock poisoned".into()))?
-            .order_reads(&mut ids);
+        let ids = &mut ids_buf[..ids_len];
+        if ids.len() > 1 {
+            self.adaptive
+                .lock()
+                .map_err(|_| StoreError::Other("pool adaptive lock poisoned".into()))?
+                .order_reads(ids);
+        }
 
         let mut first_error = None;
-        for id in ids {
-            let store = match self.get_member(id) {
-                Ok(store) => store,
+        for &id in ids.iter() {
+            let (store, gate) = match self.get_member_and_gate(id, false) {
+                Ok(pair) => pair,
                 Err(error) => {
                     first_error.get_or_insert(error);
                     continue;
                 }
             };
-            match self.read_verified_member(id, &store, hash) {
+            match self.read_verified_member_with_gate(id, &store, &gate, hash) {
                 Ok(Some(data)) => return Ok(Some(data)),
                 Ok(None) => {}
                 Err(error) => {
@@ -2141,13 +2369,13 @@ impl PoolStore {
         }
     }
 
-    fn read_verified_member(
+    fn read_verified_member_with_gate(
         &self,
         id: PoolMemberId,
         store: &LmdbBlobStore,
+        gate: &ConcurrencyGate,
         hash: &Hash,
     ) -> Result<Option<Vec<u8>>, StoreError> {
-        let gate = self.member_gate(id, false)?;
         let _permit = gate.acquire()?;
         let started = Instant::now();
         let result = store.get_sync(hash);

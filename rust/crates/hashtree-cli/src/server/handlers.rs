@@ -1175,24 +1175,51 @@ async fn serve_raw_blob_with_range(
 
     let mut source = BlobSource::Local;
     let mut fetched_body = None;
-    let mut total_size = match get_blob_size_without_blocking_runtime(state, hash).await {
-        Ok(size) => size,
-        Err(error) if error == blob_read_busy_error() => {
-            return Response::builder()
-                .status(StatusCode::SERVICE_UNAVAILABLE)
-                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
-                .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
-                .header("Retry-After", "1")
-                .body(Body::from("Blob read queue is full"))
-                .unwrap();
+    let mut local_read_error = false;
+    let direct_full_get = !head_only && !headers.contains_key(header::RANGE);
+    let mut total_size = if direct_full_get {
+        match get_blob_without_blocking_runtime(state, hash).await {
+            Ok(Some(data)) => {
+                let len = data.len() as u64;
+                fetched_body = Some(data);
+                Some(len)
+            }
+            Ok(None) => None,
+            Err(error) if error == blob_read_busy_error() => {
+                return Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+                    .header("Retry-After", "1")
+                    .body(Body::from("Blob read queue is full"))
+                    .unwrap();
+            }
+            Err(error) => {
+                tracing::warn!("Failed to read local blob {}: {}", to_hex(&hash), error);
+                local_read_error = true;
+                None
+            }
         }
-        Err(error) => {
-            tracing::warn!(
-                "Failed to read local blob size {}: {}",
-                to_hex(&hash),
-                error
-            );
-            None
+    } else {
+        match get_blob_size_without_blocking_runtime(state, hash).await {
+            Ok(size) => size,
+            Err(error) if error == blob_read_busy_error() => {
+                return Response::builder()
+                    .status(StatusCode::SERVICE_UNAVAILABLE)
+                    .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                    .header(header::CACHE_CONTROL, NOT_FOUND_CACHE_CONTROL)
+                    .header("Retry-After", "1")
+                    .body(Body::from("Blob read queue is full"))
+                    .unwrap();
+            }
+            Err(error) => {
+                tracing::warn!(
+                    "Failed to read local blob size {}: {}",
+                    to_hex(&hash),
+                    error
+                );
+                None
+            }
         }
     };
 
@@ -1218,6 +1245,13 @@ async fn serve_raw_blob_with_range(
     }
 
     let Some(total_size) = total_size else {
+        if local_read_error {
+            return Response::builder()
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .header(header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
+                .body(Body::from("Blob read failed"))
+                .unwrap();
+        }
         return if is_immutable {
             immutable_not_found_response("Not found")
         } else {
@@ -1778,12 +1812,6 @@ pub async fn serve_content_or_blob(
     }
 
     let is_localhost = is_direct_loopback(connect_info.0.ip(), &headers);
-    let _client_ip = headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| connect_info.0.ip().to_string());
     // Parse potential extension for blossom
     let (hash_part, ext) = if let Some(dot_pos) = id.rfind('.') {
         (&id[..dot_pos], Some(&id[dot_pos..]))
@@ -2144,18 +2172,35 @@ pub async fn unpin_cid(
 }
 
 pub async fn storage_stats(State(state): State<AppState>) -> impl IntoResponse {
-    let store = &state.store;
-    match store.get_storage_stats() {
-        Ok(stats) => Json(json!({
+    let store = state.store.clone();
+    match super::blob_read::run_blob_metadata_read(move || {
+        store.get_storage_stats_bounded().map_err(|e| e.to_string())
+    })
+    .await
+    {
+        Ok(Ok(stats)) => Json(json!({
             "total_dags": stats.total_dags,
             "pinned_dags": stats.pinned_dags,
             "total_bytes": stats.total_bytes,
             "quota_used_bytes": stats.quota_used_bytes,
             "quota_limit_bytes": stats.quota_limit_bytes,
-        })),
-        Err(e) => Json(json!({
-            "error": e.to_string()
-        })),
+        }))
+        .into_response(),
+        Ok(Err(e)) => Json(json!({
+            "error": e
+        }))
+        .into_response(),
+        Err(error) if error.is_busy() => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": error.to_string()
+            })),
+        )
+            .into_response(),
+        Err(error) => Json(json!({
+            "error": error.to_string()
+        }))
+        .into_response(),
     }
 }
 
@@ -2314,7 +2359,7 @@ const HTTP_RESOLVER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Create resolver config with HTTP timeout
 fn resolver_config(state: &AppState) -> NostrResolverConfig {
     NostrResolverConfig {
-        relays: state.nostr_relay_urls.clone(),
+        relays: (*state.nostr_relay_urls).clone(),
         resolve_timeout: HTTP_RESOLVER_TIMEOUT,
         ..Default::default()
     }

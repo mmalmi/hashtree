@@ -58,6 +58,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt;
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
@@ -2400,11 +2402,13 @@ impl LmdbBlobStore {
         self.env.force_sync().map_err(map_heed_error)
     }
 
-    fn total_bytes(&self) -> Result<u64, StoreError> {
+    fn totals(&self) -> Result<StoreTotals, StoreError> {
         let rtxn = self.env.read_txn().map_err(map_heed_error)?;
-        Ok(Self::read_store_totals(self.stats, &rtxn)?
-            .unwrap_or_default()
-            .total_bytes)
+        Ok(Self::read_store_totals(self.stats, &rtxn)?.unwrap_or_default())
+    }
+
+    fn total_bytes(&self) -> Result<u64, StoreError> {
+        Ok(self.totals()?.total_bytes)
     }
 
     fn evict_for_write_pressure(&self, incoming_bytes: u64) -> Result<u64, StoreError> {
@@ -2414,8 +2418,9 @@ impl LmdbBlobStore {
         if self.max_bytes.load(Ordering::Relaxed) == 0 {
             return Ok(0);
         }
-        let current = self.total_bytes()?;
-        if current == 0 {
+        let totals = self.totals()?;
+        let current = totals.total_bytes;
+        if current == 0 || current <= totals.pinned_bytes {
             return Ok(0);
         }
 
@@ -2430,8 +2435,9 @@ impl LmdbBlobStore {
             return Ok(0);
         }
 
-        let current = self.total_bytes()?;
-        if current <= max {
+        let totals = self.totals()?;
+        let current = totals.total_bytes;
+        if current <= max || current <= totals.pinned_bytes {
             return Ok(0);
         }
 
@@ -2794,14 +2800,22 @@ impl LmdbBlobStore {
             return Ok(None);
         };
 
-        let expected_size = self
-            .metadata
-            .get(&rtxn, hash)
-            .map_err(|e| StoreError::Other(e.to_string()))?
-            .map(Self::decode_blob_meta)
-            .transpose()?
-            .map(|meta| meta.size);
-        self.decode_blob_value(hash, blob, expected_size).map(Some)
+        if self.is_external_blob_ref(hash, blob) {
+            let expected_size = self
+                .metadata
+                .get(&rtxn, hash)
+                .map_err(|e| StoreError::Other(e.to_string()))?
+                .map(Self::decode_blob_meta)
+                .transpose()?
+                .map(|meta| meta.size);
+            drop(rtxn);
+            return self.read_external_blob(hash, expected_size).map(Some);
+        }
+        if let Some(pack_ref) = Self::decode_external_pack_ref(blob)? {
+            drop(rtxn);
+            return self.read_external_pack_blob(&pack_ref).map(Some);
+        }
+        Ok(Some(blob.to_vec()))
     }
 
     pub fn get_range_sync(
@@ -2823,9 +2837,11 @@ impl LmdbBlobStore {
         };
 
         if self.is_external_blob_ref(hash, blob) {
+            drop(rtxn);
             return self.read_external_blob_range(hash, start, end_inclusive);
         }
         if let Some(pack_ref) = Self::decode_external_pack_ref(blob)? {
+            drop(rtxn);
             return self.read_external_pack_range(&pack_ref, start, end_inclusive);
         }
 
@@ -3250,74 +3266,129 @@ impl LmdbBlobStore {
             return Ok(0);
         }
 
-        let rtxn = self
-            .env
-            .read_txn()
-            .map_err(|e| StoreError::Other(e.to_string()))?;
-        let order_keys: Vec<Vec<u8>> = self
-            .eviction_order
-            .iter(&rtxn)
-            .map_err(|e| StoreError::Other(e.to_string()))?
-            .map(|item| {
-                item.map(|(key, _)| key.to_vec())
-                    .map_err(|e| StoreError::Other(e.to_string()))
-            })
-            .collect::<Result<_, _>>()?;
-        drop(rtxn);
+        let totals = self.totals()?;
+        let evictable_bytes = totals.total_bytes.saturating_sub(totals.pinned_bytes);
+        if evictable_bytes == 0 {
+            return Ok(0);
+        }
 
         let mut freed_total = 0u64;
-        let to_free = current_bytes - target_bytes;
-        let mut index = 0usize;
+        let to_free = (current_bytes - target_bytes).min(evictable_bytes);
+        let mut last_seen_key: Option<[u8; ORDER_KEY_BYTES]> = None;
+        let mut batch_cap = 256usize.min(EVICTION_BATCH_MAX_ITEMS);
+        let mut batch_keys: Vec<[u8; ORDER_KEY_BYTES]> = Vec::with_capacity(batch_cap);
 
-        while freed_total < to_free && index < order_keys.len() {
-            let mut wtxn = self
-                .env
-                .write_txn()
-                .map_err(|e| StoreError::Other(e.to_string()))?;
-            let mut batch_freed = 0u64;
-            let mut batch_items = 0usize;
-            let mut batch_external_paths = Vec::new();
+        while freed_total < to_free {
+            batch_keys.clear();
+            let mut exhausted = true;
+            {
+                let after = last_seen_key;
+                let rtxn = self
+                    .env
+                    .read_txn()
+                    .map_err(|e| StoreError::Other(e.to_string()))?;
+                let mut collect = |key: &[u8]| -> Result<bool, StoreError> {
+                    let order_key: [u8; ORDER_KEY_BYTES] = key
+                        .try_into()
+                        .map_err(|_| StoreError::Other("invalid eviction order key".into()))?;
+                    last_seen_key = Some(order_key);
+                    let hash = Self::decode_hash_from_order_key(&order_key)?;
+                    if self.read_pin_count(&rtxn, &hash)? > 0 {
+                        return Ok(false);
+                    }
+                    batch_keys.push(order_key);
+                    Ok(batch_keys.len() >= batch_cap)
+                };
 
-            while freed_total + batch_freed < to_free && index < order_keys.len() {
-                let order_key = &order_keys[index];
-                index += 1;
-
-                let hash = Self::decode_hash_from_order_key(order_key)?;
-                if self.read_pin_count(&wtxn, &hash)? > 0 {
-                    continue;
-                }
-
-                let external_path = self.external_blob_path_in_txn(&wtxn, &hash)?;
-                let (_, bytes_freed) = self.delete_blob_in_txn(&mut wtxn, &hash)?;
-                if bytes_freed == 0 {
-                    let _ = self
+                if let Some(after) = after {
+                    use std::ops::Bound;
+                    let range = (Bound::Excluded(after.as_slice()), Bound::<&[u8]>::Unbounded);
+                    for item in self
                         .eviction_order
-                        .delete(&mut wtxn, order_key)
-                        .map_err(|e| StoreError::Other(e.to_string()))?;
-                    continue;
-                }
-
-                batch_freed = batch_freed.saturating_add(bytes_freed);
-                batch_items += 1;
-                if let Some(path) = external_path {
-                    batch_external_paths.push(path);
-                }
-
-                if batch_freed >= EVICTION_BATCH_TARGET_BYTES
-                    || batch_items >= EVICTION_BATCH_MAX_ITEMS
-                {
-                    break;
+                        .range(&rtxn, &range)
+                        .map_err(|e| StoreError::Other(e.to_string()))?
+                    {
+                        let (key, _) = item.map_err(|e| StoreError::Other(e.to_string()))?;
+                        if collect(key)? {
+                            exhausted = false;
+                            break;
+                        }
+                    }
+                } else {
+                    for item in self
+                        .eviction_order
+                        .iter(&rtxn)
+                        .map_err(|e| StoreError::Other(e.to_string()))?
+                    {
+                        let (key, _) = item.map_err(|e| StoreError::Other(e.to_string()))?;
+                        if collect(key)? {
+                            exhausted = false;
+                            break;
+                        }
+                    }
                 }
             }
 
-            wtxn.commit()
-                .map_err(|e| StoreError::Other(e.to_string()))?;
-            for path in batch_external_paths {
-                let _ = fs::remove_file(path);
+            if batch_keys.is_empty() {
+                break;
             }
-            if batch_freed > 0 {
-                freed_total = freed_total.saturating_add(batch_freed);
+
+            let mut index = 0usize;
+            while freed_total < to_free && index < batch_keys.len() {
+                let mut wtxn = self
+                    .env
+                    .write_txn()
+                    .map_err(|e| StoreError::Other(e.to_string()))?;
+                let mut batch_freed = 0u64;
+                let mut batch_items = 0usize;
+                let mut batch_external_paths = Vec::new();
+
+                while freed_total + batch_freed < to_free && index < batch_keys.len() {
+                    let order_key = &batch_keys[index];
+                    index += 1;
+
+                    let hash = Self::decode_hash_from_order_key(order_key)?;
+                    if self.read_pin_count(&wtxn, &hash)? > 0 {
+                        continue;
+                    }
+
+                    let external_path = self.external_blob_path_in_txn(&wtxn, &hash)?;
+                    let (_, bytes_freed) = self.delete_blob_in_txn(&mut wtxn, &hash)?;
+                    if bytes_freed == 0 {
+                        let _ = self
+                            .eviction_order
+                            .delete(&mut wtxn, order_key)
+                            .map_err(|e| StoreError::Other(e.to_string()))?;
+                        continue;
+                    }
+
+                    batch_freed = batch_freed.saturating_add(bytes_freed);
+                    batch_items += 1;
+                    if let Some(path) = external_path {
+                        batch_external_paths.push(path);
+                    }
+
+                    if batch_freed >= EVICTION_BATCH_TARGET_BYTES
+                        || batch_items >= EVICTION_BATCH_MAX_ITEMS
+                    {
+                        break;
+                    }
+                }
+
+                wtxn.commit()
+                    .map_err(|e| StoreError::Other(e.to_string()))?;
+                for path in batch_external_paths {
+                    self.remove_external_blob_file(Some(path));
+                }
+                if batch_freed > 0 {
+                    freed_total = freed_total.saturating_add(batch_freed);
+                }
             }
+
+            if exhausted {
+                break;
+            }
+            batch_cap = (batch_cap.saturating_mul(2)).min(EVICTION_BATCH_MAX_ITEMS);
         }
 
         Ok(freed_total)
@@ -3876,42 +3947,40 @@ impl LmdbBlobStore {
         Ok(markers)
     }
 
-    fn decode_blob_value(
+    fn read_external_blob(
         &self,
         hash: &Hash,
-        value: &[u8],
         expected_size: Option<u64>,
     ) -> Result<Vec<u8>, StoreError> {
-        if self.is_external_blob_ref(hash, value) {
-            let config = self.external_blobs.as_ref().ok_or_else(|| {
-                StoreError::Other(
-                    "external LMDB blob marker found but external blobs are disabled".into(),
-                )
-            })?;
-            let mut file = config.open_relative(&ExternalBlobConfig::relative_blob_path(hash))?;
-            let expected_size = expected_size.ok_or_else(|| {
-                StoreError::Other("external LMDB blob is missing size metadata".into())
-            })?;
-            let capacity = usize::try_from(expected_size)
-                .map_err(|_| StoreError::Other("external LMDB blob size exceeds usize".into()))?;
-            let mut data = Vec::with_capacity(capacity.min(1024 * 1024));
-            Read::by_ref(&mut file)
-                .take(expected_size.saturating_add(1))
-                .read_to_end(&mut data)
-                .map_err(StoreError::Io)?;
-            if data.len() as u64 != expected_size
-                || file.metadata().map_err(StoreError::Io)?.len() != expected_size
-            {
-                return Err(StoreError::Other(
-                    "external LMDB blob length differs from committed metadata".into(),
-                ));
+        let config = self.external_blobs.as_ref().ok_or_else(|| {
+            StoreError::Other(
+                "external LMDB blob marker found but external blobs are disabled".into(),
+            )
+        })?;
+        let file = config.open_relative(&ExternalBlobConfig::relative_blob_path(hash))?;
+        let expected_size = expected_size.ok_or_else(|| {
+            StoreError::Other("external LMDB blob is missing size metadata".into())
+        })?;
+        let actual_size = file.metadata().map_err(StoreError::Io)?.len();
+        if actual_size != expected_size {
+            return Err(StoreError::Other(
+                "external LMDB blob length differs from committed metadata".into(),
+            ));
+        }
+        let capacity = usize::try_from(expected_size)
+            .map_err(|_| StoreError::Other("external LMDB blob size exceeds usize".into()))?;
+        let mut data = vec![0u8; capacity];
+        if capacity > 0 {
+            if let Err(error) = read_exact_at_offset(&file, &mut data, 0) {
+                if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                    return Err(StoreError::Other(
+                        "external LMDB blob length differs from committed metadata".into(),
+                    ));
+                }
+                return Err(StoreError::Io(error));
             }
-            return Ok(data);
         }
-        if let Some(pack_ref) = Self::decode_external_pack_ref(value)? {
-            return self.read_external_pack_blob(&pack_ref);
-        }
-        Ok(value.to_vec())
+        Ok(data)
     }
 
     fn read_external_blob_range(
@@ -3925,7 +3994,7 @@ impl LmdbBlobStore {
                 "external LMDB blob marker found but external blobs are disabled".into(),
             )
         })?;
-        let mut file = config.open_relative(&ExternalBlobConfig::relative_blob_path(hash))?;
+        let file = config.open_relative(&ExternalBlobConfig::relative_blob_path(hash))?;
         let len = file.metadata()?.len();
         if len == 0 || start >= len || end_inclusive < start {
             return Ok(Some(Vec::new()));
@@ -3936,8 +4005,7 @@ impl LmdbBlobStore {
         let read_len = usize::try_from(read_len)
             .map_err(|_| StoreError::Other("blob range is too large to read".to_string()))?;
         let mut data = vec![0; read_len];
-        file.seek(SeekFrom::Start(start))?;
-        file.read_exact(&mut data)?;
+        read_exact_at_offset(&file, &mut data, start)?;
         Ok(Some(data))
     }
 
@@ -3950,11 +4018,10 @@ impl LmdbBlobStore {
                 "external LMDB pack marker found but external blobs are disabled".into(),
             )
         })?;
-        let mut file =
+        let file =
             config.open_relative(&ExternalBlobConfig::relative_pack_path(&pack_ref.name))?;
-        file.seek(SeekFrom::Start(pack_ref.offset))?;
         let mut data = vec![0; read_len];
-        file.read_exact(&mut data)?;
+        read_exact_at_offset(&file, &mut data, pack_ref.offset)?;
         Ok(data)
     }
 
@@ -3978,11 +4045,10 @@ impl LmdbBlobStore {
                 "external LMDB pack marker found but external blobs are disabled".into(),
             )
         })?;
-        let mut file =
+        let file =
             config.open_relative(&ExternalBlobConfig::relative_pack_path(&pack_ref.name))?;
-        file.seek(SeekFrom::Start(pack_ref.offset.saturating_add(start)))?;
         let mut data = vec![0; read_len];
-        file.read_exact(&mut data)?;
+        read_exact_at_offset(&file, &mut data, pack_ref.offset.saturating_add(start))?;
         Ok(Some(data))
     }
 
@@ -4028,6 +4094,19 @@ impl LmdbBlobStore {
             }
             let _ = fs::remove_file(path);
         }
+    }
+}
+
+fn read_exact_at_offset(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        file.read_exact_at(buf, offset)
+    }
+    #[cfg(not(unix))]
+    {
+        let mut file = file;
+        file.seek(SeekFrom::Start(offset))?;
+        file.read_exact(buf)
     }
 }
 
@@ -5715,6 +5794,102 @@ mod tests {
         );
         assert!(reopened.exists(&hash)?);
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_streaming_eviction_skips_pinned_and_handles_all_pinned() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let store = LmdbBlobStore::with_map_size(temp.path().join("blobs"), 32 * 1024 * 1024)?;
+
+        let mut pinned_hashes = Vec::new();
+        for idx in 0u32..320 {
+            let mut data = vec![0u8; 256];
+            data[..4].copy_from_slice(&idx.to_le_bytes());
+            let hash = sha256(&data);
+            store.put_sync(hash, &data)?;
+            store.pin_sync(&hash)?;
+            pinned_hashes.push(hash);
+        }
+
+        let mut unpinned_hashes = Vec::new();
+        for idx in 320u32..640 {
+            let mut data = vec![1u8; 256];
+            data[..4].copy_from_slice(&idx.to_le_bytes());
+            let hash = sha256(&data);
+            store.put_sync(hash, &data)?;
+            unpinned_hashes.push(hash);
+        }
+
+        // Set limit so target (90% + trigger = 91024) exceeds pinned bytes (81920) + trigger (1024),
+        // evicting oldest unpinned blobs in FIFO order while keeping pinned + newest blobs.
+        store.set_max_bytes(100_000);
+        let trigger = vec![0xabu8; 1024];
+        let trigger_hash = sha256(&trigger);
+        store.put_sync(trigger_hash, &trigger)?;
+
+        // Every pinned blob must still exist.
+        for hash in &pinned_hashes {
+            assert!(store.exists(hash)?, "pinned blob was evicted");
+        }
+        // Oldest unpinned blobs should be evicted while newest trigger blob survives.
+        assert!(!store.exists(&unpinned_hashes[0])?);
+        assert!(store.exists(&trigger_hash)?);
+
+        // When everything remaining is pinned and total > max_bytes, eviction short-circuits in O(1).
+        store.pin_sync(&trigger_hash)?;
+        for hash in &unpinned_hashes {
+            if store.exists(hash)? {
+                store.pin_sync(hash)?;
+            }
+        }
+        store.set_max_bytes(1024);
+        assert_eq!(store.evict_to_target(store.total_bytes()?, 1024)?, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_sync_and_range_inline_loose_and_packed() -> Result<(), Box<dyn std::error::Error>> {
+        let temp = TempDir::new()?;
+        let ext_dir = temp.path().join("ext");
+        let store = LmdbBlobStore::with_map_size_and_external_blob_options(
+            temp.path().join("blobs"),
+            16 * 1024 * 1024,
+            Some(ExternalBlobOptions {
+                base_path: ext_dir.clone(),
+                min_bytes: 64,
+                sync: false,
+                pack_target_bytes: Some(4096),
+            }),
+        )?;
+
+        let inline = b"tiny-inline-blob".to_vec();
+        let inline_hash = sha256(&inline);
+        store.put_sync(inline_hash, &inline)?;
+
+        let loose = (0u8..128).collect::<Vec<_>>();
+        let loose_hash = sha256(&loose);
+        store.put_sync(loose_hash, &loose)?;
+
+        let packed_a = vec![0x41u8; 200];
+        let packed_b = (0u8..200).collect::<Vec<_>>();
+        let packed_a_hash = sha256(&packed_a);
+        let packed_b_hash = sha256(&packed_b);
+        store.put_many_sync(&[(packed_a_hash, packed_a.clone()), (packed_b_hash, packed_b.clone())])?;
+
+        assert_eq!(store.get_sync(&inline_hash)?, Some(inline.clone()));
+        assert_eq!(store.get_range_sync(&inline_hash, 5, 10)?, Some(inline[5..=10].to_vec()));
+        assert_eq!(store.get_sync(&loose_hash)?, Some(loose.clone()));
+        assert_eq!(store.get_range_sync(&loose_hash, 10, 40)?, Some(loose[10..=40].to_vec()));
+        assert_eq!(store.get_sync(&packed_a_hash)?, Some(packed_a.clone()));
+        assert_eq!(store.get_sync(&packed_b_hash)?, Some(packed_b.clone()));
+        assert_eq!(store.get_range_sync(&packed_b_hash, 25, 75)?, Some(packed_b[25..=75].to_vec()));
+
+        // Verify loose external file corruption (wrong length) is still caught.
+        let loose_path = ext_dir.join(ExternalBlobConfig::relative_blob_path(&loose_hash));
+        std::fs::write(&loose_path, b"truncated")?;
+        let err = store.get_sync(&loose_hash).expect_err("corrupt loose length must error");
+        assert!(err.to_string().contains("length differs"), "{err}");
         Ok(())
     }
 

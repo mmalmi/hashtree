@@ -1,4 +1,9 @@
-use std::{future::Future, net::SocketAddr, time::Duration};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use anyhow::{anyhow, bail, Context, Result};
 use tokio::{
@@ -15,18 +20,42 @@ const OTHER_FAMILY_DELAY: Duration = Duration::from_millis(250);
 const ADDRESS_TIMEOUT: Duration = Duration::from_secs(4);
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
+fn shared_tls_connector() -> Connector {
+    static CONNECTOR: OnceLock<Arc<rustls::ClientConfig>> = OnceLock::new();
+    let config = CONNECTOR.get_or_init(|| {
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        let builder = match rustls::crypto::CryptoProvider::get_default() {
+            Some(provider) => rustls::ClientConfig::builder_with_provider(Arc::clone(provider)),
+            None => rustls::ClientConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            )),
+        };
+        let config = builder
+            .with_safe_default_protocol_versions()
+            .expect("valid default TLS protocol versions")
+            .with_root_certificates(root_store)
+            .with_no_client_auth();
+        Arc::new(config)
+    });
+    Connector::Rustls(Arc::clone(config))
+}
+
 pub(super) async fn connect(url: &str) -> Result<Socket> {
     timeout(CONNECT_TIMEOUT, async {
         let uri: Uri = url.parse()?;
-        let default_port = match uri.scheme_str() {
-            Some("wss") => 443,
-            Some("ws") => 80,
+        let (default_port, connector) = match uri.scheme_str() {
+            Some("wss") => (443, Some(shared_tls_connector())),
+            Some("ws") => (80, None),
             _ => bail!("unsupported relay URL scheme"),
         };
         let host = uri.host().context("missing relay hostname")?;
         let host = host.trim_start_matches('[').trim_end_matches(']');
         let addresses = lookup_host((host, uri.port_u16().unwrap_or(default_port))).await?;
-        race_families(addresses, |address| handshake(url, address, None)).await
+        race_families(addresses, |address| {
+            handshake(url, address, connector.clone())
+        })
+        .await
     })
     .await
     .context("upstream relay connection deadline")?

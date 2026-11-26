@@ -42,7 +42,7 @@ impl Store for PooledReadStore {
             .await
             .map_err(StoreError::Other)?
         {
-            return Ok(Some(data));
+            return Ok(Some(data.to_vec()));
         }
         Ok(self.read_upstream(hash).await?.map(|data| data.to_vec()))
     }

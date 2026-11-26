@@ -17,6 +17,8 @@ pub(super) const MIN_MEMBER_MAP_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 pub struct PoolMemberId(pub(super) [u8; 16]);
 
 impl PoolMemberId {
+    pub(super) const ZERO: Self = Self([0u8; 16]);
+
     pub fn new() -> Self {
         Self(*Uuid::new_v4().as_bytes())
     }
