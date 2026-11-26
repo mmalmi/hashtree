@@ -38,10 +38,12 @@ test('matched packed repository rows, history, interaction and idle workload', a
       new PerformanceObserver(list=>state.longTasks.push(...list.getEntries().map(e=>e.duration))).observe({type:'longtask',buffered:true});
       new MutationObserver(()=>{const rows=[...document.querySelectorAll('[data-testid="file-list"] tbody tr')].filter((r:any)=>r.cells[1]?.querySelector('a')&&r.cells[1].innerText!=='.git');if(rows.length!==29)return;state.list??=performance.now();const labeled=rows.filter((r:any)=>r.cells[2]?.querySelector('a'));if(labeled.length)state.first??=performance.now();if(labeled.length===29)state.all??=performance.now();}).observe(document,{subtree:true,childList:true,attributes:true});
     });
+    await page.goto('about:blank');
     const cdp=await page.context().newCDPSession(page);await cdp.send('Performance.enable');const samples=[];
     for(let pass=0;pass<3;pass++){
-      await page.goto(`/git.html#/${owner}/matched-perf`,{waitUntil:'domcontentloaded'});
-      await page.waitForFunction(()=>(window as any).__matched?.all!==null,undefined,{timeout:60000});
+      if(pass===0)await page.goto(`/git.html#/${owner}/matched-perf`,{waitUntil:'domcontentloaded'});
+      else await page.reload({waitUntil:'domcontentloaded'});
+      await page.waitForFunction(()=>typeof (window as any).__matched?.all==='number',undefined,{timeout:60000});
       const actual=await page.getByTestId('file-list').locator('tbody tr').evaluateAll(rs=>Object.fromEntries(rs.filter((r:any)=>r.cells[2]?.querySelector('a')).map((r:any)=>[r.cells[1].innerText,r.cells[2].querySelector('a').hash.match(/commit=([0-9a-f]+)/)[1]])));
       expect(actual).toEqual(expected);
       const historyStarted=Date.now();await page.getByRole('button',{name:'121 commits',exact:true}).click();

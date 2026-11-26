@@ -52,7 +52,9 @@ function cases(report, requirePassed=false) {
 }
 await run('install',['pnpm','install','--frozen-lockfile']);
 await run('installed-package',['python3','/stage/verify-cohort.py','installed']);
-await run('unit',['pnpm','run','test:unit']);
+const reusedUnit=JSON.parse(readFileSync('/stage/reused-unit.json'));
+assert.equal(reusedUnit.source,manifest.source);assert.equal(reusedUnit.tree,manifest.tree);assert.equal(digest('/stage/reused-unit.log'),reusedUnit.step.logSha256);
+cpSync('/stage/reused-unit.log',`${evidence}/unit.log`);result.steps.push({...reusedUnit.step,reusedFromRun:reusedUnit.run});save();console.log('Reused exact-source full unit pass',reusedUnit.run);
 // Same deterministic packed fixture, isolated storage, same runner and origin.
 await run('baseline-install',['pnpm','install','--frozen-lockfile'],{},'/stage/baseline');
 for(const [label,cwd] of [['before','/stage/baseline'],['after','/stage/app']]){

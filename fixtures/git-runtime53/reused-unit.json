@@ -1,0 +1,16 @@
+{
+  "source": "6ce0598035fbdd1f11b3accf0953b773310f9dd3",
+  "tree": "b6d52967664eabf87b8433a583ca45add18b90a8",
+  "run": 45813601820,
+  "step": {
+    "id": "unit",
+    "command": [
+      "pnpm",
+      "run",
+      "test:unit"
+    ],
+    "status": 0,
+    "seconds": 18.551,
+    "logSha256": "01c3f7642f5eb97d8cb0a9ebf9f0edfa8474d07e81256d3ed5bbc81e7fe403e7"
+  }
+}

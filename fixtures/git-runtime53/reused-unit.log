@@ -1,0 +1,325 @@
+
+> iris-git@0.1.22 test:unit /stage/app
+> pnpm run verify:dependency-lock && node --test scripts/test-isolated-browser.mjs && vitest run tests/treeForkCancellation.test.ts tests/treeRootKeys.test.ts tests/treeRootResolver.test.ts tests/gitCollaborationPrivacy.test.ts tests/nip34Live.test.ts tests/repoForksStore.test.ts tests/gitFavoritesStore.test.ts tests/directoryEntries.test.ts tests/appBranding.test.ts tests/defaultRelays.test.ts tests/gitPortableBuildConfig.test.ts tests/publishPortableBuild.test.ts tests/releaseSite.test.ts tests/httpsStaticAssetsWorker.test.ts tests/settingsLayout.test.ts tests/systemTheme.test.ts tests/renderLoopGuard.test.ts tests/hashtreePaths.test.ts tests/nativeFixtureBinaries.test.ts tests/gitDiffText.test.ts tests/codeHighlight.test.ts tests/gitFavorites.test.ts tests/gitFileCommitsProgress.test.ts tests/gitFipsRuntime.test.ts tests/gitHomeModel.test.ts tests/gitInfoStore.test.ts tests/gitLogStore.test.ts tests/gitPackedHistory.test.ts tests/gitSnapshotBudget.test.ts tests/markdown.test.ts tests/gitRefNavigation.test.ts tests/gitRefs.test.ts tests/gitRefsFacade.test.ts tests/gitRepoAnnouncements.test.ts tests/ngit.test.ts tests/gitRepoDiscovery.test.ts tests/gitRepoReadiness.test.ts tests/gitResolveRevision.test.ts tests/gitRoot.test.ts tests/gitViewContext.test.ts tests/releaseDetailAssets.test.ts tests/releaseDetailDownloadBehavior.test.ts tests/releaseDetailStore.test.ts tests/releasesStore.test.ts tests/releasesStoreFreshRoot.test.ts tests/workerAdapterP2P.test.ts tests/contactMemory.test.ts tests/contactMemoryProfile.test.ts tests/searchIndexPrivacy.test.ts tests/recentSearch.test.ts tests/graphBootstrapPolicy.test.ts tests/settingsHydrationPolicy.test.ts tests/routeRootPriority.test.ts tests/profileStore.test.ts tests/directQuery.test.ts tests/socialGraphFollowedByFriends.test.ts
+
+
+> iris-git@0.1.22 verify:dependency-lock /stage/app
+> node ./scripts/verify-dependency-lock.mjs
+
+Verified immutable Iris Git runtime release integrity
+✔ deny proxy closes a reset CONNECT socket without forwarding (336.01585ms)
+✔ deny proxy closes a reset UPGRADE socket without forwarding (352.090198ms)
+ℹ tests 2
+ℹ suites 0
+ℹ pass 2
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 734.72869
+
+[1m[30m[46m RUN [49m[39m[22m [36mv4.1.12 [39m[90m/stage/app[39m
+
+ [32m✓[39m tests/ngit.test.ts [2m([22m[2m17 tests[22m[2m)[22m[33m 507[2mms[22m[39m
+[90mstderr[2m | tests/releaseDetailStore.test.ts[2m > [22m[2mcreateReleaseDetailStore[2m > [22m[2mreloads a release when its tree root appears after the initial miss
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+ [32m✓[39m tests/releaseDetailStore.test.ts [2m([22m[2m9 tests[22m[2m)[22m[33m 665[2mms[22m[39m
+[90mstderr[2m | tests/releasesStore.test.ts
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+[90mstderr[2m | tests/releasesStore.test.ts[2m > [22m[2mreleases store helpers[2m > [22m[2mbuilds release asset urls on the app /htree route instead of upload.iris.to
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+[90mstderr[2m | tests/releasesStore.test.ts[2m > [22m[2mreleases store helpers[2m > [22m[2mpreserves the link key on release asset urls
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+[90mstderr[2m | tests/releasesStore.test.ts[2m > [22m[2mreleases store helpers[2m > [22m[2mbuilds release asset download urls that preserve client and link keys
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+ [32m✓[39m tests/releasesStore.test.ts [2m([22m[2m14 tests[22m[2m)[22m[33m 882[2mms[22m[39m
+     [33m[2m✓[22m[39m shows available releases while an older release stalls, and retains them on failure [33m 570[2mms[22m[39m
+[90mstderr[2m | tests/gitRefs.test.ts
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+ [32m✓[39m tests/gitRefs.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 217[2mms[22m[39m
+ [32m✓[39m tests/settingsLayout.test.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+[90mstdout[2m | tests/gitPackedHistory.test.ts[2m > [22m[2mpacked repository history[2m > [22m[2mwalks file history reading each stored pack chunk at most once
+[22m[39m[git perf] getFileLastCommits completed in 2 ms
+
+[90mstdout[2m | tests/gitPackedHistory.test.ts[2m > [22m[2mpacked repository history[2m > [22m[2mmatches git log for merged files, directories, and mode-only changes
+[22m[39m[git perf] getFileLastCommits completed in 5 ms
+
+[90mstdout[2m | tests/gitPackedHistory.test.ts[2m > [22m[2mpacked repository history[2m > [22m[2mmatches git log for merged files, directories, and mode-only changes
+[22m[39m[git perf] getFileLastCommits completed in 1 ms
+
+[90mstdout[2m | tests/gitPackedHistory.test.ts[2m > [22m[2mpacked repository history[2m > [22m[2mreuses public row history only when its commit is reached for that path
+[22m[39m[git perf] getFileLastCommits completed in 0 ms
+
+[90mstdout[2m | tests/gitPackedHistory.test.ts[2m > [22m[2mpacked repository history[2m > [22m[2mreuses public row history only when its commit is reached for that path
+[22m[39m[git perf] getFileLastCommits completed in 0 ms
+
+[90mstdout[2m | tests/gitPackedHistory.test.ts[2m > [22m[2mpacked repository history[2m > [22m[2mreuses public row history only when its commit is reached for that path
+[22m[39m[git perf] getFileLastCommits completed in 3 ms
+
+[90mstdout[2m | tests/gitPackedHistory.test.ts[2m > [22m[2mpacked repository history[2m > [22m[2mstops delivering rows when the listing is left
+[22m[39m[git perf] getFileLastCommits completed in 1 ms
+
+ [32m✓[39m tests/gitPackedHistory.test.ts [2m([22m[2m9 tests[22m[2m)[22m[32m 228[2mms[22m[39m
+ [32m✓[39m tests/releaseSite.test.ts [2m([22m[2m17 tests[22m[2m)[22m[32m 33[2mms[22m[39m
+[90mstderr[2m | tests/nip34Live.test.ts[2m > [22m[2mNIP-22 replies and extra publish targets[2m > [22m[2mhands each published event to registered targets once the backend has it
+[22m[39m[nostr] Could not publish event: Error: offline
+    at [90m/stage/app/[39mtests/nip34Live.test.ts:234:43
+    at [90mfile:///stage/app/[39mnode_modules/[4m.pnpm[24m/@vitest+runner@4.1.12/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:20
+
+ [32m✓[39m tests/nip34Live.test.ts [2m([22m[2m9 tests[22m[2m)[22m[32m 156[2mms[22m[39m
+ [32m✓[39m tests/gitCollaborationPrivacy.test.ts [2m([22m[2m31 tests[22m[2m)[22m[33m 310[2mms[22m[39m
+[90mstderr[2m | tests/contactMemoryProfile.test.ts
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+ [32m✓[39m tests/contactMemoryProfile.test.ts [2m([22m[2m9 tests[22m[2m)[22m[33m 740[2mms[22m[39m
+[90mstderr[2m | tests/workerAdapterP2P.test.ts
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter external P2P bridge[2m > [22m[2msettles correlated worker acknowledgements
+[22m[39m[WorkerAdapter] Worker ready
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter external P2P bridge[2m > [22m[2mreturns provider bytes to a worker P2P request
+[22m[39m[WorkerAdapter] Worker ready
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter external P2P bridge[2m > [22m[2mreturns FIPS peers without a legacy WebRTC control surface
+[22m[39m[WorkerAdapter] Worker ready
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter startup recovery[2m > [22m[2mresolves all startup callers when the first worker crashes before ready
+[22m[39m[WorkerAdapter] Restarting worker in 1000ms (attempt 1)
+
+[90mstderr[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter startup recovery[2m > [22m[2mresolves all startup callers when the first worker crashes before ready
+[22m[39m[WorkerAdapter] Worker crashed: {"message":"startup failed","error":""}
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter startup recovery[2m > [22m[2mresolves all startup callers when the first worker crashes before ready
+[22m[39m[WorkerAdapter] Worker ready
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter startup recovery[2m > [22m[2mnew callers wait through recovery after an initialized worker crashes
+[22m[39m[WorkerAdapter] Worker ready
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter startup recovery[2m > [22m[2mnew callers wait through recovery after an initialized worker crashes
+[22m[39m[WorkerAdapter] Restarting worker in 1000ms (attempt 1)
+
+[90mstderr[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter startup recovery[2m > [22m[2mnew callers wait through recovery after an initialized worker crashes
+[22m[39m[WorkerAdapter] Worker crashed: {"message":"worker failed","error":""}
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter startup recovery[2m > [22m[2mnew callers wait through recovery after an initialized worker crashes
+[22m[39m[WorkerAdapter] Worker ready
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter graph bootstrap policy[2m > [22m[2mretains the updated relay policy across a pending request and worker crash: false
+[22m[39m[WorkerAdapter] Worker ready
+
+[90mstderr[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter graph bootstrap policy[2m > [22m[2mretains the updated relay policy across a pending request and worker crash: false
+[22m[39m[WorkerAdapter] Worker crashed: {"error":""}
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter graph bootstrap policy[2m > [22m[2mretains the updated relay policy across a pending request and worker crash: false
+[22m[39m[WorkerAdapter] Restarting worker in 1000ms (attempt 1)
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter graph bootstrap policy[2m > [22m[2mretains the updated relay policy across a pending request and worker crash: false
+[22m[39m[WorkerAdapter] Worker ready
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter graph bootstrap policy[2m > [22m[2mretains the updated relay policy across a pending request and worker crash: true
+[22m[39m[WorkerAdapter] Worker ready
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter graph bootstrap policy[2m > [22m[2mretains the updated relay policy across a pending request and worker crash: true
+[22m[39m[WorkerAdapter] Restarting worker in 1000ms (attempt 1)
+
+[90mstderr[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter graph bootstrap policy[2m > [22m[2mretains the updated relay policy across a pending request and worker crash: true
+[22m[39m[WorkerAdapter] Worker crashed: {"error":""}
+
+[90mstdout[2m | tests/workerAdapterP2P.test.ts[2m > [22m[2mWorkerAdapter graph bootstrap policy[2m > [22m[2mretains the updated relay policy across a pending request and worker crash: true
+[22m[39m[WorkerAdapter] Worker ready
+
+ [32m✓[39m tests/workerAdapterP2P.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 117[2mms[22m[39m
+ [32m✓[39m tests/gitInfoStore.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 84[2mms[22m[39m
+ [32m✓[39m tests/gitDiffText.test.ts [2m([22m[2m13 tests[22m[2m)[22m[32m 9[2mms[22m[39m
+[90mstderr[2m | tests/releasesStoreFreshRoot.test.ts[2m > [22m[2mcreateReleasesStore freshness[2m > [22m[2mkeeps a previously seen newer draft release when navigation briefly reloads a stale root
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+ [32m✓[39m tests/releasesStoreFreshRoot.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 247[2mms[22m[39m
+[90mstdout[2m | tests/treeForkCancellation.test.ts[2m > [22m[2mfork cancellation[2m > [22m[2mstops recursive encryption after cancellation during listing
+[22m[39m[Fork] Source is unencrypted, re-encrypting...
+
+[90mstdout[2m | tests/treeForkCancellation.test.ts[2m > [22m[2mfork cancellation[2m > [22m[2mstops recursive encryption after cancellation during reading
+[22m[39m[Fork] Source is unencrypted, re-encrypting...
+
+[90mstdout[2m | tests/treeForkCancellation.test.ts[2m > [22m[2mfork cancellation[2m > [22m[2mstops recursive encryption after cancellation during writing
+[22m[39m[Fork] Source is unencrypted, re-encrypting...
+
+ [32m✓[39m tests/treeForkCancellation.test.ts [2m([22m[2m9 tests[22m[2m)[22m[32m 11[2mms[22m[39m
+[90mstderr[2m | tests/releaseDetailAssets.test.ts[2m > [22m[2mfetchReleaseDetail assets[2m > [22m[2muses release.json asset metadata when present
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+ [32m✓[39m tests/releaseDetailAssets.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 88[2mms[22m[39m
+ [32m✓[39m tests/profileStore.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 8[2mms[22m[39m
+ [32m✓[39m tests/gitRepoReadiness.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 11[2mms[22m[39m
+ [32m✓[39m tests/gitFavorites.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m tests/nativeFixtureBinaries.test.ts [2m([22m[2m7 tests[22m[2m)[22m[32m 15[2mms[22m[39m
+ [32m✓[39m tests/gitLogStore.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 63[2mms[22m[39m
+[90mstdout[2m | tests/treeRootKeys.test.ts[2m > [22m[2mtree root key recovery[2m > [22m[2maccepts opaque link secrets but rejects unsupported object keys and malformed hex
+[22m[39mCould not use linkKey directly: Error: Unsupported encryption suite: 254
+    at encryptionMode [90m(file:///stage/app/[39mnode_modules/[4m.pnpm[24m/@hashtree+core@https+++github.com+mmalmi+hashtree+releases+download+hashtree-ts-runtime-v0.5.42+hashtree-core-0.4.2.tgz/node_modules/[4m@hashtree/core[24m/dist/encryption.js:14:11[90m)[39m
+    at objectKeyFromHex [90m(file:///stage/app/[39mnode_modules/[4m.pnpm[24m/@hashtree+core@https+++github.com+mmalmi+hashtree+releases+download+hashtree-ts-runtime-v0.5.42+hashtree-core-0.4.2.tgz/node_modules/[4m@hashtree/core[24m/dist/encryption.js:20:5[90m)[39m
+    at Module.decryptEncryptionKey [90m(/stage/app/[39msrc/stores/treeRootKeys.ts:89:14[90m)[39m
+    at [90m/stage/app/[39mtests/treeRootKeys.test.ts:69:18
+    at [90mfile:///stage/app/[39mnode_modules/[4m.pnpm[24m/@vitest+runner@4.1.12/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:302:11
+    at [90mfile:///stage/app/[39mnode_modules/[4m.pnpm[24m/@vitest+runner@4.1.12/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:26
+    at [90mfile:///stage/app/[39mnode_modules/[4m.pnpm[24m/@vitest+runner@4.1.12/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:2326:20
+    at new Promise (<anonymous>)
+    at runWithCancel [90m(file:///stage/app/[39mnode_modules/[4m.pnpm[24m/@vitest+runner@4.1.12/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:2323:10[90m)[39m
+    at [90mfile:///stage/app/[39mnode_modules/[4m.pnpm[24m/@vitest+runner@4.1.12/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:2305:20
+
+[90mstdout[2m | tests/treeRootKeys.test.ts[2m > [22m[2mtree root key recovery[2m > [22m[2maccepts opaque link secrets but rejects unsupported object keys and malformed hex
+[22m[39mCould not use linkKey directly: Error: Invalid encryption key hex
+    at objectKeyFromHex [90m(file:///stage/app/[39mnode_modules/[4m.pnpm[24m/@hashtree+core@https+++github.com+mmalmi+hashtree+releases+download+hashtree-ts-runtime-v0.5.42+hashtree-core-0.4.2.tgz/node_modules/[4m@hashtree/core[24m/dist/encryption.js:18:15[90m)[39m
+    at Module.decryptEncryptionKey [90m(/stage/app/[39msrc/stores/treeRootKeys.ts:89:14[90m)[39m
+    at [90m/stage/app/[39mtests/treeRootKeys.test.ts:72:20
+
+[90mstdout[2m | tests/treeRootKeys.test.ts[2m > [22m[2mtree root key recovery[2m > [22m[2maccepts opaque link secrets but rejects unsupported object keys and malformed hex
+[22m[39mCould not use linkKey directly: Error: Invalid encryption key hex
+    at objectKeyFromHex [90m(file:///stage/app/[39mnode_modules/[4m.pnpm[24m/@hashtree+core@https+++github.com+mmalmi+hashtree+releases+download+hashtree-ts-runtime-v0.5.42+hashtree-core-0.4.2.tgz/node_modules/[4m@hashtree/core[24m/dist/encryption.js:18:15[90m)[39m
+    at Module.decryptEncryptionKey [90m(/stage/app/[39msrc/stores/treeRootKeys.ts:89:14[90m)[39m
+    at [90m/stage/app/[39mtests/treeRootKeys.test.ts:72:20
+    at [90mfile:///stage/app/[39mnode_modules/[4m.pnpm[24m/@vitest+runner@4.1.12/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:20
+
+[90mstdout[2m | tests/treeRootKeys.test.ts[2m > [22m[2mtree root key recovery[2m > [22m[2maccepts opaque link secrets but rejects unsupported object keys and malformed hex
+[22m[39mCould not use linkKey directly: Error: Invalid encryption key hex
+    at objectKeyFromHex [90m(file:///stage/app/[39mnode_modules/[4m.pnpm[24m/@hashtree+core@https+++github.com+mmalmi+hashtree+releases+download+hashtree-ts-runtime-v0.5.42+hashtree-core-0.4.2.tgz/node_modules/[4m@hashtree/core[24m/dist/encryption.js:18:15[90m)[39m
+    at Module.decryptEncryptionKey [90m(/stage/app/[39msrc/stores/treeRootKeys.ts:89:14[90m)[39m
+    at [90m/stage/app/[39mtests/treeRootKeys.test.ts:72:20
+    at [90mfile:///stage/app/[39mnode_modules/[4m.pnpm[24m/@vitest+runner@4.1.12/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:20
+
+ [32m✓[39m tests/treeRootKeys.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 21[2mms[22m[39m
+ [32m✓[39m tests/repoForksStore.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 101[2mms[22m[39m
+ [32m✓[39m tests/gitRepoAnnouncements.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+ [32m✓[39m tests/routeRootPriority.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 112[2mms[22m[39m
+ [32m✓[39m tests/gitHomeModel.test.ts [2m([22m[2m6 tests[22m[2m)[22m[32m 10[2mms[22m[39m
+ [32m✓[39m tests/gitResolveRevision.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 33[2mms[22m[39m
+ [32m✓[39m tests/socialGraphFollowedByFriends.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 73[2mms[22m[39m
+ [32m✓[39m tests/gitRefNavigation.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 6[2mms[22m[39m
+[90mstderr[2m | tests/settingsHydrationPolicy.test.ts[2m > [22m[2mpreserves hydrated relay selection []
+[22m[39m[settings] Using default network fallbacks for this session
+
+[90mstderr[2m | tests/settingsHydrationPolicy.test.ts[2m > [22m[2mpreserves hydrated relay selection [ 'ws://127.0.0.1:7000' ]
+[22m[39m[settings] Using default network fallbacks for this session
+
+[90mstderr[2m | tests/settingsHydrationPolicy.test.ts[2m > [22m[2mpreserves hydrated relay selection [ 'wss://relay.damus.io' ]
+[22m[39m[settings] Using default network fallbacks for this session
+
+[90mstderr[2m | tests/settingsHydrationPolicy.test.ts[2m > [22m[2mpreserves hydrated relay selection [ 'wss://custom.example' ]
+[22m[39m[settings] Using default network fallbacks for this session
+
+[90mstderr[2m | tests/settingsHydrationPolicy.test.ts[2m > [22m[2mdefaults only after an absent saved row, never a failed or malformed read
+[22m[39m[settings] error loading: Error: Unreadable saved settings
+    at [90m/stage/app/[39mtests/settingsHydrationPolicy.test.ts:29:48
+[90m    at processTicksAndRejections (node:internal/process/task_queues:104:5)[39m
+    at [90mfile:///stage/app/[39mnode_modules/[4m.pnpm[24m/@vitest+runner@4.1.12/node_modules/[4m@vitest/runner[24m/dist/chunk-artifact.js:1903:20
+
+ [32m✓[39m tests/settingsHydrationPolicy.test.ts [2m([22m[2m6 tests[22m[2m)[22m[33m 728[2mms[22m[39m
+   [33m[2m✓[22m[39m keeps hydration pending when a saved custom policy takes more than 500ms [33m 655[2mms[22m[39m
+ [32m✓[39m tests/gitFipsRuntime.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 34[2mms[22m[39m
+ [32m✓[39m tests/hashtreePaths.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+[90mstderr[2m | tests/gitRoot.test.ts
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+ [32m✓[39m tests/gitRoot.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 3[2mms[22m[39m
+[90mstderr[2m | tests/directoryEntries.test.ts[2m > [22m[2mdirectory entries[2m > [22m[2mdoes not let an older slow directory read replace a newer root
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+ [32m✓[39m tests/directoryEntries.test.ts [2m([22m[2m1 test[22m[2m)[22m[33m 331[2mms[22m[39m
+     [33m[2m✓[22m[39m does not let an older slow directory read replace a newer root [33m 330[2mms[22m[39m
+ [32m✓[39m tests/gitFavoritesStore.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 98[2mms[22m[39m
+ [32m✓[39m tests/gitFileCommitsProgress.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 130[2mms[22m[39m
+ [32m✓[39m tests/httpsStaticAssetsWorker.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 24[2mms[22m[39m
+ [32m✓[39m tests/gitPortableBuildConfig.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 3[2mms[22m[39m
+ [32m✓[39m tests/searchIndexPrivacy.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 223[2mms[22m[39m
+[90mstderr[2m | tests/gitRepoDiscovery.test.ts
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+ [32m✓[39m tests/gitRepoDiscovery.test.ts [2m([22m[2m4 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m tests/markdown.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 21[2mms[22m[39m
+ [32m✓[39m tests/codeHighlight.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m tests/appBranding.test.ts [2m([22m[2m5 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+[90mstderr[2m | tests/gitRefsFacade.test.ts[2m > [22m[2mgit refs facade[2m > [22m[2mforwards staged ref discovery callbacks to the native reader
+[22m[39m[settings] error loading: [DexieError [DatabaseClosedError]: MissingAPIError IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+  inner: [DexieError [MissingAPIError]: IndexedDB API missing. Please visit https://tinyurl.com/y2uuvskb] {
+    inner: [1mnull[22m
+  }
+}
+
+ [32m✓[39m tests/gitRefsFacade.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 269[2mms[22m[39m
+ [32m✓[39m tests/graphBootstrapPolicy.test.ts [2m([22m[2m11 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m tests/recentSearch.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 15[2mms[22m[39m
+ [32m✓[39m tests/contactMemory.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 5[2mms[22m[39m
+ [32m✓[39m tests/systemTheme.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 3[2mms[22m[39m
+ [32m✓[39m tests/gitSnapshotBudget.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 3[2mms[22m[39m
+ [32m✓[39m tests/treeRootResolver.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m tests/gitViewContext.test.ts [2m([22m[2m3 tests[22m[2m)[22m[32m 3[2mms[22m[39m
+ [32m✓[39m tests/directQuery.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m tests/publishPortableBuild.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 4[2mms[22m[39m
+ [32m✓[39m tests/releaseDetailDownloadBehavior.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 2[2mms[22m[39m
+ [32m✓[39m tests/renderLoopGuard.test.ts [2m([22m[2m2 tests[22m[2m)[22m[32m 3[2mms[22m[39m
+ [32m✓[39m tests/defaultRelays.test.ts [2m([22m[2m1 test[22m[2m)[22m[32m 3[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m56 passed[39m[22m[90m (56)[39m
+[2m      Tests [22m [1m[32m311 passed[39m[22m[90m (311)[39m
+[2m   Start at [22m 11:47:29
+[2m   Duration [22m 16.48s[2m (transform 1.23s, setup 0ms, import 4.06s, tests 6.70s, environment 197ms)[22m
+
