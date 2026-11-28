@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Diagnostic only: capture CPU/renderer traces for Latest return after a thread, three fixed observations, same a6b43f0 app and artifact. No qualification/publication claim.",
+  "purpose": "Qualify indexed ordinary-feed snapshot projection; retain complete combined deletion semantics and unchanged navigation budgets.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "a6b43f0a0be476599c2c027fdcc7ddbb97f5d3a8",
+      "commit": "4057aab012ac5b497fd547e6de98623673cf92ba",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "e68b439aa85fb5b88b60c8052cd527e9d5f935c142ba6989117b79a7311e997f",
+      "archiveSha256": "f6420fa6ab64755942721983e0c9cefb0fc6a3e7af1001235a14a6cbfd50545e",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
@@ -50,7 +50,9 @@
         "tests/navigation-shell.spec.ts": "70895ab09aa9b05d846e1b045bb3135e17a774dc731acf84eb39a4355fdb0220",
         "tests/page-scroll-shell.spec.ts": "7808dace0c1eee21f5ea9bbf8340ffb03bf50eb9e20913e7d2bd859f3c415693",
         "tests/app-route-state.spec.ts": "e50933400186da5cc5af0b836748e185548a8acbde5ade4f3b2d29b7d4b7efa0",
-        "tests/home-feed-stability-ui.spec.ts": "9c5d6e8fed85a02e05a1ee8ee744d9d5bfd6961ff70941c238a4f0d0111c4cbf"
+        "tests/home-feed-stability-ui.spec.ts": "9c5d6e8fed85a02e05a1ee8ee744d9d5bfd6961ff70941c238a4f0d0111c4cbf",
+        "tests/social-data-plane-projection.spec.ts": "f999a4806b9563a641df4560d2fc18b8eba1016abdb65bebefd28bca4e9929c2",
+        "tests/reactive-state.spec.ts": "96cc9037ca0a6354014dc4a44173bee99b6528076be3734c5dd941ca727d160e"
       },
       "expectedProjects": [
         "chromium",
