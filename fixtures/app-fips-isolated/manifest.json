@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Social cold route offset preparation, matched navigation and exact first-frame scroll regression. No publication.",
+  "purpose": "Social desktop-header layout correction: paired navigation, first-presented scroll negative control, then full project gates only on scoped pass. No publication.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "b40341659c22b58784ae1e8dc7b0bb49cfdd303b",
+      "commit": "1b6727a73d0ba07b582ba7ac1ee656935d015142",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "3962a0eab5b3184ddbd5e04851820785d7746231c3483f155661ca66cf620754",
+      "archiveSha256": "8e99b6d2a41ac5c582a68b4469f9ec3608f231b7f81e320f1e80f39dc21fca14",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
@@ -67,5 +67,10 @@
     "archiveSha256": "c20f43cac1b08b876766530514c73722238208f754849d46ee9e121d6e114a6b",
     "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a"
   },
-  "cohortMapSHA256": "55375833a85330d5ad332c67261ddd58861cbdbc4b1f19fe8ebcc0206d67ccc9"
+  "cohortMapSHA256": "55375833a85330d5ad332c67261ddd58861cbdbc4b1f19fe8ebcc0206d67ccc9",
+  "scrollNegative": {
+    "source": "067562ce56c5e4d9abe493fe27812935a8d998c7",
+    "archive": "archives/scroll-negative.tar.gz",
+    "sha256": "8fee9d935f40a0336829033402180a4a2fb806e52080459f60a451d52c5d24ef"
+  }
 }

@@ -20,6 +20,33 @@ for label,cwd in [('baseline',baseline),('candidate',root)]:
  run(['pnpm','exec','playwright','test','--config='+config.name,'tests/navigation-performance.spec.ts'],label+'-navigation',cwd=cwd,extra={'QUALIFICATION_REPORT':str(evidence/(label+'-navigation.json'))})
 config=root/'playwright.qualification.config.ts';config.write_text("import {defineConfig} from '@playwright/test';import original from './playwright.config';export default defineConfig({...original,workers:1,retries:0,outputDir:'/stage/evidence/social/'+process.env.QUALIFICATION_NAME+'-output',reporter:[['list'],['json',{outputFile:process.env.QUALIFICATION_REPORT}]],use:{...original.use,trace:'retain-on-failure',"+launch+"}});")
 run(['pnpm','exec','playwright','test','--config='+config.name,'tests/page-scroll-shell.spec.ts','tests/home-feed-snapshot-ui.spec.ts','tests/for-you-shell.spec.ts','tests/profile-identity-ui.spec.ts','tests/navigation-shell.spec.ts'],'affected-browser',extra={'QUALIFICATION_REPORT':str(evidence/'affected-browser.json')})
+
+# The prior proposal really painted a cold profile at the outgoing offset.
+# Require the same first-presented-frame probe to reject that exact old build.
+negative_spec=json.loads((stage/'procedure/manifest.json').read_text())['scrollNegative'];archive=stage/'procedure'/negative_spec['archive'];assert sha(archive.read_bytes())==negative_spec['sha256']
+negative=stage/'apps/scroll-negative';negative.mkdir()
+with tarfile.open(archive) as tar:tar.extractall(negative,filter='data')
+assert sha((negative/'pnpm-lock.yaml').read_bytes())==spec['lockSha256']
+(negative/'node_modules').symlink_to(baseline/'node_modules',target_is_directory=True)
+assert run(['pnpm','run','build'],'scroll-negative-build',cwd=negative)==0
+case=negative/'tests/page-scroll-shell.spec.ts';raw=case.read_bytes();case.write_bytes((root/'tests/page-scroll-shell.spec.ts').read_bytes())
+(evidence/'scroll-negative-overlay.json').write_text(json.dumps({'source':negative_spec['source'],'archiveSha256':negative_spec['sha256'],'testBefore':sha(raw),'testAfter':sha(case.read_bytes())},indent=2)+'\n')
+(negative/config.name).write_bytes(config.read_bytes())
+status=run(['pnpm','exec','playwright','test','--config='+config.name,'tests/page-scroll-shell.spec.ts','--grep','cold and retained destinations'],'scroll-negative-browser',cwd=negative,extra={'QUALIFICATION_REPORT':str(evidence/'scroll-negative-browser.json')})
+import base64
+samples=[]
+def collect(value):
+ if isinstance(value,dict):
+  for attachment in value.get('attachments',[]):
+   if attachment.get('name')=='route-scroll-frames.json':samples.append(json.loads(base64.b64decode(attachment['body'])))
+  for k,v in value.items():
+   if k!='attachments':collect(v)
+ elif isinstance(value,list):
+  for v in value:collect(v)
+collect(json.loads((evidence/'scroll-negative-browser.json').read_text()))
+assert status!=0 and len(samples)==1 and samples[0][0]['kind']=='profile' and samples[0][0]['offset']>0, 'Negative control must catch the actual cold-profile offset regression'
+(evidence/'scroll-negative-result.json').write_text(json.dumps({'source':negative_spec['source'],'expectedFailure':True,'samples':samples[0]},indent=2)+'\n')
+
 if next(r for r in records if r['name']=='candidate-navigation')['exit']:
  assert run(['pnpm','exec','vite','build','--sourcemap','hidden'],'diagnostic-maps')==0
  observed={str(p.relative_to(root/'dist')):sha(p.read_bytes()) for p in (root/'dist').rglob('*') if p.is_file() and not p.name.endswith('.map')};assert observed==files
@@ -29,4 +56,6 @@ if next(r for r in records if r['name']=='candidate-navigation')['exit']:
  key="  expect(p95DurationMs).toBeLessThan(300);";assert text.count(key)==1;text=text.replace(key,"  await testInfo.attach('cpu-profile.json', {body:JSON.stringify(await cdp.send('Profiler.stop')), contentType:'application/json'});\n"+key);case.write_text(text)
  (evidence/'profile-overlay.json').write_text(json.dumps({'before':sha(raw),'after':sha(case.read_bytes()),'purpose':'diagnostic only'},indent=2)+'\n')
  run(['pnpm','exec','playwright','test','--config=playwright.matched.config.ts','tests/navigation-performance.spec.ts'],'candidate-profile',extra={'QUALIFICATION_REPORT':str(evidence/'candidate-profile.json')})
-assert all(r['exit']==0 for r in records if r['name']!='baseline-navigation'),'Candidate checks incomplete; baseline failure retained separately.'
+assert all(r['exit']==0 for r in records if r['name'] not in ['baseline-navigation','scroll-negative-browser']),'Candidate checks incomplete; baseline failure retained separately.'
+
+subprocess.run(['python3','/stage/procedure/run-final-closure.py'],cwd=root,env=env,check=True,timeout=1500)
