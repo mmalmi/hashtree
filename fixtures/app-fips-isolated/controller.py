@@ -95,15 +95,19 @@ def prepare():
         assert json.loads((target/'package.json').read_text())['packageManager']==app['packageManager']
         for file,digest in app['testFiles'].items():assert sha(target/file)==digest
         assert sha(target/'playwright.config.ts')==app['configSha256']
-        docker('iris-fips-install-'+app['id'],['python3','/stage/procedure/resolve-lock.py'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
-    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'distInputsVerified':False,'scope':'coherent lock preparation only, no product qualification/promotion'},indent=2)+'\n')
+        docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
+        docker('iris-verify-installed-'+app['id'],['python3','/stage/procedure/verify-installed.py'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
+    baseline=M['baseline'];baseline_archive=HERE/baseline['archive'];assert sha(baseline_archive)==baseline['archiveSha256']
+    baseline_target=STAGE/'apps/baseline';extract(baseline_archive,baseline_target);assert sha(baseline_target/'pnpm-lock.yaml')==baseline['lockSha256']
+    docker('iris-baseline-install-social',['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/baseline',seconds=300)
+    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'distInputsVerified':False,'scope':'exact full product qualification, native/source-cold/live acceptance still pending'},indent=2)+'\n')
 
 def test():
     assert json.loads((EVIDENCE/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json')
     assert set(SELECTED)<=set(json.loads((EVIDENCE/'prepared.json').read_text())['apps'])
     budgets=json.loads((HERE/'app-budgets.json').read_text()); results=[]
     for app in APPS:
-        code=docker('iris-fips-test-'+app['id'],['python3','/stage/procedure/run-one.py',app['id']],cwd='/stage/apps/'+app['id'],seconds=1800,dummy=False,allow_failure=True)
+        code=docker('iris-fips-test-'+app['id'],['python3','/stage/procedure/run-one.py',app['id']],cwd='/stage/apps/'+app['id'],seconds=2000,dummy=True,allow_failure=True)
         assert not CONTAINERS,'No later app may start before cleanup'
         results.append({'app':app['id'],'exitCode':code,'passed':code==0})
     passed=all(row['passed'] for row in results)

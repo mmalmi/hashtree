@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Social runtime54 coherent lock preparation only. Not product qualification or publication.",
+  "purpose": "Full Social runtime54/FIPS67 product checks and matched baseline performance; no native/signing/production publication",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,10 +11,10 @@
   "apps": [
     {
       "id": "social",
-      "commit": "fff7c48a26e209a59d50f6d783f142a4e965eaac",
+      "commit": "b49a8a0563c9cd5845f1875b01a05533192943b0",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "1d4eb1ff0fbf0eb76e1f065fd29856f00a2453f5c956815602d51fecfacccaa3",
-      "lockSha256": "e6201eb5970e270e24eae4d15713f3c9c5e6c6872258eb130a36e603f48a9308",
+      "archiveSha256": "dfa23457c4d49ba071c897b972ccc449e0da4fe1ca8d9db65adee5133babc406",
+      "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
       "specs": [
@@ -50,50 +50,21 @@
       "env": {
         "PLAYWRIGHT_PORT": "4180",
         "PLAYWRIGHT_RUNTIME_PORT": "4181",
-        "PLAYWRIGHT_USE_PREVIEW": "1"
+        "PLAYWRIGHT_USE_PREVIEW": "1",
+        "VITE_FIPS_PEERS": "",
+        "VITE_NOSTR_EVENT_INDEX": "npub1yscmnnadrmvape0mvgzfx9uyl267klnhzy8znsr6ysl8wtxngpqsnx6dm0/nostr-event-index",
+        "VITE_PROFILE_INDEX": "npub1yscmnnadrmvape0mvgzfx9uyl267klnhzy8znsr6ysl8wtxngpqsnx6dm0/profiles-by-pubkey",
+        "VITE_PROFILE_SEARCH_INDEX": "npub1yscmnnadrmvape0mvgzfx9uyl267klnhzy8znsr6ysl8wtxngpqsnx6dm0/profile-search",
+        "IRIS_ALLOW_UNCONFIGURED_POST_SEARCH": "1"
       },
-      "baseline": "1b8ff30ece102f6407555954b5d5c5d89cd65208",
-      "changedLintFiles": [
-        "src/lib/appDataHydrationControllers.ts",
-        "src/lib/appLifecycle.ts",
-        "src/lib/appRouteLoader.ts",
-        "src/lib/components/ProfileSearchSheet.svelte",
-        "src/lib/components/PublicPeopleSearchAction.svelte",
-        "src/lib/post-search/controller.ts",
-        "src/lib/post-search/expansion.ts",
-        "src/lib/post-search/session.ts",
-        "tests/app-route-loader-profile-likes.spec.ts",
-        "tests/post-search-semantic.spec.ts",
-        "tests/post-search-sheet.spec.ts",
-        "tests/post-search-consent-ui.spec.ts",
-        "playwright.browser-tests.ts",
-        "scripts/release-site.mjs",
-        "tests/helpers/explicitPostSearch.ts",
-        "tests/helpers/searchRelayFixture.ts",
-        "tests/notifications-pagination-ui.spec.ts"
-      ],
-      "reusedEvidence": {
-        "run": 46086832229,
-        "source": "71534a7745417e1797e8c8a0ba43e3a2ecfb6dca",
-        "facts": [
-          "two targeted regressions fail on original code",
-          "70 focused tests passed",
-          "svelte-check zero errors and warnings"
-        ],
-        "reason": "No runtime or unit test changes; only browser test split and release-list addition",
-        "additional": {
-          "run": 46087518065,
-          "source": "0d2bf0094989193b9dfc85bf59df5fac17afcdab",
-          "facts": [
-            "production build passed",
-            "20 release-contract tests passed",
-            "50 browser checks passed including offline MiniLM, For You desktop/mobile, profile and idle CPU"
-          ],
-          "reason": "Only test fixtures changed; runtime remains identical. Rerun the seven failing cases with deterministic transport fixtures."
-        }
-      },
-      "sourceTree": "cf2fade282e837ea4ac3fc3c3caacbaeb6695f0b",
-      "phase": "Uncommitted source preparation; hosted lock generation only"
+      "baseline": "fff7c48a26e209a59d50f6d783f142a4e965eaac"
     }
-  ]
+  ],
+  "baseline": {
+    "commit": "fff7c48a26e209a59d50f6d783f142a4e965eaac",
+    "archive": "archives/social-baseline.tar.gz",
+    "archiveSha256": "e2a29df6d98fae70ba4cb8a7942bf1b8416a814222e911a047dd01db5b06dd5b",
+    "lockSha256": "e6201eb5970e270e24eae4d15713f3c9c5e6c6872258eb130a36e603f48a9308"
+  },
+  "cohortMapSHA256": "55375833a85330d5ad332c67261ddd58861cbdbc4b1f19fe8ebcc0206d67ccc9"
 }
