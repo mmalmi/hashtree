@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Qualify indexed ordinary-feed snapshot projection; retain complete combined deletion semantics and unchanged navigation budgets.",
+  "purpose": "Qualify ordinary snapshot projection in existing projection module; unchanged budgets and complete gates.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "4057aab012ac5b497fd547e6de98623673cf92ba",
+      "commit": "7940c664a4637e9d4a370b59c4ec17c03c019e4e",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "f6420fa6ab64755942721983e0c9cefb0fc6a3e7af1001235a14a6cbfd50545e",
+      "archiveSha256": "a9e47718fedc2c8d5fc69092dafdea8597197e3c1a26c84655f7af0c1914d9ba",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
