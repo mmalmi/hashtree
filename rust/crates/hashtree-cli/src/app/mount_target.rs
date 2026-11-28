@@ -36,8 +36,15 @@ fn pubkey_hex_to_npub(pubkey_hex: &str) -> Result<String> {
     pubkey.to_bech32().context("Failed to encode npub")
 }
 
-pub(crate) fn normalize_mount_target_for_resolution(target: &str) -> Result<String> {
-    normalize_mount_target_for_resolution_with(target, resolve_identity)
+pub(crate) fn parse_mount_reference<'a>(
+    target: &'a str,
+    link_key: Option<&str>,
+) -> Result<(String, hashtree_core::LinkSecretRef<'a>)> {
+    let (reference, target) = super::resolve::parse_resource_link(target, link_key)?;
+    Ok((
+        normalize_mount_target_for_resolution_with(&reference, resolve_identity)?,
+        target,
+    ))
 }
 
 fn normalize_mount_target_for_resolution_with<F>(target: &str, resolver: F) -> Result<String>
@@ -172,6 +179,28 @@ mod tests {
     use super::*;
     use nostr_sdk::Keys;
     use std::fs;
+
+    #[test]
+    fn printed_git_link_mounts_the_named_repository_at_its_root() {
+        let author = "npub1qvmu0aru530g6yu3kmlhw33fh68r75wf3wuml3vk4ekg0p4m4t6s7fuhxx";
+        let hex = "0123456789abcdef".repeat(4);
+        let printed = format!("htree://{author}/team/repo#k={hex}/repo");
+        let (base, target) = parse_mount_reference(&printed, None).unwrap();
+        let published = super::super::resolve::parse_published_target(&base).unwrap();
+        assert_eq!(published.tree_name, "team/repo");
+        assert_eq!(published.path, None);
+        assert_eq!(
+            target.link_key,
+            Some(hashtree_core::LinkKeyBytes::from_hex(&hex).unwrap())
+        );
+        assert_eq!(target.fragment, None);
+        assert_eq!(derive_default_mountpoint_name(&printed).unwrap(), "repo");
+        let short = format!("htree://{author}/team/repo#k={hex}");
+        let (base, _) = parse_mount_reference(&short, None).unwrap();
+        let published = super::super::resolve::parse_published_target(&base).unwrap();
+        assert_eq!(published.tree_name, "team");
+        assert_eq!(published.path.as_deref(), Some("repo"));
+    }
 
     #[test]
     fn normalize_mount_target_resolves_alias_owner() {

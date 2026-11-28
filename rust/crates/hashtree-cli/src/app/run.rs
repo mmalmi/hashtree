@@ -1060,7 +1060,7 @@ fn run_command(
 
             // Resolve to Cid (raw bytes, no hex conversion needed for nhash)
             let (input, link_key) = split_link_key(&cid_input, link_key.as_deref())?;
-            let target = super::discovery::target(input, false, non_interactive, &data_dir).await?;
+            let target = super::discovery::target(&input, false, non_interactive, &data_dir).await?;
             let resolved = super::resolve::resolve_get_input(&target, link_key).await?;
             let cid = resolved.cid.clone();
 
@@ -1149,7 +1149,7 @@ fn run_command(
                     .map(|config| config.nostr.active_relays()),
                 ..ResolveOptions::default()
             };
-            let resolved = resolve_cid_input_with_opts(input, &opts).await?;
+            let resolved = resolve_cid_input_with_opts(&input, &opts).await?;
 
             let store = Arc::new(HashtreeStore::new(&data_dir)?);
             let fetcher = Fetcher::new(FetchConfig::default());

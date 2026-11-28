@@ -44,7 +44,7 @@ fn test_link_visible_push_and_clone_with_secret() {
 
     let repo = create_test_repo();
     let secret = random_secret();
-    let remote_url = format!("htree://self/link-visible-test#k={}", secret);
+    let remote_url = format!("htree://self/team/link-visible-test#k={}", secret);
 
     println!("Using secret: {}...", &secret[..16]);
     println!("Remote URL: {}", remote_url);
@@ -81,7 +81,7 @@ fn test_link_visible_push_and_clone_with_secret() {
         .unwrap();
     assert_eq!(
         clone_url,
-        format!("htree://{npub}/link-visible-test#k={secret}/link-visible-test")
+        format!("htree://{npub}/team/link-visible-test#k={secret}/link-visible-test")
     );
     let clone_dir = TempDir::new().unwrap();
     let clone_path = clone_dir.path().join("link-visible-test");
@@ -107,6 +107,24 @@ fn test_link_visible_push_and_clone_with_secret() {
         std::fs::read_to_string(clone_path.join("README.md")).unwrap(),
         "Files should match"
     );
+
+    // Open the exact string from the helper as a resource, using a fresh store.
+    let fetched = TempDir::new().unwrap();
+    let output = fetched.path().join("files");
+    let read = Command::new(common::find_htree_binary().expect("htree used by TestServer"))
+        .arg("--data-dir")
+        .arg(fetched.path().join("data"))
+        .args(["get", clone_url, "--output"])
+        .arg(&output)
+        .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .output()
+        .unwrap();
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert!(output.join(".git/objects").is_dir());
 
     println!("\n=== SUCCESS: Link-visible repo with secret works! ===");
 }

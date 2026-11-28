@@ -14,7 +14,7 @@ use super::mount_publish::{
 };
 use super::mount_registry::{register_active_mount, ActiveMount};
 use super::mount_target::{
-    create_mountpoint_dir, derive_implicit_mountpoint, normalize_mount_target_for_resolution,
+    create_mountpoint_dir, derive_implicit_mountpoint, parse_mount_reference,
 };
 use super::resolve::{parse_published_target, resolve_cid_input_with_opts, ResolveOptions};
 use super::run::format_cid_for_display;
@@ -227,9 +227,7 @@ pub(crate) async fn mount_fuse(
         mountpoint
     };
 
-    let target = target.strip_prefix("htree://").unwrap_or(&target);
-    let target = hashtree_core::LinkSecretRef::parse(target)?.with_link_key(link_key.as_deref())?;
-    let base = normalize_mount_target_for_resolution(target.reference)?;
+    let (base, target) = parse_mount_reference(&target, link_key.as_deref())?;
     let requested_target = base.clone();
 
     let MountVisibility {

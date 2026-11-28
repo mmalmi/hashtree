@@ -27,9 +27,18 @@ pub struct LinkSecretRef<'a> {
 }
 
 impl<'a> LinkSecretRef<'a> {
-    /// Reads `#k=<hex>` and a locally accepted `?k=<hex>`. Query strings are
-    /// not part of the tree path, so the whole query is left out of `reference`.
+    /// Reads a fragment or query link key, removing any checkout-name hint.
     pub fn parse(input: &'a str) -> Result<Self, LinkSecretError> {
+        Self::parse_with_repository_name(input).map(|(target, _)| target)
+    }
+
+    /// A printed Git share link repeats its basename after the fragment key so
+    /// Git can choose a checkout directory. In that form, the whole path after
+    /// the publisher is the repository's tree name, including any slashes.
+    /// Other resource links can use that same path to name a file inside a tree.
+    pub fn parse_with_repository_name(
+        input: &'a str,
+    ) -> Result<(Self, Option<&'a str>), LinkSecretError> {
         let (rest, fragment) = split(input, '#');
         let (reference, query) = split(rest, '?');
         let mut parsed = Self {
@@ -42,14 +51,25 @@ impl<'a> LinkSecretRef<'a> {
                 parsed = parsed.with_link_key(Some(hex))?;
             }
         }
-        match fragment.map(|fragment| fragment.strip_prefix("k=").ok_or(fragment)) {
-            Some(Ok(hex)) => parsed.with_link_key(Some(hex)),
-            Some(Err(other)) => Ok(Self {
-                fragment: Some(other),
-                ..parsed
-            }),
-            None => Ok(parsed),
+        let Some(value) = fragment.and_then(|part| part.strip_prefix("k=")) else {
+            parsed.fragment = fragment;
+            return Ok((parsed, None));
+        };
+        let Some((key, basename)) = value.split_once('/') else {
+            return Ok((parsed.with_link_key(Some(value))?, None));
+        };
+        let (publisher, repo) = reference
+            .strip_prefix("htree://")
+            .unwrap_or(reference)
+            .split_once('/')
+            .ok_or(LinkSecretError::Invalid)?;
+        if publisher.is_empty()
+            || basename.is_empty()
+            || repo.trim_end_matches('/').rsplit('/').next() != Some(basename)
+        {
+            return Err(LinkSecretError::Invalid);
         }
+        Ok((parsed.with_link_key(Some(key))?, Some(repo)))
     }
 
     /// Adds a separately supplied secret, rejecting one that differs.
@@ -120,6 +140,28 @@ mod tests {
             assert!(parsed.reference.ends_with("npub1x/tree/a.txt"), "{input}");
             assert_eq!(parsed.fragment, None);
             assert_eq!(parsed.link_key, Some(LinkKeyBytes::from_hex(&hex).unwrap()));
+        }
+    }
+
+    #[test]
+    fn accepts_only_the_matching_clone_basename_in_a_key_fragment() {
+        let legacy = &SECRET[..64];
+        for hex in [legacy, SECRET] {
+            let base = "htree://npub1x/team/project";
+            let input = format!("{base}?k={hex}#k={hex}/project");
+            let parsed = LinkSecretRef::parse(&input).unwrap();
+            assert_eq!(parsed.reference, base);
+            assert_eq!(parsed.link_key, Some(LinkKeyBytes::from_hex(hex).unwrap()));
+            assert!(parsed.fragment.is_none());
+            for suffix in ["", "other", "sub/project", "project/", "project?x"] {
+                assert!(LinkSecretRef::parse(&format!("{base}#k={hex}/{suffix}")).is_err());
+            }
+            assert!(LinkSecretRef::parse(&format!("{base}?k={hex}/project")).is_err());
+            assert!(LinkSecretRef::parse(&format!("{base}#k=01/project")).is_err());
+            assert!(
+                LinkSecretRef::parse(&format!("{base}?k={}#k={hex}/project", "ff".repeat(32)))
+                    .is_err()
+            );
         }
     }
 

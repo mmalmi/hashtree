@@ -347,20 +347,6 @@ fn parse_htree_url(url: &str) -> Result<ParsedUrl> {
         .strip_prefix("htree://")
         .context("URL must start with htree://")?;
 
-    // Git chooses its checkout directory before invoking this helper. Share
-    // links repeat the repository basename inside the fragment for that step.
-    let url = match url.split_once("#k=") {
-        Some((path, fragment)) if fragment.contains('/') => {
-            let (key_url, basename) = url.rsplit_once('/').unwrap();
-            let path = path.split('?').next().unwrap().trim_end_matches('/');
-            anyhow::ensure!(
-                !basename.is_empty() && path.rsplit('/').next() == Some(basename),
-                "Clone directory suffix must match the repository name"
-            );
-            key_url
-        }
-        _ => url,
-    };
     let parsed = hashtree_core::LinkSecretRef::parse(url)?;
     let (url_path, secret_key) = (parsed.reference, parsed.link_key);
     let (is_private, auto_generate_secret) = match parsed.fragment {

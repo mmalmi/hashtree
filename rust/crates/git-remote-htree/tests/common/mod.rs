@@ -711,7 +711,7 @@ impl Drop for TestServer {
     }
 }
 
-fn find_htree_binary() -> Option<PathBuf> {
+pub(crate) fn find_htree_binary() -> Option<PathBuf> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = PathBuf::from(manifest_dir)
         .parent()?
