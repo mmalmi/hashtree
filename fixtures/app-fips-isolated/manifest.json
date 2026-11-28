@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Match navigation before/after narrow layout/date-cost corrections; verify scroll, quote, feed and profile presentation. No publication.",
+  "purpose": "Social retained-card and bounded hidden-grid preparation correction, matched navigation and unchanged affected-flow gates; no publication.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "d2aca21ae9eb080efe81a2e7368c695c0bb435aa",
+      "commit": "636ef0eecce88d220b746b23b3fefb5f65389cc4",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "1d46072ea386c525d33195d66d447d63d0d80e80eec33308287c5fcf3e52855c",
+      "archiveSha256": "219ecd3cd8a4fb2ad347397b941bc6d1ca8918aa631f92a7c6ab0cd3bf0dafd1",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
