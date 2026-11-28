@@ -1,7 +1,7 @@
 import pathlib,json,hashlib,base64,tarfile,urllib.request,re,sys,subprocess
 ROOT=pathlib.Path('/stage');APP=pathlib.Path.cwd();E=ROOT/'evidence'
 pinsBytes=(ROOT/'consumer-pins.json').read_bytes()
-assert hashlib.sha256(pinsBytes).hexdigest()=='a5dcd8feb2530643e7430cfe7bdae38a192b63ab832f4f082222f092c4b0bf6f'
+assert hashlib.sha256(pinsBytes).hexdigest()=='55375833a85330d5ad332c67261ddd58861cbdbc4b1f19fe8ebcc0206d67ccc9'
 pins=json.loads(pinsBytes)['packages'];mode=sys.argv[1]
 lock=(APP/'pnpm-lock.yaml').read_text();records=[]
 cache=ROOT/'verified-cohort';cache.mkdir(exist_ok=True)
