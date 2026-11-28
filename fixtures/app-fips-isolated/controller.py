@@ -84,6 +84,8 @@ def prepare():
     assert not STAGE.exists(),'Use one empty task stage'
     STAGE.mkdir(mode=0o700);EVIDENCE.mkdir();(STAGE/'home/social').mkdir(parents=True);(STAGE/'tools/bin').mkdir(parents=True)
     shutil.copytree(HERE,STAGE/'procedure',ignore=shutil.ignore_patterns('archives'))
+    negative=M['scrollNegative'];negative_archive=HERE/negative['archive'];assert sha(negative_archive)==negative['sha256']
+    shutil.copyfile(negative_archive,STAGE/'scroll-negative.tar.gz')
     fetch(M['pnpm'],STAGE/'pnpm.tgz');extract(STAGE/'pnpm.tgz',STAGE/'tools/pnpm')
     (STAGE/'tools/bin/pnpm').write_text('#!/bin/sh\nexec node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');(STAGE/'tools/bin/pnpm').chmod(0o755)
     run(['docker','pull',IMAGE],'image-pull.log',300)
