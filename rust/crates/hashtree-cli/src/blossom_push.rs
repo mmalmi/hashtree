@@ -497,8 +497,8 @@ async fn upload_cids_with_client(
     let mut stats = PushStats::default();
 
     let pending_cids = cids_to_push;
+    let client = client.with_confirmed_uploads();
     if !force_upload {
-        let client = client.with_confirmed_uploads();
         let probe = [to_hex(&pending_cids[0].hash)];
         let mut batch_servers = Vec::new();
         for server in client.write_servers() {
@@ -535,10 +535,9 @@ async fn upload_cids_with_client(
             )
             .await?;
         }
-    } else if total == 1 {
-        stats = upload_singles(store, fetcher, client, Vec::new(), pending_cids, true, None).await;
     } else {
         // force_upload pushes every blob to all configured write servers.
+        // A one-blob batch can commit a shallow root on an optimistic PUT server.
         let item_count = pending_cids.len();
         let probe_hash = vec![to_hex(&pending_cids[0].hash)];
         let mut any_server_succeeded = false;

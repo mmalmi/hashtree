@@ -160,6 +160,88 @@ async fn regular_push_claims_existing_leaf_and_preserves_rooted_read() {
 }
 
 #[tokio::test]
+async fn forced_root_push_requires_a_completed_write() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let (_source_dir, source) = test_store();
+    let tree = HashTree::new(HashTreeConfig::new(source.store_arc()).public());
+    let data = b"release artifact";
+    let (file, size) = tree.put(data).await.unwrap();
+    let root = tree
+        .put_directory(vec![DirEntry::from_cid("artifact", &file).with_size(size)])
+        .await
+        .unwrap();
+    let keys = Keys::generate();
+
+    let mut app = axum::Router::new();
+    let received = Arc::new(AtomicUsize::new(0));
+    for (path, status) in [
+        ("/queued/upload", StatusCode::ACCEPTED),
+        ("/conflict/upload", StatusCode::CONFLICT),
+    ] {
+        let author = keys.public_key().to_hex();
+        let received = Arc::clone(&received);
+        let root_hash = root.hash;
+        app = app.route(
+            path,
+            put(
+                move |headers: axum::http::HeaderMap, body: bytes::Bytes| async move {
+                    assert_eq!(sha256(&body), root_hash);
+                    let auth = crate::server::blossom::verify_blossom_auth(
+                        &headers,
+                        "upload",
+                        Some(&to_hex(&root_hash)),
+                    )
+                    .unwrap();
+                    assert_eq!(auth.pubkey, author);
+                    received.fetch_add(1, Ordering::SeqCst);
+                    status
+                },
+            ),
+        );
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let stub = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let client = BlossomClient::new_empty(keys.clone()).with_write_servers(vec![
+        format!("http://{addr}/queued"),
+        format!("http://{addr}/conflict"),
+    ]);
+    let refused =
+        upload_cids_with_client(source.clone(), None, client, vec![root.clone()], true).await;
+    stub.abort();
+    let _ = stub.await;
+    assert_eq!(received.load(Ordering::SeqCst), 2);
+    assert!(refused
+        .expect_err("a queued or conflicting root is unconfirmed")
+        .to_string()
+        .contains("failed to upload 1 blob"));
+
+    let (_remote_dir, remote) = test_store();
+    remote.put_owned_blob(data, &[4; 32]).unwrap();
+    let (url, server) = start_server(remote, &keys, 1024 * 1024).await;
+    let reader = BlossomClient::new_empty(Keys::generate()).with_read_servers(vec![url.clone()]);
+    let client = BlossomClient::new_empty(keys).with_write_servers(vec![url]);
+    let counts = upload_cids_with_client(source, None, client, vec![root.clone()], true)
+        .await
+        .unwrap();
+    assert_eq!(counts, (1, 0));
+    let body = reader.download(&to_hex(&root.hash)).await.unwrap();
+    let directory = decode_tree_node_by_cid(&root, body).unwrap().unwrap();
+    let artifact = directory
+        .links
+        .iter()
+        .find(|link| link.name.as_deref() == Some("artifact"))
+        .unwrap();
+    assert_eq!(
+        reader.download(&to_hex(&artifact.hash)).await.unwrap(),
+        data.as_slice()
+    );
+    server.abort();
+    let _ = server.await;
+}
+
+#[tokio::test]
 async fn regular_single_large_push_claims_existing_bytes() {
     let (_source_dir, source) = test_store();
     let (_remote_dir, remote) = test_store();
