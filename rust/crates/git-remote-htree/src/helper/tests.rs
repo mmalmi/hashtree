@@ -3367,6 +3367,18 @@ fn test_push_to_file_servers_respects_blob_link_type_for_tree_shaped_leaf() {
     );
 }
 
+fn repository_directory_with_file(helper: &RemoteHelper, payload: &[u8]) -> (Cid, Cid) {
+    block_on_result(async {
+        let tree = HashTree::new(HashTreeConfig::new(helper.storage.store().clone()).public());
+        let (file, size) = tree.put_file(payload).await?;
+        let root = tree
+            .put_directory(vec![DirEntry::from_cid("note.txt", &file).with_size(size)])
+            .await?;
+        Ok((root, file))
+    })
+    .expect("write repository fixture")
+}
+
 #[test]
 fn test_push_to_file_servers_reports_degraded_local_only_upload() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
@@ -3392,19 +3404,8 @@ fn test_push_to_file_servers_reports_degraded_local_only_upload() {
     ];
 
     let helper = create_signed_test_helper(config);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-
-    let root_cid = rt.block_on(async {
-        let store = helper.storage.store().clone();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
-        tree.put(b"new root can publish from local store only")
-            .await
-            .expect("write root")
-            .0
-    });
+    let (root_cid, file) =
+        repository_directory_with_file(&helper, b"new root can publish from local store only");
 
     let result = helper.push_to_file_servers(&hex::encode(root_cid.hash), None);
 
@@ -3416,14 +3417,15 @@ fn test_push_to_file_servers_reports_degraded_local_only_upload() {
         result.degraded,
         "all write server failures should be reported as degraded replication"
     );
-    assert!(
-        !result.failed.is_empty(),
-        "write server failures should be reported"
+    assert_eq!(
+        result.failed,
+        vec![failing_server_a.base_url(), failing_server_b.base_url()]
     );
-    assert!(
-        !failing_server_a.has_blob(&root_cid.hash) && !failing_server_b.has_blob(&root_cid.hash),
-        "failing servers should not receive the blob"
-    );
+    assert!(result.succeeded.is_empty());
+    for server in [&failing_server_a, &failing_server_b] {
+        assert!(!server.has_blob(&root_cid.hash));
+        assert!(!server.has_blob(&file.hash));
+    }
 }
 
 #[test]
@@ -3471,24 +3473,15 @@ fn test_confirmed_writer_has_readable_root() {
     config.blossom.write_servers = vec![server.base_url().to_string()];
 
     let helper = create_signed_test_helper(config);
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-
-    let root_cid = rt.block_on(async {
-        let store = helper.storage.store().clone();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
-        tree.put(b"root must be visible before publishing")
-            .await
-            .expect("write root")
-            .0
-    });
+    let (root_cid, file) =
+        repository_directory_with_file(&helper, b"root must be visible before publishing");
     let root_hash = hex::encode(root_cid.hash);
 
     let result = helper.push_to_file_servers(&root_hash, None);
     super::push::ensure_blossom_publish_ready(&result).expect("upload complete");
     assert_eq!(result.succeeded, vec![server.base_url().to_string()]);
+    assert!(server.has_blob(&root_cid.hash));
+    assert!(server.has_blob(&file.hash));
 
     assert!(
         server.get_head_request_count() > 0,
@@ -3511,24 +3504,43 @@ fn test_writer_with_owner_rows_but_unreadable_root_cannot_publish() {
     config.blossom.write_servers = vec![server.base_url().to_string()];
 
     let helper = create_signed_test_helper(config);
-    let root = block_on_result(async {
-        let tree = HashTree::new(HashTreeConfig::new(helper.storage.store().clone()).public());
-        Ok(tree
-            .put(b"owner lists the root but HEAD cannot read it")
-            .await?
-            .0)
-    })
-    .unwrap();
+    let (root, file) =
+        repository_directory_with_file(&helper, b"owner lists the root but HEAD cannot read it");
     let result = helper.push_to_file_servers(&hex::encode(root.hash), root.key.as_ref());
-    assert!(server
-        .state
-        .lock()
-        .unwrap()
-        .claims
-        .contains(&helper.pubkey, &hex::encode(root.hash)));
+    for cid in [&root, &file] {
+        assert!(server
+            .state
+            .lock()
+            .unwrap()
+            .claims
+            .contains(&helper.pubkey, &hex::encode(cid.hash)));
+    }
+    assert!(result.local_complete);
     assert!(server.get_head_request_count() > 0);
     assert!(result.succeeded.is_empty());
     assert!(super::push::ensure_blossom_publish_ready(&result).is_err());
+}
+
+#[test]
+fn test_push_rejects_literal_repository_root_before_writing() {
+    let _env_lock = ENV_LOCK.lock().expect("env lock");
+    let home = TempDir::new().expect("temp home");
+    let _home_guard = HomeGuard::set(home.path());
+    let server = CountingBlossomServer::new();
+    write_test_config(home.path(), server.base_url(), false);
+
+    let mut config = Config::default();
+    config.nostr.relays = vec![];
+    config.blossom.read_servers = vec![server.base_url().to_string()];
+    config.blossom.write_servers = vec![server.base_url().to_string()];
+    let helper = create_signed_test_helper(config);
+    let (_, file) = repository_directory_with_file(&helper, b"a literal file is not a directory");
+    let result = helper.push_to_file_servers(&hex::encode(file.hash), file.key.as_ref());
+    assert!(!result.local_complete);
+    assert!(result.succeeded.is_empty());
+    assert!(super::push::ensure_blossom_publish_ready(&result).is_err());
+    assert_eq!(server.get_upload_request_count(), 0);
+    assert_eq!(server.get_batch_upload_request_count(), 0);
 }
 
 #[test]
