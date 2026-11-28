@@ -55,7 +55,21 @@ def docker(name,command,*,network='none',cwd='/stage',seconds=300,dummy=False,ev
     assert not dummy or (network=='none' and name in APP_CONTAINERS)
     if dummy:command=['python3','/stage/procedure/await-start.py',name,*command]
     command=['timeout','--signal=TERM','--kill-after=5s',str(seconds-10)+'s',*command]
-    cpu_set=','.join(str(cpu) for cpu in sorted(os.sched_getaffinity(0))[:2]);assert len(cpu_set.split(','))==2
+    topology=[]
+    for cpu in sorted(os.sched_getaffinity(0)):
+        base=pathlib.Path('/sys/devices/system/cpu')/f'cpu{cpu}'/'topology'
+        topology.append({'cpu':cpu,**{key:(base/key).read_text().strip() for key in ['physical_package_id','core_id','thread_siblings_list']}})
+    chosen=[];cores=set()
+    for item in topology:
+        key=(item['physical_package_id'],item['core_id'])
+        if key not in cores:chosen.append(item['cpu']);cores.add(key)
+        if len(chosen)==2:break
+    for item in topology:
+        if len(chosen)==2:break
+        if item['cpu'] not in chosen:chosen.append(item['cpu'])
+    assert len(chosen)==2
+    cpu_set=','.join(map(str,chosen))
+    (EVIDENCE/(name+'-cpu-topology.json')).write_text(json.dumps({'allowed':topology,'selected':chosen,'cpuQuota':2},indent=2)+'\n')
     args=['docker','create','--name',name,'--label','iris.task=app-fips-isolated','--network',network,'--ipc','private','--cpus','2','--cpuset-cpus',cpu_set,'--memory','3g','--memory-swap','3g','--pids-limit','512','--cap-drop','ALL','--security-opt','no-new-privileges','--user',f'{os.getuid()}:{os.getgid()}','--read-only','--tmpfs','/tmp:rw,nosuid,nodev,size=512m','--shm-size','512m','--init','--stop-timeout','5','--mount',f'type=bind,src={STAGE},dst=/stage','--workdir',cwd,'--env','HOME=/stage/home/social','--env','PLAYWRIGHT_BROWSERS_PATH=/ms-playwright','--env','npm_config_manage_package_manager_versions=false','--env','npm_config_package_manager_strict_version=true','--env','PATH=/stage/tools/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','--env','FIPS_DUMMY='+str(int(dummy)),'--env','FIPS_EVIDENCE_SUFFIX='+evidence_suffix,'--env','FIPS_MEDIA_PERMISSION='+str(int(name in APP_CONTAINERS)),IMAGE,*command]
     CONTAINERS.add(name)
     run(args,name+'-create.log',30)

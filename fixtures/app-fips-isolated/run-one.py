@@ -33,5 +33,7 @@ for label,cwd in [('baseline',stage/'apps/baseline'),('candidate',root)]:
  status=run(['pnpm','exec','playwright','test','--config='+config.name,'tests/navigation-performance.spec.ts'],label+'-navigation',cwd)
  if label=='candidate' and status:
   subprocess.run(['python3','/stage/procedure/run-diagnostic.py'],cwd=root,env=env,check=True,timeout=300)
-  raise AssertionError('Navigation acceptance must remain within the unchanged budget')
+  # Preserve the failed navigation record; finish independent gates once.
 subprocess.run(['python3','/stage/procedure/run-final-closure.py'],cwd=root,env=env,check=True,timeout=1800)
+
+assert next(r for r in records if r['name']=='candidate-navigation')['exit']==0, 'Unchanged navigation gate failed; full evidence retained, no publication'
