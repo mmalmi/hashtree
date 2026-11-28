@@ -1,6 +1,8 @@
 #![doc = include_str!("../README.md")]
 
 mod batch_download;
+mod owned_list;
+pub use owned_list::OWNER_LIST_PAGE_SIZE;
 
 use base64::Engine;
 use nostr::prelude::*;
@@ -72,11 +74,18 @@ pub struct BlossomClient {
     http: reqwest::Client,
     upload_http: reqwest::Client,
     upload_http1_only: bool,
-    require_confirmed_uploads: bool,
+    upload_confirmation: UploadConfirmation,
     max_batch_download_bytes: usize,
     dns_overrides: Vec<(String, Vec<SocketAddr>)>,
     danger_accept_invalid_certs: bool,
     timeout: Duration,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UploadConfirmation {
+    Legacy,
+    Completed,
+    Descriptor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -319,6 +328,24 @@ fn upload_redirect_extra_headers() -> Vec<(&'static str, String)> {
     }
 }
 
+async fn bounded_descriptor_json<T: serde::de::DeserializeOwned>(
+    mut response: reqwest::Response,
+    limit: usize,
+    name: &str,
+) -> Result<T, BlossomError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if chunk.len() > limit - bytes.len() {
+            return Err(BlossomError::UploadFailed(format!(
+                "{name} exceeded its byte limit"
+            )));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|err| BlossomError::UploadFailed(format!("invalid {name}: {err}")))
+}
+
 async fn parse_batch_upload_response(
     resp: reqwest::Response,
     items: &[BatchUploadItem],
@@ -417,7 +444,7 @@ impl BlossomClient {
             keys,
             read_servers,
             write_servers: config.blossom.all_write_servers(),
-            require_confirmed_uploads: false,
+            upload_confirmation: UploadConfirmation::Legacy,
             max_batch_download_bytes: batch_download::DEFAULT_MAX_BYTES,
             http: default_http_client(Duration::from_secs(30), &[], false),
             upload_http: upload_http_client(Duration::from_secs(30), true, &[], false),
@@ -438,7 +465,7 @@ impl BlossomClient {
     pub fn new_empty(keys: Keys) -> Self {
         Self {
             keys,
-            require_confirmed_uploads: false,
+            upload_confirmation: UploadConfirmation::Legacy,
             max_batch_download_bytes: batch_download::DEFAULT_MAX_BYTES,
             read_servers: vec![],
             write_servers: vec![],
@@ -482,7 +509,16 @@ impl BlossomClient {
     /// unsigned presence shortcuts and excludes queued (202) or conflicting
     /// (409) writes from successful acknowledgements.
     pub fn with_confirmed_uploads(mut self) -> Self {
-        self.require_confirmed_uploads = true;
+        if self.upload_confirmation == UploadConfirmation::Legacy {
+            self.upload_confirmation = UploadConfirmation::Completed;
+        }
+        self
+    }
+
+    /// Require a completed write and a matching hash/size descriptor on individual uploads.
+    /// Batch responses also have to acknowledge every submitted hash.
+    pub fn with_confirmed_upload_receipts(mut self) -> Self {
+        self.upload_confirmation = UploadConfirmation::Descriptor;
         self
     }
 
@@ -641,7 +677,7 @@ impl BlossomClient {
 
         // For large files, check existence first to save bandwidth
         const HEAD_CHECK_THRESHOLD: usize = 256 * 1024; // 256KB
-        if !self.require_confirmed_uploads
+        if self.upload_confirmation == UploadConfirmation::Legacy
             && data.len() >= HEAD_CHECK_THRESHOLD
             && self.exists(&hash).await
         {
@@ -858,7 +894,12 @@ impl BlossomClient {
             })
             .await?;
 
-        parse_batch_upload_response(resp, items, self.require_confirmed_uploads).await
+        parse_batch_upload_response(
+            resp,
+            items,
+            self.upload_confirmation != UploadConfirmation::Legacy,
+        )
+        .await
     }
 
     pub async fn upload_json_batch_to_server(
@@ -900,7 +941,12 @@ impl BlossomClient {
             })
             .await?;
 
-        parse_batch_upload_response(resp, items, self.require_confirmed_uploads).await
+        parse_batch_upload_response(
+            resp,
+            items,
+            self.upload_confirmation != UploadConfirmation::Legacy,
+        )
+        .await
     }
 
     /// Probe a blob on a specific server, distinguishing explicit misses from
@@ -1572,7 +1618,32 @@ impl BlossomClient {
             .map_err(Self::upload_request_error)?;
 
         let status = resp.status();
-        if self.require_confirmed_uploads
+        if self.upload_confirmation == UploadConfirmation::Descriptor && status.is_success() {
+            if !matches!(status, StatusCode::OK | StatusCode::CREATED) {
+                return Err(UploadAttemptError::fatal(format!(
+                    "signed upload was not confirmed: {status}"
+                )));
+            }
+            #[derive(Deserialize)]
+            struct Receipt {
+                sha256: String,
+                size: u64,
+            }
+            let receipt: Receipt = bounded_descriptor_json(resp, 64 * 1024, "upload receipt")
+                .await
+                .map_err(|err| UploadAttemptError::fatal(err.to_string()))?;
+            if !receipt.sha256.eq_ignore_ascii_case(hash) || receipt.size != data.len() as u64 {
+                return Err(UploadAttemptError::fatal(
+                    "upload receipt did not match the submitted hash and size".into(),
+                ));
+            }
+            return Ok(if status == StatusCode::CREATED {
+                UploadOutcome::Uploaded
+            } else {
+                UploadOutcome::AlreadyExists
+            });
+        }
+        if self.upload_confirmation != UploadConfirmation::Legacy
             && matches!(status, StatusCode::ACCEPTED | StatusCode::CONFLICT)
         {
             Err(UploadAttemptError::fatal(format!(
@@ -2663,6 +2734,36 @@ mod tests {
         // Will fail since servers don't exist, but should compile
         let result = client.upload_to_all_servers(b"test data").await;
         assert!(result.is_err()); // Expected to fail - servers don't exist
+    }
+
+    #[tokio::test]
+    async fn confirmed_single_upload_requires_the_submitted_hash_and_size() {
+        let data = b"archive note";
+        let hash = compute_sha256(data);
+        let descriptor = serde_json::json!({"sha256": hash, "size": data.len()});
+        for (status, body, expected) in [
+            (200, serde_json::json!({"sha256": hash}), None),
+            (201, serde_json::json!({"sha256": hash, "size": 0}), None),
+            (
+                200,
+                serde_json::json!({"sha256": compute_sha256(b"other"), "size": data.len()}),
+                None,
+            ),
+            (202, descriptor.clone(), None),
+            (200, descriptor.clone(), Some(false)),
+            (201, descriptor, Some(true)),
+        ] {
+            let mut server = TestBodyServer::new(vec![(status, body.to_string())]);
+            let client = BlossomClient::new_empty(Keys::generate())
+                .with_write_servers(vec![server.url.clone()])
+                .with_confirmed_upload_receipts();
+            let result = client.upload_if_missing(data).await;
+            match expected {
+                Some(inserted) => assert_eq!(result.unwrap(), (hash.clone(), inserted)),
+                None => assert!(result.is_err(), "incomplete receipt returned success"),
+            }
+            server.wait_for_requests().await;
+        }
     }
 
     #[tokio::test]

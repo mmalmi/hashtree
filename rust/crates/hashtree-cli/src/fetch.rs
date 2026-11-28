@@ -8,10 +8,8 @@ use anyhow::Result;
 use futures::stream::{FuturesUnordered, StreamExt};
 use hashtree_blossom::{BlossomClient, BlossomError};
 use hashtree_config::detect_local_daemon_url;
-use hashtree_core::{
-    decode_tree_node_by_cid, decrypt_object, encrypted_size, encrypted_size_chk, to_hex, Cid,
-    EncryptionMode, Link, LinkType, ObjectKey, TreeNode,
-};
+pub(crate) use hashtree_core::tree_walk::{child_cid, WalkContext};
+use hashtree_core::{decrypt_object, to_hex, Cid, LinkType, ObjectKey};
 use nostr::Keys;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -30,102 +28,6 @@ const FETCH_BATCH_SINGLE_ITEM_MAX_BYTES: u64 = 512 * 1024;
 const FETCH_MAX_CONCURRENT_BATCHES: usize = 4;
 const FETCH_WRITE_BATCH_ITEMS: usize = 128;
 const FETCH_WRITE_BATCH_BYTES: usize = 8 * 1024 * 1024;
-
-pub(crate) fn child_cid(parent: &Cid, link: &Link) -> Cid {
-    let inherits_parent_key = link
-        .name
-        .as_deref()
-        .map(|name| {
-            name.starts_with("_chunk_")
-                || (name.starts_with('_') && name.chars().count() == 2 && link.link_type.is_tree())
-        })
-        .unwrap_or(false);
-
-    Cid {
-        hash: link.hash,
-        key: link.key.or(if inherits_parent_key {
-            parent.key
-        } else {
-            None
-        }),
-    }
-}
-
-/// A directory entry starts a file, while a Blob child within a File may be
-/// literal bytes even when those bytes are themselves a valid manifest.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum WalkContext {
-    Node,
-    DirectoryBlob(u64),
-    FileChunk(u64),
-}
-
-impl WalkContext {
-    pub(crate) fn for_link(parent_type: LinkType, link: &Link) -> Self {
-        match (parent_type, link.link_type) {
-            (LinkType::File, LinkType::Blob) => Self::FileChunk(link.size),
-            (_, LinkType::Blob) => Self::DirectoryBlob(link.size),
-            _ => Self::Node,
-        }
-    }
-
-    fn is_literal_file_chunk(self, cid: &Cid, stored_len: u64) -> bool {
-        let Self::FileChunk(size) = self else {
-            return false;
-        };
-        let overhead = match cid.key.map(|key| key.mode()) {
-            None => 0,
-            Some(EncryptionMode::LegacyChk | EncryptionMode::ChkV1) => encrypted_size_chk(0) as u64,
-            Some(EncryptionMode::RndV1) => encrypted_size(0) as u64,
-        };
-        size.checked_add(overhead) == Some(stored_len)
-    }
-
-    pub(crate) fn decode(self, cid: &Cid, data: Cow<'_, [u8]>) -> Result<Option<TreeNode>> {
-        let size = match self {
-            Self::Node => return Ok(decode_tree_node_by_cid(cid, data.into_owned())?),
-            Self::DirectoryBlob(size) | Self::FileChunk(size) => size,
-        };
-        let plaintext = match cid.key {
-            Some(key) => match decrypt_object(&data, &key) {
-                Ok(bytes) => Cow::Owned(bytes),
-                // Historical plaintext trees may carry a legacy decryption key.
-                Err(_)
-                    if key.mode() == EncryptionMode::LegacyChk
-                        && hashtree_core::is_tree_node(&data) =>
-                {
-                    data
-                }
-                Err(err) => return Err(err.into()),
-            },
-            None => data,
-        };
-        if plaintext.len() as u64 == size {
-            if matches!(self, Self::FileChunk(_)) {
-                return Ok(None);
-            }
-            // An equal-length directory entry can still be a chunked file.
-            // Raw MessagePack files may also contain valid but unrelated links.
-            return Ok(
-                hashtree_core::try_decode_tree_node(&plaintext).filter(|node| {
-                    node.is_file()
-                        && node
-                            .links
-                            .iter()
-                            .try_fold(0_u64, |total, link| total.checked_add(link.size))
-                            == Some(size)
-                }),
-            );
-        }
-        if matches!(self, Self::FileChunk(_)) {
-            return Ok(hashtree_core::try_decode_tree_node(&plaintext).filter(TreeNode::is_file));
-        }
-        Ok(decode_tree_node_by_cid(
-            &Cid::public(cid.hash),
-            plaintext.into_owned(),
-        )?)
-    }
-}
 
 #[derive(Clone)]
 struct FetchItem {

@@ -16,6 +16,7 @@ pub mod lmdb_runtime;
 pub mod nhash;
 pub mod reader;
 pub mod store;
+pub mod tree_walk;
 pub mod types;
 pub mod visibility;
 
