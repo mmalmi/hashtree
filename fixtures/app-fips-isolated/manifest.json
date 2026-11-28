@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Social navigation redundant-crypto/history correction: mutation and scroll regression checks, paired navigation, full project gates; no publication.",
+  "purpose": "Social profile media uses existing parsed presentation cache; query-free navigation avoids URL parsing. Focused regressions, unchanged paired navigation budget, full project gates; no publication.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "b43c7a730ed71a7d80812753400f24773ec16a1d",
+      "commit": "b02931803c7016eb19c0e7a275245b3f7fc17b35",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "49ca393da187eb714858ae8bfc7245e8f9f818756b988deed1876c7a6235fb8b",
+      "archiveSha256": "bf84a3f471487db23cb531c03618bd62ee887c4caa3a7ef167ef64fef1b66f5f",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
@@ -45,7 +45,8 @@
         "tests/account-signer.spec.ts": "34a5cff5ed9d3c1802fe6904278075091a3e9291be464e9129f06759220b3c5d",
         "tests/app-history-navigation.spec.ts": "26f00cb09182d944131964f4fcb16b6633f6bac95462f8c4c885db08e0e4956e",
         "tests/navigation-performance.spec.ts": "a12c917ef105d800f8a3a87b70e5b0c1e6af7da3676af96f5383f01cf6aa5a88",
-        "tests/note-mentions-ui.spec.ts": "1acb5082c8c7c04eab0f059acc7f48cb56b060f4c4f33790aaf203e2edd04a86"
+        "tests/note-mentions-ui.spec.ts": "1acb5082c8c7c04eab0f059acc7f48cb56b060f4c4f33790aaf203e2edd04a86",
+        "tests/profile-content.spec.ts": "2f03413579709fe6d10c6f1b001d56f28c33e566d04913ca635fe1fe3aa75e79"
       },
       "expectedProjects": [
         "chromium",
