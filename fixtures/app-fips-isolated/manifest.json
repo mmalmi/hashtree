@@ -87,6 +87,6 @@
     "archive": "archives/retained-scroll-negative.tar.gz",
     "sha256": "2ea6a1ff49969786b83a9aa73d5ea3da9cfed7eb651365bf68781c253d41df61",
     "testFile": "tests/home-feed-stability-ui.spec.ts",
-    "testSHA256": "aa85d189faa855e07b74e73e3007343f286265d5fdea7f50f115d04581bb158d"
+    "testSHA256": "cabece146a92df08d4c4626bc0457afd0ff7efa66245648ba686b1b1c5442e39"
   }
 }
