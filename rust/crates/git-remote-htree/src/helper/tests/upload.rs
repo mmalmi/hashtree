@@ -98,7 +98,7 @@ fn git_storage_upload_includes_chunked_objects_and_multilevel_descendants() {
     config.nostr.relays.clear();
     config.blossom.read_servers = vec![blossom.base_url().to_string()];
     config.blossom.write_servers = config.blossom.read_servers.clone();
-    let helper = create_test_helper_with_config(config.clone()).unwrap();
+    let helper = create_signed_test_helper(config.clone());
     let mut expected = HashMap::new();
     // Incompressible content exercises the real GitStorage writer: a file below
     // the core default chunk size, and a file with multiple chunk-tree levels.
@@ -135,13 +135,7 @@ fn git_storage_upload_includes_chunked_objects_and_multilevel_descendants() {
     })
     .unwrap();
 
-    let result = helper.push_to_file_servers_with_diff(
-        &hex::encode(root.hash),
-        root.key.as_ref(),
-        None,
-        None,
-        false,
-    );
+    let result = helper.push_to_file_servers(&hex::encode(root.hash), root.key.as_ref());
     assert!(result.failed.is_empty(), "{:?}", result.failed);
     let missing = hashes.iter().filter(|hash| !blossom.has_blob(hash)).count();
     assert_eq!(missing, 0, "upload omitted descendants of real Git objects");
@@ -232,13 +226,8 @@ fn multi_ref_push_batches_ancestor_branches_and_tags_into_one_upload() {
         .import_ref("HEAD", "ref: refs/heads/master")
         .unwrap();
     let initial_root = helper.storage.build_tree().unwrap();
-    let seed_upload = helper.push_to_file_servers_with_diff(
-        &hex::encode(initial_root.hash),
-        initial_root.key.as_ref(),
-        None,
-        None,
-        false,
-    );
+    let seed_upload =
+        helper.push_to_file_servers(&hex::encode(initial_root.hash), initial_root.key.as_ref());
     assert!(seed_upload.failed.is_empty(), "{:?}", seed_upload.failed);
 
     // Fresh helper pushing 4 refs together (ancestor branch + diverged dev + 2 tags).

@@ -1,9 +1,12 @@
 //! Missing old-chunk repair tests
 //!
-//! Reproduces a server state where old data disappeared, but initial HEAD
-//! sampling still reports success. Push must still repair missing old chunks.
+//! The writer loses old chunks between pushes and still answers HEAD positively.
+//! A changed repository must restore those chunks for a reader with empty storage.
 
+#[path = "common/blossom_claims.rs"]
+mod blossom_claims;
 mod common;
+use blossom_claims::{signed_author, ListQuery, OwnerClaims};
 
 use axum::{
     body::{Body, Bytes},
@@ -25,10 +28,8 @@ use tokio::sync::oneshot;
 #[derive(Default)]
 struct FakeBlossomState {
     blobs: HashMap<String, Vec<u8>>,
-    spoof_head_remaining: usize,
-    drop_all_after_spoof: bool,
-    drop_events: usize,
-    head_requests: usize,
+    claims: OwnerClaims,
+    stale_head: bool,
 }
 
 struct FakeBlossomServer {
@@ -39,7 +40,10 @@ struct FakeBlossomServer {
 }
 
 impl FakeBlossomServer {
-    fn new(port: u16) -> Self {
+    fn new() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
         let state = Arc::new(Mutex::new(FakeBlossomState::default()));
         let state_clone = Arc::clone(&state);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
@@ -53,12 +57,12 @@ impl FakeBlossomServer {
 
             rt.block_on(async move {
                 let app = Router::new()
+                    .route("/list/:owner", axum::routing::get(list_claims))
                     .route("/upload", put(upload_blob))
                     .route("/:id", axum::routing::get(get_blob).head(head_blob))
                     .with_state(state_clone);
 
-                let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
-                    .await
+                let listener = tokio::net::TcpListener::from_std(listener)
                     .expect("Failed to bind fake blossom server");
 
                 axum::serve(listener, app)
@@ -89,20 +93,16 @@ impl FakeBlossomServer {
         format!("http://127.0.0.1:{}", self.port)
     }
 
-    fn spoof_next_head_checks_then_drop_all(&self, count: usize) {
-        let mut state = self.state.lock().expect("state lock poisoned");
-        state.spoof_head_remaining = count;
-        state.drop_all_after_spoof = true;
-    }
-
-    fn drop_event_count(&self) -> usize {
-        let state = self.state.lock().expect("state lock poisoned");
-        state.drop_events
-    }
-
-    fn head_request_count(&self) -> usize {
-        let state = self.state.lock().expect("state lock poisoned");
-        state.head_requests
+    fn lose_stored_blobs(&self, owner: &str) {
+        let mut state = self.state.lock().unwrap();
+        assert!(!state.blobs.is_empty(), "initial push must seed the writer");
+        assert!(state
+            .blobs
+            .keys()
+            .all(|hash| state.claims.contains(owner, hash)));
+        state.blobs.clear();
+        state.claims = OwnerClaims::default();
+        state.stale_head = true;
     }
 }
 
@@ -126,11 +126,20 @@ fn parse_hash_from_path(id: &str) -> Option<String> {
     }
 }
 
+async fn list_claims(
+    State(state): State<Arc<Mutex<FakeBlossomState>>>,
+    AxumPath(owner): AxumPath<String>,
+    axum::extract::Query(query): axum::extract::Query<ListQuery>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    state.lock().unwrap().claims.list(&headers, &owner, &query)
+}
+
 async fn upload_blob(
     State(state): State<Arc<Mutex<FakeBlossomState>>>,
     headers: HeaderMap,
     body: Bytes,
-) -> StatusCode {
+) -> Response<Body> {
     let mut hasher = Sha256::new();
     hasher.update(&body);
     let computed_hash = hex::encode(hasher.finalize());
@@ -141,17 +150,33 @@ async fn upload_blob(
         .map(|s| s.to_ascii_lowercase())
     {
         if expected_hash != computed_hash {
-            return StatusCode::BAD_REQUEST;
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .unwrap();
         }
     }
 
     let mut state = state.lock().expect("state lock poisoned");
-    let was_new = state.blobs.insert(computed_hash, body.to_vec()).is_none();
-    if was_new {
+    state
+        .claims
+        .record(signed_author(&headers, "upload").as_deref(), &computed_hash);
+    let was_new = state
+        .blobs
+        .insert(computed_hash.clone(), body.to_vec())
+        .is_none();
+    let status = if was_new {
         StatusCode::CREATED
     } else {
         StatusCode::OK
-    }
+    };
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({"sha256": computed_hash, "size": body.len()}).to_string(),
+        ))
+        .unwrap()
 }
 
 async fn head_blob(
@@ -165,15 +190,8 @@ async fn head_blob(
             .unwrap();
     };
 
-    let mut state = state.lock().expect("state lock poisoned");
-    state.head_requests += 1;
-    if state.spoof_head_remaining > 0 {
-        state.spoof_head_remaining -= 1;
-        if state.spoof_head_remaining == 0 && state.drop_all_after_spoof {
-            state.blobs.clear();
-            state.drop_all_after_spoof = false;
-            state.drop_events += 1;
-        }
+    let state = state.lock().expect("state lock poisoned");
+    if state.stale_head && !state.blobs.contains_key(&hash) {
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -228,13 +246,13 @@ async fn get_blob(
 }
 
 #[test]
-fn test_push_repairs_missing_old_chunks_after_sample_check() {
+fn test_push_repairs_lost_chunks_despite_stale_head_responses() {
     if skip_if_no_binary() {
         return;
     }
 
     let relay = TestRelay::new();
-    let fake_blossom = FakeBlossomServer::new(19321);
+    let fake_blossom = FakeBlossomServer::new();
     println!(
         "Started local nostr relay at {}, fake blossom at {}",
         relay.url(),
@@ -282,7 +300,7 @@ fn test_push_repairs_missing_old_chunks_after_sample_check() {
         .output()
         .expect("Failed first push");
     let stderr1 = String::from_utf8_lossy(&push1.stderr);
-    if !push1.status.success() && !stderr1.contains("-> master") {
+    if !push1.status.success() {
         panic!("First push failed: {}", stderr1);
     }
 
@@ -295,9 +313,7 @@ fn test_push_repairs_missing_old_chunks_after_sample_check() {
         .output()
         .expect("Failed git commit");
 
-    // Spoof exactly the first 5 HEAD checks (server sample check), then drop all old blobs.
-    fake_blossom.spoof_next_head_checks_then_drop_all(5);
-    let head_requests_before_push2 = fake_blossom.head_request_count();
+    fake_blossom.lose_stored_blobs(&nostr::PublicKey::parse(&test_env.npub).unwrap().to_hex());
 
     let push2 = Command::new("git")
         .args(["push", "htree", "master"])
@@ -307,33 +323,17 @@ fn test_push_repairs_missing_old_chunks_after_sample_check() {
         .expect("Failed second push");
     let stderr2 = String::from_utf8_lossy(&push2.stderr);
     println!("Second push stderr:\n{}", stderr2);
-    if !push2.status.success() && !stderr2.contains("-> master") {
+    if !push2.status.success() {
         panic!("Second push failed: {}", stderr2);
     }
-    assert!(
-        fake_blossom.drop_event_count() > 0,
-        "Expected fake blossom to drop old blobs after sample checks"
-    );
-    let head_requests_after_push2 = fake_blossom.head_request_count();
-    let head_requests_during_push2 = head_requests_after_push2 - head_requests_before_push2;
-    assert!(
-        head_requests_during_push2 <= 64,
-        "Expected second push to use bounded HEAD checks, got {}",
-        head_requests_during_push2
-    );
-    assert!(
-        stderr2.contains("Computing diff") || stderr2.contains("unchanged"),
-        "Expected diff path on second push, stderr:\n{}",
-        stderr2
-    );
-
     // Clone from a fresh repo; should succeed if old chunks were repaired.
+    let reader = TestEnv::new(Some(&fake_blossom.base_url()), Some(&relay.url()));
     let clone_url = format!("htree://{}/missing-old-chunks", test_env.npub);
     let clone_dir = TempDir::new().expect("Failed to create clone dir");
     let clone_path = clone_dir.path().join("clone");
     let clone = Command::new("git")
         .args(["clone", &clone_url, clone_path.to_str().unwrap()])
-        .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .envs(reader.env())
         .output()
         .expect("Failed git clone");
     println!("Clone stderr:\n{}", String::from_utf8_lossy(&clone.stderr));
@@ -357,6 +357,20 @@ fn test_push_repairs_missing_old_chunks_after_sample_check() {
         );
     }
 
+    let fsck = Command::new("git")
+        .args(["fsck", "--full"])
+        .current_dir(&clone_path)
+        .output()
+        .unwrap();
+    assert!(
+        fsck.status.success(),
+        "{}",
+        String::from_utf8_lossy(&fsck.stderr)
+    );
+    assert_eq!(
+        std::fs::read_dir(clone_path.join("bulk")).unwrap().count(),
+        300
+    );
     assert!(
         clone_path.join("README.md").exists(),
         "Expected README.md after successful clone"

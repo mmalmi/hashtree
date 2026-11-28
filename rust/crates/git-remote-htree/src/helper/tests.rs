@@ -20,6 +20,10 @@ use std::thread::JoinHandle;
 use tempfile::TempDir;
 use tokio::sync::oneshot;
 
+#[path = "../../tests/common/blossom_claims.rs"]
+mod blossom_claims;
+use blossom_claims::{signed_author, ListQuery, OwnerClaims};
+
 mod cached_root_repair;
 mod closure_validation;
 mod hydration;
@@ -77,6 +81,8 @@ impl Store for TransientMissingStore {
 
 #[derive(Default)]
 struct CountingBlossomState {
+    claims: OwnerClaims,
+    unretained_hash: Option<String>,
     blobs: HashMap<String, Vec<u8>>,
     get_requests: usize,
     head_requests: usize,
@@ -84,6 +90,7 @@ struct CountingBlossomState {
     batch_upload_requests: usize,
     upload_check_requests: usize,
     fail_uploads: bool,
+    hide_head: bool,
     support_upload_check: bool,
     support_batch_upload: bool,
     max_batch_body_bytes: Option<usize>,
@@ -158,6 +165,7 @@ impl CountingBlossomServer {
 
             rt.block_on(async move {
                 let app = Router::new()
+                    .route("/list/:owner", axum::routing::get(list_claims))
                     .route("/upload", put(upload_blob))
                     .route("/upload/check", post(upload_check))
                     .route("/upload/batch-binary", post(upload_blob_batch_binary))
@@ -258,16 +266,28 @@ fn parse_hash_from_path(id: &str) -> Option<String> {
     }
 }
 
+async fn list_claims(
+    State(state): State<Arc<Mutex<CountingBlossomState>>>,
+    AxumPath(owner): AxumPath<String>,
+    axum::extract::Query(query): axum::extract::Query<ListQuery>,
+    headers: HeaderMap,
+) -> Response<Body> {
+    state.lock().unwrap().claims.list(&headers, &owner, &query)
+}
+
 async fn upload_blob(
     State(state): State<Arc<Mutex<CountingBlossomState>>>,
     headers: HeaderMap,
     body: Bytes,
-) -> StatusCode {
+) -> Response<Body> {
     {
         let mut state = state.lock().expect("state lock");
         state.upload_requests += 1;
         if state.fail_uploads {
-            return StatusCode::FORBIDDEN;
+            return Response::builder()
+                .status(StatusCode::FORBIDDEN)
+                .body(Body::empty())
+                .unwrap();
         }
     }
 
@@ -281,16 +301,35 @@ async fn upload_blob(
         .map(|value| value.to_ascii_lowercase())
     {
         if expected_hash != computed_hash {
-            return StatusCode::BAD_REQUEST;
+            return Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Body::empty())
+                .unwrap();
         }
     }
 
     let mut state = state.lock().expect("state lock");
-    if state.blobs.insert(computed_hash, body.to_vec()).is_some() {
+    if state.unretained_hash.as_ref() != Some(&computed_hash) {
+        state
+            .claims
+            .record(signed_author(&headers, "upload").as_deref(), &computed_hash);
+    }
+    let status = if state
+        .blobs
+        .insert(computed_hash.clone(), body.to_vec())
+        .is_some()
+    {
         StatusCode::OK
     } else {
         StatusCode::CREATED
-    }
+    };
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            serde_json::json!({"sha256": computed_hash, "size": body.len()}).to_string(),
+        ))
+        .unwrap()
 }
 
 #[derive(serde::Deserialize)]
@@ -393,6 +432,7 @@ fn parse_test_binary_batch(body: &[u8]) -> Option<Vec<(String, Vec<u8>)>> {
 
 async fn upload_blob_batch_binary(
     State(state): State<Arc<Mutex<CountingBlossomState>>>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
     {
@@ -439,6 +479,7 @@ async fn upload_blob_batch_binary(
     let mut uploaded = 0usize;
     let mut state = state.lock().expect("state lock");
 
+    let author = signed_author(&headers, "upload");
     for (expected_hash, data) in items {
         let actual_hash = hex::encode(Sha256::digest(&data));
         if actual_hash != expected_hash {
@@ -446,6 +487,9 @@ async fn upload_blob_batch_binary(
                 .status(StatusCode::BAD_REQUEST)
                 .body(Body::empty())
                 .unwrap();
+        }
+        if state.unretained_hash.as_ref() != Some(&expected_hash) {
+            state.claims.record(author.as_deref(), &expected_hash);
         }
         if state.blobs.insert(expected_hash.clone(), data).is_none() {
             uploaded += 1;
@@ -514,7 +558,7 @@ async fn head_blob(
 
     let mut state = state.lock().expect("state lock");
     state.head_requests += 1;
-    if let Some(data) = state.blobs.get(&hash) {
+    if let Some(data) = state.blobs.get(&hash).filter(|_| !state.hide_head) {
         return Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "application/octet-stream")
@@ -816,6 +860,19 @@ fn create_repo_with_rewritten_text_history(
 fn create_test_helper() -> Option<RemoteHelper> {
     let config = Config::default();
     RemoteHelper::new(TEST_PUBKEY, "test-repo", None, None, false, config).ok()
+}
+
+fn create_signed_test_helper(config: Config) -> RemoteHelper {
+    let keys = nostr::Keys::generate();
+    RemoteHelper::new(
+        &keys.public_key().to_hex(),
+        "test-repo",
+        Some(hex::encode(keys.secret_key().to_secret_bytes())),
+        None,
+        false,
+        config,
+    )
+    .unwrap()
 }
 
 fn create_test_helper_with_config(config: Config) -> Option<RemoteHelper> {
@@ -2640,76 +2697,7 @@ fn test_git_pack_install_retries_a_transient_missing_chunk() {
 }
 
 #[test]
-fn test_push_to_file_servers_with_diff_does_not_fetch_old_tree_from_blossom() {
-    let _env_lock = ENV_LOCK.lock().expect("env lock");
-    let home = TempDir::new().expect("temp home");
-    let _home_guard = HomeGuard::set(home.path());
-    let fake_blossom = CountingBlossomServer::new();
-    write_test_config(home.path(), fake_blossom.base_url(), true);
-
-    let mut config = Config::default();
-    config.nostr.relays = vec![];
-    config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
-    config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
-    config.blossom.force_upload = true;
-
-    let helper = create_test_helper_with_config(config).expect("helper");
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-
-    let (old_cid, new_cid) = rt.block_on(async {
-        let old_store = Arc::new(MemoryStore::new());
-        let old_tree = HashTree::new(HashTreeConfig::new(old_store.clone()).public());
-        let (old_cid, _) = old_tree
-            .put(b"old tree exists only on blossom")
-            .await
-            .expect("build old tree");
-        let old_bytes = old_store
-            .get(&old_cid.hash)
-            .await
-            .expect("read old root")
-            .expect("old root bytes");
-
-        hashtree_blossom::BlossomClient::new_empty(nostr::Keys::generate())
-            .with_servers(vec![fake_blossom.base_url().to_string()])
-            .upload(&old_bytes)
-            .await
-            .expect("upload old tree to fake blossom");
-
-        let new_store = helper.storage.store().clone();
-        let new_tree = HashTree::new(HashTreeConfig::new(new_store).public());
-        let (new_cid, _) = new_tree
-            .put(b"new tree exists only locally")
-            .await
-            .expect("build new tree");
-
-        (old_cid, new_cid)
-    });
-
-    let result = helper.push_to_file_servers_with_diff(
-        &hex::encode(new_cid.hash),
-        None,
-        Some(&hex::encode(old_cid.hash)),
-        None,
-        true,
-    );
-
-    assert!(
-        result.failed.is_empty(),
-        "diff upload should succeed without remote old-tree fetches: {:?}",
-        result.failed
-    );
-    assert_eq!(
-        fake_blossom.get_request_count(),
-        0,
-        "diff collection should not fetch the old tree from Blossom when it is missing locally"
-    );
-}
-
-#[test]
-fn test_push_to_file_servers_with_unavailable_old_root_probes_before_reupload() {
+fn test_push_claims_all_cached_hashes_through_plain_bud02() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
     let _home_guard = HomeGuard::set(home.path());
@@ -2721,20 +2709,13 @@ fn test_push_to_file_servers_with_unavailable_old_root_probes_before_reupload() 
     config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
     config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
 
-    let helper = create_test_helper_with_config(config).expect("helper");
+    let helper = create_signed_test_helper(config);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime");
 
-    let (old_cid, new_cid, new_hash_count) = rt.block_on(async {
-        let old_store = Arc::new(MemoryStore::new());
-        let old_tree = HashTree::new(HashTreeConfig::new(old_store).public());
-        let (old_cid, _) = old_tree
-            .put(b"old root is not in the local cache or file server")
-            .await
-            .expect("build old tree");
-
+    let (new_cid, new_hashes) = rt.block_on(async {
         let new_store = helper.storage.store().clone();
         let new_tree = HashTree::new(HashTreeConfig::new(new_store.clone()).public());
         let mut entries = Vec::new();
@@ -2763,39 +2744,33 @@ fn test_push_to_file_servers_with_unavailable_old_root_probes_before_reupload() 
             fake_blossom.insert_blob(data);
         }
 
-        (old_cid, new_cid, new_hashes.len())
+        (new_cid, new_hashes)
     });
 
-    let result = helper.push_to_file_servers_with_diff(
-        &hex::encode(new_cid.hash),
-        new_cid.key.as_ref(),
-        Some(&hex::encode(old_cid.hash)),
-        old_cid.key.as_ref(),
-        true,
-    );
+    let result = helper.push_to_file_servers(&hex::encode(new_cid.hash), new_cid.key.as_ref());
 
     assert!(
         result.failed.is_empty(),
-        "push should succeed even when old root is unavailable: {:?}",
+        "signed BUD-02 writes must claim existing cache entries: {:?}",
         result.failed
-    );
-    assert!(
-        fake_blossom.get_head_request_count() >= new_hash_count,
-        "fallback should probe server state before uploading existing blobs"
-    );
-    assert!(
-        fake_blossom.get_upload_check_request_count() > 0,
-        "fallback should first try the modern inventory endpoint before legacy HEAD probes"
     );
     assert_eq!(
         fake_blossom.get_upload_request_count(),
-        0,
-        "existing small blobs should be skipped by HEAD instead of re-sent as upload bodies"
+        new_hashes.len(),
+        "plain BUD-02 writer should receive every cached input"
     );
+    assert_eq!(fake_blossom.get_upload_check_request_count(), 0);
+    let state = fake_blossom.state.lock().unwrap();
+    for hash in &new_hashes {
+        assert!(
+            state.claims.contains(&helper.pubkey, &hex::encode(hash)),
+            "new writer must retain {hash:?}"
+        );
+    }
 }
 
 #[test]
-fn test_push_to_file_servers_with_diff_trusts_sampled_old_tree_coverage() {
+fn test_push_claims_old_subtrees_stored_by_another_author() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
     let _home_guard = HomeGuard::set(home.path());
@@ -2807,13 +2782,13 @@ fn test_push_to_file_servers_with_diff_trusts_sampled_old_tree_coverage() {
     config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
     config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
 
-    let helper = create_test_helper_with_config(config).expect("helper");
+    let helper = create_signed_test_helper(config);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime");
 
-    let (old_cid, new_cid, old_hash_count) = rt.block_on(async {
+    let (old_cid, new_cid, new_hashes) = rt.block_on(async {
         let store = helper.storage.store().clone();
         let tree = HashTree::new(HashTreeConfig::new(store.clone()).public());
 
@@ -2857,16 +2832,13 @@ fn test_push_to_file_servers_with_diff_trusts_sampled_old_tree_coverage() {
             .await
             .expect("write new directory");
 
-        (old_cid, new_cid, old_hashes.len())
+        let new_hashes = collect_hashes(&tree, &new_cid, 32)
+            .await
+            .expect("collect required hashes");
+        (old_cid, new_cid, new_hashes)
     });
 
-    let result = helper.push_to_file_servers_with_diff(
-        &hex::encode(new_cid.hash),
-        None,
-        Some(&hex::encode(old_cid.hash)),
-        None,
-        true,
-    );
+    let result = helper.push_to_file_servers(&hex::encode(new_cid.hash), None);
 
     assert!(
         result.failed.is_empty(),
@@ -2878,16 +2850,23 @@ fn test_push_to_file_servers_with_diff_trusts_sampled_old_tree_coverage() {
         0,
         "push diff should not need GET requests when old tree is already local"
     );
+    let state = fake_blossom.state.lock().unwrap();
+    for hash in &new_hashes {
+        assert!(
+            state.claims.contains(&helper.pubkey, &hex::encode(hash)),
+            "new writer must retain {hash:?}"
+        );
+    }
     assert!(
-        fake_blossom.get_head_request_count() <= old_hash_count.min(32),
-        "expected only sampled HEAD probes for a single write server, got {} for {} old hashes",
-        fake_blossom.get_head_request_count(),
-        old_hash_count
+        !state
+            .claims
+            .contains(&helper.pubkey, &hex::encode(old_cid.hash)),
+        "the obsolete root is outside the new closure"
     );
 }
 
 #[test]
-fn test_push_diff_prunes_when_only_previous_root_blob_is_missing_on_server() {
+fn test_push_claims_reused_children_without_reuploading_obsolete_root() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
     let _home_guard = HomeGuard::set(home.path());
@@ -2899,13 +2878,13 @@ fn test_push_diff_prunes_when_only_previous_root_blob_is_missing_on_server() {
     config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
     config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
 
-    let helper = create_test_helper_with_config(config).expect("helper");
+    let helper = create_signed_test_helper(config);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime");
 
-    let (old_cid, new_cid, old_hash_count) = rt.block_on(async {
+    let (old_cid, new_cid, new_hashes) = rt.block_on(async {
         let store = helper.storage.store().clone();
         let tree = HashTree::new(HashTreeConfig::new(store.clone()).public());
 
@@ -2950,34 +2929,36 @@ fn test_push_diff_prunes_when_only_previous_root_blob_is_missing_on_server() {
             .await
             .expect("write new directory");
 
-        (old_cid, new_cid, old_hashes.len())
+        let new_hashes = collect_hashes(&tree, &new_cid, 32)
+            .await
+            .expect("collect required hashes");
+        (old_cid, new_cid, new_hashes)
     });
 
-    let result = helper.push_to_file_servers_with_diff(
-        &hex::encode(new_cid.hash),
-        None,
-        Some(&hex::encode(old_cid.hash)),
-        None,
-        true,
-    );
+    let result = helper.push_to_file_servers(&hex::encode(new_cid.hash), None);
 
     assert!(
         result.failed.is_empty(),
         "diff upload should succeed when reusable old children are on Blossom: {:?}",
         result.failed
     );
+    let state = fake_blossom.state.lock().unwrap();
+    for hash in &new_hashes {
+        assert!(
+            state.claims.contains(&helper.pubkey, &hex::encode(hash)),
+            "new writer must retain {hash:?}"
+        );
+    }
     assert!(
-        fake_blossom.get_head_request_count() <= old_hash_count.min(32),
-        "coverage probe should sample old children without forcing a full walk"
-    );
-    assert!(
-        fake_blossom.get_upload_request_count() <= 2,
-        "missing previous root alone should not re-upload unchanged old children"
+        !state
+            .claims
+            .contains(&helper.pubkey, &hex::encode(old_cid.hash)),
+        "the obsolete root is outside the new closure"
     );
 }
 
 #[test]
-fn test_push_to_file_servers_with_diff_force_upload_skips_old_tree_probes() {
+fn test_force_upload_submits_new_tree_without_inventory() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
     let _home_guard = HomeGuard::set(home.path());
@@ -2990,13 +2971,13 @@ fn test_push_to_file_servers_with_diff_force_upload_skips_old_tree_probes() {
     config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
     config.blossom.force_upload = true;
 
-    let helper = create_test_helper_with_config(config).expect("helper");
+    let helper = create_signed_test_helper(config);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime");
 
-    let (old_cid, new_cid) = rt.block_on(async {
+    let new_cid = rt.block_on(async {
         let store = helper.storage.store().clone();
         let tree = HashTree::new(HashTreeConfig::new(store).public());
 
@@ -3006,30 +2987,16 @@ fn test_push_to_file_servers_with_diff_force_upload_skips_old_tree_probes() {
             .expect("write old file");
         let old_entries =
             vec![DirEntry::from_cid("shared.txt", &old_file_cid).with_size(old_file_size)];
-        let old_cid = tree
-            .put_directory(old_entries.clone())
-            .await
-            .expect("write old directory");
-
         let (new_file_cid, new_file_size) =
             tree.put_file(b"new file").await.expect("write new file");
         let mut new_entries = old_entries;
         new_entries.push(DirEntry::from_cid("new.txt", &new_file_cid).with_size(new_file_size));
-        let new_cid = tree
-            .put_directory(new_entries)
+        tree.put_directory(new_entries)
             .await
-            .expect("write new directory");
-
-        (old_cid, new_cid)
+            .expect("write new directory")
     });
 
-    let result = helper.push_to_file_servers_with_diff(
-        &hex::encode(new_cid.hash),
-        None,
-        Some(&hex::encode(old_cid.hash)),
-        None,
-        true,
-    );
+    let result = helper.push_to_file_servers(&hex::encode(new_cid.hash), None);
 
     assert!(
         result.failed.is_empty(),
@@ -3037,18 +3004,18 @@ fn test_push_to_file_servers_with_diff_force_upload_skips_old_tree_probes() {
         result.failed
     );
     assert_eq!(
-        fake_blossom.get_head_request_count(),
+        fake_blossom.get_upload_check_request_count(),
         0,
-        "force upload should upload the new tree directly instead of probing every old hash"
+        "force upload should send the new tree directly"
     );
 }
 
 #[test]
-fn test_push_to_file_servers_with_diff_uploads_new_hashes_to_any_write_server() {
+fn test_push_uses_one_complete_writer_when_optional_replica_refuses() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
     let _home_guard = HomeGuard::set(home.path());
-    let server_a = CountingBlossomServer::new();
+    let server_a = CountingBlossomServer::failing_uploads();
     let server_b = CountingBlossomServer::new();
     write_test_config_for_servers(
         home.path(),
@@ -3067,47 +3034,94 @@ fn test_push_to_file_servers_with_diff_uploads_new_hashes_to_any_write_server() 
         server_b.base_url().to_string(),
     ];
 
-    let helper = create_test_helper_with_config(config).expect("helper");
+    let helper = create_signed_test_helper(config);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("test runtime");
 
-    let root_cid = rt.block_on(async {
-        let store = helper.storage.store().clone();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
-        tree.put(b"new root must land on at least one write server")
+    let (root_cid, required) = rt.block_on(async {
+        let tree = HashTree::new(HashTreeConfig::new(helper.storage.store().clone()).public());
+        let (child, size) = tree
+            .put_file(b"retained by the second writer")
             .await
-            .expect("write root")
-            .0
+            .unwrap();
+        let root = tree
+            .put_directory(vec![DirEntry::from_cid("child", &child).with_size(size)])
+            .await
+            .unwrap();
+        let required = collect_hashes(&tree, &root, 32).await.unwrap();
+        assert!(required.len() >= 2);
+        (root, required)
     });
 
-    let result =
-        helper.push_to_file_servers_with_diff(&hex::encode(root_cid.hash), None, None, None, true);
-
-    assert!(
-        result.failed.is_empty(),
-        "push upload should succeed when at least one write server accepts it: {:?}",
-        result.failed
-    );
-    assert!(
-        server_a.has_blob(&root_cid.hash) || server_b.has_blob(&root_cid.hash),
-        "at least one write server should have the new root"
-    );
+    let result = helper.push_to_file_servers(&hex::encode(root_cid.hash), None);
+    assert_eq!(result.succeeded, vec![server_b.base_url().to_string()]);
+    assert!(!result.degraded);
+    let state = server_b.state.lock().unwrap();
+    for hash in required {
+        assert!(state.claims.contains(&helper.pubkey, &hex::encode(hash)));
+    }
+    drop(state);
     assert!(
         server_a.get_batch_upload_request_count() > 0
             || server_b.get_batch_upload_request_count() > 0,
         "multi-server ordinary writes should preserve the binary batch upload path"
     );
     assert_eq!(
-        server_a.get_upload_request_count() + server_b.get_upload_request_count(),
+        server_b.get_upload_request_count(),
         0,
-        "batch-capable write servers should not fall back to per-blob PUTs"
+        "the complete writer supports binary batches"
     );
 }
 
 #[test]
-fn test_push_to_file_servers_with_diff_splits_edge_rejected_batch_body() {
+fn test_separate_writers_cannot_combine_partial_owner_lists() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let home = TempDir::new().unwrap();
+    let _home = HomeGuard::set(home.path());
+    let first = CountingBlossomServer::new();
+    let second = CountingBlossomServer::new();
+    write_test_config_for_servers(home.path(), &[first.base_url(), second.base_url()], false);
+    let mut config = Config::default();
+    config.nostr.relays.clear();
+    config.blossom.write_servers = vec![first.base_url().into(), second.base_url().into()];
+    config.blossom.read_servers = config.blossom.write_servers.clone();
+    let helper = create_signed_test_helper(config);
+    let (root, left, right) = block_on_result(async {
+        let tree = HashTree::new(HashTreeConfig::new(helper.storage.store().clone()).public());
+        let (left, left_size) = tree.put_file(b"left hand file").await?;
+        let (right, right_size) = tree.put_file(b"right hand file").await?;
+        let root = tree
+            .put_directory(vec![
+                DirEntry::from_cid("left", &left).with_size(left_size),
+                DirEntry::from_cid("right", &right).with_size(right_size),
+            ])
+            .await?;
+        Ok((root, left, right))
+    })
+    .unwrap();
+    first.state.lock().unwrap().unretained_hash = Some(hex::encode(left.hash));
+    second.state.lock().unwrap().unretained_hash = Some(hex::encode(right.hash));
+
+    let result = helper.push_to_file_servers(&hex::encode(root.hash), root.key.as_ref());
+    for (server, retained, cached) in [
+        (&first, right.hash, left.hash),
+        (&second, left.hash, right.hash),
+    ] {
+        assert!(server.has_blob(&root.hash) && server.has_blob(&cached));
+        let state = server.state.lock().unwrap();
+        assert!(state
+            .claims
+            .contains(&helper.pubkey, &hex::encode(retained)));
+        assert!(!state.claims.contains(&helper.pubkey, &hex::encode(cached)));
+    }
+    assert!(result.succeeded.is_empty());
+    assert!(super::push::ensure_blossom_publish_ready(&result).is_err());
+}
+
+#[test]
+fn test_push_to_file_servers_splits_edge_rejected_batch_body() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let _batch_target = EnvGuard::set("HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES", "16777216");
     let home = TempDir::new().expect("temp home");
@@ -3120,7 +3134,7 @@ fn test_push_to_file_servers_with_diff_splits_edge_rejected_batch_body() {
     config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
     config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
 
-    let helper = create_test_helper_with_config(config).expect("helper");
+    let helper = create_signed_test_helper(config);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -3144,8 +3158,7 @@ fn test_push_to_file_servers_with_diff_splits_edge_rejected_batch_body() {
         (root_cid, hashes)
     });
 
-    let result =
-        helper.push_to_file_servers_with_diff(&hex::encode(root_cid.hash), None, None, None, true);
+    let result = helper.push_to_file_servers(&hex::encode(root_cid.hash), None);
 
     assert!(
         result.failed.is_empty(),
@@ -3171,7 +3184,7 @@ fn test_push_to_file_servers_with_diff_splits_edge_rejected_batch_body() {
 }
 
 #[test]
-fn test_push_to_file_servers_with_diff_retries_transient_batch_before_split() {
+fn test_push_to_file_servers_retries_transient_batch_before_split() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let _batch_target = EnvGuard::set("HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES", "16777216");
     let home = TempDir::new().expect("temp home");
@@ -3184,7 +3197,7 @@ fn test_push_to_file_servers_with_diff_retries_transient_batch_before_split() {
     config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
     config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
 
-    let helper = create_test_helper_with_config(config).expect("helper");
+    let helper = create_signed_test_helper(config);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -3208,8 +3221,7 @@ fn test_push_to_file_servers_with_diff_retries_transient_batch_before_split() {
         (root_cid, hashes)
     });
 
-    let result =
-        helper.push_to_file_servers_with_diff(&hex::encode(root_cid.hash), None, None, None, true);
+    let result = helper.push_to_file_servers(&hex::encode(root_cid.hash), None);
 
     assert!(
         result.failed.is_empty(),
@@ -3248,7 +3260,7 @@ fn test_push_to_file_servers_respects_blob_link_type_for_tree_shaped_leaf() {
     config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
     config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
 
-    let helper = create_test_helper_with_config(config).expect("helper");
+    let helper = create_signed_test_helper(config);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -3278,8 +3290,7 @@ fn test_push_to_file_servers_respects_blob_link_type_for_tree_shaped_leaf() {
         (root_cid, leaf_hash, missing_child)
     });
 
-    let result =
-        helper.push_to_file_servers_with_diff(&hex::encode(root_cid.hash), None, None, None, true);
+    let result = helper.push_to_file_servers(&hex::encode(root_cid.hash), None);
 
     assert!(
         result.failed.is_empty(),
@@ -3295,7 +3306,7 @@ fn test_push_to_file_servers_respects_blob_link_type_for_tree_shaped_leaf() {
 }
 
 #[test]
-fn test_push_to_file_servers_with_diff_reports_degraded_local_only_upload() {
+fn test_push_to_file_servers_reports_degraded_local_only_upload() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
     let _home_guard = HomeGuard::set(home.path());
@@ -3318,7 +3329,7 @@ fn test_push_to_file_servers_with_diff_reports_degraded_local_only_upload() {
         failing_server_b.base_url().to_string(),
     ];
 
-    let helper = create_test_helper_with_config(config).expect("helper");
+    let helper = create_signed_test_helper(config);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -3333,8 +3344,7 @@ fn test_push_to_file_servers_with_diff_reports_degraded_local_only_upload() {
             .0
     });
 
-    let result =
-        helper.push_to_file_servers_with_diff(&hex::encode(root_cid.hash), None, None, None, true);
+    let result = helper.push_to_file_servers(&hex::encode(root_cid.hash), None);
 
     assert!(
         result.local_complete,
@@ -3386,7 +3396,7 @@ fn test_blossom_publish_gate_accepts_complete_upload() {
 }
 
 #[test]
-fn test_verify_root_available_on_write_server_accepts_uploaded_root() {
+fn test_confirmed_writer_has_readable_root() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
     let _home_guard = HomeGuard::set(home.path());
@@ -3398,7 +3408,7 @@ fn test_verify_root_available_on_write_server_accepts_uploaded_root() {
     config.blossom.read_servers = vec![server.base_url().to_string()];
     config.blossom.write_servers = vec![server.base_url().to_string()];
 
-    let helper = create_test_helper_with_config(config).expect("helper");
+    let helper = create_signed_test_helper(config);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -3414,11 +3424,9 @@ fn test_verify_root_available_on_write_server_accepts_uploaded_root() {
     });
     let root_hash = hex::encode(root_cid.hash);
 
-    let result = helper.push_to_file_servers_with_diff(&root_hash, None, None, None, true);
+    let result = helper.push_to_file_servers(&root_hash, None);
     super::push::ensure_blossom_publish_ready(&result).expect("upload complete");
-    helper
-        .verify_root_available_on_write_server(&root_hash)
-        .expect("uploaded root is visible");
+    assert_eq!(result.succeeded, vec![server.base_url().to_string()]);
 
     assert!(
         server.get_head_request_count() > 0,
@@ -3427,11 +3435,12 @@ fn test_verify_root_available_on_write_server_accepts_uploaded_root() {
 }
 
 #[test]
-fn test_verify_root_available_on_write_server_rejects_missing_root() {
+fn test_writer_with_owner_rows_but_unreadable_root_cannot_publish() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
     let home = TempDir::new().expect("temp home");
     let _home_guard = HomeGuard::set(home.path());
     let server = CountingBlossomServer::new();
+    server.state.lock().unwrap().hide_head = true;
     write_test_config(home.path(), server.base_url(), false);
 
     let mut config = Config::default();
@@ -3439,44 +3448,25 @@ fn test_verify_root_available_on_write_server_rejects_missing_root() {
     config.blossom.read_servers = vec![server.base_url().to_string()];
     config.blossom.write_servers = vec![server.base_url().to_string()];
 
-    let helper = create_test_helper_with_config(config).expect("helper");
-    let missing_hash = hex::encode([0x55u8; 32]);
-    let err = helper
-        .verify_root_available_on_write_server(&missing_hash)
-        .expect_err("missing root must block publish");
-
-    assert!(
-        err.to_string().contains("not readable"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn test_queue_links_for_diff_upload_prunes_known_subtrees() {
-    let old_hash = [1u8; 32];
-    let new_hash = [2u8; 32];
-    let links = vec![Link::new(old_hash), Link::new(new_hash)];
-    let old_hashes = HashSet::from([old_hash]);
-    let mut queue = Vec::new();
-    let mut queued = HashSet::new();
-    let discovered = std::sync::atomic::AtomicUsize::new(0);
-
-    super::push::queue_links_for_diff_upload(
-        &mut queue,
-        &mut queued,
-        &links,
-        &old_hashes,
-        true,
-        &discovered,
-    );
-
-    assert_eq!(queue.len(), 1, "known old subtrees should not be queued");
-    assert_eq!(queue[0].hash, new_hash);
-    assert_eq!(
-        discovered.load(std::sync::atomic::Ordering::Relaxed),
-        1,
-        "only the new child should count as discovered work"
-    );
+    let helper = create_signed_test_helper(config);
+    let root = block_on_result(async {
+        let tree = HashTree::new(HashTreeConfig::new(helper.storage.store().clone()).public());
+        Ok(tree
+            .put(b"owner lists the root but HEAD cannot read it")
+            .await?
+            .0)
+    })
+    .unwrap();
+    let result = helper.push_to_file_servers(&hex::encode(root.hash), root.key.as_ref());
+    assert!(server
+        .state
+        .lock()
+        .unwrap()
+        .claims
+        .contains(&helper.pubkey, &hex::encode(root.hash)));
+    assert!(server.get_head_request_count() > 0);
+    assert!(result.succeeded.is_empty());
+    assert!(super::push::ensure_blossom_publish_ready(&result).is_err());
 }
 
 #[test]

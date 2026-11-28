@@ -22,7 +22,7 @@ fn test_git_push_fails_when_only_local_relay_confirms_publish() {
         }
     };
 
-    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let test_env = server.writer_env(&relay.url());
     let config_path = test_env.home_dir.join(".hashtree").join("config.toml");
     let config = format!(
         r#"
@@ -81,5 +81,45 @@ write_servers = ["{}"]
             || stderr.contains("publication timed out"),
         "stderr should explain the local-only relay publish failure, stderr:\n{}",
         stderr
+    );
+}
+
+#[test]
+fn cache_only_writer_cannot_advertise_git_root() {
+    if skip_if_no_binary() {
+        return;
+    }
+
+    let relay = TestRelay::new();
+    let server = TestServer::new().expect("cache-only test needs the real htree daemon");
+    // The server enables public writes. This independent author can upload cache
+    // entries but has no permission to retain them.
+    let writer = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let repo = create_test_repo();
+    let mut push = Command::new("git");
+    push.args(["push", "htree://self/cache-only-retention", "master"])
+        .current_dir(repo.path())
+        .envs(writer.env());
+
+    let result = command_output_with_timeout(&mut push, Duration::from_secs(50))
+        .expect("git push must finish");
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let events = relay.stored_events();
+    let published = events
+        .iter()
+        .filter(|event| matches!(event["kind"].as_u64(), Some(30064 | 30078 | 30617 | 30618)))
+        .count();
+
+    assert_eq!(
+        published, 0,
+        "cache-only push advertised repository state: {stderr}"
+    );
+    assert!(
+        !result.status.success(),
+        "cache-only push reported success: {stderr}"
+    );
+    assert!(
+        stderr.contains("no Blossom write server confirmed ownership of the complete repository"),
+        "expected a storage error before relay publication: {stderr}"
     );
 }

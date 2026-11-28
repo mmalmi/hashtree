@@ -185,7 +185,7 @@ fn benchmark_large_repo_clone_local() {
     configure_repo_identity(&source_repo_path);
     let branch = source_branch(&source_repo_path);
 
-    let publisher_env = TestEnv::new(Some(&blossom_url), Some(&relay_url));
+    let publisher_env = server.writer_env(&relay_url);
     let publisher_env_vars = publisher_env.env();
 
     let remote_url = format!("htree://self/{}", remote_repo);

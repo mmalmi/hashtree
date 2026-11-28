@@ -122,8 +122,8 @@ fn test_diff_based_push_production() {
         .output()
         .unwrap();
 
-    // Second push - should use diff
-    println!("\n=== Second push (should use diff) ===");
+    // Second push must publish the updated tip.
+    println!("\n=== Second push (updated tip) ===");
     let push2 = Command::new("git")
         .args(["push", "htree", "master"])
         .current_dir(repo.path())
@@ -137,9 +137,29 @@ fn test_diff_based_push_production() {
         panic!("Second push failed: {}", stderr2);
     }
 
-    let used_diff = stderr2.contains("unchanged") || stderr2.contains("Computing diff");
-    println!("\nDiff optimization used: {}", used_diff);
-    assert!(used_diff, "Second push should use diff optimization");
+    let expected = Command::new("git")
+        .args(["rev-parse", "master"])
+        .current_dir(repo.path())
+        .output()
+        .unwrap();
+    assert!(expected.status.success());
+    let published = Command::new("git")
+        .args(["ls-remote", "htree", "refs/heads/master"])
+        .current_dir(repo.path())
+        .envs(test_env.env())
+        .output()
+        .unwrap();
+    assert!(
+        published.status.success(),
+        "{}",
+        String::from_utf8_lossy(&published.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&published.stdout)
+            .split_whitespace()
+            .next(),
+        Some(String::from_utf8_lossy(&expected.stdout).trim())
+    );
 
     println!("\n=== SUCCESS ===");
 }

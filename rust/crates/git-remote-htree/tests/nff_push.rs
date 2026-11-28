@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{create_test_repo, skip_if_no_binary, test_relay::TestRelay, TestEnv, TestServer};
+use common::{create_test_repo, skip_if_no_binary, test_relay::TestRelay, TestServer};
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
@@ -27,7 +27,7 @@ fn test_non_fast_forward_rejected() {
 
     println!("\n=== Non-Fast-Forward Push Test ===\n");
 
-    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let test_env = server.writer_env(&relay.url());
     let env_vars: Vec<_> = test_env.env();
 
     // Create repo A and push initial commit

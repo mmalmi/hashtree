@@ -9,6 +9,7 @@ mod common;
 
 use common::{create_test_repo, skip_if_no_binary, test_relay::TestRelay, TestEnv, TestServer};
 use git_remote_htree::nostr_client::KIND_HASHTREE_ROOT;
+use nostr::ToBech32;
 use serde_json::Value;
 use std::path::Path;
 use std::process::Command;
@@ -145,7 +146,7 @@ fn test_git_push_and_clone_local() {
     println!("\n=== Git Push/Clone Roundtrip Test (Local Servers) ===\n");
 
     // Create test environment pointing to local servers
-    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let test_env = server.writer_env(&relay.url());
     println!("Test environment at: {:?}\n", test_env.home_dir);
 
     // Create test repo
@@ -257,7 +258,7 @@ fn test_public_push_publishes_nip34_repo_announcement() {
             return;
         }
     };
-    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let test_env = server.writer_env(&relay.url());
     let env_vars: Vec<_> = test_env.env();
     let repo = create_test_repo();
     let repo_name = "nip34-public-push";
@@ -315,15 +316,20 @@ fn test_public_push_from_cloned_htree_repo_announces_personal_fork() {
     }
 
     let relay = TestRelay::new();
-    let server = match TestServer::new() {
+    let fork_keys = nostr::Keys::generate();
+    let server = match TestServer::with_additional_writers(&[fork_keys.public_key()]) {
         Some(s) => s,
         None => {
             println!("SKIP: htree binary not found. Run `cargo build --bin htree` first.");
             return;
         }
     };
-    let source_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
-    let fork_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let source_env = server.writer_env(&relay.url());
+    let fork_env = TestEnv::with_nsec(
+        Some(&server.base_url()),
+        Some(&relay.url()),
+        &fork_keys.secret_key().to_bech32().unwrap(),
+    );
     let source_env_vars: Vec<_> = source_env.env();
     let fork_env_vars: Vec<_> = fork_env.env();
     let source_repo = create_test_repo();
@@ -452,7 +458,7 @@ fn test_git_push_clone_and_pull_across_two_clients_local() {
         }
     };
 
-    let author_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let author_env = server.writer_env(&relay.url());
     let consumer_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
     let author_env_fresh = TestEnv::with_nsec(
         Some(&server.base_url()),

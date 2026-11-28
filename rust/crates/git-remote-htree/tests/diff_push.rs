@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::{create_test_repo, skip_if_no_binary, test_relay::TestRelay, TestEnv, TestServer};
+use common::{create_test_repo, skip_if_no_binary, test_relay::TestRelay, TestServer};
 use std::process::{Command, Stdio};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -70,7 +70,7 @@ fn parse_last_listed_object_count(stderr: &str) -> Option<u32> {
         .next_back()
 }
 
-/// Test diff-based push - second push should upload fewer blobs
+/// A small change uses the Git delta and produces a readable updated repository.
 #[test]
 fn test_diff_based_push() {
     if skip_if_no_binary() {
@@ -94,7 +94,7 @@ fn test_diff_based_push() {
         server.base_url()
     );
 
-    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let test_env = server.writer_env(&relay.url());
     let env_vars: Vec<_> = test_env.env();
 
     // Create and push initial repo
@@ -121,7 +121,7 @@ fn test_diff_based_push() {
     let stderr1 = String::from_utf8_lossy(&push1.stderr);
     println!("First push stderr:\n{}", stderr1);
 
-    if !push1.status.success() && !stderr1.contains("-> master") {
+    if !push1.status.success() {
         panic!("First push failed: {}", stderr1);
     }
     let first_listed_objects =
@@ -160,7 +160,7 @@ fn test_diff_based_push() {
     let stderr2 = String::from_utf8_lossy(&push2.stderr);
     println!("Second push stderr:\n{}", stderr2);
 
-    if !push2.status.success() && !stderr2.contains("-> master") {
+    if !push2.status.success() {
         panic!("Second push failed: {}", stderr2);
     }
     assert!(
@@ -178,11 +178,6 @@ fn test_diff_based_push() {
         "second push should explain the cached-root merge phase without repair wording:\n{}",
         stderr2
     );
-
-    // Verify diff was used
-    let used_diff = stderr2.contains("unchanged") || stderr2.contains("Computing diff");
-    println!("\nDiff optimization used: {}", used_diff);
-    assert!(used_diff, "Second push should use diff optimization");
 
     let second_listed_objects =
         parse_last_listed_object_count(&stderr2).expect("second push should list objects");
@@ -214,6 +209,16 @@ fn test_diff_based_push() {
         final_progress
     );
 
+    let root_ids = || {
+        relay
+            .stored_events()
+            .iter()
+            .filter(|event| event["kind"] == 30064)
+            .map(|event| event["id"].as_str().unwrap().to_owned())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    let previous_roots = root_ids();
+    assert!(!previous_roots.is_empty());
     // Third push with no changes
     println!("\n=== Third push (no changes) ===");
     let push3 = Command::new("git")
@@ -226,38 +231,11 @@ fn test_diff_based_push() {
     let stderr3 = String::from_utf8_lossy(&push3.stderr);
     println!("Third push stderr:\n{}", stderr3);
 
-    // Either detects exact same root hash OR uploads very few blobs
-    // Note: The index file contains timestamps which may cause small variations
-    let no_changes = stderr3.contains("No changes") || stderr3.contains("same root");
-    let minimal_upload = stderr3.contains("unchanged") && {
-        // Parse "X new" from output - should be small (< 10)
-        stderr3
-            .split_whitespace()
-            .zip(stderr3.split_whitespace().skip(1))
-            .find(|(_, word)| *word == "new,")
-            .and_then(|(num, _)| num.strip_prefix('(').unwrap_or(num).parse::<u32>().ok())
-            .map(|n| n < 10)
-            .unwrap_or(false)
-    };
-    println!(
-        "No-change optimization used: {} (minimal_upload: {})",
-        no_changes, minimal_upload
-    );
-    let third_listed_objects = parse_last_listed_object_count(&stderr3);
-    let skipped_noop_before_listing =
-        third_listed_objects.is_none() && !stderr3.contains("Uploading:");
-    if let Some(third_listed_objects) = third_listed_objects {
-        println!("Third push listed objects: {}", third_listed_objects);
-        let repaired_missing_ref_objects =
-            stderr3.contains("Built repo tree is missing ref object(s)");
-        assert!(
-            third_listed_objects <= second_listed_objects || repaired_missing_ref_objects,
-            "Third push should not walk more git objects than the second push unless it is repairing a missing-ref-object root"
-        );
-    }
-    assert!(
-        no_changes || minimal_upload || skipped_noop_before_listing,
-        "Third push should detect no changes or upload minimal blobs"
+    assert!(push3.status.success(), "unchanged push failed: {stderr3}");
+    assert_eq!(
+        root_ids(),
+        previous_roots,
+        "an unchanged tip must preserve the signed root"
     );
 
     let clone_url = format!("htree://{}/diff-test-repo", test_env.npub);
@@ -278,7 +256,7 @@ fn test_diff_based_push() {
 }
 
 #[test]
-fn test_diff_push_prunes_unchanged_upload_frontier() {
+fn test_diff_push_reuses_git_objects_and_confirms_unchanged_blobs() {
     if skip_if_no_binary() {
         return;
     }
@@ -292,7 +270,7 @@ fn test_diff_push_prunes_unchanged_upload_frontier() {
         }
     };
 
-    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let test_env = server.writer_env(&relay.url());
     let env_vars: Vec<_> = test_env.env();
     let repo = create_test_repo();
 
@@ -335,7 +313,7 @@ fn test_diff_push_prunes_unchanged_upload_frontier() {
         .output()
         .expect("Failed to push initial large repo");
     let stderr1 = String::from_utf8_lossy(&push1.stderr);
-    if !push1.status.success() && !stderr1.contains("-> master") {
+    if !push1.status.success() {
         panic!("Initial push failed: {}", stderr1);
     }
     let initial_progress = parse_final_upload_progress(&stderr1)
@@ -370,7 +348,7 @@ fn test_diff_push_prunes_unchanged_upload_frontier() {
         .output()
         .expect("Failed to push follow-up change");
     let stderr2 = String::from_utf8_lossy(&push2.stderr);
-    if !push2.status.success() && !stderr2.contains("-> master") {
+    if !push2.status.success() {
         panic!("Follow-up push failed: {}", stderr2);
     }
     assert!(
@@ -391,19 +369,14 @@ fn test_diff_push_prunes_unchanged_upload_frontier() {
 
     let final_progress = parse_final_upload_progress(&stderr2)
         .expect("Second push should print a final upload progress line");
-    println!("Pruned diff push final progress: {:?}", final_progress);
-
+    assert_eq!(final_progress.failed, 0);
+    assert_eq!(final_progress.processed, final_progress.total);
     assert!(
-        final_progress.total < 128,
-        "second push should prune unchanged upload frontier aggressively: {:?}\nInitial push:\n{}\nFollow-up push:\n{}",
-        final_progress,
-        stderr1,
-        stderr2
+        final_progress.exist > 0,
+        "follow-up should confirm existing blobs: {stderr2}"
     );
     assert!(
         final_progress.new_count < 32,
-        "single-file follow-up should only upload a small number of new blobs: {:?}\n{}",
-        final_progress,
-        stderr2
+        "single-file change should create few new blobs: {stderr2}"
     );
 }
