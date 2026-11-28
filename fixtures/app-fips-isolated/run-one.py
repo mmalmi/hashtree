@@ -12,10 +12,10 @@ cmd=['pnpm','exec','playwright','test','--config=playwright.unit.config.ts','--w
 run(['node','scripts/verify-dependency-lock.mjs'],'verify-pins')
 run(['pnpm','exec','eslint',*spec['changedLintFiles'],'--max-warnings','0'],'lint-changed')
 run(['pnpm','run','build'],'build')
-run(cmd+['tests/release-site.spec.mjs'],'release-contract')
+run(['pnpm','run','check'],'check')
 config=root/'playwright.review.config.ts'
 config.write_text("import { defineConfig } from '@playwright/test'; import original from './playwright.config'; export default defineConfig({...original,workers:1,retries:0,outputDir:'/stage/evidence/social/browser-output',reporter:[['list'],['json',{outputFile:'/stage/evidence/social/browser.json'}]],use:{...original.use,trace:'retain-on-failure'}});")
-run(['pnpm','exec','playwright','test','--config='+config.name,'tests/post-search-sheet.spec.ts','tests/post-search-consent-ui.spec.ts','tests/post-search-ai-ui.spec.ts','tests/profile-identity-ui.spec.ts','tests/notifications-pagination-ui.spec.ts','tests/initial-paint.spec.ts','tests/for-you-shell.spec.ts','tests/idle-cpu.spec.ts'],'browser')
+run(['pnpm','exec','playwright','test','--config='+config.name,'tests/notifications-pagination-ui.spec.ts','tests/post-search-consent-ui.spec.ts','tests/post-search-sheet.spec.ts','--grep','a read-only account loads grouped notifications|resolving a multi-line notification target|public search consent|runs only for an explicitly selected query|empty posts search loads recommendations'],'browser')
 files={str(p.relative_to(root/'dist')):hashlib.sha256(p.read_bytes()).hexdigest() for p in (root/'dist').rglob('*') if p.is_file()}
 (evidence/'artifact.json').write_text(json.dumps(dict(source=spec['commit'],files=files),indent=2))
 

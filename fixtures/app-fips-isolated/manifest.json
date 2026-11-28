@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "0d2bf0094989193b9dfc85bf59df5fac17afcdab",
+      "commit": "fff7c48a26e209a59d50f6d783f142a4e965eaac",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "15cf2b57410afc18bdbcf98b6906ac4c773f4bc2924cc7d78f78e439d18518d1",
+      "archiveSha256": "e2a29df6d98fae70ba4cb8a7942bf1b8416a814222e911a047dd01db5b06dd5b",
       "lockSha256": "e6201eb5970e270e24eae4d15713f3c9c5e6c6872258eb130a36e603f48a9308",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
@@ -67,7 +67,10 @@
         "tests/post-search-sheet.spec.ts",
         "tests/post-search-consent-ui.spec.ts",
         "playwright.browser-tests.ts",
-        "scripts/release-site.mjs"
+        "scripts/release-site.mjs",
+        "tests/helpers/explicitPostSearch.ts",
+        "tests/helpers/searchRelayFixture.ts",
+        "tests/notifications-pagination-ui.spec.ts"
       ],
       "reusedEvidence": {
         "run": 46086832229,
@@ -77,7 +80,17 @@
           "70 focused tests passed",
           "svelte-check zero errors and warnings"
         ],
-        "reason": "No runtime or unit test changes; only browser test split and release-list addition"
+        "reason": "No runtime or unit test changes; only browser test split and release-list addition",
+        "additional": {
+          "run": 46087518065,
+          "source": "0d2bf0094989193b9dfc85bf59df5fac17afcdab",
+          "facts": [
+            "production build passed",
+            "20 release-contract tests passed",
+            "50 browser checks passed including offline MiniLM, For You desktop/mobile, profile and idle CPU"
+          ],
+          "reason": "Only test fixtures changed; runtime remains identical. Rerun the seven failing cases with deterministic transport fixtures."
+        }
       }
     }
   ]
