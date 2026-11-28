@@ -100,24 +100,38 @@ async fn restores_named_manifest_even_when_its_bytes_are_also_a_literal_file_chu
 }
 
 #[cfg(feature = "lmdb")]
+fn open_pool(dir: &tempfile::TempDir) -> HashtreeStore {
+    HashtreeStore::with_options_and_backend(
+        dir.path(),
+        None,
+        STORE_BYTES as u64,
+        false,
+        &StorageBackend::Lmdb,
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "lmdb")]
+fn remove_member_body(dir: &tempfile::TempDir, hash: &[u8; 32]) {
+    // The pool must be closed so only the member changes, leaving its catalog row intact.
+    let member = hashtree_lmdb::LmdbBlobStore::with_exact_map_size_and_external_blob_options(
+        dir.path().join("blobs"),
+        STORE_BYTES,
+        None,
+    )
+    .unwrap();
+    assert!(member.delete_sync(hash).unwrap());
+}
+
+#[cfg(feature = "lmdb")]
 #[tokio::test]
 async fn catalog_size_without_member_bytes_requires_a_source_and_is_repaired() {
     let dir = tempdir().unwrap();
-    let open = || {
-        HashtreeStore::with_options_and_backend(
-            dir.path(),
-            None,
-            STORE_BYTES as u64,
-            false,
-            &StorageBackend::Lmdb,
-        )
-        .unwrap()
-    };
     let bytes = b"first block, followed by another";
     let chunk = &bytes[..16];
     let missing = sha256(chunk);
     let root = {
-        let dst = open();
+        let dst = open_pool(&dir);
         let tree = HashTree::new(
             HashTreeConfig::new(dst.store_arc())
                 .public()
@@ -125,17 +139,8 @@ async fn catalog_size_without_member_bytes_requires_a_source_and_is_repaired() {
         );
         tree.put(bytes).await.unwrap().0
     };
-    // Remove the member's bytes offline, leaving its Pool catalog row intact.
-    {
-        let member = hashtree_lmdb::LmdbBlobStore::with_exact_map_size_and_external_blob_options(
-            dir.path().join("blobs"),
-            STORE_BYTES,
-            None,
-        )
-        .unwrap();
-        assert!(member.delete_sync(&missing).unwrap());
-    }
-    let dst = open();
+    remove_member_body(&dir, &missing);
+    let dst = open_pool(&dir);
     assert_eq!(dst.blob_size(&missing).unwrap(), Some(chunk.len() as u64));
     assert!(dst.get_blob(&missing).unwrap().is_none());
     assert!(fetcher(vec![]).fetch_cid_tree(&dst, &root).await.is_err());
@@ -154,6 +159,64 @@ async fn catalog_size_without_member_bytes_requires_a_source_and_is_repaired() {
     assert_eq!(restored.get(&root, None).await.unwrap().unwrap(), bytes);
     server.abort();
     let _ = server.await;
+}
+
+#[cfg(feature = "lmdb")]
+#[tokio::test]
+async fn missing_catalogued_file_manifest_restores_its_chunks_for_offline_read() {
+    let source = Arc::new(MemoryStore::new());
+    let tree = HashTree::new(
+        HashTreeConfig::new(source.clone())
+            .public()
+            .with_chunk_size(16),
+    );
+    let bytes = b"0123456789abcdefABCDEFGHIJKLMNOP";
+    let (file, size) = tree.put(bytes).await.unwrap();
+    let root = tree
+        .put_directory(vec![DirEntry::from_cid("note", &file).with_size(size)])
+        .await
+        .unwrap();
+    let manifest = source.get(&file.hash).await.unwrap().unwrap();
+    assert_ne!(manifest.len() as u64, size);
+
+    let dir = tempdir().unwrap();
+    {
+        let dst = open_pool(&dir);
+        let root_body = source.get(&root.hash).await.unwrap().unwrap();
+        dst.put_cached_blob(&root_body).unwrap();
+        dst.put_cached_blob(&manifest).unwrap();
+    }
+    remove_member_body(&dir, &file.hash);
+    let dst = open_pool(&dir);
+    assert_eq!(
+        dst.blob_size(&file.hash).unwrap(),
+        Some(manifest.len() as u64)
+    );
+    assert!(dst.get_blob(&file.hash).unwrap().is_none());
+    assert!(fetcher(vec![]).fetch_cid_tree(&dst, &root).await.is_err());
+
+    let (url, server) = serve(source).await;
+    let fetched = fetcher(vec![url])
+        .fetch_cid_tree(&dst, &root)
+        .await
+        .unwrap();
+    assert_eq!(fetched, (3, manifest.len() as u64 + size));
+    server.abort();
+    let _ = server.await;
+    drop(dst);
+
+    let offline = open_pool(&dir);
+    assert_eq!(
+        fetcher(vec![])
+            .fetch_cid_tree(&offline, &root)
+            .await
+            .unwrap(),
+        (0, 0)
+    );
+    let restored = HashTree::new(HashTreeConfig::new(offline.store_arc()));
+    let named = restored.resolve_path(&root, "note").await.unwrap().unwrap();
+    assert_eq!(named, file);
+    assert_eq!(restored.get(&named, None).await.unwrap().unwrap(), bytes);
 }
 
 #[cfg(feature = "s3")]
