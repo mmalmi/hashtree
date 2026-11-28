@@ -9,8 +9,8 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use hashtree_blossom::{BlossomClient, BlossomError};
 use hashtree_config::detect_local_daemon_url;
 use hashtree_core::{
-    decode_tree_node_by_cid, encrypted_size, encrypted_size_chk, to_hex, Cid, EncryptionMode, Link,
-    LinkType, ObjectKey,
+    decode_tree_node_by_cid, decrypt_object, encrypted_size, encrypted_size_chk, to_hex, Cid,
+    EncryptionMode, Link, LinkType, ObjectKey, TreeNode,
 };
 use nostr::Keys;
 use std::borrow::Cow;
@@ -51,24 +51,90 @@ pub(crate) fn child_cid(parent: &Cid, link: &Link) -> Cid {
     }
 }
 
-fn is_literal_file_chunk(cid: &Cid, file_chunk_size: Option<u64>, stored_len: u64) -> bool {
-    let overhead = match cid.key.map(|key| key.mode()) {
-        None => 0,
-        Some(EncryptionMode::LegacyChk | EncryptionMode::ChkV1) => encrypted_size_chk(0) as u64,
-        Some(EncryptionMode::RndV1) => encrypted_size(0) as u64,
-    };
-    file_chunk_size.is_some_and(|size| size.checked_add(overhead) == Some(stored_len))
+/// A directory entry starts a file, while a Blob child within a File may be
+/// literal bytes even when those bytes are themselves a valid manifest.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum WalkContext {
+    Node,
+    DirectoryBlob(u64),
+    FileChunk(u64),
+}
+
+impl WalkContext {
+    pub(crate) fn for_link(parent_type: LinkType, link: &Link) -> Self {
+        match (parent_type, link.link_type) {
+            (LinkType::File, LinkType::Blob) => Self::FileChunk(link.size),
+            (_, LinkType::Blob) => Self::DirectoryBlob(link.size),
+            _ => Self::Node,
+        }
+    }
+
+    fn is_literal_file_chunk(self, cid: &Cid, stored_len: u64) -> bool {
+        let Self::FileChunk(size) = self else {
+            return false;
+        };
+        let overhead = match cid.key.map(|key| key.mode()) {
+            None => 0,
+            Some(EncryptionMode::LegacyChk | EncryptionMode::ChkV1) => encrypted_size_chk(0) as u64,
+            Some(EncryptionMode::RndV1) => encrypted_size(0) as u64,
+        };
+        size.checked_add(overhead) == Some(stored_len)
+    }
+
+    pub(crate) fn decode(self, cid: &Cid, data: Cow<'_, [u8]>) -> Result<Option<TreeNode>> {
+        let size = match self {
+            Self::Node => return Ok(decode_tree_node_by_cid(cid, data.into_owned())?),
+            Self::DirectoryBlob(size) | Self::FileChunk(size) => size,
+        };
+        let plaintext = match cid.key {
+            Some(key) => match decrypt_object(&data, &key) {
+                Ok(bytes) => Cow::Owned(bytes),
+                // Historical plaintext trees may carry a legacy decryption key.
+                Err(_)
+                    if key.mode() == EncryptionMode::LegacyChk
+                        && hashtree_core::is_tree_node(&data) =>
+                {
+                    data
+                }
+                Err(err) => return Err(err.into()),
+            },
+            None => data,
+        };
+        if plaintext.len() as u64 == size {
+            if matches!(self, Self::FileChunk(_)) {
+                return Ok(None);
+            }
+            // An equal-length directory entry can still be a chunked file.
+            // Raw MessagePack files may also contain valid but unrelated links.
+            return Ok(
+                hashtree_core::try_decode_tree_node(&plaintext).filter(|node| {
+                    node.is_file()
+                        && node
+                            .links
+                            .iter()
+                            .try_fold(0_u64, |total, link| total.checked_add(link.size))
+                            == Some(size)
+                }),
+            );
+        }
+        if matches!(self, Self::FileChunk(_)) {
+            return Ok(hashtree_core::try_decode_tree_node(&plaintext).filter(TreeNode::is_file));
+        }
+        Ok(decode_tree_node_by_cid(
+            &Cid::public(cid.hash),
+            plaintext.into_owned(),
+        )?)
+    }
 }
 
 #[derive(Clone)]
 struct FetchItem {
     cid: Cid,
-    // Only a Blob link inside a File can identify literal chunks by length.
-    file_chunk_size: Option<u64>,
+    context: WalkContext,
     estimated_bytes: u64,
 }
 
-type Visited = HashSet<([u8; 32], Option<ObjectKey>, Option<u64>)>;
+type Visited = HashSet<([u8; 32], Option<ObjectKey>, WalkContext)>;
 
 enum FetchOutcome {
     Single(FetchItem, Result<Vec<u8>, BlossomError>),
@@ -128,28 +194,25 @@ fn enqueue_children(
     visited: &mut Visited,
     pending: &mut VecDeque<FetchItem>,
 ) -> Result<()> {
-    if is_literal_file_chunk(&item.cid, item.file_chunk_size, data.len() as u64) {
+    if item
+        .context
+        .is_literal_file_chunk(&item.cid, data.len() as u64)
+    {
         return Ok(());
     }
-    if let Some(node) = decode_tree_node_by_cid(&item.cid, data.into_owned())
+    if let Some(node) = item
+        .context
+        .decode(&item.cid, data)
         .map_err(|err| anyhow::anyhow!("Failed to decode {}: {err}", to_hex(&item.cid.hash)))?
     {
-        if item.file_chunk_size.is_some() && node.node_type != LinkType::File {
-            // A legacy Blob child can extend a file only with another File node.
-            return Ok(());
-        }
         for link in node.links {
             let cid = child_cid(&item.cid, &link);
             let blob_size = (link.link_type == LinkType::Blob).then_some(link.size);
-            let file_chunk_size = if node.node_type == LinkType::File {
-                blob_size
-            } else {
-                None
-            };
-            if visited.insert((cid.hash, cid.key, file_chunk_size)) {
+            let context = WalkContext::for_link(node.node_type, &link);
+            if visited.insert((cid.hash, cid.key, context)) {
                 pending.push_back(FetchItem {
                     cid,
-                    file_chunk_size,
+                    context,
                     estimated_bytes: blob_size.unwrap_or(FETCH_DEFAULT_ITEM_ESTIMATE),
                 });
             }
@@ -375,10 +438,10 @@ impl Fetcher {
         let mut active_batches = 0usize;
         let mut active: FuturesUnordered<FetchFuture> = FuturesUnordered::new();
 
-        visited.insert((root_cid.hash, root_cid.key, None));
+        visited.insert((root_cid.hash, root_cid.key, WalkContext::Node));
         pending.push_back(FetchItem {
             cid: root_cid.clone(),
-            file_chunk_size: None,
+            context: WalkContext::Node,
             estimated_bytes: FETCH_DEFAULT_ITEM_ESTIMATE,
         });
 
@@ -395,7 +458,10 @@ impl Fetcher {
                 if let Some(data) = store.router().get_sync(&item.cid.hash)? {
                     // A warm walk verifies literal chunks without scheduling an
                     // access-time write for each chunk of an already-local file.
-                    if !is_literal_file_chunk(&item.cid, item.file_chunk_size, data.len() as u64) {
+                    if !item
+                        .context
+                        .is_literal_file_chunk(&item.cid, data.len() as u64)
+                    {
                         store.record_blob_accesses([item.cid.hash]);
                     }
                     enqueue_children(&item, Cow::Owned(data), &mut visited, &mut pending)?;

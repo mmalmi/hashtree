@@ -1,16 +1,14 @@
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
 use hashtree_blossom::{BatchUploadItem, BlossomClient, BATCH_UPLOAD_MAX_BLOBS};
-use hashtree_core::{
-    decode_tree_node_by_cid, decrypt_object, to_hex, Cid, Link, LinkType, TreeNode,
-};
+use hashtree_core::{to_hex, Cid, Link};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::ensure_keys_string;
-use crate::fetch::{child_cid, FetchConfig, Fetcher};
+use crate::fetch::{child_cid, FetchConfig, Fetcher, WalkContext};
 use crate::HashtreeStore;
 
 const BLOSSOM_PUSH_BATCH_CONCURRENCY: usize = 4;
@@ -45,26 +43,6 @@ async fn load_local_blob_for_push(
     anyhow::bail!("missing local blob while pushing DAG: {}", cid);
 }
 
-fn node_for_push_bytes(cid: &Cid, data: &[u8], blob_size: Option<u64>) -> Result<Option<TreeNode>> {
-    if let Some(size) = blob_size {
-        // Match the core file reader: a Blob's declared size describes its
-        // plaintext leaf, regardless of the writer's chunk size. Authenticate
-        // keyed bytes before treating tree-shaped file contents as a leaf.
-        let plaintext_size = match cid.key.as_ref() {
-            Some(key) => decrypt_object(data, key)
-                .ok()
-                .map(|plaintext| plaintext.len() as u64),
-            None => Some(data.len() as u64),
-        };
-        if plaintext_size == Some(size) {
-            return Ok(None);
-        }
-    }
-
-    decode_tree_node_by_cid(cid, data.to_vec())
-        .map_err(|err| anyhow::anyhow!("Failed to inspect {cid}: {err}"))
-}
-
 pub(crate) async fn collect_cids_for_push(
     store: &HashtreeStore,
     root_cid: Cid,
@@ -75,10 +53,10 @@ pub(crate) async fn collect_cids_for_push(
     // Traverse each interpretation, but upload each block only once.
     let mut visited = HashSet::new();
     let mut collected = HashSet::new();
-    let mut queue = vec![(root_cid, None)];
+    let mut queue = vec![(root_cid, WalkContext::Node)];
 
-    while let Some((cid, blob_size)) = queue.pop() {
-        if !visited.insert((cid.hash, blob_size)) {
+    while let Some((cid, context)) = queue.pop() {
+        if !visited.insert((cid.hash, cid.key, context)) {
             continue;
         }
 
@@ -87,11 +65,11 @@ pub(crate) async fn collect_cids_for_push(
             cids_to_push.push(cid.clone());
         }
 
-        if let Some(node) = node_for_push_bytes(&cid, &data, blob_size)? {
+        if let Some(node) = context.decode(&cid, data.into())? {
             for link in &node.links {
                 queue.push((
                     child_cid(&cid, link),
-                    (link.link_type == LinkType::Blob).then_some(link.size),
+                    WalkContext::for_link(node.node_type, link),
                 ));
             }
         }
@@ -135,13 +113,13 @@ async fn collect_incremental_cids(
     let mut cids_to_push = Vec::new();
     let mut visited_new = HashSet::new();
     let mut collected = HashSet::new();
-    let mut queue = vec![(root_cid, Some(previous_root_cid), None)];
+    let mut queue = vec![(root_cid, WalkContext::Node, Some(previous_root_cid))];
 
-    while let Some((cid, old_cid, blob_size)) = queue.pop() {
-        if old_cid.as_ref().is_some_and(|old| old.hash == cid.hash) {
+    while let Some((cid, context, previous)) = queue.pop() {
+        if previous.as_ref() == Some(&cid) {
             continue;
         }
-        if !visited_new.insert((cid.hash, blob_size)) {
+        if !visited_new.insert((cid.hash, cid.key, context)) {
             continue;
         }
 
@@ -150,11 +128,11 @@ async fn collect_incremental_cids(
             cids_to_push.push(cid.clone());
         }
 
-        let Some(node) = node_for_push_bytes(&cid, &data, blob_size)? else {
+        let Some(node) = context.decode(&cid, data.into())? else {
             continue;
         };
 
-        let old_node = match old_cid.as_ref() {
+        let old_node = match previous.as_ref() {
             Some(old_cid) => {
                 let old_bytes = if require_previous_nodes {
                     Some(
@@ -166,8 +144,8 @@ async fn collect_incremental_cids(
                     store.get_blob(&old_cid.hash)?
                 };
                 match old_bytes {
-                    Some(old_bytes) => match node_for_push_bytes(old_cid, &old_bytes, blob_size) {
-                        Ok(old_node) => old_node,
+                    Some(old_bytes) => match context.decode(old_cid, old_bytes.into()) {
+                        Ok(old_node) => old_node.map(|node| (old_cid, node)),
                         Err(err) if require_previous_nodes => {
                             return Err(err)
                                 .context("previous DAG is unreadable for a bounded delta push");
@@ -189,26 +167,19 @@ async fn collect_incremental_cids(
 
         for (index, link) in node.links.iter().enumerate() {
             let child = child_cid(&cid, link);
-            let old_child = old_node
-                .as_ref()
-                .and_then(|old_node| matching_old_child(&old_node.links, index, link))
-                .filter(|old_link| {
-                    (old_link.link_type == LinkType::Blob).then_some(old_link.size)
-                        == (link.link_type == LinkType::Blob).then_some(link.size)
-                })
-                .map(|old_link| child_cid(old_cid.as_ref().expect("old node has cid"), old_link));
-
-            if old_child
-                .as_ref()
-                .is_some_and(|old_child| old_child.hash == child.hash)
-            {
-                continue;
+            let child_context = WalkContext::for_link(node.node_type, link);
+            // A previous literal reference provides no coverage for a subtree
+            // reached through a different interpretation of the same bytes.
+            let old_child = old_node.as_ref().and_then(|(old_cid, old_node)| {
+                matching_old_child(&old_node.links, index, link)
+                    .filter(|old_link| {
+                        WalkContext::for_link(old_node.node_type, old_link) == child_context
+                    })
+                    .map(|old_link| child_cid(old_cid, old_link))
+            });
+            if old_child.as_ref() != Some(&child) {
+                queue.push((child, child_context, old_child));
             }
-            queue.push((
-                child,
-                old_child,
-                (link.link_type == LinkType::Blob).then_some(link.size),
-            ));
         }
     }
 
@@ -796,6 +767,9 @@ pub async fn background_blossom_push_incremental_with_store(
     upload_cids_with_client(store, Some(fetcher), client, cids_to_push, false).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod manifest_tests;
 
 #[cfg(test)]
 mod regular_push_tests;
