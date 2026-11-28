@@ -67,8 +67,20 @@ impl WalkContext {
 
     pub fn decode(self, cid: &Cid, data: Cow<'_, [u8]>) -> Result<Option<TreeNode>, HashTreeError> {
         let size = match self {
-            Self::Directory | Self::Node => {
-                return Ok(decode_tree_node_by_cid(cid, data.into_owned())?)
+            Self::Node => return decode_tree_node_by_cid(cid, data.into_owned()),
+            Self::Directory => {
+                let node = decode_tree_node_by_cid(cid, data.into_owned())?.ok_or_else(|| {
+                    HashTreeError::Store(format!(
+                        "expected a directory node at {}",
+                        crate::to_hex(&cid.hash)
+                    ))
+                })?;
+                // list_directory_required historically yields no entries for a
+                // zero-link File wrapper. There are no physical chunks to assemble.
+                if node.is_file() && node.links.is_empty() {
+                    return Ok(Some(TreeNode::dir(Vec::new())));
+                }
+                return Ok(Some(node));
             }
             Self::DirectoryBlob(size) | Self::FileChunk(size) => size,
         };
@@ -105,5 +117,39 @@ impl WalkContext {
             &Cid::public(cid.hash),
             plaintext.into_owned(),
         )?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn typed_directories_require_a_node_and_preserve_empty_encodings() {
+        let read = |context: WalkContext, bytes: &[u8]| {
+            context.decode(&Cid::public(crate::sha256(bytes)), Cow::Borrowed(bytes))
+        };
+        let literal = b"ordinary file contents";
+        assert!(
+            read(WalkContext::DirectoryBlob(literal.len() as u64), literal)
+                .unwrap()
+                .is_none()
+        );
+        for link_type in [LinkType::Dir, LinkType::Fanout] {
+            let mut link = Link::new(crate::sha256(literal));
+            link.link_type = link_type;
+            let context = WalkContext::for_link(LinkType::Dir, &link);
+            assert!(read(context, literal).is_err());
+            let invalid = rmp_serde::to_vec(&(Vec::<u8>::new(), 42u8)).unwrap();
+            assert!(read(context, &invalid).is_err());
+            let empty_dir = crate::encode_tree_node(&TreeNode::dir(Vec::new())).unwrap();
+            let empty_file_wrapper = crate::encode_tree_node(&TreeNode::file(Vec::new())).unwrap();
+            // Legacy compact encoding uses the wire field order [links, type].
+            let compact_dir = rmp_serde::to_vec(&(Vec::<u8>::new(), LinkType::Dir as u8)).unwrap();
+            for bytes in [empty_dir, empty_file_wrapper, compact_dir] {
+                let dir = read(context, &bytes).unwrap().unwrap();
+                assert!(dir.is_dir() && dir.links.is_empty());
+            }
+        }
     }
 }

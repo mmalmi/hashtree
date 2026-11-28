@@ -153,3 +153,73 @@ impl BlossomClient {
         Ok(page)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    fn hash(index: u32) -> [u8; 32] {
+        let mut bytes = [0; 32];
+        bytes[..4].copy_from_slice(&index.to_be_bytes());
+        bytes
+    }
+
+    #[tokio::test]
+    async fn claim_window_counts_existing_rows_before_consecutive_pushes() {
+        let client = BlossomClient::new_empty(Keys::generate());
+        let author = client.signer_public_key().to_hex();
+        let requested: HashSet<_> = (700..1200).map(hash).collect();
+        let rows = |range: std::ops::Range<u32>, timestamp: u64| {
+            range.map(
+                move |i| serde_json::json!({"sha256": hex::encode(hash(i)), "uploaded": timestamp}),
+            )
+        };
+        // Exactly 1,000 rows fill the first page. The bounded scan looks at
+        // the older boundary as well before allowing only 300 new claims.
+        let first: Vec<_> = rows(0..700, 10).chain(rows(1200..1500, 9)).collect();
+        let boundary: Vec<_> = rows(1200..1500, 9).collect();
+        // A later repeat finds all 500 requested rows among the latest page.
+        let repeat: Vec<_> = rows(700..1200, 11).chain(rows(0..500, 10)).collect();
+        let pages = [("", first), ("&until=9", boundary), ("", repeat)];
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for (cursor, page) in pages {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut stream = BufReader::new(stream);
+                let mut line = String::new();
+                stream.read_line(&mut line).await.unwrap();
+                assert_eq!(
+                    line,
+                    format!("GET /list/{author}?limit=1000{cursor} HTTP/1.1\r\n")
+                );
+                loop {
+                    line.clear();
+                    assert!(stream.read_line(&mut line).await.unwrap() > 0);
+                    if line == "\r\n" {
+                        break;
+                    }
+                }
+                let body = serde_json::to_vec(&page).unwrap();
+                let headers = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                stream
+                    .get_mut()
+                    .write_all(headers.as_bytes())
+                    .await
+                    .unwrap();
+                stream.get_mut().write_all(&body).await.unwrap();
+            }
+        });
+
+        let (unknown, occupied) = client.owner_claim_window(&url, &requested).await.unwrap();
+        assert_eq!(unknown, requested);
+        assert_eq!(occupied, 700);
+        assert_eq!(OWNER_LIST_PAGE_SIZE - occupied, 300);
+
+        let (unknown, occupied) = client.owner_claim_window(&url, &requested).await.unwrap();
+        assert!(unknown.is_empty());
+        assert_eq!(occupied, 500);
+        server.await.unwrap();
+    }
+}
