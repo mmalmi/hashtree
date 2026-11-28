@@ -1,8 +1,8 @@
 {
-  "source": "6ce0598035fbdd1f11b3accf0953b773310f9dd3",
-  "tree": "b6d52967664eabf87b8433a583ca45add18b90a8",
-  "epoch": 1795693448,
-  "archiveSha256": "60227e3bc4a15198a5262581e6fd2d1c9f0de0ecf2fec1af61c971dcb03c3e2c",
+  "source": "769fdf1fdcf97a59c3562bd68fd5b51f5a3c8752",
+  "tree": "c8e98bc069cd59ed4cc8043bc0df5728ae7533b7",
+  "epoch": 1795824977,
+  "archiveSha256": "e4e5900c8d79b063fdc303eb616336a698be1bf34711be69f21244093b78d24f",
   "packageSha256": "537d9aec596fe76796b8a0b2b93d3c8257afe5234da046dcdbf18d162d9ac078",
   "lockSha256": "e9cf7650192a50146e09fea60d7cf3e6f64caf7504a28f6120653ebb265a25cd",
   "pnpm": {
@@ -21,7 +21,7 @@
   },
   "image": "mcr.microsoft.com/playwright@sha256:83192064c7510f7ee73dd63dc5f22a5e01a92c81a2e6a9c715d9e3fe55471fd9",
   "baseline": {
-    "source": "24c2272af826206adbbbe85f1b3b8b473924172d",
-    "sha256": "24ad2ae02879667bef809407ba3308c4f25ac9d8d276e913989a806dc2783e5a"
+    "source": "6ce0598035fbdd1f11b3accf0953b773310f9dd3",
+    "sha256": "60227e3bc4a15198a5262581e6fd2d1c9f0de0ecf2fec1af61c971dcb03c3e2c"
   }
 }

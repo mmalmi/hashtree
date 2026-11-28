@@ -14,7 +14,7 @@ assert.equal(originalLock, manifest.lockSha256);
 assert.equal(originalPackage, manifest.packageSha256);
 const save = () => writeFileSync(`${evidence}/qualification.json`, JSON.stringify(result,null,2));
 const oomKills = () => Number(readFileSync('/sys/fs/cgroup/memory.events','utf8').match(/^oom_kill (\d+)/m)[1]);
-async function run(id, command, env = {}, cwd = "/stage/app") {
+async function run(id, command, env = {}, cwd = "/stage/app", expectedStatus = 0) {
   const started = Date.now(), initialOom = oomKills();
   const fd = openSync(`${evidence}/${id}.log`, 'w');
   const resourceFd = openSync(`${evidence}/${id}-resources.jsonl`, 'w');
@@ -35,7 +35,7 @@ async function run(id, command, env = {}, cwd = "/stage/app") {
   result.steps.push({id,command,status,seconds:(Date.now()-started)/1000,logSha256:digest(`${evidence}/${id}.log`)});
   save();console.log(`${id} exited ${status}`);
   if(status!==0)console.log(readFileSync(`${evidence}/${id}.log`,'utf8').slice(-4000));
-  assert.equal(status,0,`${id} failed`);
+  assert.equal(status,expectedStatus,`${id} status differed`);
   assert.equal(digest('pnpm-lock.yaml'),originalLock,'Frozen lock changed');
   assert.equal(digest('package.json'),originalPackage,'Manifest changed');
 }
@@ -52,51 +52,20 @@ function cases(report, requirePassed=false) {
 }
 await run('install',['pnpm','install','--frozen-lockfile']);
 await run('installed-package',['python3','/stage/verify-cohort.py','installed']);
-const reusedUnit=JSON.parse(readFileSync('/stage/reused-unit.json'));
-assert.equal(reusedUnit.source,manifest.source);assert.equal(reusedUnit.tree,manifest.tree);assert.equal(digest('/stage/reused-unit.log'),reusedUnit.step.logSha256);
-cpSync('/stage/reused-unit.log',`${evidence}/unit.log`);result.steps.push({...reusedUnit.step,reusedFromRun:reusedUnit.run});save();console.log('Reused exact-source full unit pass',reusedUnit.run);
-// Same deterministic packed fixture, isolated storage, same runner and origin.
 await run('baseline-install',['pnpm','install','--frozen-lockfile'],{},'/stage/baseline');
+const testFiles=['tests/releasesStoreFreshRoot.test.ts','tests/gitPackedHistory.test.ts'];
+for(const file of testFiles)cpSync('/stage/app/'+file,'/stage/baseline/'+file);
+await run('regressions-before',['pnpm','exec','vitest','run',...testFiles,'-t','keeps both subscribed|watches subscribed|shows submodule|rejects mutually','--reporter=json','--outputFile=/stage/evidence/regressions-before.json'],{},'/stage/baseline',1);
+const red=JSON.parse(readFileSync(`${evidence}/regressions-before.json`));assert.equal(red.numFailedTests,4);assert.equal(red.numPassedTests,0);
+await run('focused-unit',['pnpm','exec','vitest','run',...testFiles,'tests/releasesStore.test.ts','tests/gitDiffText.test.ts','tests/ngit.test.ts','tests/gitRefs.test.ts','tests/gitRepoReadiness.test.ts','--reporter=json','--outputFile=/stage/evidence/focused-unit.json']);
 for(const [label,cwd] of [['before','/stage/baseline'],['after','/stage/app']]){
-  cpSync('/stage/runtime53-performance.spec.ts',cwd+'/e2e/runtime53-performance.spec.ts');
-  const id='performance-'+label;
-  try{await run(id,['pnpm','exec','playwright','test','e2e/runtime53-performance.spec.ts','--retries=0','--reporter=list,json'],{PLAYWRIGHT_JSON_OUTPUT_FILE:`${evidence}/${id}.json`},cwd);}
-  finally{try{cpSync(cwd+'/test-results',`${evidence}/${id}-results`,{recursive:true});}catch{}}
+ cpSync('/stage/runtime53-performance.spec.ts',cwd+'/e2e/runtime53-performance.spec.ts');
+ const id='performance-'+label;
+ try{await run(id,['pnpm','exec','playwright','test','e2e/runtime53-performance.spec.ts','--retries=0','--reporter=list,json'],{PLAYWRIGHT_JSON_OUTPUT_FILE:`${evidence}/${id}.json`},cwd);}
+ finally{try{cpSync(cwd+'/test-results',`${evidence}/${id}-results`,{recursive:true});}catch{}}
 }
-const {createReleasePlan,parseArgs} = await import(pathToFileURL(resolve('scripts/release-site.mjs')));
-const plan = createReleasePlan(parseArgs(['git','--dry-run']));
-for(const step of plan.steps){
-  if(['install','publish','deploy'].includes(step.id))continue;
-  if(step.id!=='test-2'){await run(step.id,step.command);continue;}
-  assert.deepEqual(step.command,['pnpm','run','test:e2e:git']);
-  const started=Date.now();
-  const list=`${evidence}/test-2-cases.json`;
-  await run('test-2-list',[...step.command,'--list','--reporter=json'],{PLAYWRIGHT_JSON_OUTPUT_FILE:list});
-  const expected=cases(JSON.parse(readFileSync(list)));
-  assert.equal(expected.length,97,'Expected original 95 cases plus two qualified cancellation regressions');
-  const actual=[], reports=[];
-  for(let shard=1;shard<=8;shard++){
-    const id=`test-2-shard-${shard}`, file=`${evidence}/${id}.json`;
-    try {await run(id,[...step.command,`--shard=${shard}/8`,'--reporter=list,json'],{PLAYWRIGHT_JSON_OUTPUT_FILE:file});}
-    finally {try{cpSync('test-results',`${evidence}/${id}-results`,{recursive:true});}catch{}}
-    actual.push(...cases(JSON.parse(readFileSync(file)),true));
-    reports.push({id,file:id+'.json',sha256:digest(file)});
-  }
-  assert.deepEqual(actual.sort(),expected,'Shards must cover every original test exactly once');
-  const coverage={mode:'Playwright built-in sequential sharding with fresh servers',inventory:{file:'test-2-cases.json',sha256:digest(list)},reports,tests:expected.length};
-  writeFileSync(`${evidence}/test-2.log`,JSON.stringify(coverage,null,2)+'\n');
-  result.steps.push({id:step.id,command:step.command,status:0,seconds:(Date.now()-started)/1000,logSha256:digest(`${evidence}/test-2.log`),coverage});
-  save();console.log('All 97 browser cases passed across 8 fresh-server shards');
+for(const [id,file] of [['commit-view','e2e/git-commit-view.spec.ts'],['navigation','e2e/git-navigation-layout.spec.ts']]){
+ try{await run(id,['pnpm','exec','playwright','test',file,'--retries=0','--reporter=list,json'],{PLAYWRIGHT_JSON_OUTPUT_FILE:`${evidence}/${id}.json`});}
+ finally{try{cpSync('test-results',`${evidence}/${id}-results`,{recursive:true});}catch{}}
 }
-const files={};
-function walk(directory,prefix=''){
-  for(const name of readdirSync(directory)){
-    const file=directory+'/'+name,relative=prefix+name;
-    if(statSync(file).isDirectory())walk(file,relative+'/');
-    else files[relative]={sha256:digest(file),bytes:statSync(file).size};
-  }
-}
-walk('iris-git');result.files=files;
-result.releaseProfileSha256=digest('scripts/release-profiles.mjs');
-await run('archive-dist',['tar','-czf',`${evidence}/qualified-dist.tar.gz`,'-C','iris-git','.']);
-result.passed=true;save();console.log('Exact source passed all pre-publication gates');
+result.passed=true;result.scope='Scoped review regression checks; not final cohort release qualification';save();
