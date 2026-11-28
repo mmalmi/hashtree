@@ -1,5 +1,7 @@
 #![doc = include_str!("../README.md")]
 
+mod batch_download;
+
 use base64::Engine;
 use nostr::prelude::*;
 use reqwest::{
@@ -71,6 +73,7 @@ pub struct BlossomClient {
     upload_http: reqwest::Client,
     upload_http1_only: bool,
     require_confirmed_uploads: bool,
+    max_batch_download_bytes: usize,
     dns_overrides: Vec<(String, Vec<SocketAddr>)>,
     danger_accept_invalid_certs: bool,
     timeout: Duration,
@@ -415,6 +418,7 @@ impl BlossomClient {
             read_servers,
             write_servers: config.blossom.all_write_servers(),
             require_confirmed_uploads: false,
+            max_batch_download_bytes: batch_download::DEFAULT_MAX_BYTES,
             http: default_http_client(Duration::from_secs(30), &[], false),
             upload_http: upload_http_client(Duration::from_secs(30), true, &[], false),
             upload_http1_only: true,
@@ -435,6 +439,7 @@ impl BlossomClient {
         Self {
             keys,
             require_confirmed_uploads: false,
+            max_batch_download_bytes: batch_download::DEFAULT_MAX_BYTES,
             read_servers: vec![],
             write_servers: vec![],
             http: default_http_client(Duration::from_secs(30), &[], false),
@@ -456,6 +461,14 @@ impl BlossomClient {
     /// Set read-only servers (for downloads)
     pub fn with_read_servers(mut self, servers: Vec<String>) -> Self {
         self.read_servers = servers;
+        self
+    }
+
+    /// Limit each binary batch response, including frame headers. The default
+    /// is 64 MiB and the maximum is 512 MiB, matching the daemon. Single-blob
+    /// GETs use their own path.
+    pub fn with_max_batch_download_bytes(mut self, bytes: usize) -> Self {
+        self.max_batch_download_bytes = bytes.min(batch_download::MAX_BYTES);
         self
     }
 
@@ -1228,30 +1241,15 @@ impl BlossomClient {
                 return Err(BlossomError::DownloadFailed(last_error));
             }
 
-            let raw = match resp.bytes().await {
-                Ok(raw) => raw,
-                Err(err) => {
+            match batch_download::read_response(resp, &requested, self.max_batch_download_bytes)
+                .await
+            {
+                Ok(items) => return Ok(Some(items)),
+                Err(BlossomError::Http(err)) => {
                     last_error = format!("{server}: {err}");
-                    continue;
                 }
-            };
-            let decoded = decode_binary_batch_download(&raw)?;
-            let mut verified = Vec::with_capacity(decoded.len());
-            let mut seen = HashSet::with_capacity(decoded.len());
-            for (hash, data) in decoded {
-                if !requested.contains(&hash) || !seen.insert(hash) {
-                    continue;
-                }
-                let actual = Sha256::digest(&data);
-                if actual.as_slice() != hash.as_slice() {
-                    return Err(BlossomError::HashMismatch {
-                        expected: hex::encode(hash),
-                        actual: hex::encode(actual),
-                    });
-                }
-                verified.push((hash, data));
+                Err(error) => return Err(error),
             }
-            return Ok(Some(verified));
         }
 
         Err(BlossomError::DownloadFailed(last_error))
@@ -1917,6 +1915,8 @@ pub use store_impl::BlossomStore;
 
 #[cfg(test)]
 mod tests {
+    mod batch_download;
+
     use super::*;
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -2886,6 +2886,31 @@ mod tests {
             "persistent 503 must return Err, not fake Ok(None)"
         );
         let _ = err_done.await;
+    }
+
+    #[tokio::test]
+    async fn batch_limit_leaves_the_single_blob_get_available() {
+        let data = vec![31; 512 * 1024];
+        let hash = compute_sha256(&data);
+        let mut frame = BLOB_BATCH_DOWNLOAD_MAGIC.to_vec();
+        frame.extend_from_slice(&1u32.to_be_bytes());
+        frame.extend_from_slice(&hex::decode(&hash).unwrap());
+        frame.extend_from_slice(&(data.len() as u64).to_be_bytes());
+        frame.extend_from_slice(&data);
+        let (url, requests, done) = spawn_download_server(vec![
+            (200, Duration::ZERO, frame),
+            (200, Duration::ZERO, data.clone()),
+        ]);
+        let client = BlossomClient::new_empty(Keys::generate())
+            .with_read_servers(vec![url])
+            .with_max_batch_download_bytes(data.len());
+        assert!(client
+            .download_batch(std::slice::from_ref(&hash))
+            .await
+            .is_err());
+        assert_eq!(client.download(&hash).await.unwrap(), data);
+        let _ = done.await;
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
