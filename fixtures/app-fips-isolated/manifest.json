@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Social runtime54: correct full-suite blockers, preserve prior full evidence, compare real peers and navigation against baseline. No native/publication.",
+  "purpose": "Social runtime54: restore established isolated RTC browser options; close peer/feed/performance gates and prove artifact equality. No native/publication.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "edb60d590d8bbc93c6923d7dd239e51ecc0d93ad",
+      "commit": "d43ec80d178def1906fd3f64f2dd8bafee0e2896",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "a1ec26b71e20698b2e3d0e3248cf20e77d84fe5fcfbd0ce320c219d06e752f94",
+      "archiveSha256": "c20f43cac1b08b876766530514c73722238208f754849d46ee9e121d6e114a6b",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
