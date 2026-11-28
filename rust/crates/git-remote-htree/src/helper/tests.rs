@@ -1535,7 +1535,12 @@ fn test_for_push_still_rejects_ambiguous_remote_read_failure() {
 #[test]
 fn test_for_push_reuploads_missing_cached_root_and_retries_ref_advertisement() {
     let _env_lock = ENV_LOCK.lock().expect("env lock");
-    let home = TempDir::new().expect("temp home");
+    let _git_dir = EnvGuard::clear("GIT_DIR");
+    let (home, repo, commits) = create_repo_with_linear_history(1);
+    let master_sha = &commits[0];
+    let _cwd = CwdGuard::set(repo.path());
+    let source_data = TempDir::new().unwrap();
+    let _data = EnvGuard::set("HTREE_DATA_DIR", source_data.path().to_str().unwrap());
     let _home_guard = HomeGuard::set(home.path());
     let fake_blossom = CountingBlossomServer::new();
     write_test_config(home.path(), fake_blossom.base_url(), false);
@@ -1545,18 +1550,19 @@ fn test_for_push_reuploads_missing_cached_root_and_retries_ref_advertisement() {
     config.blossom.read_servers = vec![fake_blossom.base_url().to_string()];
     config.blossom.write_servers = vec![fake_blossom.base_url().to_string()];
 
-    let mut helper = create_test_helper_with_config(config).expect("helper");
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test runtime");
-    let root_cid = rt.block_on(async {
-        let store = helper.storage.store().clone();
-        let tree = HashTree::new(HashTreeConfig::new(store).public());
-        tree.put_directory(vec![])
-            .await
-            .expect("write cached root tree")
-    });
+    let mut helper = create_signed_test_helper(config.clone());
+    let objects = helper.list_objects_for_shas(&commits, &[]).unwrap();
+    let contents = helper.read_git_objects_batch(&objects).unwrap();
+    helper.storage.write_raw_objects_batch(&contents).unwrap();
+    helper
+        .storage
+        .import_ref("refs/heads/master", master_sha)
+        .unwrap();
+    helper
+        .storage
+        .import_ref("HEAD", "ref: refs/heads/master")
+        .unwrap();
+    let root_cid = helper.storage.build_tree().unwrap();
     let root_hash = hex::encode(root_cid.hash);
     helper
         .nostr
@@ -1566,13 +1572,13 @@ fn test_for_push_reuploads_missing_cached_root_and_retries_ref_advertisement() {
         &root_hash[..12],
         fake_blossom.base_url()
     ));
-    let master_sha = "1".repeat(40);
     let mut refs = HashMap::new();
     refs.insert("refs/heads/master".to_string(), master_sha.clone());
     helper
         .nostr
-        .force_fetch_refs_success_for_test(refs, Some(root_hash), root_cid.key);
+        .force_fetch_refs_success_for_test(refs, Some(root_hash.clone()), root_cid.key);
 
+    assert!(!fake_blossom.has_blob(&root_cid.hash));
     let listed = helper
         .handle_command("list for-push")
         .expect("root 404 should repair from local cache")
@@ -1582,11 +1588,66 @@ fn test_for_push_reuploads_missing_cached_root_and_retries_ref_advertisement() {
         fake_blossom.has_blob(&root_cid.hash),
         "missing cached root should be reuploaded to Blossom"
     );
+    assert!(fake_blossom
+        .state
+        .lock()
+        .unwrap()
+        .claims
+        .contains(&helper.pubkey, &root_hash));
     assert!(
         listed.contains(&format!("{} refs/heads/master", master_sha)),
         "ref advertisement should be retried after reupload: {:?}",
         listed
     );
+
+    // Confirm the advertised ref and commit can be recovered from the writer
+    // by a reader with neither the publisher's blob cache nor its Git objects.
+    let fresh_data = TempDir::new().unwrap();
+    let _reader_data = EnvGuard::set("HTREE_DATA_DIR", fresh_data.path().to_str().unwrap());
+    let fresh = TempDir::new().unwrap();
+    assert!(git(fresh.path(), &["init", "-b", "master"])
+        .status
+        .success());
+    let _reader_cwd = CwdGuard::set(fresh.path());
+    let reader = create_test_helper_with_config(config).unwrap();
+    assert!(reader
+        .storage
+        .store()
+        .get_sync(&root_cid.hash)
+        .unwrap()
+        .is_none());
+    let actual_refs = block_on_result(
+        reader
+            .nostr
+            .fetch_refs_from_hashtree(&root_hash, root_cid.key.as_ref()),
+    )
+    .unwrap();
+    assert_eq!(actual_refs.get("refs/heads/master"), Some(master_sha));
+    block_on_result(reader.fetch_git_objects_to_local_git_async(&root_hash, root_cid.key.as_ref()))
+        .unwrap();
+    assert!(git(
+        fresh.path(),
+        &["update-ref", "refs/heads/master", master_sha]
+    )
+    .status
+    .success());
+    let cloned = TempDir::new().unwrap();
+    let clone = git(
+        fresh.path(),
+        &["clone", "--no-local", ".", cloned.path().to_str().unwrap()],
+    );
+    assert!(
+        clone.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clone.stderr)
+    );
+    assert_eq!(
+        std::fs::read(cloned.path().join("file-00.txt")).unwrap(),
+        b"file 0\n"
+    );
+    assert!(git(cloned.path(), &["fsck", "--strict", "--full"])
+        .status
+        .success());
 }
 
 #[test]
