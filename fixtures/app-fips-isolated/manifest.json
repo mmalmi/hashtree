@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Social final project gates; require exact 74-file runtime equality to qualified navigation and 41 affected browser checks. No publication.",
+  "purpose": "Social mention accessibility correction: delayed metadata regressions, paired navigation, then full project gates. Retain prior exact failures and unaffected provenance; no publication.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "9917294d0ada26c7ee7c6643b184f90198d1527a",
+      "commit": "01fea520fcc2ced50e7fe36375923a06d5a85c20",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "b4f097eeea3cf163bf5ee446ded59d197969b9c1f3caf2478b65fc6f91e3b1cb",
+      "archiveSha256": "85160f833fb9722eb4b0782ca05a7e62b67df1c00e7bc2ca2e7ffc498d23fefd",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
