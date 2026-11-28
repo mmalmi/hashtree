@@ -10,9 +10,9 @@ Install the FIPS peers from their immutable release archives alongside this
 package. These two peers are not yet available in the npm registry:
 
 ```bash
-npm install @hashtree/fips-transport@0.5.4 \
-  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.66/fips-core-0.0.61.tgz \
-  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.66/fips-transport-webrtc-0.0.65.tgz
+npm install @hashtree/fips-transport@0.5.5 \
+  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.67/fips-core-0.0.62.tgz \
+  https://github.com/mmalmi/fips-ts/releases/download/runtime-v0.0.67/fips-transport-webrtc-0.0.66.tgz
 ```
 
 With npm 12, add `--allow-remote=all` to this command and subsequent `npm install`

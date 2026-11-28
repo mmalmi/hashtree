@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## TypeScript runtime 0.5.54 - 2026-11-28
+
+- FIPS transport 0.5.5 requires the corrected FIPS runtime 0.0.67 core and
+  WebRTC peers. The cohort preserves active-peer replay protection when inactive
+  history reaches its limit, and prevents overlapping offers or shutdown from
+  creating extra WebRTC connections. Discovery retains the accepted 64-hop limit.
+- Worker 0.4.34 and Nostr pubsub adapter 0.1.12 keep their existing runtime 0.5.53
+  archives. Consumers must apply the complete FIPS cohort at root overrides so
+  transitive TCP dependencies use the same corrected core.
+
 ## TypeScript runtime 0.5.53 - 2026-11-26
 
 - FIPS transport 0.5.4 stops connection and stream work when its caller cancels,
