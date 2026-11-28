@@ -11,8 +11,8 @@ def run(cmd,name,expected=0):
 cmd=['pnpm','exec','playwright','test','--config=playwright.unit.config.ts','--workers=1','--reporter=list']
 run(['node','scripts/verify-dependency-lock.mjs'],'verify-pins')
 run(['pnpm','exec','eslint',*spec['changedLintFiles'],'--max-warnings','0'],'lint-changed')
-run(cmd+['tests/release-site.spec.mjs'],'release-contract')
 run(['pnpm','run','build'],'build')
+run(cmd+['tests/release-site.spec.mjs'],'release-contract')
 config=root/'playwright.review.config.ts'
 config.write_text("import { defineConfig } from '@playwright/test'; import original from './playwright.config'; export default defineConfig({...original,workers:1,retries:0,outputDir:'/stage/evidence/social/browser-output',reporter:[['list'],['json',{outputFile:'/stage/evidence/social/browser.json'}]],use:{...original.use,trace:'retain-on-failure'}});")
 run(['pnpm','exec','playwright','test','--config='+config.name,'tests/post-search-sheet.spec.ts','tests/post-search-consent-ui.spec.ts','tests/post-search-ai-ui.spec.ts','tests/profile-identity-ui.spec.ts','tests/notifications-pagination-ui.spec.ts','tests/initial-paint.spec.ts','tests/for-you-shell.spec.ts','tests/idle-cpu.spec.ts'],'browser')
