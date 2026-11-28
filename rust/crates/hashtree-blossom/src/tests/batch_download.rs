@@ -1,5 +1,6 @@
 use super::*;
 use std::io::Result as IoResult;
+use std::sync::Barrier;
 use std::time::Instant;
 
 #[derive(Clone, Copy)]
@@ -40,11 +41,22 @@ impl Blob {
 
 // Keep the server's footprint constant so process peak RSS measures the client.
 fn serve_batch(blobs: Vec<Blob>, chunked: bool) -> (String, thread::JoinHandle<IoResult<()>>) {
+    serve_batch_with_barrier(blobs, chunked, None)
+}
+
+fn serve_batch_with_barrier(
+    blobs: Vec<Blob>,
+    chunked: bool,
+    requests_ready: Option<Arc<Barrier>>,
+) -> (String, thread::JoinHandle<IoResult<()>>) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let server = thread::spawn(move || {
         let (mut socket, _) = listener.accept()?;
         drain_http_request(&mut socket, &mut [0; 8192]);
+        if let Some(requests_ready) = requests_ready {
+            requests_ready.wait();
+        }
         let wire_len = 12 + blobs.iter().map(|b| 40 + b.len).sum::<usize>();
         write!(socket, "HTTP/1.1 200 OK\r\nConnection: close\r\n")?;
         if chunked {
@@ -135,6 +147,66 @@ async fn measure_mixed_batch_download() {
         "batch_download frames={} wire_bytes={} payload_bytes={expected_bytes} elapsed_us={}",
         sizes.len(),
         12 + sizes.len() * 40 + expected_bytes,
+        elapsed.as_micros()
+    );
+}
+
+#[tokio::test]
+#[ignore = "use a fresh process for comparable peak-RSS measurements"]
+async fn measure_four_concurrent_mixed_batch_downloads() {
+    use futures::stream::{FuturesUnordered, StreamExt};
+
+    const REQUESTS: usize = 4;
+    const FRAMES: usize = 64;
+    // Repeated eight times, these sizes leave room for framing under 8 MiB.
+    let sizes_kib = [1, 3, 8, 24, 61, 160, 254, 512];
+    let requests_ready = Arc::new(Barrier::new(REQUESTS));
+    let mut downloads = FuturesUnordered::new();
+    let mut expected_total = 0;
+    for batch in 0..REQUESTS {
+        let blobs: Vec<_> = (0..FRAMES)
+            .map(|i| {
+                Blob::new(
+                    (batch * FRAMES + i) as u8,
+                    sizes_kib[i % sizes_kib.len()] * 1024,
+                )
+            })
+            .collect();
+        let expected_bytes: usize = blobs.iter().map(|blob| blob.len).sum();
+        assert!(12 + FRAMES * 40 + expected_bytes <= 8 * 1024 * 1024);
+        expected_total += expected_bytes;
+        let hashes: Vec<_> = blobs.iter().map(|b| hex::encode(b.hash)).collect();
+        let (url, server) =
+            serve_batch_with_barrier(blobs.clone(), false, Some(requests_ready.clone()));
+        let client = BlossomClient::new_empty(Keys::generate()).with_read_servers(vec![url]);
+        downloads.push(async move {
+            let results = client.download_batch(&hashes).await.unwrap().unwrap();
+            server.join().unwrap().unwrap();
+            (blobs, results)
+        });
+    }
+
+    // Consume each completed batch before polling for the next, as the callers do.
+    let start = Instant::now();
+    let mut verified_bytes = 0;
+    while let Some((blobs, results)) = downloads.next().await {
+        assert_eq!(results.len(), FRAMES);
+        for (blob, (hash, data)) in blobs.into_iter().zip(results) {
+            assert_eq!(hash, blob.hash);
+            assert_eq!(data.len(), blob.len);
+            let expected = [blob.byte; 16 * 1024];
+            assert!(data
+                .chunks(expected.len())
+                .all(|chunk| chunk == &expected[..chunk.len()]));
+            verified_bytes += data.len();
+        }
+    }
+    let elapsed = start.elapsed();
+    assert_eq!(verified_bytes, expected_total);
+    eprintln!(
+        "batch_download requests={REQUESTS} frames={} wire_bytes={} payload_bytes={verified_bytes} elapsed_us={}",
+        REQUESTS * FRAMES,
+        REQUESTS * (12 + FRAMES * 40) + verified_bytes,
         elapsed.as_micros()
     );
 }
