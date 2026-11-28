@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Social runtime54 remaining gates: restore previously accepted two-origin no-capture RTC fixture, enforce two-CPU affinity, collect throttling and separate diagnostic profile. No source or production publication.",
+  "purpose": "Match navigation before/after narrow layout/date-cost corrections; verify scroll, quote, feed and profile presentation. No publication.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "d43ec80d178def1906fd3f64f2dd8bafee0e2896",
+      "commit": "d2aca21ae9eb080efe81a2e7368c695c0bb435aa",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "c20f43cac1b08b876766530514c73722238208f754849d46ee9e121d6e114a6b",
+      "archiveSha256": "1d46072ea386c525d33195d66d447d63d0d80e80eec33308287c5fcf3e52855c",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
@@ -57,15 +57,15 @@
         "VITE_PROFILE_SEARCH_INDEX": "npub1yscmnnadrmvape0mvgzfx9uyl267klnhzy8znsr6ysl8wtxngpqsnx6dm0/profile-search",
         "IRIS_ALLOW_UNCONFIGURED_POST_SEARCH": "1"
       },
-      "baseline": "fff7c48a26e209a59d50f6d783f142a4e965eaac",
+      "baseline": "d43ec80d178def1906fd3f64f2dd8bafee0e2896",
       "retainedFullEvidenceRun": 46089680516
     }
   ],
   "baseline": {
-    "commit": "fff7c48a26e209a59d50f6d783f142a4e965eaac",
+    "commit": "d43ec80d178def1906fd3f64f2dd8bafee0e2896",
     "archive": "archives/social-baseline.tar.gz",
-    "archiveSha256": "e2a29df6d98fae70ba4cb8a7942bf1b8416a814222e911a047dd01db5b06dd5b",
-    "lockSha256": "e6201eb5970e270e24eae4d15713f3c9c5e6c6872258eb130a36e603f48a9308"
+    "archiveSha256": "c20f43cac1b08b876766530514c73722238208f754849d46ee9e121d6e114a6b",
+    "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a"
   },
   "cohortMapSHA256": "55375833a85330d5ad332c67261ddd58861cbdbc4b1f19fe8ebcc0206d67ccc9"
 }
