@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Diagnostic exact unchanged Social candidate: first profile CPU/timeline plus repaired scroll negative control. Not release qualification.",
+  "purpose": "Qualify Social visible-event query indexes: matched navigation, original regression gates, then full release closure. No publication.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "1b6727a73d0ba07b582ba7ac1ee656935d015142",
+      "commit": "0661bc49fd937e328d8d3b4e473acad617010ed0",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "8e99b6d2a41ac5c582a68b4469f9ec3608f231b7f81e320f1e80f39dc21fca14",
+      "archiveSha256": "f3b9e1430dca6020b471186995dca3db63b2ccf40fc201eb54850896572969e6",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
