@@ -539,12 +539,7 @@ async fn upload_archive_to_writer<S: Store>(
     // A repeat need not be paced: submitting an already owned blob does
     // not create another dated owner record. The signed writes and the final
     // ownership check still run for the entire tree.
-    let unconfirmed = if hashes.len() > hashtree_blossom::OWNER_LIST_PAGE_SIZE {
-        blossom.unconfirmed_owners_on_server(server, hashes).await?
-    } else {
-        HashSet::new()
-    };
-    let mut new_claims = 0usize;
+    let (unconfirmed, mut new_claims) = blossom.owner_claim_window(server, hashes).await?;
     let mut batch_supported = true;
     let mut window = Vec::new();
     let mut bytes = 0usize;

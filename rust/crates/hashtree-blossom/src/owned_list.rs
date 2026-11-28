@@ -24,10 +24,39 @@ impl BlossomClient {
         server: &str,
         requested: &HashSet<[u8; 32]>,
     ) -> Result<HashSet<[u8; 32]>, BlossomError> {
+        Ok(self.scan_owner_records(server, requested, false).await?.0)
+    }
+
+    /// Plan writes against the last observed owner timestamp, including rows from
+    /// earlier pushes. Returns possible new claims and occupied slots. A small
+    /// push that already fits needs only the first page. The publisher must
+    /// still obtain positive owner records for every block after writing.
+    pub async fn owner_claim_window(
+        &self,
+        server: &str,
+        requested: &HashSet<[u8; 32]>,
+    ) -> Result<(HashSet<[u8; 32]>, usize), BlossomError> {
+        self.scan_owner_records(server, requested, true).await
+    }
+
+    async fn scan_owner_records(
+        &self,
+        server: &str,
+        requested: &HashSet<[u8; 32]>,
+        preparing_writes: bool,
+    ) -> Result<(HashSet<[u8; 32]>, usize), BlossomError> {
         let mut missing = requested.clone();
         let mut until = None;
+        let mut initial_bucket = 0;
+        let mut first_page_at = None;
         while !missing.is_empty() {
             let page = self.owned_list_page(server, until).await?;
+            if preparing_writes && until.is_none() {
+                first_page_at = Some(std::time::Instant::now());
+                if let Some(newest) = page.iter().map(|row| row.uploaded).max() {
+                    initial_bucket = page.iter().filter(|row| row.uploaded == newest).count();
+                }
+            }
             let mut oldest = None;
             for descriptor in &page {
                 if until.is_some_and(|until| descriptor.uploaded > until) {
@@ -43,7 +72,10 @@ impl BlossomClient {
                     last.min(descriptor.uploaded)
                 }));
             }
-            if page.len() < OWNER_LIST_PAGE_SIZE || missing.is_empty() {
+            if page.len() < OWNER_LIST_PAGE_SIZE
+                || missing.is_empty()
+                || (preparing_writes && missing.len() <= OWNER_LIST_PAGE_SIZE - initial_bucket)
+            {
                 break;
             }
             let oldest = oldest.expect("a full page is nonempty");
@@ -59,7 +91,12 @@ impl BlossomClient {
                 break;
             }
         }
-        Ok(missing)
+        // A full second since the page arrived means its timestamp has ended,
+        // without assuming the publisher's clock agrees with the writer.
+        if first_page_at.is_some_and(|time| time.elapsed() >= Duration::from_secs(1)) {
+            initial_bucket = 0;
+        }
+        Ok((missing, initial_bucket))
     }
 
     async fn owned_list_page(
