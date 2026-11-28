@@ -8,7 +8,7 @@ def run(cmd,name,*,cwd=root,extra=None):
  with (evidence/(name+'.log')).open('wb') as out:r=subprocess.run(cmd,cwd=cwd,env=dict(env,QUALIFICATION_NAME=name,**(extra or {})),stdout=out,stderr=subprocess.STDOUT,timeout=800)
  records.append({'name':name,'exit':r.returncode,'seconds':time.monotonic()-start,'cgroupBefore':before,'cgroupAfter':stats()});(evidence/'checks.json').write_text(json.dumps({'source':spec['commit'],'baseline':spec['baseline'],'records':records},indent=2)+'\n');return r.returncode
 run(['pnpm','run','lint'],'lint');run(['pnpm','run','check'],'typecheck')
-run(['pnpm','exec','playwright','test','--config=playwright.unit.config.ts','tests/profile-identity.spec.ts','tests/home-projection-commit.spec.ts','tests/progressive-scroll-restore.spec.ts','tests/social-repository.spec.ts','tests/social-data-plane.spec.ts'],'focused-unit')
+run(['pnpm','exec','playwright','test','--config=playwright.unit.config.ts','tests/profile-identity.spec.ts','tests/home-projection-commit.spec.ts','tests/progressive-scroll-restore.spec.ts','tests/social-repository.spec.ts','tests/social-data-plane.spec.ts','tests/social-data-plane-projection.spec.ts'],'focused-unit')
 baseline=stage/'apps/baseline'
 launch="launchOptions:{channel:'chromium',args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}"
 for label,cwd in [('baseline',baseline),('candidate',root)]:
