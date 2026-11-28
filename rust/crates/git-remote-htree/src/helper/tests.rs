@@ -25,6 +25,7 @@ mod blossom_claims;
 use blossom_claims::{signed_author, ListQuery, OwnerClaims};
 
 mod cached_root_repair;
+mod chunked_directory;
 mod closure_validation;
 mod hydration;
 mod local_rebuild;

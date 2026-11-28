@@ -7,6 +7,8 @@ use tempfile::tempdir;
 
 const STORE_BYTES: usize = 32 * 1024 * 1024;
 
+mod chunked_directory;
+
 async fn serve(source: Arc<MemoryStore>) -> (String, tokio::task::JoinHandle<()>) {
     let app = Router::new().route(
         "/*path",
