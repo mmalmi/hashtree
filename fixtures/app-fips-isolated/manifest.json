@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Close five brace-only source/test lint corrections. Full exact-source unit/type/lint/pin checks and runtime build for byte binding to the preceding full browser qualification; no publication.",
+  "purpose": "Final combined Social profile adoption fixes and exact runtime54 cohort. Full gates, early lint, isolated source negative control without unrelated built-asset test collection.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
