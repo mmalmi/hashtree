@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "71534a7745417e1797e8c8a0ba43e3a2ecfb6dca",
+      "commit": "0d2bf0094989193b9dfc85bf59df5fac17afcdab",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "526f8e9db7d5638d2ed808406474228d64ef9c8a7746355f2d85863703dc8705",
+      "archiveSha256": "15cf2b57410afc18bdbcf98b6906ac4c773f4bc2924cc7d78f78e439d18518d1",
       "lockSha256": "e6201eb5970e270e24eae4d15713f3c9c5e6c6872258eb130a36e603f48a9308",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
@@ -64,8 +64,21 @@
         "src/lib/post-search/session.ts",
         "tests/app-route-loader-profile-likes.spec.ts",
         "tests/post-search-semantic.spec.ts",
-        "tests/post-search-sheet.spec.ts"
-      ]
+        "tests/post-search-sheet.spec.ts",
+        "tests/post-search-consent-ui.spec.ts",
+        "playwright.browser-tests.ts",
+        "scripts/release-site.mjs"
+      ],
+      "reusedEvidence": {
+        "run": 46086832229,
+        "source": "71534a7745417e1797e8c8a0ba43e3a2ecfb6dca",
+        "facts": [
+          "two targeted regressions fail on original code",
+          "70 focused tests passed",
+          "svelte-check zero errors and warnings"
+        ],
+        "reason": "No runtime or unit test changes; only browser test split and release-list addition"
+      }
     }
   ]
 }
