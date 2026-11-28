@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Bound profile-preview classification to the one requested row; unchanged navigation budgets, focused regression and full exact production gates. Restore diagnostic-only test edits; retain all prior successful unit/browser evidence.",
+  "purpose": "Qualify bounded profile preview, with updated exact regression-test digest; same app archive and unchanged full gates.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -46,7 +46,7 @@
         "tests/app-history-navigation.spec.ts": "26f00cb09182d944131964f4fcb16b6633f6bac95462f8c4c885db08e0e4956e",
         "tests/navigation-performance.spec.ts": "a12c917ef105d800f8a3a87b70e5b0c1e6af7da3676af96f5383f01cf6aa5a88",
         "tests/note-mentions-ui.spec.ts": "1acb5082c8c7c04eab0f059acc7f48cb56b060f4c4f33790aaf203e2edd04a86",
-        "tests/profile-content.spec.ts": "2f03413579709fe6d10c6f1b001d56f28c33e566d04913ca635fe1fe3aa75e79",
+        "tests/profile-content.spec.ts": "a4cbbc9553eb58d478a1eca4934437f2ea034c878bb78edcf79ea5fb5fb872be",
         "tests/navigation-shell.spec.ts": "70895ab09aa9b05d846e1b045bb3135e17a774dc731acf84eb39a4355fdb0220",
         "tests/page-scroll-shell.spec.ts": "7808dace0c1eee21f5ea9bbf8340ffb03bf50eb9e20913e7d2bd859f3c415693",
         "tests/app-route-state.spec.ts": "e50933400186da5cc5af0b836748e185548a8acbde5ade4f3b2d29b7d4b7efa0",
