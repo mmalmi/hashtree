@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Correct four-note interruption fixture only. Reuse 24 passing affected browser checks and exact unchanged runtime files from run46124868697; finish new interruption cases, paired navigation and full release gates.",
+  "purpose": "Combined cold/retained profile adoption fixes. Demonstrate early-scroll failure on preceding source, then verify corrected arrival, navigation/scroll stability and full production gates.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "9fea576f62a0e45af9ed1aab62523b1fb35f528d",
+      "commit": "1dc02595080f2f931e7dcf91e476a109f7fde0f1",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "2ea6a1ff49969786b83a9aa73d5ea3da9cfed7eb651365bf68781c253d41df61",
+      "archiveSha256": "c76f0e91312fccdaa3a418ec3957f21180e8e40e17505eb05a292c653875c34f",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
@@ -49,7 +49,8 @@
         "tests/profile-content.spec.ts": "2f03413579709fe6d10c6f1b001d56f28c33e566d04913ca635fe1fe3aa75e79",
         "tests/navigation-shell.spec.ts": "3425ac0e5dffc5eaad1a015b922fa391ae6badaccb8cbf304c84772f70bada2d",
         "tests/page-scroll-shell.spec.ts": "7808dace0c1eee21f5ea9bbf8340ffb03bf50eb9e20913e7d2bd859f3c415693",
-        "tests/app-route-state.spec.ts": "e50933400186da5cc5af0b836748e185548a8acbde5ade4f3b2d29b7d4b7efa0"
+        "tests/app-route-state.spec.ts": "e50933400186da5cc5af0b836748e185548a8acbde5ade4f3b2d29b7d4b7efa0",
+        "tests/home-feed-stability-ui.spec.ts": "aa85d189faa855e07b74e73e3007343f286265d5fdea7f50f115d04581bb158d"
       },
       "expectedProjects": [
         "chromium",
@@ -80,5 +81,12 @@
     "source": "067562ce56c5e4d9abe493fe27812935a8d998c7",
     "archive": "archives/scroll-negative.tar.gz",
     "sha256": "8fee9d935f40a0336829033402180a4a2fb806e52080459f60a451d52c5d24ef"
+  },
+  "retainedScrollNegative": {
+    "source": "9fea576f62a0e45af9ed1aab62523b1fb35f528d",
+    "archive": "archives/retained-scroll-negative.tar.gz",
+    "sha256": "2ea6a1ff49969786b83a9aa73d5ea3da9cfed7eb651365bf68781c253d41df61",
+    "testFile": "tests/home-feed-stability-ui.spec.ts",
+    "testSHA256": "aa85d189faa855e07b74e73e3007343f286265d5fdea7f50f115d04581bb158d"
   }
 }

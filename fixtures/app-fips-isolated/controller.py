@@ -86,6 +86,7 @@ def prepare():
     shutil.copytree(HERE,STAGE/'procedure',ignore=shutil.ignore_patterns('archives'))
     negative=M['scrollNegative'];negative_archive=HERE/negative['archive'];assert sha(negative_archive)==negative['sha256']
     shutil.copyfile(negative_archive,STAGE/'scroll-negative.tar.gz')
+    n=M['retainedScrollNegative'];archive=HERE/n['archive'];assert sha(archive)==n['sha256'];extract(archive,STAGE/'apps/retained-scroll-negative')
     fetch(M['pnpm'],STAGE/'pnpm.tgz');extract(STAGE/'pnpm.tgz',STAGE/'tools/pnpm')
     (STAGE/'tools/bin/pnpm').write_text('#!/bin/sh\nexec node /stage/tools/pnpm/package/bin/pnpm.cjs "$@"\n');(STAGE/'tools/bin/pnpm').chmod(0o755)
     run(['docker','pull',IMAGE],'image-pull.log',300)
