@@ -1060,7 +1060,8 @@ fn run_command(
 
             // Resolve to Cid (raw bytes, no hex conversion needed for nhash)
             let (input, link_key) = split_link_key(&cid_input, link_key.as_deref())?;
-            let target = super::discovery::target(&input, false, non_interactive, &data_dir).await?;
+            let target =
+                super::discovery::target(&input, false, non_interactive, &data_dir).await?;
             let resolved = super::resolve::resolve_get_input(&target, link_key).await?;
             let cid = resolved.cid.clone();
 
