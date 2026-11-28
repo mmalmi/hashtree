@@ -41,7 +41,7 @@ for i,cmd in enumerate(profile['testCommands']):
   extra={'QUALIFICATION_REPORT':str(evidence/f'gate-{i+1}.json')}
   if 'tests/personal-event-index-publication.spec.ts' in cmd:extra.update(PLAYWRIGHT_USE_PREVIEW='0',PLAYWRIGHT_PORT='4182')
  run(cmd,f'gate-{i+1}',extra=extra)
-run(['pnpm','exec','playwright','test','--config='+config.name,'tests/profile-identity-ui.spec.ts','tests/notifications-pagination-ui.spec.ts','tests/home-feed-snapshot-ui.spec.ts','tests/page-scroll-shell.spec.ts'], 'review-browser',extra={'QUALIFICATION_REPORT':str(evidence/'review-browser.json')})
+run(['pnpm','exec','playwright','test','--config='+config.name,'tests/profile-identity-ui.spec.ts','tests/notifications-pagination-ui.spec.ts','tests/home-feed-snapshot-ui.spec.ts','tests/page-scroll-shell.spec.ts','tests/navigation-shell.spec.ts'], 'review-browser',extra={'QUALIFICATION_REPORT':str(evidence/'review-browser.json')})
 # Navigation comparison is reused from the exact artifact qualified in the
 # preceding run. Compare changed-flow idle/search costs on this same runner.
 for label,cwd in [('baseline',stage/'apps/baseline'),('candidate',root)]:

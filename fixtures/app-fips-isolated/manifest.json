@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Social profile media uses existing parsed presentation cache; query-free navigation avoids URL parsing. Focused regressions, unchanged paired navigation budget, full project gates; no publication.",
+  "purpose": "Social route mount reads plain view/action projection fields once per update. Preserve mutable state subscription behavior. Paired navigation, full project gates plus navigation interactions; no publication.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "b02931803c7016eb19c0e7a275245b3f7fc17b35",
+      "commit": "2e3ab945e1dbad42b75ee2d67469b9ad67411f09",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "bf84a3f471487db23cb531c03618bd62ee887c4caa3a7ef167ef64fef1b66f5f",
+      "archiveSha256": "2fff721b084fd37e57362be2b7262b4dce04d09b0a333ddb5592358f6c444cb2",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
