@@ -1,7 +1,7 @@
 //! Remote content fetching through configured Blossom read servers.
 //!
 //! Provides shared logic for fetching content from:
-//! 1. Local storage (first)
+//! 1. Local storage, then the configured S3 archive
 //! 2. Blossom HTTP servers (using `POST /blob/batch` when supported, with hedged parallel GET fallback)
 
 use anyhow::Result;
@@ -10,9 +10,10 @@ use hashtree_blossom::{BlossomClient, BlossomError};
 use hashtree_config::detect_local_daemon_url;
 use hashtree_core::{
     decode_tree_node_by_cid, encrypted_size, encrypted_size_chk, to_hex, Cid, EncryptionMode, Link,
-    LinkType,
+    LinkType, ObjectKey,
 };
 use nostr::Keys;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -23,6 +24,7 @@ use crate::storage::HashtreeStore;
 
 const DEFAULT_FETCH_CONCURRENCY: usize = 16;
 const FETCH_BATCH_MAX_HASHES: usize = 64;
+const FETCH_DEFAULT_ITEM_ESTIMATE: u64 = 64 * 1024;
 const FETCH_BATCH_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const FETCH_BATCH_SINGLE_ITEM_MAX_BYTES: u64 = 512 * 1024;
 const FETCH_MAX_CONCURRENT_BATCHES: usize = 4;
@@ -49,30 +51,24 @@ pub(crate) fn child_cid(parent: &Cid, link: &Link) -> Cid {
     }
 }
 
-fn is_definite_leaf_len(cid: &Cid, blob_size: Option<u64>, stored_len: u64) -> bool {
-    let Some(plaintext_size) = blob_size else {
-        return false;
+fn is_literal_file_chunk(cid: &Cid, file_chunk_size: Option<u64>, stored_len: u64) -> bool {
+    let overhead = match cid.key.map(|key| key.mode()) {
+        None => 0,
+        Some(EncryptionMode::LegacyChk | EncryptionMode::ChkV1) => encrypted_size_chk(0) as u64,
+        Some(EncryptionMode::RndV1) => encrypted_size(0) as u64,
     };
-    let Ok(plaintext_usize) = usize::try_from(plaintext_size) else {
-        return false;
-    };
-    let expected = match cid.key.as_ref() {
-        None => plaintext_size,
-        Some(key) => match key.mode() {
-            EncryptionMode::LegacyChk | EncryptionMode::ChkV1 => {
-                encrypted_size_chk(plaintext_usize) as u64
-            }
-            EncryptionMode::RndV1 => encrypted_size(plaintext_usize) as u64,
-        },
-    };
-    stored_len == expected
+    file_chunk_size.is_some_and(|size| size.checked_add(overhead) == Some(stored_len))
 }
 
 #[derive(Clone)]
 struct FetchItem {
     cid: Cid,
-    blob_size: Option<u64>,
+    // Only a Blob link inside a File can identify literal chunks by length.
+    file_chunk_size: Option<u64>,
+    estimated_bytes: u64,
 }
+
+type Visited = HashSet<([u8; 32], Option<ObjectKey>, Option<u64>)>;
 
 enum FetchOutcome {
     Single(FetchItem, Result<Vec<u8>, BlossomError>),
@@ -127,25 +123,34 @@ impl FetchWriteBuffer {
 }
 
 fn enqueue_children(
-    parent: &Cid,
-    data: &[u8],
-    blob_size: Option<u64>,
-    visited: &mut HashSet<([u8; 32], Option<u64>)>,
+    item: &FetchItem,
+    data: Cow<'_, [u8]>,
+    visited: &mut Visited,
     pending: &mut VecDeque<FetchItem>,
 ) -> Result<()> {
-    if is_definite_leaf_len(parent, blob_size, data.len() as u64) {
+    if is_literal_file_chunk(&item.cid, item.file_chunk_size, data.len() as u64) {
         return Ok(());
     }
-    if let Some(node) = decode_tree_node_by_cid(parent, data.to_vec())
-        .map_err(|err| anyhow::anyhow!("Failed to decode {}: {err}", to_hex(&parent.hash)))?
+    if let Some(node) = decode_tree_node_by_cid(&item.cid, data.into_owned())
+        .map_err(|err| anyhow::anyhow!("Failed to decode {}: {err}", to_hex(&item.cid.hash)))?
     {
+        if item.file_chunk_size.is_some() && node.node_type != LinkType::File {
+            // A legacy Blob child can extend a file only with another File node.
+            return Ok(());
+        }
         for link in node.links {
-            let child = child_cid(parent, &link);
-            let child_blob_size = (link.link_type == LinkType::Blob).then_some(link.size);
-            if visited.insert((child.hash, child_blob_size)) {
+            let cid = child_cid(&item.cid, &link);
+            let blob_size = (link.link_type == LinkType::Blob).then_some(link.size);
+            let file_chunk_size = if node.node_type == LinkType::File {
+                blob_size
+            } else {
+                None
+            };
+            if visited.insert((cid.hash, cid.key, file_chunk_size)) {
                 pending.push_back(FetchItem {
-                    cid: child,
-                    blob_size: child_blob_size,
+                    cid,
+                    file_chunk_size,
+                    estimated_bytes: blob_size.unwrap_or(FETCH_DEFAULT_ITEM_ESTIMATE),
                 });
             }
         }
@@ -357,7 +362,7 @@ impl Fetcher {
         let mut chunks_fetched = 0usize;
         let mut bytes_fetched = 0u64;
 
-        let mut visited: HashSet<([u8; 32], Option<u64>)> = HashSet::new();
+        let mut visited = Visited::new();
         let mut pending: VecDeque<FetchItem> = VecDeque::new();
         let mut remote_queue: VecDeque<FetchItem> = VecDeque::new();
         let mut single_only: VecDeque<FetchItem> = VecDeque::new();
@@ -370,10 +375,11 @@ impl Fetcher {
         let mut active_batches = 0usize;
         let mut active: FuturesUnordered<FetchFuture> = FuturesUnordered::new();
 
-        visited.insert((root_cid.hash, None));
+        visited.insert((root_cid.hash, root_cid.key, None));
         pending.push_back(FetchItem {
             cid: root_cid.clone(),
-            blob_size: None,
+            file_chunk_size: None,
+            estimated_bytes: FETCH_DEFAULT_ITEM_ESTIMATE,
         });
 
         loop {
@@ -381,21 +387,18 @@ impl Fetcher {
             //    their children become available for batching right away.
             while let Some(item) = pending.pop_front() {
                 if let Some(data) = writes.get(&item.cid.hash) {
-                    enqueue_children(&item.cid, data, item.blob_size, &mut visited, &mut pending)?;
+                    enqueue_children(&item, Cow::Borrowed(data), &mut visited, &mut pending)?;
                     continue;
                 }
-                if let Some(local_len) = store.blob_size(&item.cid.hash)? {
-                    if !is_definite_leaf_len(&item.cid, item.blob_size, local_len) {
-                        if let Some(data) = store.get_blob(&item.cid.hash)? {
-                            enqueue_children(
-                                &item.cid,
-                                &data,
-                                item.blob_size,
-                                &mut visited,
-                                &mut pending,
-                            )?;
-                        }
+                // The routed read checks local member bytes and falls back to the
+                // configured archive. A catalog size alone cannot establish either.
+                if let Some(data) = store.router().get_sync(&item.cid.hash)? {
+                    // A warm walk verifies literal chunks without scheduling an
+                    // access-time write for each chunk of an already-local file.
+                    if !is_literal_file_chunk(&item.cid, item.file_chunk_size, data.len() as u64) {
+                        store.record_blob_accesses([item.cid.hash]);
                     }
+                    enqueue_children(&item, Cow::Owned(data), &mut visited, &mut pending)?;
                     continue;
                 }
                 if in_flight.contains(&item.cid.hash) {
@@ -426,7 +429,7 @@ impl Fetcher {
                         let Some(next) = remote_queue.front() else {
                             break;
                         };
-                        let item_est = next.blob_size.unwrap_or(64 * 1024);
+                        let item_est = next.estimated_bytes;
                         if item_est > FETCH_BATCH_SINGLE_ITEM_MAX_BYTES
                             || (!batch.is_empty() && est_bytes + item_est > FETCH_BATCH_MAX_BYTES)
                         {
@@ -504,14 +507,13 @@ impl Fetcher {
                 bytes_fetched += data.len() as u64;
 
                 let mut decode_res =
-                    enqueue_children(&item.cid, &data, item.blob_size, &mut visited, &mut pending);
+                    enqueue_children(&item, Cow::Borrowed(&data), &mut visited, &mut pending);
                 if let Some(extras) = waiting_same_hash.remove(&item.cid.hash) {
                     for extra in extras {
                         if decode_res.is_ok() {
                             decode_res = enqueue_children(
-                                &extra.cid,
-                                &data,
-                                extra.blob_size,
+                                &extra,
+                                Cow::Borrowed(&data),
                                 &mut visited,
                                 &mut pending,
                             );
@@ -779,3 +781,6 @@ mod tests {
         let _ = server.await;
     }
 }
+
+#[cfg(test)]
+mod tree_tests;

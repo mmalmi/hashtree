@@ -53,7 +53,7 @@ hashtree-paid-retrieval = { version = "0.1.1", path = "crates/hashtree-paid-retr
 hashtree-fips-transport = { version = "0.5.2", path = "crates/hashtree-fips-transport" }
 hashtree-updater = { version = "0.3.0", path = "crates/hashtree-updater" }
 cashu-service = { version = "0.3.0", default-features = false }
-nostr-pubsub = "0.1.22"
+nostr-pubsub = "=0.1.24"
 nostr-pubsub-fips = "=0.6.6"
 nostr-pubsub-relay = "=0.1.15"
 
@@ -85,5 +85,5 @@ clap = { version = "4.5", features = ["derive", "env"] }
 bytes = "1.0"
 toml = "0.8"
 lru = "0.12"
-nostr-social-graph = "0.2.1"
+nostr-social-graph = "=0.2.4"
 nostr-social-graph-heed = { package = "hashtree-nostr-social-graph-heed", version = "=0.2.1-hashtree.1", path = "vendor/nostr-social-graph-heed" }

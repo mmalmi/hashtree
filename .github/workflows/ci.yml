@@ -216,6 +216,9 @@ jobs:
           key: ${{ runner.os }}-cargo-cli-package-${{ hashFiles('rust/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-cli-package-
+      - name: Check Blossom with its normal dependencies
+        working-directory: rust
+        run: cargo check --locked -p hashtree-blossom --lib
       - name: Compile the locked modern Git helper package
         working-directory: rust
         run: |

@@ -239,9 +239,8 @@ async fn upload_batch_adaptive(
             }
             match client.upload_batch_to_server(server, &batch).await {
                 Ok(Some(res)) => {
-                    let count = res.uploaded.min(batch.len());
-                    uploaded += count;
-                    existing += batch.len().saturating_sub(count);
+                    uploaded += res.uploaded;
+                    existing += res.accepted - res.uploaded;
                     settled = true;
                     break;
                 }
@@ -335,7 +334,7 @@ async fn upload_singles(
         .map(|item| SinglePushTarget::Loaded(item.data))
         .chain(cids.into_iter().map(SinglePushTarget::Cid));
 
-    let mut uploads = stream::iter(targets.map(|target| {
+    let uploads = stream::iter(targets.map(|target| {
         let store = Arc::clone(&store);
         let fetcher = fetcher.clone();
         let client = client.clone();
@@ -366,6 +365,12 @@ async fn upload_singles(
     }))
     .buffer_unordered(BLOSSOM_PUSH_SINGLE_CONCURRENCY);
 
+    collect_single_results(uploads).await
+}
+
+async fn collect_single_results(
+    mut uploads: impl futures::Stream<Item = Result<(String, bool)>> + Unpin,
+) -> PushStats {
     let mut stats = PushStats::default();
     while let Some(result) = uploads.next().await {
         match result {
@@ -381,23 +386,97 @@ async fn upload_singles(
     stats
 }
 
-async fn upload_remaining_batches_to_server(
+async fn upload_regular_batch(
+    client: &BlossomClient,
+    servers: &[String],
+    batch: Vec<BatchUploadItem>,
+) -> PushStats {
+    let mut pending = vec![batch];
+    let mut stats = PushStats::default();
+    'next_batch: while let Some(mut batch) = pending.pop() {
+        let mut too_large = false;
+        for server in servers {
+            match client.upload_batch_to_server(server, &batch).await {
+                Ok(Some(receipt)) => {
+                    stats.uploaded += receipt.uploaded;
+                    stats.skipped += receipt.accepted - receipt.uploaded;
+                    continue 'next_batch;
+                }
+                Ok(None) => {}
+                Err(hashtree_blossom::BlossomError::Http(err))
+                    if err.status() == Some(reqwest::StatusCode::PAYLOAD_TOO_LARGE) =>
+                {
+                    too_large = true;
+                }
+                Err(err) => tracing::warn!("Blossom batch upload to {server} failed: {err}"),
+            }
+        }
+        if too_large && batch.len() > 1 {
+            pending.push(batch.split_off(batch.len() / 2));
+            pending.push(batch);
+            continue;
+        }
+
+        // Plain Blossom servers and single-upload endpoints remain usable
+        // when all batch endpoints decline this range.
+        let uploads = stream::iter(batch.into_iter().map(|item| async move {
+            client
+                .upload_if_missing(&item.data)
+                .await
+                .map_err(anyhow::Error::from)
+        }))
+        .buffer_unordered(BLOSSOM_PUSH_SINGLE_CONCURRENCY / BLOSSOM_PUSH_BATCH_CONCURRENCY);
+        stats.merge(collect_single_results(uploads).await);
+    }
+    stats
+}
+
+#[derive(Clone, Copy)]
+enum BatchTargets<'a> {
+    Any(&'a [String]),
+    One(&'a str),
+}
+
+impl BatchTargets<'_> {
+    async fn upload(self, client: &BlossomClient, batch: Vec<BatchUploadItem>) -> PushStats {
+        let server = match self {
+            Self::Any(servers) => return upload_regular_batch(client, servers, batch).await,
+            Self::One(server) => server,
+        };
+        let len = batch.len();
+        let error = match upload_batch_adaptive(client, server, batch).await {
+            Ok(BatchOutcome::Done { uploaded, existing }) => {
+                return PushStats {
+                    uploaded,
+                    skipped: existing,
+                    ..Default::default()
+                }
+            }
+            Ok(BatchOutcome::Unsupported) => "server stopped accepting batch uploads".to_string(),
+            Err(err) => err.to_string(),
+        };
+        tracing::warn!("Blossom batch upload failed: {error}");
+        PushStats {
+            errors: len,
+            last_error: Some(error),
+            ..Default::default()
+        }
+    }
+}
+
+async fn upload_batches(
     store: &HashtreeStore,
     fetcher: Option<&Fetcher>,
     client: &BlossomClient,
-    server: &str,
+    targets: BatchTargets<'_>,
     pending: &mut std::collections::VecDeque<Cid>,
-    progress: Option<(usize, usize, usize)>,
+    total: usize,
 ) -> Result<PushStats> {
     use futures::stream::FuturesUnordered;
 
     let mut stats = PushStats::default();
-    let (mut processed, base_uploaded, base_skipped, total) = match progress {
-        Some((up, skip, total)) => (up + skip, up, skip, total),
-        None => (0, 0, 0, 0),
-    };
-    let mut next_report =
-        ((processed / BLOSSOM_PUSH_PROGRESS_EVERY) + 1) * BLOSSOM_PUSH_PROGRESS_EVERY;
+    let mut processed = 0;
+    let mut next_report = BLOSSOM_PUSH_PROGRESS_EVERY;
     let mut in_flight = FuturesUnordered::new();
 
     loop {
@@ -407,36 +486,19 @@ async fn upload_remaining_batches_to_server(
                 break;
             }
             let len = batch.len();
-            let client = client.clone();
-            let server = server.to_string();
-            in_flight
-                .push(async move { (len, upload_batch_adaptive(&client, &server, batch).await) });
+            in_flight.push(async move { (len, targets.upload(client, batch).await) });
         }
 
         let Some((len, result)) = in_flight.next().await else {
             break;
         };
         processed += len;
-        match result {
-            Ok(BatchOutcome::Done { uploaded, existing }) => {
-                stats.uploaded += uploaded;
-                stats.skipped += existing;
-            }
-            Ok(BatchOutcome::Unsupported) => {
-                stats.errors += len;
-                stats.last_error = Some("server stopped accepting batch uploads".to_string());
-            }
-            Err(err) => {
-                tracing::warn!("Blossom batch upload failed: {}", err);
-                stats.errors += len;
-                stats.last_error = Some(err.to_string());
-            }
-        }
+        stats.merge(result);
         if total > 0 && processed >= next_report && processed < total {
             println!(
                 "  file servers: {processed}/{total} processed ({} uploaded, {} already exist, {} failed)",
-                base_uploaded + stats.uploaded,
-                base_skipped + stats.skipped,
+                stats.uploaded,
+                stats.skipped,
                 stats.errors,
             );
             next_report =
@@ -463,99 +525,47 @@ async fn upload_cids_with_client(
 
     let mut stats = PushStats::default();
 
-    // 1. Pre-filter already-present blobs in one round trip via POST /upload/check,
-    //    and record which write servers support Hashtree's batch upload API.
-    let mut pending_cids = cids_to_push;
-    let mut batch_servers = Vec::new();
-    if !force_upload && pending_cids.len() >= 2 {
-        let hash_hexes: Vec<String> = pending_cids.iter().map(|cid| to_hex(&cid.hash)).collect();
-        let mut present = HashSet::new();
+    let pending_cids = cids_to_push;
+    if !force_upload {
+        let client = client.with_confirmed_uploads();
+        let probe = [to_hex(&pending_cids[0].hash)];
+        let mut batch_servers = Vec::new();
         for server in client.write_servers() {
-            if let Some(server_present) = client.check_uploads_on_server(&hash_hexes, server).await
+            // Global presence only identifies the batch API. A signed upload
+            // lets the server record this publisher even for existing bytes.
+            if client
+                .check_uploads_on_server(&probe, server)
+                .await
+                .is_some()
             {
                 batch_servers.push(server.clone());
-                present.extend(server_present);
             }
         }
-        if !present.is_empty() {
-            let before = pending_cids.len();
-            pending_cids.retain(|cid| !present.contains(&to_hex(&cid.hash)));
-            stats.skipped += before - pending_cids.len();
-        }
-    }
-
-    if pending_cids.is_empty() {
-        println!(
-            "  file servers: {total}/{total} processed (0 uploaded, {} already exist, 0 failed)",
-            stats.skipped,
-        );
-        return Ok((0, stats.skipped));
-    }
-
-    // 2. Upload lazily in bounded 8 MiB batches (keeping peak RAM bounded even for multi-GiB trees).
-    if pending_cids.len() == 1 || (!force_upload && batch_servers.is_empty()) {
-        stats.merge(
-            upload_singles(
+        if batch_servers.is_empty() {
+            stats = upload_singles(
                 store,
                 fetcher,
                 client,
                 Vec::new(),
                 pending_cids,
-                force_upload,
+                false,
                 None,
             )
-            .await,
-        );
-    } else if !force_upload {
-        let mut pending: VecDeque<Cid> = pending_cids.into();
-        let first_batch = take_next_batch(&mut pending, store.as_ref(), fetcher.as_deref()).await?;
-        let first_len = first_batch.len();
-
-        let mut batch_server = None;
-        let mut saw_unsupported = false;
-        let mut probe_err = None;
-        for server in &batch_servers {
-            match upload_batch_adaptive(&client, server, first_batch.clone()).await {
-                Ok(BatchOutcome::Done { uploaded, existing }) => {
-                    stats.uploaded += uploaded;
-                    stats.skipped += existing;
-                    batch_server = Some(server.clone());
-                    break;
-                }
-                Ok(BatchOutcome::Unsupported) => saw_unsupported = true,
-                Err(err) => probe_err = Some(err.to_string()),
-            }
-        }
-
-        if let Some(server) = batch_server {
-            stats.merge(
-                upload_remaining_batches_to_server(
-                    store.as_ref(),
-                    fetcher.as_deref(),
-                    &client,
-                    &server,
-                    &mut pending,
-                    Some((stats.uploaded, stats.skipped, total)),
-                )
-                .await?,
-            );
-        } else if saw_unsupported {
-            stats.merge(
-                upload_singles(
-                    store,
-                    fetcher,
-                    client,
-                    first_batch,
-                    pending.into(),
-                    false,
-                    None,
-                )
-                .await,
-            );
+            .await;
         } else {
-            stats.errors += first_len;
-            stats.last_error = probe_err;
+            let mut pending = pending_cids.into();
+            stats = upload_batches(
+                &store,
+                fetcher.as_deref(),
+                &client,
+                BatchTargets::Any(&batch_servers),
+                &mut pending,
+                total,
+            )
+            .await?;
         }
+    } else if total == 1 {
+        stats = upload_singles(store, fetcher, client, Vec::new(), pending_cids, true, None).await;
     } else {
         // force_upload pushes every blob to all configured write servers.
         let item_count = pending_cids.len();
@@ -588,13 +598,13 @@ async fn upload_cids_with_client(
             let first = take_next_batch(&mut pending, store.as_ref(), fetcher.as_deref()).await?;
             match upload_batch_adaptive(&client, &server, first.clone()).await {
                 Ok(BatchOutcome::Done { .. }) => {
-                    let rest = upload_remaining_batches_to_server(
+                    let rest = upload_batches(
                         store.as_ref(),
                         fetcher.as_deref(),
                         &client,
-                        &server,
+                        BatchTargets::One(&server),
                         &mut pending,
-                        None,
+                        0,
                     )
                     .await?;
                     if rest.errors == 0 {
@@ -786,6 +796,9 @@ pub async fn background_blossom_push_incremental_with_store(
     upload_cids_with_client(store, Some(fetcher), client, cids_to_push, false).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod regular_push_tests;
 
 #[cfg(test)]
 mod tests {
@@ -1289,14 +1302,17 @@ mod tests {
                 axum::routing::post(move |body: bytes::Bytes| {
                     let batch_reqs = Arc::clone(&batch_reqs_r);
                     let uploaded = Arc::clone(&uploaded_r);
+                    let preseeded = preseeded.clone();
                     async move {
                         batch_reqs.fetch_add(1, Ordering::SeqCst);
                         assert_eq!(&body[..8], b"HTBBV1\0\0");
                         let count = u32::from_be_bytes(body[8..12].try_into().unwrap()) as usize;
                         let mut cursor = 12;
                         let mut descriptors = Vec::with_capacity(count);
+                        let mut inserted = 0;
                         for _ in 0..count {
                             let hash = hex::encode(&body[cursor..cursor + 32]);
+                            inserted += usize::from(hash != preseeded);
                             cursor += 32;
                             let ct_len =
                                 u16::from_be_bytes(body[cursor..cursor + 2].try_into().unwrap())
@@ -1310,7 +1326,7 @@ mod tests {
                         }
                         uploaded.fetch_add(count, Ordering::SeqCst);
                         axum::Json(serde_json::json!({
-                            "uploaded": count,
+                            "uploaded": inserted,
                             "blobs": descriptors,
                         }))
                     }
@@ -1329,7 +1345,7 @@ mod tests {
         assert_eq!((uploaded, skipped), (4, 1));
         assert_eq!(check_reqs.load(Ordering::SeqCst), 1);
         assert_eq!(batch_reqs.load(Ordering::SeqCst), 1);
-        assert_eq!(uploaded_count.load(Ordering::SeqCst), 4);
+        assert_eq!(uploaded_count.load(Ordering::SeqCst), 5);
         server.abort();
         let _ = server.await;
 
