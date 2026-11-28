@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Final combined Social profile adoption fixes and exact runtime54 cohort. Full gates, early lint, isolated source negative control without unrelated built-asset test collection.",
+  "purpose": "Correct retained-profile negative fixture to Back/Latest; same runtime bytes. Negative/positive early-scroll arrival, full profile/navigation checks and full production closure.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "49289b087b5e3fc8b38ea466a7b366ccfeb1b995",
+      "commit": "7f258a28b13a233cf5dc43459e3ebc44a1b33fae",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "1b49d782d64b324fa8abe37c74a96e4f924489db8a90d8aad4ec4b4e8ed13a9f",
+      "archiveSha256": "3f3d7606bb050872dbb2a8372a3331f88bb2e288c261dd01a48ed218ba3ea749",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
@@ -50,7 +50,7 @@
         "tests/navigation-shell.spec.ts": "70895ab09aa9b05d846e1b045bb3135e17a774dc731acf84eb39a4355fdb0220",
         "tests/page-scroll-shell.spec.ts": "7808dace0c1eee21f5ea9bbf8340ffb03bf50eb9e20913e7d2bd859f3c415693",
         "tests/app-route-state.spec.ts": "e50933400186da5cc5af0b836748e185548a8acbde5ade4f3b2d29b7d4b7efa0",
-        "tests/home-feed-stability-ui.spec.ts": "cabece146a92df08d4c4626bc0457afd0ff7efa66245648ba686b1b1c5442e39"
+        "tests/home-feed-stability-ui.spec.ts": "9c5d6e8fed85a02e05a1ee8ee744d9d5bfd6961ff70941c238a4f0d0111c4cbf"
       },
       "expectedProjects": [
         "chromium",
@@ -87,6 +87,6 @@
     "archive": "archives/retained-scroll-negative.tar.gz",
     "sha256": "2ea6a1ff49969786b83a9aa73d5ea3da9cfed7eb651365bf68781c253d41df61",
     "testFile": "tests/home-feed-stability-ui.spec.ts",
-    "testSHA256": "cabece146a92df08d4c4626bc0457afd0ff7efa66245648ba686b1b1c5442e39"
+    "testSHA256": "9c5d6e8fed85a02e05a1ee8ee744d9d5bfd6961ff70941c238a4f0d0111c4cbf"
   }
 }
