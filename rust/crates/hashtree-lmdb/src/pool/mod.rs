@@ -803,14 +803,18 @@ impl PoolStore {
                 "pool rejected bytes that do not match their hash".into(),
             ));
         }
+        self.put_hash_checked_input(hash, data)
+    }
 
+    // Both the single entry point and the batch preflight verify the supplied
+    // bytes. Always verify the stored copy independently before acknowledging it.
+    fn put_hash_checked_input(&self, hash: Hash, data: &[u8]) -> Result<bool, StoreError> {
         if let Some(location) = self.read_location(&hash)? {
             match self.read_verified_location(&hash, location) {
-                Ok(Some(found)) => {
+                Ok(Some(_)) => {
                     if matches!(location, LocationRecord::Pending { .. }) {
                         self.finalize_pending(hash, location)?;
                     }
-                    debug_assert_eq!(sha256(&found), hash);
                     return Ok(false);
                 }
                 Ok(None) | Err(_) => return self.repair_location(hash, data, location),
@@ -825,11 +829,10 @@ impl PoolStore {
         let location = self.reserve_if_absent(hash, pending)?;
         if location != pending {
             match self.read_verified_location(&hash, location) {
-                Ok(Some(found)) => {
+                Ok(Some(_)) => {
                     if matches!(location, LocationRecord::Pending { .. }) {
                         self.finalize_pending(hash, location)?;
                     }
-                    debug_assert_eq!(sha256(&found), hash);
                     return Ok(false);
                 }
                 Ok(None) | Err(_) => return self.repair_location(hash, data, location),
@@ -960,7 +963,7 @@ impl PoolStore {
             }
         }
         for (hash, data) in existing_to_check {
-            if self.put_sync(hash, data)? {
+            if self.put_hash_checked_input(hash, data)? {
                 inserted.insert(hash);
             }
         }
@@ -1048,7 +1051,7 @@ impl PoolStore {
         wtxn.commit().map_err(map_heed)?;
 
         for (hash, data) in raced {
-            if self.put_sync(hash, data)? {
+            if self.put_hash_checked_input(hash, data)? {
                 inserted.insert(hash);
             }
         }
@@ -1093,7 +1096,7 @@ impl PoolStore {
                 Err(_) => {
                     drop(permit);
                     for (hash, data) in batch {
-                        if self.put_sync(hash, data)? {
+                        if self.put_hash_checked_input(hash, data)? {
                             inserted.insert(hash);
                         }
                     }
