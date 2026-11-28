@@ -53,11 +53,11 @@ function cases(report, requirePassed=false) {
 await run('install',['pnpm','install','--frozen-lockfile']);
 await run('installed-package',['python3','/stage/verify-cohort.py','installed']);
 await run('baseline-install',['pnpm','install','--frozen-lockfile'],{},'/stage/baseline');
-const testFiles=['tests/releasesStoreFreshRoot.test.ts','tests/gitPackedHistory.test.ts'];
+const testFiles=['tests/releasesStoreFreshRoot.test.ts','tests/gitPackedHistory.test.ts','tests/ngit.test.ts'];
 for(const file of testFiles)cpSync('/stage/app/'+file,'/stage/baseline/'+file);
-await run('regressions-before',['pnpm','exec','vitest','run',...testFiles,'-t','keeps both subscribed|watches subscribed|shows submodule|rejects mutually','--reporter=json','--outputFile=/stage/evidence/regressions-before.json'],{},'/stage/baseline',1);
-const red=JSON.parse(readFileSync(`${evidence}/regressions-before.json`));assert.equal(red.numFailedTests,4);assert.equal(red.numPassedTests,0);
-await run('focused-unit',['pnpm','exec','vitest','run',...testFiles,'tests/releasesStore.test.ts','tests/gitDiffText.test.ts','tests/ngit.test.ts','tests/gitRefs.test.ts','tests/gitRepoReadiness.test.ts','--reporter=json','--outputFile=/stage/evidence/focused-unit.json']);
+await run('regressions-before',['pnpm','exec','vitest','run',...testFiles,'-t','keeps both subscribed|watches subscribed|shows submodule|rejects mutually|preserves reserved characters','--reporter=json','--outputFile=/stage/evidence/regressions-before.json'],{},'/stage/baseline',1);
+const red=JSON.parse(readFileSync(`${evidence}/regressions-before.json`));assert.equal(red.numFailedTests,5);assert.equal(red.numPassedTests,0);
+await run('focused-unit',['pnpm','exec','vitest','run',...testFiles,'tests/releasesStore.test.ts','tests/gitDiffText.test.ts','tests/gitRefs.test.ts','tests/gitRepoReadiness.test.ts','--reporter=json','--outputFile=/stage/evidence/focused-unit.json']);
 for(const [label,cwd] of [['before','/stage/baseline'],['after','/stage/app']]){
  cpSync('/stage/runtime53-performance.spec.ts',cwd+'/e2e/runtime53-performance.spec.ts');
  const id='performance-'+label;
