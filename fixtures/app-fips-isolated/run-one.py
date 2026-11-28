@@ -1,6 +1,7 @@
 import hashlib,json,os,pathlib,subprocess,tarfile,time
 root=pathlib.Path.cwd();stage=pathlib.Path('/stage');evidence=stage/'evidence/social';evidence.mkdir();spec=json.loads((stage/'procedure/manifest.json').read_text())['apps'][0];tmp=stage/'task-tmp';tmp.mkdir();env=dict(os.environ,CI='1',TMPDIR=str(tmp),**spec['env']);records=[]
 sha=lambda b:hashlib.sha256(b).hexdigest()
+(evidence/'cpu-provenance.json').write_text(json.dumps({'models':sorted(set(line.split(':',1)[1].strip() for line in pathlib.Path('/proc/cpuinfo').read_text().splitlines() if line.startswith('model name'))),'affinity':sorted(os.sched_getaffinity(0)),'cpuMax':pathlib.Path('/sys/fs/cgroup/cpu.max').read_text(),'memoryMax':pathlib.Path('/sys/fs/cgroup/memory.max').read_text()},indent=2)+'\n')
 def run(cmd,name,cwd=root):
  start=time.monotonic()
  with (evidence/(name+'.log')).open('wb') as out:r=subprocess.run(cmd,cwd=cwd,env=dict(env,QUALIFICATION_NAME=name,QUALIFICATION_REPORT=str(evidence/(name+'.json'))),stdout=out,stderr=subprocess.STDOUT,timeout=300)
@@ -12,7 +13,7 @@ files={str(p.relative_to(root/'dist')):sha(p.read_bytes()) for p in (root/'dist'
 with tarfile.open(evidence/'dist.tar.gz','w:gz') as tar:tar.add(root/'dist',arcname='dist')
 launch="launchOptions:{channel:'chromium',args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}"
 config=root/'playwright.qualification.config.ts';config.write_text("import {defineConfig} from '@playwright/test';import original from './playwright.config';export default defineConfig({...original,workers:1,retries:0,outputDir:'/stage/evidence/social/'+process.env.QUALIFICATION_NAME+'-output',reporter:[['list'],['json',{outputFile:process.env.QUALIFICATION_REPORT}]],use:{...original.use,trace:'retain-on-failure',"+launch+"}});")
-assert run(['pnpm','exec','playwright','test','--config='+config.name,'tests/note-mentions-ui.spec.ts'],'mention-regression')==0
+assert run(['pnpm','exec','playwright','test','--config='+config.name,'tests/note-mentions-ui.spec.ts','tests/profile-sections.spec.ts'],'mention-and-profile-regression')==0
 for label,cwd in [('baseline',stage/'apps/baseline'),('candidate',root)]:
  if label=='baseline':assert run(['pnpm','run','build'],label+'-build',cwd)==0
  config=cwd/'playwright.matched.config.ts';config.write_text("import {defineConfig,devices} from '@playwright/test';import original from './playwright.config';export default defineConfig({...original,workers:1,retries:0,projects:[{name:'matched',use:{...devices['Desktop Chrome']}}],outputDir:'/stage/evidence/social/'+process.env.QUALIFICATION_NAME+'-output',reporter:[['list'],['json',{outputFile:process.env.QUALIFICATION_REPORT}]],use:{...original.use,trace:'off',"+launch+"}});")
