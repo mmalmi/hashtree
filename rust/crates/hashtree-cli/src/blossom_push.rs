@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
 use hashtree_blossom::{BatchUploadItem, BlossomClient, BATCH_UPLOAD_MAX_BLOBS};
-use hashtree_core::{to_hex, Cid, Link};
+use hashtree_core::{to_hex, Cid, HashTree, HashTreeConfig, HashTreeError, Link, TreeNode};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -26,7 +26,14 @@ async fn load_local_blob_for_push(
     cid: &Cid,
 ) -> Result<Vec<u8>> {
     if let Some(data) = store.get_blob(&cid.hash)? {
-        return Ok(data);
+        if hashtree_core::sha256(&data) == cid.hash {
+            return Ok(data);
+        }
+        anyhow::ensure!(
+            fetcher.is_some(),
+            "incorrect bytes in local store for {}",
+            cid
+        );
     }
 
     if let Some(fetcher) = fetcher {
@@ -41,6 +48,33 @@ async fn load_local_blob_for_push(
     }
 
     anyhow::bail!("missing local blob while pushing DAG: {}", cid);
+}
+
+async fn nodes_for_push(
+    store: &HashtreeStore,
+    fetcher: Option<&Fetcher>,
+    cid: &Cid,
+    context: WalkContext,
+    data: Vec<u8>,
+) -> Result<[Option<TreeNode>; 2]> {
+    let physical = context.decode(cid, data.into())?;
+    let Some(wrapper) = physical
+        .as_ref()
+        .filter(|node| context.is_wrapped_directory(node))
+    else {
+        return Ok([physical, None]);
+    };
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+    let directory = match tree.read_wrapped_directory(cid, wrapper).await {
+        Err(HashTreeError::MissingChunk(_)) if fetcher.is_some() => {
+            // Fetch the physical file first. Its decoded entries are visited
+            // by this collector under their own CID and file/directory context.
+            fetcher.unwrap().fetch_cid_tree(store, cid).await?;
+            tree.read_wrapped_directory(cid, wrapper).await?
+        }
+        result => result?,
+    };
+    Ok([physical, Some(directory)])
 }
 
 pub(crate) async fn collect_cids_for_push(
@@ -65,7 +99,11 @@ pub(crate) async fn collect_cids_for_push(
             cids_to_push.push(cid.clone());
         }
 
-        if let Some(node) = context.decode(&cid, data.into())? {
+        for node in nodes_for_push(store, fetcher, &cid, context, data)
+            .await?
+            .into_iter()
+            .flatten()
+        {
             for link in &node.links {
                 queue.push((
                     child_cid(&cid, link),
@@ -128,9 +166,10 @@ async fn collect_incremental_cids(
             cids_to_push.push(cid.clone());
         }
 
-        let Some(node) = context.decode(&cid, data.into())? else {
+        let nodes = nodes_for_push(store, fetcher, &cid, context, data).await?;
+        if nodes[0].is_none() {
             continue;
-        };
+        }
 
         let old_node = match previous.as_ref() {
             Some(old_cid) => {
@@ -141,11 +180,21 @@ async fn collect_incremental_cids(
                             .context("previous DAG is unavailable for a bounded delta push")?,
                     )
                 } else {
-                    store.get_blob(&old_cid.hash)?
+                    store
+                        .get_blob(&old_cid.hash)?
+                        .filter(|bytes| hashtree_core::sha256(bytes) == old_cid.hash)
                 };
                 match old_bytes {
-                    Some(old_bytes) => match context.decode(old_cid, old_bytes.into()) {
-                        Ok(old_node) => old_node.map(|node| (old_cid, node)),
+                    Some(old_bytes) => match nodes_for_push(
+                        store,
+                        fetcher.filter(|_| require_previous_nodes),
+                        old_cid,
+                        context,
+                        old_bytes,
+                    )
+                    .await
+                    {
+                        Ok(old_nodes) => Some((old_cid, old_nodes)),
                         Err(err) if require_previous_nodes => {
                             return Err(err)
                                 .context("previous DAG is unreadable for a bounded delta push");
@@ -165,20 +214,24 @@ async fn collect_incremental_cids(
             None => None,
         };
 
-        for (index, link) in node.links.iter().enumerate() {
-            let child = child_cid(&cid, link);
-            let child_context = WalkContext::for_link(node.node_type, link);
-            // A previous literal reference provides no coverage for a subtree
-            // reached through a different interpretation of the same bytes.
-            let old_child = old_node.as_ref().and_then(|(old_cid, old_node)| {
-                matching_old_child(&old_node.links, index, link)
-                    .filter(|old_link| {
-                        WalkContext::for_link(old_node.node_type, old_link) == child_context
-                    })
-                    .map(|old_link| child_cid(old_cid, old_link))
-            });
-            if old_child.as_ref() != Some(&child) {
-                queue.push((child, child_context, old_child));
+        for (part, node) in nodes.into_iter().enumerate() {
+            let Some(node) = node else { continue };
+            for (index, link) in node.links.iter().enumerate() {
+                let child = child_cid(&cid, link);
+                let child_context = WalkContext::for_link(node.node_type, link);
+                // A previous literal reference provides no coverage for a subtree
+                // reached through a different interpretation of the same bytes.
+                let old_child = old_node.as_ref().and_then(|(old_cid, old_nodes)| {
+                    let old_node = old_nodes[part].as_ref()?;
+                    matching_old_child(&old_node.links, index, link)
+                        .filter(|old_link| {
+                            WalkContext::for_link(old_node.node_type, old_link) == child_context
+                        })
+                        .map(|old_link| child_cid(old_cid, old_link))
+                });
+                if old_child.as_ref() != Some(&child) {
+                    queue.push((child, child_context, old_child));
+                }
             }
         }
     }

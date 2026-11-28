@@ -9,7 +9,9 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use hashtree_blossom::{BlossomClient, BlossomError};
 use hashtree_config::detect_local_daemon_url;
 pub(crate) use hashtree_core::tree_walk::{child_cid, WalkContext};
-use hashtree_core::{decrypt_object, to_hex, Cid, LinkType, ObjectKey};
+use hashtree_core::{
+    decrypt_object, to_hex, Cid, HashTree, HashTreeConfig, LinkType, ObjectKey, TreeNode,
+};
 use nostr::Keys;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -95,6 +97,7 @@ fn enqueue_children(
     data: Cow<'_, [u8]>,
     visited: &mut Visited,
     pending: &mut VecDeque<FetchItem>,
+    wrapped_directories: &mut Vec<(Cid, TreeNode)>,
 ) -> Result<()> {
     if item
         .context
@@ -113,20 +116,32 @@ fn enqueue_children(
         .decode(&item.cid, data)
         .map_err(|err| anyhow::anyhow!("Failed to decode {}: {err}", to_hex(&item.cid.hash)))?
     {
-        for link in node.links {
-            let cid = child_cid(&item.cid, &link);
-            let blob_size = (link.link_type == LinkType::Blob).then_some(link.size);
-            let context = WalkContext::for_link(node.node_type, &link);
-            if visited.insert((cid.hash, cid.key, context)) {
-                pending.push_back(FetchItem {
-                    cid,
-                    context,
-                    estimated_bytes: blob_size.unwrap_or(FETCH_DEFAULT_ITEM_ESTIMATE),
-                });
-            }
+        enqueue_node_links(&item.cid, &node, visited, pending);
+        if item.context.is_wrapped_directory(&node) {
+            wrapped_directories.push((item.cid.clone(), node));
         }
     }
     Ok(())
+}
+
+fn enqueue_node_links(
+    parent: &Cid,
+    node: &TreeNode,
+    visited: &mut Visited,
+    pending: &mut VecDeque<FetchItem>,
+) {
+    for link in &node.links {
+        let cid = child_cid(parent, link);
+        let blob_size = (link.link_type == LinkType::Blob).then_some(link.size);
+        let context = WalkContext::for_link(node.node_type, link);
+        if visited.insert((cid.hash, cid.key, context)) {
+            pending.push_back(FetchItem {
+                cid,
+                context,
+                estimated_bytes: blob_size.unwrap_or(FETCH_DEFAULT_ITEM_ESTIMATE),
+            });
+        }
+    }
 }
 
 fn spawn_single_fetch(
@@ -329,6 +344,34 @@ impl Fetcher {
         concurrency: usize,
         progress: Option<&FetchProgress>,
     ) -> Result<(usize, u64)> {
+        self.fetch_tree_with_context(store, root_cid, WalkContext::Node, concurrency, progress)
+            .await
+    }
+
+    /// Fetch a known directory, including entries in historical byte-chunked directory nodes.
+    pub async fn fetch_directory_tree(
+        &self,
+        store: &HashtreeStore,
+        cid: &Cid,
+    ) -> Result<(usize, u64)> {
+        self.fetch_tree_with_context(
+            store,
+            cid,
+            WalkContext::Directory,
+            DEFAULT_FETCH_CONCURRENCY,
+            None,
+        )
+        .await
+    }
+
+    async fn fetch_tree_with_context(
+        &self,
+        store: &HashtreeStore,
+        root_cid: &Cid,
+        root_context: WalkContext,
+        concurrency: usize,
+        progress: Option<&FetchProgress>,
+    ) -> Result<(usize, u64)> {
         let concurrency = concurrency.max(1);
         let mut chunks_fetched = 0usize;
         let mut bytes_fetched = 0u64;
@@ -346,10 +389,11 @@ impl Fetcher {
         let mut active_batches = 0usize;
         let mut active: FuturesUnordered<FetchFuture> = FuturesUnordered::new();
 
-        visited.insert((root_cid.hash, root_cid.key, WalkContext::Node));
+        let mut wrapped_directories = Vec::new();
+        visited.insert((root_cid.hash, root_cid.key, root_context));
         pending.push_back(FetchItem {
             cid: root_cid.clone(),
-            context: WalkContext::Node,
+            context: root_context,
             estimated_bytes: FETCH_DEFAULT_ITEM_ESTIMATE,
         });
 
@@ -358,7 +402,13 @@ impl Fetcher {
             //    their children become available for batching right away.
             while let Some(item) = pending.pop_front() {
                 if let Some(data) = writes.get(&item.cid.hash) {
-                    enqueue_children(&item, Cow::Borrowed(data), &mut visited, &mut pending)?;
+                    enqueue_children(
+                        &item,
+                        Cow::Borrowed(data),
+                        &mut visited,
+                        &mut pending,
+                        &mut wrapped_directories,
+                    )?;
                     continue;
                 }
                 // The routed read checks local member bytes and falls back to the
@@ -372,7 +422,13 @@ impl Fetcher {
                     {
                         store.record_blob_accesses([item.cid.hash]);
                     }
-                    enqueue_children(&item, Cow::Owned(data), &mut visited, &mut pending)?;
+                    enqueue_children(
+                        &item,
+                        Cow::Owned(data),
+                        &mut visited,
+                        &mut pending,
+                        &mut wrapped_directories,
+                    )?;
                     continue;
                 }
                 if in_flight.contains(&item.cid.hash) {
@@ -435,7 +491,18 @@ impl Fetcher {
 
             // 3. Process the next completed network fetch.
             let Some(outcome) = active.next().await else {
-                break;
+                if wrapped_directories.is_empty() || !failed.is_empty() {
+                    break;
+                }
+                // The physical chunk trees are complete. Decode their logical
+                // directories from verified bytes, then fetch newly found entries.
+                writes.flush(store)?;
+                let tree = HashTree::new(HashTreeConfig::new(store.store_arc()));
+                for (cid, wrapper) in wrapped_directories.drain(..) {
+                    let directory = tree.read_wrapped_directory(&cid, &wrapper).await?;
+                    enqueue_node_links(&cid, &directory, &mut visited, &mut pending);
+                }
+                continue;
             };
             let mut delivered = Vec::new();
             match outcome {
@@ -480,8 +547,13 @@ impl Fetcher {
                 chunks_fetched += 1;
                 bytes_fetched += data.len() as u64;
 
-                let mut decode_res =
-                    enqueue_children(&item, Cow::Borrowed(&data), &mut visited, &mut pending);
+                let mut decode_res = enqueue_children(
+                    &item,
+                    Cow::Borrowed(&data),
+                    &mut visited,
+                    &mut pending,
+                    &mut wrapped_directories,
+                );
                 if let Some(extras) = waiting_same_hash.remove(&item.cid.hash) {
                     for extra in extras {
                         if decode_res.is_ok() {
@@ -490,6 +562,7 @@ impl Fetcher {
                                 Cow::Borrowed(&data),
                                 &mut visited,
                                 &mut pending,
+                                &mut wrapped_directories,
                             );
                         }
                     }
@@ -543,7 +616,8 @@ impl Fetcher {
         if let Ok(Some(listing)) = store.get_directory_listing(hash) {
             return Ok(Some(listing));
         }
-        self.fetch_tree(store, hash).await?;
+        self.fetch_directory_tree(store, &Cid::public(*hash))
+            .await?;
         store.get_directory_listing(hash)
     }
 

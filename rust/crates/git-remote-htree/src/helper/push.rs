@@ -488,14 +488,15 @@ fn split_pending_upload_batches(
 }
 
 async fn archive_hashes<S: Store>(
-    store: &S,
+    tree: &HashTree<S>,
     root: hashtree_core::Cid,
 ) -> Result<HashSet<[u8; 32]>> {
     use hashtree_core::tree_walk::{child_cid, WalkContext};
 
+    let store = tree.get_store();
     let mut hashes = HashSet::new();
     let mut visited = HashSet::new();
-    let mut pending = vec![(root, WalkContext::Node)];
+    let mut pending = vec![(root, WalkContext::Directory)];
     while let Some((cid, context)) = pending.pop() {
         if !visited.insert((cid.hash, cid.key, context)) {
             continue;
@@ -508,11 +509,18 @@ async fn archive_hashes<S: Store>(
         })?;
         hashes.insert(cid.hash);
         if let Some(node) = context.decode(&cid, data.into())? {
-            for link in &node.links {
-                pending.push((
-                    child_cid(&cid, link),
-                    WalkContext::for_link(node.node_type, link),
-                ));
+            let inner = if context.is_wrapped_directory(&node) {
+                Some(tree.read_wrapped_directory(&cid, &node).await?)
+            } else {
+                None
+            };
+            for node in std::iter::once(node).chain(inner) {
+                for link in &node.links {
+                    pending.push((
+                        child_cid(&cid, link),
+                        WalkContext::for_link(node.node_type, link),
+                    ));
+                }
             }
         }
     }
@@ -2938,7 +2946,7 @@ impl RemoteHelper {
             };
             let (tree, _) = self.build_cached_fetch_tree()?;
             let store = tree.get_store();
-            let hashes = archive_hashes(&*store, root).await?;
+            let hashes = archive_hashes(&tree, root).await?;
             result.local_complete = true;
             anyhow::ensure!(
                 self.nostr.can_sign()

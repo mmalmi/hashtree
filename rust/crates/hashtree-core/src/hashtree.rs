@@ -807,10 +807,7 @@ impl<S: Store> HashTree<S> {
 
         // If this is a file tree (chunked data), reassemble to get actual directory
         if node.node_type == LinkType::File {
-            let mut bytes_read = 0u64;
-            let assembled = self
-                .assemble_chunks_limited(&node, None, &mut bytes_read)
-                .await?;
+            let assembled = self.assemble_directory_bytes(cid, &node).await?;
             if is_tree_node(&assembled) {
                 let inner_node = decode_tree_node(&assembled)?;
                 return Ok(Some(inner_node));
@@ -818,6 +815,35 @@ impl<S: Store> HashTree<S> {
         }
 
         Ok(Some(node))
+    }
+
+    /// Read the logical entries of a directory encoded as a chunked file. The
+    /// physical wrapper and chunks remain part of the reachable tree as well.
+    pub async fn read_wrapped_directory(
+        &self,
+        cid: &Cid,
+        wrapper: &TreeNode,
+    ) -> Result<TreeNode, HashTreeError> {
+        let assembled = self.assemble_directory_bytes(cid, wrapper).await?;
+        let node = decode_tree_node(&assembled)?;
+        if !node.node_type.is_directory_like() {
+            return Err(HashTreeError::Store(
+                "chunked directory does not contain directory entries".into(),
+            ));
+        }
+        Ok(node)
+    }
+
+    async fn assemble_directory_bytes(
+        &self,
+        cid: &Cid,
+        wrapper: &TreeNode,
+    ) -> Result<Vec<u8>, HashTreeError> {
+        let mut bytes_read = 0;
+        let mut out = Vec::new();
+        self.assemble_chunks_into(wrapper, None, &mut bytes_read, &mut out, Some(cid))
+            .await?;
+        Ok(out)
     }
 
     /// Check if hash points to a tree node (no decryption)
@@ -1047,7 +1073,7 @@ impl<S: Store> HashTree<S> {
         bytes_read: &mut u64,
     ) -> Result<Vec<u8>, HashTreeError> {
         let mut out = Vec::new();
-        self.assemble_chunks_into(node, max_size, bytes_read, &mut out)
+        self.assemble_chunks_into(node, max_size, bytes_read, &mut out, None)
             .await?;
         Ok(out)
     }
@@ -1059,15 +1085,38 @@ impl<S: Store> HashTree<S> {
         max_size: Option<u64>,
         bytes_read: &mut u64,
         out: &mut Vec<u8>,
+        directory_parent: Option<&Cid>,
     ) -> Result<(), HashTreeError> {
         for link in &node.links {
             let projected = (*bytes_read).saturating_add(link.size);
             Self::ensure_size_limit(max_size, projected)?;
 
-            let child_data = self.read_link_bytes(link).await?;
+            let child = directory_parent.map(|parent| crate::tree_walk::child_cid(parent, link));
+            let child_data = if let Some(cid) = &child {
+                let stored = self
+                    .get_blob(&cid.hash)
+                    .await?
+                    .ok_or_else(|| HashTreeError::MissingChunk(to_hex(&cid.hash)))?;
+                if sha256(&stored) != cid.hash {
+                    return Err(HashTreeError::Store(format!(
+                        "corrupt directory chunk {}",
+                        to_hex(&cid.hash)
+                    )));
+                }
+                decrypt_cid_root_bytes(cid, stored)?
+            } else {
+                self.read_link_bytes(link).await?
+            };
 
             if let Some(child_node) = Self::decode_linked_file_node(link, &child_data)? {
-                Box::pin(self.assemble_chunks_into(&child_node, max_size, bytes_read, out)).await?;
+                Box::pin(self.assemble_chunks_into(
+                    &child_node,
+                    max_size,
+                    bytes_read,
+                    out,
+                    child.as_ref(),
+                ))
+                .await?;
             } else {
                 let projected = (*bytes_read).saturating_add(child_data.len() as u64);
                 Self::ensure_size_limit(max_size, projected)?;

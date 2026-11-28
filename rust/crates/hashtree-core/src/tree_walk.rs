@@ -32,6 +32,7 @@ pub fn child_cid(parent: &Cid, link: &Link) -> Cid {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum WalkContext {
     Node,
+    Directory,
     DirectoryBlob(u64),
     FileChunk(u64),
 }
@@ -40,9 +41,16 @@ impl WalkContext {
     pub fn for_link(parent_type: LinkType, link: &Link) -> Self {
         match (parent_type, link.link_type) {
             (LinkType::File, LinkType::Blob) => Self::FileChunk(link.size),
+            (_, LinkType::Dir | LinkType::Fanout) => Self::Directory,
             (_, LinkType::Blob) => Self::DirectoryBlob(link.size),
             _ => Self::Node,
         }
+    }
+
+    /// A file-shaped directory link can store the bytes of a separate directory node.
+    /// File entries with identical bytes keep their ordinary file interpretation.
+    pub fn is_wrapped_directory(self, node: &TreeNode) -> bool {
+        self == Self::Directory && node.is_file()
     }
 
     pub fn is_literal_file_chunk(self, cid: &Cid, stored_len: u64) -> bool {
@@ -59,7 +67,9 @@ impl WalkContext {
 
     pub fn decode(self, cid: &Cid, data: Cow<'_, [u8]>) -> Result<Option<TreeNode>, HashTreeError> {
         let size = match self {
-            Self::Node => return Ok(decode_tree_node_by_cid(cid, data.into_owned())?),
+            Self::Directory | Self::Node => {
+                return Ok(decode_tree_node_by_cid(cid, data.into_owned())?)
+            }
             Self::DirectoryBlob(size) | Self::FileChunk(size) => size,
         };
         let plaintext = match cid.key {
