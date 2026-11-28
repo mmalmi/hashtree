@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Exact Social runtime cold-profile CPU diagnosis only. No qualification claim, publication or code change.",
+  "purpose": "Social navigation redundant-crypto/history correction: mutation and scroll regression checks, paired navigation, full project gates; no publication.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "01fea520fcc2ced50e7fe36375923a06d5a85c20",
+      "commit": "b43c7a730ed71a7d80812753400f24773ec16a1d",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "85160f833fb9722eb4b0782ca05a7e62b67df1c00e7bc2ca2e7ffc498d23fefd",
+      "archiveSha256": "49ca393da187eb714858ae8bfc7245e8f9f818756b988deed1876c7a6235fb8b",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
@@ -41,7 +41,11 @@
         "tests/submitted-post-search.spec.ts": "7be6edc9895ac1add4f4be69e482925d7b597afc9cbc40251be9180246f61d01",
         "tests/viewer-list-relay.spec.ts": "9096a02eccd7f0baf2f2a55a51190b815bc9fc5f088270bffbc3af385a69ee0d",
         "tests/profile-records.spec.ts": "4e8b4037acee68b7c996842f9c02b0340a4213ebe63c94138588f02624c8d902",
-        "tests/app-viewer-search-hydrator.spec.ts": "5006c0245787975b4e848714ede86013ddae9e633f12200da3f68b8f70923def"
+        "tests/app-viewer-search-hydrator.spec.ts": "5006c0245787975b4e848714ede86013ddae9e633f12200da3f68b8f70923def",
+        "tests/account-signer.spec.ts": "34a5cff5ed9d3c1802fe6904278075091a3e9291be464e9129f06759220b3c5d",
+        "tests/app-history-navigation.spec.ts": "26f00cb09182d944131964f4fcb16b6633f6bac95462f8c4c885db08e0e4956e",
+        "tests/navigation-performance.spec.ts": "a12c917ef105d800f8a3a87b70e5b0c1e6af7da3676af96f5383f01cf6aa5a88",
+        "tests/note-mentions-ui.spec.ts": "1acb5082c8c7c04eab0f059acc7f48cb56b060f4c4f33790aaf203e2edd04a86"
       },
       "expectedProjects": [
         "chromium",
