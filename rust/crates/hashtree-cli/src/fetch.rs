@@ -198,6 +198,12 @@ fn enqueue_children(
         .context
         .is_literal_file_chunk(&item.cid, data.len() as u64)
     {
+        // Length establishes the shape, but only authentication proves a keyed chunk is readable.
+        if let Some(key) = &item.cid.key {
+            decrypt_object(&data, key).map_err(|err| {
+                anyhow::anyhow!("Failed to decrypt {}: {err}", to_hex(&item.cid.hash))
+            })?;
+        }
         return Ok(());
     }
     if let Some(node) = item

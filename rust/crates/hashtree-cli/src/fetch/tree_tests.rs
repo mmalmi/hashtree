@@ -225,3 +225,45 @@ async fn restores_archive_only_descendant_before_consulting_blossom() {
     server.abort();
     let _ = server.await;
 }
+
+#[tokio::test]
+async fn loading_local_encrypted_file_checks_each_chunk_key() {
+    let dir = tempdir().unwrap();
+    let store = HashtreeStore::with_options_and_backend(
+        dir.path(),
+        None,
+        STORE_BYTES as u64,
+        false,
+        &StorageBackend::Fs,
+    )
+    .unwrap();
+    let tree = HashTree::new(HashTreeConfig::new(store.store_arc()).with_chunk_size(4));
+    let bytes = b"abcdefgh";
+    let (valid, _) = tree.put(bytes).await.unwrap();
+    let load = fetcher(vec![]);
+    assert_eq!(
+        load.fetch_cid_tree_with_progress(&store, &valid, None)
+            .await
+            .unwrap(),
+        (0, 0)
+    );
+    assert_eq!(tree.get(&valid, None).await.unwrap().unwrap(), bytes);
+
+    // Both ciphertexts are present. Only the first link's key is wrong.
+    let mut node = tree.get_node(&valid).await.unwrap().unwrap();
+    let other_key = node.links[1].key;
+    assert_ne!(node.links[0].key, other_key);
+    node.links[0].key = other_key;
+    let leaf_hash = hashtree_core::to_hex(&node.links[0].hash);
+    let encoded = hashtree_core::encode_tree_node(&node).unwrap();
+    let mismatched = hashtree_core::Cid::public(tree.put_blob(&encoded).await.unwrap());
+    assert!(tree.get(&mismatched, None).await.is_err());
+    let error = load
+        .fetch_cid_tree_with_progress(&store, &mismatched, None)
+        .await
+        .unwrap_err();
+    assert!(
+        error.to_string().contains(&leaf_hash),
+        "expected the unreadable chunk: {error}"
+    );
+}
