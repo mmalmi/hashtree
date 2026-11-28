@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Qualify combined bounded profile preview and silent controller-cache readback, preserving rendered-cache reactivity. Same strict navigation, complete exact-source project gates and controls.",
+  "purpose": "Diagnostic only: capture CPU/renderer traces for Latest return after a thread, three fixed observations, same a6b43f0 app and artifact. No qualification/publication claim.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",

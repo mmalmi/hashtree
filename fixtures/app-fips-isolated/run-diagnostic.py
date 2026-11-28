@@ -18,21 +18,24 @@ with tarfile.open(evidence/'diagnostic-maps.tar.gz','w:gz') as tar:
 case=root/'tests/navigation-performance.spec.ts';raw=case.read_bytes();text=raw.decode()
 key="      inputAt = performance.now();";assert text.count(key)==1;text=text.replace(key,key+"\n      performance.mark('diagnostic-route-input');")
 key="        const routeCommittedMs = performance.now() - inputAt;";assert text.count(key)==1;text=text.replace(key,"        performance.mark('diagnostic-route-commit');\n"+key)
-key="  await visit('profile-first', 'desktop-nav-profile', 'profile-hero');";assert text.count(key)==1
+key="  await visit('latest-after-thread', 'feed-tab-latest', 'latest-feed');";assert text.count(key)==1
 before="""  await cdp.send('Profiler.enable'); await cdp.send('Profiler.start');
   await cdp.send('Tracing.start', {categories:'devtools.timeline,v8.execute,blink.user_timing',transferMode:'ReturnAsStream'});
 """
 after="""
   await testInfo.attach('cpu-profile.json', {body:JSON.stringify(await cdp.send('Profiler.stop')), contentType:'application/json'});
-  const traceComplete = new Promise<{stream:string}>(resolve => cdp.once('Tracing.tracingComplete', resolve));
+  const traceComplete = new Promise<{stream?:string}>(resolve => cdp.once('Tracing.tracingComplete', resolve));
   await cdp.send('Tracing.end');
-  const {stream} = await traceComplete; let traceBody = '';
-  for (;;) {const chunk = await cdp.send('IO.read', {handle:stream}); traceBody += chunk.data; if (chunk.eof) break;}
+  const {stream} = await traceComplete; if (!stream) { throw new Error('Missing trace stream'); } let traceBody = '';
+  for (;;) {const chunk = await cdp.send('IO.read', {handle:stream}); traceBody += chunk.data; if (chunk.eof) { break; }}
   await cdp.send('IO.close', {handle:stream});
-  await testInfo.attach('cold-profile-trace.json', {body:traceBody, contentType:'application/json'});
+  await testInfo.attach('latest-return-trace.json', {body:traceBody, contentType:'application/json'});
 """
 text=text.replace(key,before+key+after);case.write_text(text)
 (evidence/'profile-overlay.json').write_text(json.dumps({'before':sha(raw),'after':sha(case.read_bytes()),'purpose':'diagnose first profile only; unchanged artifact bytes and unchanged timing gates'},indent=2)+'\n')
 config.write_text(config.read_text().replace("trace:'retain-on-failure'","trace:'off'"))
-run(['pnpm','exec','playwright','test','--config='+config.name,'tests/navigation-performance.spec.ts'],'candidate-profile',extra={'QUALIFICATION_REPORT':str(evidence/'candidate-profile.json')})
-(evidence/'diagnostic-only.json').write_text(json.dumps({'source':spec['commit'],'qualificationPassed':False,'scope':'Measured exact first-profile trace; retain current candidate navigation failure separately.'},indent=2)+'\n')
+for attempt in range(1,4):
+ name='candidate-profile-'+str(attempt)
+ run(['pnpm','exec','playwright','test','--config='+config.name,'tests/navigation-performance.spec.ts'],name,extra={'QUALIFICATION_REPORT':str(evidence/(name+'.json'))})
+case.write_bytes(raw)
+(evidence/'diagnostic-only.json').write_text(json.dumps({'source':spec['commit'],'qualificationPassed':False,'scope':'Three fixed exact-artifact Latest-return observations; retain current candidate navigation failure separately.'},indent=2)+'\n')
