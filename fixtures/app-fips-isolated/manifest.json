@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Remaining Social browser release gates; 17 original UI cases plus2FIPS and3personal-index cases, exact accepted source/dist, no assertion changes",
+  "purpose": "Social original-review focused regression only, accepted dependency line, no publication or runtime53 adoption",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,294 +11,61 @@
   "apps": [
     {
       "id": "social",
-      "commit": "b0ffcf7f34f7a3d94f933b7664da9ade86730657",
+      "commit": "71534a7745417e1797e8c8a0ba43e3a2ecfb6dca",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "95f6f1ecb7aaed13f59d646d7cc1d5d03352074ee088b169b5687890eff8b687",
-      "lockSha256": "393b4b78857ed83e47794fc0b94bcecf2024c74d28e51104ca409e3ebe6865cc",
+      "archiveSha256": "526f8e9db7d5638d2ed808406474228d64ef9c8a7746355f2d85863703dc8705",
+      "lockSha256": "e6201eb5970e270e24eae4d15713f3c9c5e6c6872258eb130a36e603f48a9308",
       "packageManager": "pnpm@10.28.2",
-      "distDir": "dist",
-      "distArchive": "archives/social-dist.tar.gz",
-      "distArchiveSha256": "ff056a1d8cf9af60a67ce3b2c156b2cb90900b0ba3f7788993ea921fbce76ec4",
-      "distArchivePrefix": "dist",
-      "distFiles": [
-        {
-          "path": "app-icon.svg",
-          "sha256": "d2c34897b8c77486300448391606bd1f26d74613c89fc452ae59be71baf15fff",
-          "bytes": 78157
-        },
-        {
-          "path": "assets/AccountSheet-I8ipOqg1.js",
-          "sha256": "913460890ae0f309dc575b454291dc8419f58e5e3b5f7adaa113e05886aaf790",
-          "bytes": 8693
-        },
-        {
-          "path": "assets/ArticleContent-CATdA0Wi.js",
-          "sha256": "b76da34da63f642399f7fbfaa7fe8616cc4f41107e1e760242f6788a03cee298",
-          "bytes": 108925
-        },
-        {
-          "path": "assets/ArticleContent-sASPTX0G.css",
-          "sha256": "abfdf9c40028c97a0fada3408fb10c8195b114a41229e7ad47e592bb6ce389c1",
-          "bytes": 2881
-        },
-        {
-          "path": "assets/FeedSourceEditorSheet-tccMcF7O.js",
-          "sha256": "4d01dd03273db526e62312ebbf58bfe83f509b0bb0ae75be201dd22f2cb14b3c",
-          "bytes": 8314
-        },
-        {
-          "path": "assets/NoteDetailSheet-1Q-nLynx.js",
-          "sha256": "7612c8c24eb01687ec35524e33961c90a6ae16cb3b1b607fe9737def8a8a1cb6",
-          "bytes": 6537
-        },
-        {
-          "path": "assets/ProfilePeopleModal-DYWCPdUq.js",
-          "sha256": "f028753ddd3ddcbd73d1de1aadda76b2de6a6005d66cab6cde3c076502fd4f35",
-          "bytes": 3499
-        },
-        {
-          "path": "assets/ProfileQrModal-C3BNjDTI.js",
-          "sha256": "820243e00c25f8ac3b4a1ea98722d3be5b6693e04f41aaa17ce5ac7f875b96e4",
-          "bytes": 9000
-        },
-        {
-          "path": "assets/QrScanner-DQX8nqCn.js",
-          "sha256": "478d37775907d0237cec2da661bdad7fc399cdacc0f0d58f1c73f854da6b9bdf",
-          "bytes": 132717
-        },
-        {
-          "path": "assets/SearchPage-BhNvViWN.js",
-          "sha256": "2446fb46165600f9aaae95a7cc346b0f3a46386f0c892ceab1e716f83fe54294",
-          "bytes": 27448
-        },
-        {
-          "path": "assets/SettingsPage-C0dULXR1.js",
-          "sha256": "805ffd2b3e8562910c656d9009cf52bede4dfa5475f0431e1808a8e5845eeedd",
-          "bytes": 49658
-        },
-        {
-          "path": "assets/SocialGraph-BxdWTlny-DdPZuNuz.js",
-          "sha256": "25597ab087c747abc8857f89918ffa94f231f17a2b5671ece1977d83c08e38eb",
-          "bytes": 24210
-        },
-        {
-          "path": "assets/WalletPage-B-aj-NYb.js",
-          "sha256": "5012c3276efc1d2c4691f5a03e49dc419e994d70cc6678cbf98b971adde8c8b2",
-          "bytes": 46048
-        },
-        {
-          "path": "assets/ZapAllSheet-CJsLj-z-.js",
-          "sha256": "af382c6f65ad92d634c356ac4728dc896e2126856099354d9031af44ba10e14d",
-          "bytes": 4950
-        },
-        {
-          "path": "assets/_commonjsHelpers-Cpj98o6Y.js",
-          "sha256": "9625379badd4849610dfe6c15453cdf0c0071264c90eef177307fac094d2aa6c",
-          "bytes": 236
-        },
-        {
-          "path": "assets/browser-AJ-GTtSI.js",
-          "sha256": "4757c0ed06ed0a1ea41076f6f0e02d56015f423afa4adc21a8bd97b043ddcf8f",
-          "bytes": 25795
-        },
-        {
-          "path": "assets/browserNotifications-DzipwVjm.js",
-          "sha256": "8ba1e154f7445c8f28104f576931d405b4dfaf29ffd542b30c5e99ae938a3a6f",
-          "bytes": 8990
-        },
-        {
-          "path": "assets/browserProvider-BMibIRjQ.js",
-          "sha256": "a3d7985f780eab108a16c80641c0c1406d6d575d0fd121c3978a244c33c5048d",
-          "bytes": 221153
-        },
-        {
-          "path": "assets/browserShadowReadComparator-BOl6RgBX.js",
-          "sha256": "7a0a325abeb9bd703f1e48a16f0726e15a075f259906e4e35c7e5662b43fae22",
-          "bytes": 6107
-        },
-        {
-          "path": "assets/hashtree.worker--3YcbW15.js",
-          "sha256": "96dffa3b6a43d22ec0bd2909da10e1b46e624fded1f62a16ca062f65de0a6ec1",
-          "bytes": 783811
-        },
-        {
-          "path": "assets/index-CX9jPgIt.js",
-          "sha256": "8c2b9da5002fb8af5049434cd91bfdf5ac1582bad4375a67ec59889b5c54d77c",
-          "bytes": 1228121
-        },
-        {
-          "path": "assets/index-Df4SJMhP.js",
-          "sha256": "4b6003c832d53008d28e8012cbbf8b9b5e26dca8d65f11ffd4985381fd9b6e4d",
-          "bytes": 101292
-        },
-        {
-          "path": "assets/index-_rM0dN6I.js",
-          "sha256": "067efe73c8e95f22957cd39007ea0d280932bbcb7775cc79d75a83c88d0fb819",
-          "bytes": 35289
-        },
-        {
-          "path": "assets/nostr-social-graph.es-C8QVl_NV.js",
-          "sha256": "b6b29e313d134098c17ba9950d6291d3b1ded5f6a08dfdfd7247f71404fa3a5c",
-          "bytes": 277
-        },
-        {
-          "path": "assets/nwcWallet-B96b1T3V.js",
-          "sha256": "2c7ca9154f285a425c4125955cdf2661681e8b9f28e90832ef51cb3d8016042c",
-          "bytes": 29192
-        },
-        {
-          "path": "assets/postSearchRuntime-DlYaTAtY.js",
-          "sha256": "0b75d4e9aa75b2451581a02fa77300ee1275e5eeaa74599b20dc611d8ac64505",
-          "bytes": 102702
-        },
-        {
-          "path": "assets/postSearchTermRouting-BU9UUeeG.js",
-          "sha256": "08faa140798ed6eaed85f5fd7223e6d39e17ec3e564294dd69adbbd4bef29441",
-          "bytes": 1674
-        },
-        {
-          "path": "assets/postSearchV5PageRouter-BBzChUYR.js",
-          "sha256": "80694bc1a6e53e539677012c479e2e8d9a3893580fe5af714eeb8db0f6b1c35e",
-          "bytes": 13455
-        },
-        {
-          "path": "assets/privateContactSyncV2-B0Vot6HE.js",
-          "sha256": "bd16b06664f8a39df199cc86b9802312b8f27d26751121af12450b3828d89c58",
-          "bytes": 6358
-        },
-        {
-          "path": "assets/privateContactSyncV2Controller-Ct3KL7QY.js",
-          "sha256": "a70371724e15dfcb735a28222d56d6ccf191095b72b19645c76076e842caf036",
-          "bytes": 2511
-        },
-        {
-          "path": "assets/privateRatchetRuntime-dEKOp_Nx.js",
-          "sha256": "94c63e871ec37893e15b728aab9c1f41059e1790fb57e3d80bbd8502609307ed",
-          "bytes": 286891
-        },
-        {
-          "path": "assets/profileSearch-dyDMPmI0.js",
-          "sha256": "b6ecb667d97ac35d506574bfb087b9d782a466cede6a2b2c375cf5427a81416e",
-          "bytes": 6779
-        },
-        {
-          "path": "assets/profileSearchV3Runtime-DTjuQNnd.js",
-          "sha256": "1a825974d8dd50798998cc4d5ed18fe934876c8359a4ec3bfd68698aa3c0ef1d",
-          "bytes": 30322
-        },
-        {
-          "path": "assets/publicGraphSync-BSTpz1dm.js",
-          "sha256": "05c49819d2f6d0d347e355b54ca991da5156f4e049ca9367f448d153015894b3",
-          "bytes": 14455
-        },
-        {
-          "path": "assets/retained-peer-discovery-DddyPzEq.js",
-          "sha256": "c14df7ecedbca1a391bafaf86afbe78c1dad34d777798172f85f373c97de27e8",
-          "bytes": 5471
-        },
-        {
-          "path": "assets/signers-CqlasrhK.js",
-          "sha256": "b624f21cf07bc4a3cd69cd59642859b4cc2c947c88d23232b88f9ed375c00b22",
-          "bytes": 1634
-        },
-        {
-          "path": "assets/socialRelationshipRuntime-CyKe_wnd.js",
-          "sha256": "30429fdf769a60c934c1cb7317461c47ad0638a208ecf12bcc8beefa4b33ced5",
-          "bytes": 12337
-        },
-        {
-          "path": "assets/wallet.worker-Dh61wnKZ.js",
-          "sha256": "9a0f66e156f59a59af4abd10bc7af5815fa28ba984bcc6f8c20666fbc88d399a",
-          "bytes": 738028
-        },
-        {
-          "path": "assets/walletStore-DjMM7f5c.js",
-          "sha256": "d62764b072691c6aaca5c77f2128d7de63ce91f0bedf663c0dfbf8a33397f1e1",
-          "bytes": 2037
-        },
-        {
-          "path": "assets/walletUi-6nqc4p-0.js",
-          "sha256": "d8325fe8ed345fe765d782b6ea8400699bcd03eb1ebb17f6f06057d1ad15a235",
-          "bytes": 664
-        },
-        {
-          "path": "assets/walletWorkerTransport-BOmAg0Uh.js",
-          "sha256": "ab0441a3e598e1163b1aa8c3431631b7b2cce3d07ea05f7e5d2e09fd358914dd",
-          "bytes": 2227
-        },
-        {
-          "path": "assets/workerClient-BkCV9yD5.js",
-          "sha256": "e54505da29910788d9447c95da7684f2055a3f784be14e7eb61ee768934d31dd",
-          "bytes": 25481
-        },
-        {
-          "path": "browser-notifications.js",
-          "sha256": "8dc6a445ab66e5b08a5f75341f78c9068e334434a8beaadf36ca97241fbd4fce",
-          "bytes": 5787
-        },
-        {
-          "path": "favicon.svg",
-          "sha256": "87081c44f9ccbc423b90a5a37fa4a65525dd1f5774415f25462e070b94828f61",
-          "bytes": 77977
-        },
-        {
-          "path": "index.html",
-          "sha256": "53fd572e1cc506cff02918b86289ad0f9083181408629bca92bb7eded69950bc",
-          "bytes": 76121
-        },
-        {
-          "path": "iris-icons.svg",
-          "sha256": "096da41f9f1b43a38904062fe975a3b0dbe026f913a98814f232155acd505ef4",
-          "bytes": 135700
-        },
-        {
-          "path": "service-worker.js",
-          "sha256": "e7041c51c0500f00a1acfbbfd71f284681a8b5873cab7c42daf6b8365d0dfd1d",
-          "bytes": 15708
-        },
-        {
-          "path": "socialGraph.bin",
-          "sha256": "19b490ce9c8715cc5c8dc24b73719051ce932febaec4ec369ab1ed9f7c575d20",
-          "bytes": 1420890
-        },
-        {
-          "path": "socialGraphFrontier.bin",
-          "sha256": "1b050f7f7b5805647eb18a0b990584605c177186f18200d42ed53cdb0a31a642",
-          "bytes": 13120
-        },
-        {
-          "path": "socialGraphSnapshot.provenance.json",
-          "sha256": "b90438e4c5ba5b0886c4678a093f339f461c137571dc6b503e5d95bad3cb1a82",
-          "bytes": 1420
-        }
-      ],
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
       "specs": [
-        "tests/initial-paint.spec.ts",
-        "tests/favorites-feed-ui.spec.ts",
-        "tests/private-contact-sync-ui.spec.ts",
-        "tests/recent-searches.spec.ts",
-        "tests/fips-p2p.spec.ts",
-        "tests/personal-event-index-publication.spec.ts"
+        "tests/post-search-semantic.spec.ts",
+        "tests/app-route-loader-profile-likes.spec.ts",
+        "tests/profile-cache.spec.ts",
+        "tests/app-thread-loader.spec.ts",
+        "tests/app-profile-hydrators.spec.ts",
+        "tests/search-pagination.spec.ts",
+        "tests/app-shell-cache-policy.spec.ts",
+        "tests/submitted-post-search.spec.ts",
+        "tests/viewer-list-relay.spec.ts",
+        "tests/profile-records.spec.ts",
+        "tests/app-viewer-search-hydrator.spec.ts"
       ],
       "testFiles": {
-        "tests/initial-paint.spec.ts": "5d55dcfea8f841b195945b6bf496f912abdf6cbe5ffaaf9e0c484ffb2a3f818b",
-        "tests/favorites-feed-ui.spec.ts": "d1eba8bd2534e4f6765025bf5ab56ccf308bfc9f8aee930d0665c53c49319a23",
-        "tests/private-contact-sync-ui.spec.ts": "fc094a3087744785bc69e3d440e449d462559435d152ff73528743cc9f532e0c",
-        "tests/recent-searches.spec.ts": "5a1f0ad5e96b48aafa96465dabc749d5c80135b6047567fc02d65e8837e4a68f",
-        "tests/fips-p2p.spec.ts": "f38775a0f26ccff6129ac1f3ff901857eab55aec61f12281a2a7b9ab5d553608",
-        "tests/personal-event-index-publication.spec.ts": "935c4ffadb55d54054066e57029cc428396897628aca4f52c7b86a5e13bdc5d4"
+        "tests/post-search-semantic.spec.ts": "9298ea3b9de718f05d2e5b2d96861ec59c2d89a59b920f597770d1fc6426766b",
+        "tests/app-route-loader-profile-likes.spec.ts": "1038e16b179f99aed7beb45fd2dd8adbbb0cbae0c9b4f8dc68bfbe41f6046db5",
+        "tests/profile-cache.spec.ts": "1d61c15622b5e294501b2b5fe648a84c07c6fa331681748d3798d73ed6320213",
+        "tests/app-thread-loader.spec.ts": "69615f1f78852fe15e864da2e767d451a8b5171215fe49dca8003341547a5a4b",
+        "tests/app-profile-hydrators.spec.ts": "660ec61caf180416aa26441780ea51fbd36468f2952a8748d7bd5723109301f0",
+        "tests/search-pagination.spec.ts": "1b939ff75a2991a977747960665d0b0e3ecd112e27da57d0317909d819d587ff",
+        "tests/app-shell-cache-policy.spec.ts": "881355def80154820cab8f7b310453dbcf6f049f28ee83151ac19847ee929fd5",
+        "tests/submitted-post-search.spec.ts": "7be6edc9895ac1add4f4be69e482925d7b597afc9cbc40251be9180246f61d01",
+        "tests/viewer-list-relay.spec.ts": "9096a02eccd7f0baf2f2a55a51190b815bc9fc5f088270bffbc3af385a69ee0d",
+        "tests/profile-records.spec.ts": "4e8b4037acee68b7c996842f9c02b0340a4213ebe63c94138588f02624c8d902",
+        "tests/app-viewer-search-hydrator.spec.ts": "5006c0245787975b4e848714ede86013ddae9e633f12200da3f68b8f70923def"
       },
       "expectedProjects": [
         "chromium",
         "source-runtime"
       ],
-      "expectedCases": 22,
       "env": {
         "PLAYWRIGHT_PORT": "4180",
         "PLAYWRIGHT_RUNTIME_PORT": "4181",
         "PLAYWRIGHT_USE_PREVIEW": "1"
-      }
+      },
+      "baseline": "1b8ff30ece102f6407555954b5d5c5d89cd65208",
+      "changedLintFiles": [
+        "src/lib/appDataHydrationControllers.ts",
+        "src/lib/appLifecycle.ts",
+        "src/lib/appRouteLoader.ts",
+        "src/lib/components/ProfileSearchSheet.svelte",
+        "src/lib/components/PublicPeopleSearchAction.svelte",
+        "src/lib/post-search/controller.ts",
+        "src/lib/post-search/expansion.ts",
+        "src/lib/post-search/session.ts",
+        "tests/app-route-loader-profile-likes.spec.ts",
+        "tests/post-search-semantic.spec.ts",
+        "tests/post-search-sheet.spec.ts"
+      ]
     }
   ]
 }
