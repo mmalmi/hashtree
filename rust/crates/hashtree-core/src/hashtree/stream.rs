@@ -103,6 +103,8 @@ impl<'a, S: Store> OrderedStreamReader<'a, S> {
             };
             let allow = self.in_flight.is_empty()
                 || (next.link_type == LinkType::Blob
+                    // Descend into a known subtree before fetching its siblings.
+                    && self.in_flight_links.back().is_some_and(|link| link.link_type == LinkType::Blob)
                     && self.in_flight_bytes.saturating_add(next.size) <= STREAM_READ_AHEAD_BYTES);
             if !allow {
                 break;
