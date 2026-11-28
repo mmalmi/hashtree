@@ -95,8 +95,8 @@ def prepare():
         assert json.loads((target/'package.json').read_text())['packageManager']==app['packageManager']
         for file,digest in app['testFiles'].items():assert sha(target/file)==digest
         assert sha(target/'playwright.config.ts')==app['configSha256']
-        docker('iris-fips-install-'+app['id'],['pnpm','install','--frozen-lockfile','--ignore-scripts','--store-dir','/stage/pnpm-store'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
-    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'distInputsVerified':False,'scope':'focused source review, no build/promotion'},indent=2)+'\n')
+        docker('iris-fips-install-'+app['id'],['python3','/stage/procedure/resolve-lock.py'],network='bridge',cwd='/stage/apps/'+app['id'],seconds=300)
+    (EVIDENCE/'prepared.json').write_text(json.dumps({'manifestSha256':sha(HERE/'manifest.json'),'image':IMAGE,'apps':SELECTED,'sourceInputsVerified':True,'distInputsVerified':False,'scope':'coherent lock preparation only, no product qualification/promotion'},indent=2)+'\n')
 
 def test():
     assert json.loads((EVIDENCE/'prepared.json').read_text())['manifestSha256']==sha(HERE/'manifest.json')

@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Social original-review focused regression only, accepted dependency line, no publication or runtime53 adoption",
+  "purpose": "Social runtime54 coherent lock preparation only. Not product qualification or publication.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -13,7 +13,7 @@
       "id": "social",
       "commit": "fff7c48a26e209a59d50f6d783f142a4e965eaac",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "e2a29df6d98fae70ba4cb8a7942bf1b8416a814222e911a047dd01db5b06dd5b",
+      "archiveSha256": "1d4eb1ff0fbf0eb76e1f065fd29856f00a2453f5c956815602d51fecfacccaa3",
       "lockSha256": "e6201eb5970e270e24eae4d15713f3c9c5e6c6872258eb130a36e603f48a9308",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
@@ -91,7 +91,9 @@
           ],
           "reason": "Only test fixtures changed; runtime remains identical. Rerun the seven failing cases with deterministic transport fixtures."
         }
-      }
+      },
+      "sourceTree": "cf2fade282e837ea4ac3fc3c3caacbaeb6695f0b",
+      "phase": "Uncommitted source preparation; hosted lock generation only"
     }
   ]
 }

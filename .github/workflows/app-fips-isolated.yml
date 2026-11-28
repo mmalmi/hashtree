@@ -1,4 +1,4 @@
-name: Social original-review focused regressions
+name: Social runtime54 locked source preparation
 on:
   workflow_dispatch:
 permissions:
