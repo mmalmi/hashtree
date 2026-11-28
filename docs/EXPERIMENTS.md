@@ -2,6 +2,47 @@
 
 This file records performance and behavior experiments without identifying data. Do not store pubkeys, secrets, IP addresses, private hostnames, exact private repo names, or raw content hashes here unless explicitly requested.
 
+## 2026-11-28 — Native imports and signed repeat pushes
+
+A Linux x86-64 development build used two CPUs and a 4 GiB memory limit. For each revision, three fresh stores imported a directory containing one 192 MiB file with 256 KiB chunks. Every restore matched the source bytes. The warm runs reused those same three stores. Times and peak process memory below are medians. The machine also hosted other workloads.
+
+| Operation | Before verification fixes | With verification and bounded writes |
+| --- | ---: | ---: |
+| Fresh directory import | 13.98 s | 13.80 s |
+| Peak memory during import | 247.1 MiB | 100.7 MiB |
+| Repeat directory import | 10.09 s | 13.74 s |
+| Warm local file-tree traversal (`htree load`) | 0.028 s | 3.90 s |
+
+The warm traversal now reads stored bodies and follows manifests. The earlier traversal could finish with missing bodies. The first implementation of verified repeat import took 21.37 s. Checking each incoming block once and retaining verification of the stored copy reduced this to 13.74 s.
+
+The ordinary signed push test used a fresh loopback server, 33 blocks and 1,294,336 payload bytes. Request and response counts include HTTP framing. Each result is the median of three trials.
+
+| Operation | Earlier request / response | Confirmed request / response | Earlier / confirmed time |
+| --- | ---: | ---: | ---: |
+| First push | 1,300,652 / 8,462 B | 1,298,506 / 8,457 B | 168.2 / 168.7 ms |
+| Repeat push | 2,344 / 173 B | 1,298,506 / 8,456 B | 1.18 / 110.79 ms |
+
+The old repeat skipped blocks on a cache-presence response. The CLI resends signed data. The test server grants durable writes to the fixture publisher. Servers that accept unlisted authors into a public cache can also return successful upload receipts, so those receipts alone cannot establish retention across policies. The separate Git remote helper has its own upload path. To repeat the wire measurement, run the ignored `blossom_push::regular_push_tests::measure_regular_push_wire_cost` test in the `hashtree-cli` library with `--exact --ignored --nocapture --test-threads=1`.
+
+A separate download fixture returned five verified blocks totaling 46,661,730 bytes in one HTTP response. Across three alternating baseline and candidate runs, streaming the response reduced median peak process memory from 100.3 to 56.6 MiB. Median elapsed time was 1.034 s before and 1.066 s after. These figures cover a single request.
+
+Four simultaneous native-sized requests carried 33,521,664 verified bytes in total. Median peak memory was 42.3 MiB before and 42.8 MiB after. Median time rose from 723 to 778 ms. The memory saving in the larger single response did not carry over to these smaller requests.
+
+On a file using 16 KiB BEP52 chunks and the default fanout of 174, the reader fetched one sibling twice. Deferring that read until the preceding subtree had been consumed reduced the read count from 178 to 177 and saved 16,384 bytes. All three trials returned the same 2,867,200 file bytes. With 2 ms of simulated storage latency per read, the medians were 75.5 and 74.9 ms. The default 2 MiB chunk case falls outside the small-sibling prefetch condition measured here.
+
+### Ordinary Git pushes and a second publisher
+
+Two isolated publishers pushed a repository with 768 KiB of file content to the same loopback storage server. The ordinary Git command ran once per scenario for each helper. Three independent clones per helper checked the branch tip, initial commit, file contents and strict Git object integrity. A separate withdrawal test removed the first publisher's claims and confirmed that the second publisher could still serve the entire history.
+
+| Push | Storage requests, before → after | Bytes sent, before → after | Bytes received, before → after | Git time, before → after |
+| --- | ---: | ---: | ---: | ---: |
+| First push to an empty target | 8 → 9 | 1,592,014 → 1,589,697 | 16,059 → 28,947 | 33.20 → 33.61 s |
+| Same target, unchanged ref | 6 → 6 | 1,702 → 1,702 | 3,970 → 3,970 | 8.02 → 8.02 s |
+| Same target, one small file edit | 10 → 11 | 11,275 → 1,589,119 | 10,396 → 50,321 | 8.48 → 8.68 s |
+| New publisher, same tip on a warm server | 8 → 9 | 12,275 → 1,591,175 | 4,011 → 31,884 | 33.15 → 33.59 s |
+
+Byte counts include Blossom HTTP and relay WebSocket traffic in both directions. Times include Git startup and relay discovery and exclude clone verification. These are single matched observations. On a changed ref, the corrected helper resends the reachable repository with signed writes and verifies that one writer records ownership of every block. This raised the upload for a small edit by 1,577,844 bytes on this fixture. An unchanged ref incurred the same traffic with either helper.
+
 ## 2026-11-26 - Nostr archive indexer (`hashtree-nostr`, `hashtree-index`, `PoolStore`/LMDB batch writes, and `htree` catch-up / forward append)
 
 We profiled and optimized the durable Nostr event archive indexer (`htree nostr-index catch-up` and `htree nostr-index append-forward`) across both paired local macOS ARM64 release microbenchmarks (comparing the pre-optimization baseline commit against the optimized commit on identical workloads and bit-for-bit identical output root CIDs) and a live multi-terabyte Linux x86_64 archive workload (47 GiB pool catalog LMDB + 24 GiB packed cold-member LMDB on mirrored 7200 RPM HDDs with `HTREE_LMDB_NO_READ_AHEAD=1` and synchronous durability).
