@@ -12,7 +12,6 @@ assert run(['pnpm','run','check'],'early-typecheck')==0
 assert run(['pnpm','run','build'],'candidate-build')==0
 files={str(p.relative_to(root/'dist')):sha(p.read_bytes()) for p in (root/'dist').rglob('*') if p.is_file()};(evidence/'artifact.json').write_text(json.dumps({'source':spec['commit'],'archiveSha256':spec['archiveSha256'],'env':spec['env'],'files':files},indent=2)+'\n')
 with tarfile.open(evidence/'dist.tar.gz','w:gz') as tar:tar.add(root/'dist',arcname='dist')
-assert files==json.loads((stage/'procedure/retained-runtime.json').read_text())['files'],'Fixture correction changed runtime bytes'
 launch="launchOptions:{channel:'chromium',args:['--disable-features=WebRtcHideLocalIpsWithMdns','--allow-loopback-in-peer-connection']}"
 config=root/'playwright.qualification.config.ts';config.write_text("import {defineConfig} from '@playwright/test';import original from './playwright.config';export default defineConfig({...original,workers:1,retries:0,outputDir:'/stage/evidence/social/'+process.env.QUALIFICATION_NAME+'-output',reporter:[['list'],['json',{outputFile:process.env.QUALIFICATION_REPORT}]],use:{...original.use,trace:'retain-on-failure',"+launch+"}});")
 negative=stage/'apps/retained-scroll-negative';(negative/'node_modules').symlink_to(root/'node_modules',target_is_directory=True)
@@ -32,8 +31,10 @@ for label,cwd in [('baseline',stage/'apps/baseline'),('candidate',root)]:
  config=cwd/'playwright.matched.config.ts';config.write_text("import {defineConfig,devices} from '@playwright/test';import original from './playwright.config';export default defineConfig({...original,workers:1,retries:0,projects:[{name:'matched',use:{...devices['Desktop Chrome']}}],outputDir:'/stage/evidence/social/'+process.env.QUALIFICATION_NAME+'-output',reporter:[['list'],['json',{outputFile:process.env.QUALIFICATION_REPORT}]],use:{...original.use,trace:'off',"+launch+"}});")
  status=run(['pnpm','exec','playwright','test','--config='+config.name,'tests/navigation-performance.spec.ts'],label+'-navigation',cwd)
  if label=='candidate' and status:
-  subprocess.run(['python3','/stage/procedure/run-diagnostic.py'],cwd=root,env=env,check=True,timeout=300)
-  # Preserve the failed navigation record; finish independent gates once.
+  diagnostic_case=root/'tests/navigation-performance.spec.ts';original=diagnostic_case.read_bytes()
+  try:subprocess.run(['python3','/stage/procedure/run-diagnostic.py'],cwd=root,env=env,check=True,timeout=300)
+  finally:diagnostic_case.write_bytes(original)
+  raise AssertionError('Unchanged navigation gate failed; diagnostics retained and source test restored')
 subprocess.run(['python3','/stage/procedure/run-final-closure.py'],cwd=root,env=env,check=True,timeout=1800)
 
 assert next(r for r in records if r['name']=='candidate-navigation')['exit']==0, 'Unchanged navigation gate failed; full evidence retained, no publication'

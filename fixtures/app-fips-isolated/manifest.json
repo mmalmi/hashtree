@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Same Social source and all unchanged gates; select two distinct hosted physical cores within the existing two-CPU quota, retain topology, and collect full closure even if navigation fails.",
+  "purpose": "Bound profile-preview classification to the one requested row; unchanged navigation budgets, focused regression and full exact production gates. Restore diagnostic-only test edits; retain all prior successful unit/browser evidence.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "7f258a28b13a233cf5dc43459e3ebc44a1b33fae",
+      "commit": "af476627d0640309f75b97d32e9495a3bb2179ae",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "3f3d7606bb050872dbb2a8372a3331f88bb2e288c261dd01a48ed218ba3ea749",
+      "archiveSha256": "5196afcabbb7d2966832f61a6a93b52461a0cfa0fcbd1528f633dbbb5fc7450c",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
