@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Combined cold/retained profile adoption fixes. Demonstrate early-scroll failure on preceding source, then verify corrected arrival, navigation/scroll stability and full production gates.",
+  "purpose": "Close five brace-only source/test lint corrections. Full exact-source unit/type/lint/pin checks and runtime build for byte binding to the preceding full browser qualification; no publication.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "1dc02595080f2f931e7dcf91e476a109f7fde0f1",
+      "commit": "49289b087b5e3fc8b38ea466a7b366ccfeb1b995",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "c76f0e91312fccdaa3a418ec3957f21180e8e40e17505eb05a292c653875c34f",
+      "archiveSha256": "1b49d782d64b324fa8abe37c74a96e4f924489db8a90d8aad4ec4b4e8ed13a9f",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
@@ -47,10 +47,10 @@
         "tests/navigation-performance.spec.ts": "a12c917ef105d800f8a3a87b70e5b0c1e6af7da3676af96f5383f01cf6aa5a88",
         "tests/note-mentions-ui.spec.ts": "1acb5082c8c7c04eab0f059acc7f48cb56b060f4c4f33790aaf203e2edd04a86",
         "tests/profile-content.spec.ts": "2f03413579709fe6d10c6f1b001d56f28c33e566d04913ca635fe1fe3aa75e79",
-        "tests/navigation-shell.spec.ts": "3425ac0e5dffc5eaad1a015b922fa391ae6badaccb8cbf304c84772f70bada2d",
+        "tests/navigation-shell.spec.ts": "70895ab09aa9b05d846e1b045bb3135e17a774dc731acf84eb39a4355fdb0220",
         "tests/page-scroll-shell.spec.ts": "7808dace0c1eee21f5ea9bbf8340ffb03bf50eb9e20913e7d2bd859f3c415693",
         "tests/app-route-state.spec.ts": "e50933400186da5cc5af0b836748e185548a8acbde5ade4f3b2d29b7d4b7efa0",
-        "tests/home-feed-stability-ui.spec.ts": "aa85d189faa855e07b74e73e3007343f286265d5fdea7f50f115d04581bb158d"
+        "tests/home-feed-stability-ui.spec.ts": "cabece146a92df08d4c4626bc0457afd0ff7efa66245648ba686b1b1c5442e39"
       },
       "expectedProjects": [
         "chromium",
