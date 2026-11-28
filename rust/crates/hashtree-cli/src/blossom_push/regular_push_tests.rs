@@ -2,6 +2,7 @@ use super::*;
 use crate::server::HashtreeServer;
 use axum::http::StatusCode;
 use axum::routing::{head, post, put};
+use hashtree_core::decode_tree_node_by_cid;
 use hashtree_core::{sha256, DirEntry, HashTree, HashTreeConfig};
 use nostr::Keys;
 use tempfile::TempDir;
