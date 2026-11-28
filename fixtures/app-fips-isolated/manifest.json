@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "purpose": "Qualify bounded profile preview, with updated exact regression-test digest; same app archive and unchanged full gates.",
+  "purpose": "Qualify combined bounded profile preview and silent controller-cache readback, preserving rendered-cache reactivity. Same strict navigation, complete exact-source project gates and controls.",
   "image": "mcr.microsoft.com/playwright@sha256:eac9b0a5312cdab40ee8c2429df5bf19bffdccf8f3bf3c42268e173f97541645",
   "imageTagForProvenance": "v1.59.1-noble",
   "imageIndexSha256": "b0ab6f3cb99aa7803adbc14d9027ec1785fc6e433b97e134e0f8fe61683b6b53",
@@ -11,9 +11,9 @@
   "apps": [
     {
       "id": "social",
-      "commit": "af476627d0640309f75b97d32e9495a3bb2179ae",
+      "commit": "a6b43f0a0be476599c2c027fdcc7ddbb97f5d3a8",
       "archive": "archives/social-source.tar.gz",
-      "archiveSha256": "5196afcabbb7d2966832f61a6a93b52461a0cfa0fcbd1528f633dbbb5fc7450c",
+      "archiveSha256": "e68b439aa85fb5b88b60c8052cd527e9d5f935c142ba6989117b79a7311e997f",
       "lockSha256": "63191e4be55d3b02d627e9ca84ac15d370430749273ab6cfaf014c6ca121e93a",
       "packageManager": "pnpm@10.28.2",
       "configSha256": "5cc874b3351e5f62d5aad018f4b50f20a07717a50b242004f725186de9183dcf",
