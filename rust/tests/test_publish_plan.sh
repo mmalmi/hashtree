@@ -34,37 +34,14 @@ fuse_version="$(awk -F '"' '/^version = / { print $2; exit }' "${RUST_DIR}/crate
 grep -F "hashtree-fuse = { version = \"${fuse_version}\", path = \"../fuse\", optional = true, features = [\"fuse\"] }" \
     "${RUST_DIR}/crates/hashtree-cli/Cargo.toml" >/dev/null
 
-fake_bin="$(mktemp -d "${TMPDIR:-/tmp}/hashtree-publish-test.XXXXXX")"
-trap 'rm -rf "${fake_bin}"' EXIT
-export REAL_CARGO
-REAL_CARGO="$(command -v cargo)"
-cat >"${fake_bin}/cargo" <<'STUB'
-#!/bin/bash
-if [[ "$1" == metadata ]]; then exec "$REAL_CARGO" "$@"; fi
-[[ "$1" == publish && "${*: -2:1}" == -p ]] || exit 2
-name="${*: -1}"
-version="$(python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]==sys.argv[1]))' "$name" < "$PUBLISH_METADATA")"
-echo "error: crate ${name}@${version} already exists on crates.io index" >&2
-exit 1
-STUB
-chmod +x "${fake_bin}/cargo"
-export PUBLISH_METADATA="${fake_bin}/metadata.json"
-cargo metadata --manifest-path "${RUST_DIR}/Cargo.toml" --no-deps --locked --format-version 1 > "$PUBLISH_METADATA"
-python3 - "$PUBLISH_METADATA" <<'PYTHON'
+python3 -B "${SCRIPT_DIR}/test_publish_resume.py"
+cargo metadata --manifest-path "${RUST_DIR}/Cargo.toml" --no-deps --locked --format-version 1 | python3 -c '
 import json, sys
-with open(sys.argv[1]) as metadata:
-    cli = next(p for p in json.load(metadata)["packages"] if p["name"] == "hashtree-cli")
+cli = next(p for p in json.load(sys.stdin)["packages"] if p["name"] == "hashtree-cli")
 bins = {t["name"] for t in cli["targets"] if "bin" in t["kind"]
         and set(t.get("required-features", [])) <= set(cli["features"]["default"])}
 assert {"htree", "git-remote-htree"} <= bins, "Both binaries must install by default"
-PYTHON
-SKIP_OUTPUT="$(PATH="${fake_bin}:${PATH}" "${PUBLISH_SCRIPT}")"
-planned_count="$(printf '%s\n' "$PLAN_OUTPUT" | awk 'NF { count++ } END { print count }')"
-skipped_count="$(printf '%s\n' "$SKIP_OUTPUT" | grep -cF 'already published at this version (skipping)')"
-if [ "$planned_count" -ne "$skipped_count" ]; then
-    echo "unchanged registry versions must skip without failing the release" >&2
-    exit 1
-fi
+'
 
 if printf '%s\n' "$PLAN_OUTPUT" | grep -Fx 'cashu-service' >/dev/null; then
     echo "cashu-service is published from the standalone cashu-service repo, not hashtree" >&2

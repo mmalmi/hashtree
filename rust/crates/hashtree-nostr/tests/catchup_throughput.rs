@@ -343,6 +343,71 @@ fn catchup_append_fanout_and_commit_matrix_preserves_every_projection() {
 }
 
 #[test]
+fn parallel_required_reads_preserve_append_replay_and_historical_projections() {
+    block_on(async {
+        let (historical, incoming) = fixture();
+        let backing = Arc::new(MemoryStore::new());
+        let previous = NostrEventStore::new(backing.clone())
+            .build(None, historical.clone())
+            .await
+            .unwrap()
+            .unwrap();
+        let previous_projections = projections(backing.clone(), &previous).await;
+        let mut reference = None;
+        for workers in [1, 2, 4, 8, 16] {
+            let measured = Arc::new(RecordingStore::new(backing.clone()));
+            let writer = NostrEventStore::with_options(
+                measured.clone(),
+                NostrEventStoreOptions {
+                    index_commit_batch_size: Some(256),
+                    ..Default::default()
+                },
+            )
+            .with_index_write_buffer_bytes(8 * 1024 * 1024)
+            .with_index_read_concurrency(workers);
+            let root = writer
+                .build(Some(&previous), incoming.clone())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut blobs = measured.appended.keys();
+            blobs.sort();
+            let counters = (
+                measured.metrics.gets.load(Ordering::Relaxed),
+                measured.metrics.inserted_bytes.load(Ordering::Relaxed),
+            );
+            let observed = (root.clone(), blobs, counters);
+            if let Some(expected) = &reference {
+                assert_eq!(
+                    &observed, expected,
+                    "parallel lookup must preserve exact root, all retained blobs and read count"
+                );
+            } else {
+                reference = Some(observed);
+            }
+            let reader = NostrEventStore::new(measured.clone());
+            reader.validate_index_root(Some(&root)).await.unwrap();
+            assert_eq!(
+                projections(measured.clone(), &previous).await,
+                previous_projections
+            );
+            // Reopen from the durable result with no worker-local cache state.
+            let reopened =
+                NostrEventStore::new(measured.clone()).with_index_read_concurrency(workers);
+            assert_eq!(
+                reopened.build(Some(&root), incoming.clone()).await.unwrap(),
+                Some(root)
+            );
+            assert_eq!(
+                measured.metrics.inserted_bytes.load(Ordering::Relaxed),
+                counters.1,
+                "duplicate replay cannot retain new content"
+            );
+        }
+    });
+}
+
+#[test]
 fn catchup_coalesces_projection_writes_without_changing_any_root_or_retained_blob() {
     block_on(async {
         let (historical, incoming) = fixture();

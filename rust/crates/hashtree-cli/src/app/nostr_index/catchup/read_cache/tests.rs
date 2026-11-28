@@ -4,9 +4,7 @@ use hashtree_nostr::{stored_event_from_nostr_sdk_event, NostrEventStore, NostrEv
 use nostr::{EventBuilder, Keys, Kind, Timestamp};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-// Explicit diagnostic feature: cold admission requires a real Linux filesystem
-// and a dedicated resource window, outside the ordinary parallel test suite.
-#[cfg(all(feature = "lmdb", feature = "archive-io-diagnostics"))]
+#[cfg(feature = "lmdb")]
 mod append_io;
 
 #[derive(Default)]

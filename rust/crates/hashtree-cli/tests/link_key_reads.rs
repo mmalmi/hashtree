@@ -102,12 +102,14 @@ fn fixture() -> Fixture {
     );
     let root = Cid::parse(&writer.upload_dir_encrypted(&source).unwrap()).unwrap();
     let public_root = Cid::parse(&writer.upload_dir(&source).unwrap()).unwrap();
+    let note = Cid::parse(&writer.upload_file_encrypted(source.join("marker")).unwrap()).unwrap();
 
     let author = Keys::generate();
     let secret = LinkKeyBytes::from_bytes(&[0x5a; 33]).unwrap();
     let legacy_secret = LinkKeyBytes::from_bytes(&[0x3c; 32]).unwrap();
     let relay = TestRelay::with_events(vec![
         link_visible_root(&author, "photos", &root, &secret, true),
+        link_visible_root(&author, "team/note", &note, &secret, true),
         link_visible_root(&author, "legacy", &root, &legacy_secret, false),
     ]);
     let blossom = BlobServer::new(Some(writer));
@@ -266,6 +268,30 @@ fn get_and_cat_open_link_visible_trees_without_sending_the_secret() {
         for leaked in [secret.as_str(), legacy.as_str(), "k=", "#"] {
             assert!(!head.contains(leaked), "{leaked:?} sent in:\n{head}");
         }
+    }
+}
+
+#[test]
+fn get_and_cat_read_the_same_suffixed_link_to_a_nested_publication() {
+    let fx = fixture();
+    let printed_form = format!(
+        "htree://{}/team/note#k={}/note",
+        fx.npub(),
+        hex::encode(fx.secret)
+    );
+    let out = fx.temp.path().join("note");
+    assert_success(&fx.htree(&["get", &printed_form, "--output", out.to_str().unwrap()]));
+    assert_eq!(std::fs::read(out).unwrap(), b"link-visible hello");
+    let result = fx.cat(&printed_form, &[]);
+    assert_success(&result);
+    assert_eq!(result.stdout, b"link-visible hello");
+    for request in fx
+        .blossom
+        .requests()
+        .iter()
+        .chain(fx.daemon.requests().iter())
+    {
+        assert!(!request.contains(&hex::encode(fx.secret)) && !request.contains("#k="));
     }
 }
 

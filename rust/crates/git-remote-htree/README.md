@@ -63,6 +63,20 @@ git remote add origin htree://self/myrepo#private
 git push origin main
 ```
 
+When a push updates a ref, configure at least one Blossom write server that keeps
+blobs for your signing identity and supports the authenticated BUD-02 owner
+list. The helper checks that one server has retained the entire reachable
+repository before it publishes the new root. A server configured for public
+caching can accept an upload without granting ownership. The helper reports an
+error if it cannot verify the required claims on any configured writer.
+
+Ref updates send signed repository blocks, including shared history. An
+unchanged ref uses the ordinary Git no-op path. Writers that paginate by whole
+seconds can return at most 1,000 owner records from a single second. The helper
+paces groups of new claims at that boundary. A writer with older or concurrent
+records hidden by that limit can still refuse verification. A failed retention
+check leaves the previously announced refs in place.
+
 Each pusher should use their own identity-specific remote instead of sharing one private key. If multiple people push with the same key and their local refs are not in sync, a later push can overwrite refs published by someone else.
 
 Unresolved names such as `git clone htree://iris-chat` or

@@ -611,7 +611,7 @@ fn format_duration_compact(duration: Duration) -> String {
     format!("{}ms", duration.as_millis())
 }
 
-fn encode_hash_route_segment(segment: &str) -> String {
+pub(super) fn encode_hash_route_segment(segment: &str) -> String {
     let mut encoded = String::with_capacity(segment.len());
     for byte in segment.bytes() {
         match byte {

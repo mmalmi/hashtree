@@ -39,7 +39,7 @@ fn test_pr_auto_merge_detection() {
     println!("\n=== PR Auto-Merge Detection Test ===\n");
 
     // Create maintainer environment
-    let maintainer_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let maintainer_env = server.writer_env(&relay.url());
     let maintainer_npub = maintainer_env.npub.clone();
     println!("Maintainer: {}", &maintainer_npub[..20]);
 
@@ -522,7 +522,7 @@ fn setup_pr_merge_fixture(
     server: &TestServer,
     repo_name: &str,
 ) -> PrMergeFixture {
-    let maintainer_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let maintainer_env = server.writer_env(&relay.url());
     let maintainer_npub = maintainer_env.npub.clone();
     let env_vars: Vec<_> = maintainer_env.env();
 

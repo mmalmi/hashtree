@@ -42,6 +42,12 @@ pub use pool::{
     ReadOnlyPoolStore, POOL_DELETE_PROTECTED,
 };
 
+pub(crate) enum VerifyBatchOutcome {
+    Verified,
+    Missing,
+    Corrupt,
+}
+
 use async_trait::async_trait;
 use hashtree_core::store::{PutManyReport, Store, StoreError, StoreStats};
 use hashtree_core::{to_hex, types::Hash};
@@ -90,7 +96,6 @@ const NEXT_ORDER_KEY: &[u8] = b"next_order";
 const NEXT_ORDER_MIGRATION_FLOOR: u64 = 1 << 48;
 const EXTERNAL_BLOB_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-blob-v1\0";
 const EXTERNAL_PACK_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-pack-v1\0";
-const EXTERNAL_PACK_RESERVED_MARKER_PREFIX: &[u8] = b"\0hashtree-lmdb-external-pack-reserved-v1\0";
 const LMDB_NO_READ_AHEAD_ENV: &str = "HTREE_LMDB_NO_READ_AHEAD";
 const LMDB_NO_SYNC_ENV: &str = "HTREE_LMDB_NO_SYNC";
 const LMDB_NO_META_SYNC_ENV: &str = "HTREE_LMDB_NO_META_SYNC";
@@ -2306,6 +2311,55 @@ impl LmdbBlobStore {
             return Ok(existing);
         }
 
+        if sorted_hashes.len() >= 128 {
+            let workers = (sorted_hashes.len() / 32).clamp(2, 8);
+            let chunk_len = sorted_hashes.len().div_ceil(workers);
+            std::thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(workers);
+                for (hash_chunk, existing_chunk) in sorted_hashes
+                    .chunks(chunk_len)
+                    .zip(existing.chunks_mut(chunk_len))
+                {
+                    handles.push(scope.spawn(move || -> Result<(), StoreError> {
+                        let rtxn = self.env.read_txn().map_err(map_heed_error)?;
+                        Self::mark_existing_hashes_in_db(
+                            self.metadata,
+                            &rtxn,
+                            hash_chunk,
+                            existing_chunk,
+                        )?;
+                        if existing_chunk.iter().all(|exists| *exists) {
+                            return Ok(());
+                        }
+                        Self::mark_existing_hashes_in_db(
+                            self.blobs,
+                            &rtxn,
+                            hash_chunk,
+                            existing_chunk,
+                        )?;
+                        Ok(())
+                    }));
+                }
+                let mut first_err = None;
+                for handle in handles {
+                    match handle
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+                    {
+                        Ok(()) => {}
+                        Err(err) => {
+                            first_err.get_or_insert(err);
+                        }
+                    }
+                }
+                if let Some(err) = first_err {
+                    return Err(err);
+                }
+                Ok(())
+            })?;
+            return Ok(existing);
+        }
+
         let rtxn = self.env.read_txn().map_err(map_heed_error)?;
         Self::mark_existing_hashes_in_db(self.metadata, &rtxn, sorted_hashes, &mut existing)?;
         if existing.iter().all(|exists| *exists) {
@@ -2465,33 +2519,41 @@ impl LmdbBlobStore {
         let mut inserted_bytes = 0u64;
         let mut inserted_pinned = 0u64;
         let mut inserted_pinned_bytes = 0u64;
-        let mut order = self
+        let start_order = self
             .allocate_order_range_in_txn(wtxn, inserted_entries.len())
             .map_err(map_heed_error)?;
+        let has_pins = !self.pins.is_empty(wtxn).map_err(map_heed_error)?;
 
+        let mut order = start_order;
         for (hash, data_len) in inserted_entries {
             let meta = Self::encode_blob_meta(BlobMeta {
                 order,
                 size: *data_len,
                 last_accessed_at: now,
             });
-            let order_key = Self::encode_order_key(order, hash);
             order = order.saturating_add(1);
             self.metadata
                 .put(wtxn, hash, &meta)
                 .map_err(map_heed_error)?;
-            self.eviction_order
-                .put(wtxn, &order_key, &())
-                .map_err(map_heed_error)?;
             inserted_bytes = inserted_bytes.saturating_add(*data_len);
-            if self
-                .read_pin_count_lossy(wtxn, hash)
-                .map_err(map_heed_error)?
-                > 0
+            if has_pins
+                && self
+                    .read_pin_count_lossy(wtxn, hash)
+                    .map_err(map_heed_error)?
+                    > 0
             {
                 inserted_pinned = inserted_pinned.saturating_add(1);
                 inserted_pinned_bytes = inserted_pinned_bytes.saturating_add(*data_len);
             }
+        }
+
+        let mut order = start_order;
+        for (hash, _) in inserted_entries {
+            let order_key = Self::encode_order_key(order, hash);
+            order = order.saturating_add(1);
+            self.eviction_order
+                .put(wtxn, &order_key, &())
+                .map_err(map_heed_error)?;
         }
 
         self.increment_totals_in_txn(
@@ -2541,69 +2603,94 @@ impl LmdbBlobStore {
             total,
             ..PutManyReport::default()
         };
-        let mut inserted_entries: Vec<(Hash, u64)> = Vec::new();
+        let mut sorted_indices = (0..items.len()).collect::<Vec<_>>();
+        sorted_indices.sort_unstable_by_key(|&idx| items[idx].0);
+        let sorted_keys = sorted_indices
+            .iter()
+            .map(|&idx| items[idx].0.as_slice())
+            .collect::<Vec<_>>();
+        let sorted_present = self
+            .blobs
+            .contains_raw_keys_without_data(&wtxn, &sorted_keys)
+            .map_err(map_heed_error)?;
+        let mut present = vec![false; items.len()];
+        for (&idx, is_present) in sorted_indices.iter().zip(sorted_present) {
+            present[idx] = is_present;
+        }
+
+        let mut absent_items: Vec<(Hash, &[u8])> = Vec::new();
         let mut external_blobs: Vec<(Hash, &[u8])> = Vec::new();
         let mut external_pack_entries: Vec<(usize, Hash, &[u8])> = Vec::new();
         let external_config = self.external_blobs.as_ref();
 
-        for (hash, data) in items {
-            let external = external_config.filter(|config| data.len() >= config.min_bytes);
-            let pack_external = external.is_some_and(|config| config.pack_target_bytes.is_some());
-            let reserved_marker;
-            let external_marker;
-            let value = if pack_external {
-                reserved_marker = Self::external_pack_reserved_ref(hash);
-                reserved_marker.as_slice()
-            } else if external.is_some() {
-                external_marker = Self::external_blob_ref(hash);
-                external_marker.as_slice()
-            } else {
-                *data
-            };
-
-            match self
-                .blobs
-                .put_with_flags(&mut wtxn, PutFlags::NO_OVERWRITE, hash, value)
-            {
-                Ok(()) => {}
-                Err(HeedError::Mdb(MdbError::KeyExist)) => continue,
-                Err(err) => return Err(map_heed_error(err)),
+        for ((hash, data), is_present) in items.iter().zip(present) {
+            if is_present {
+                continue;
             }
-
-            let inserted_index = inserted_entries.len();
+            let absent_index = absent_items.len();
             let data_len = data.len() as u64;
-            inserted_entries.push((*hash, data_len));
+            absent_items.push((*hash, *data));
             report.inserted = report.inserted.saturating_add(1);
             report.inserted_bytes = report.inserted_bytes.saturating_add(data_len);
             report.inserted_hashes.push(*hash);
 
+            let external = external_config.filter(|config| data.len() >= config.min_bytes);
+            let pack_external = external.is_some_and(|config| config.pack_target_bytes.is_some());
             if pack_external {
-                external_pack_entries.push((inserted_index, *hash, *data));
+                external_pack_entries.push((absent_index, *hash, *data));
             } else if external.is_some() {
                 external_blobs.push((*hash, *data));
             }
         }
 
-        if inserted_entries.is_empty() {
+        if absent_items.is_empty() {
             return Ok(report);
         }
 
+        let mut pack_markers: Vec<Option<Vec<u8>>> = if external_pack_entries.is_empty() {
+            Vec::new()
+        } else {
+            vec![None; absent_items.len()]
+        };
         if let Some(config) = external_config {
             for (hash, data) in external_blobs {
                 self.write_external_blob(&hash, data, config)?;
             }
             if let Some(pack_target_bytes) = config.pack_target_bytes {
-                for (inserted_index, marker) in self.write_external_blob_packs(
-                    &external_pack_entries,
-                    config,
-                    pack_target_bytes,
-                )? {
-                    let hash = inserted_entries[inserted_index].0;
-                    self.blobs
-                        .put(&mut wtxn, &hash, &marker)
-                        .map_err(map_heed_error)?;
+                if !external_pack_entries.is_empty() {
+                    for (absent_index, marker) in self.write_external_blob_packs(
+                        &external_pack_entries,
+                        config,
+                        pack_target_bytes,
+                    )? {
+                        pack_markers[absent_index] = Some(marker);
+                    }
                 }
             }
+        }
+
+        // Write each absent blob and metadata entry into LMDB once in strictly sorted hash order.
+        let mut sorted_absent = (0..absent_items.len()).collect::<Vec<_>>();
+        sorted_absent.sort_unstable_by_key(|&idx| absent_items[idx].0);
+        let mut inserted_entries: Vec<(Hash, u64)> = Vec::with_capacity(absent_items.len());
+        for absent_index in sorted_absent {
+            let (hash, data) = absent_items[absent_index];
+            let external_marker;
+            let value = if let Some(marker) = pack_markers
+                .get(absent_index)
+                .and_then(|marker| marker.as_deref())
+            {
+                marker
+            } else if external_config.is_some_and(|config| data.len() >= config.min_bytes) {
+                external_marker = Self::external_blob_ref(&hash);
+                external_marker.as_slice()
+            } else {
+                data
+            };
+            self.blobs
+                .put_with_flags(&mut wtxn, PutFlags::NO_OVERWRITE, &hash, value)
+                .map_err(map_heed_error)?;
+            inserted_entries.push((hash, data.len() as u64));
         }
 
         self.write_metadata_for_inserted_blobs(&mut wtxn, &inserted_entries)?;
@@ -2816,6 +2903,85 @@ impl LmdbBlobStore {
             return self.read_external_pack_blob(&pack_ref).map(Some);
         }
         Ok(Some(blob.to_vec()))
+    }
+
+    /// Verify that every hash in `sorted_hashes` is committed and hashes to
+    /// itself using one LMDB read transaction and one file open per pack.
+    pub(crate) fn verify_many_committed_sync(
+        &self,
+        sorted_hashes: &[Hash],
+    ) -> Result<VerifyBatchOutcome, StoreError> {
+        if sorted_hashes.is_empty() {
+            return Ok(VerifyBatchOutcome::Verified);
+        }
+        let mut loose_external: Vec<(Hash, Option<u64>)> = Vec::new();
+        let mut pack_groups: std::collections::BTreeMap<String, Vec<(u64, u64, Hash)>> =
+            std::collections::BTreeMap::new();
+        {
+            let rtxn = self
+                .env
+                .read_txn()
+                .map_err(|e| StoreError::Other(e.to_string()))?;
+            for hash in sorted_hashes {
+                let Some(blob) = self
+                    .blobs
+                    .get(&rtxn, hash)
+                    .map_err(|e| StoreError::Other(e.to_string()))?
+                else {
+                    return Ok(VerifyBatchOutcome::Missing);
+                };
+                if self.is_external_blob_ref(hash, blob) {
+                    let expected_size = self
+                        .metadata
+                        .get(&rtxn, hash)
+                        .map_err(|e| StoreError::Other(e.to_string()))?
+                        .map(Self::decode_blob_meta)
+                        .transpose()?
+                        .map(|meta| meta.size);
+                    loose_external.push((*hash, expected_size));
+                } else if let Some(pack_ref) = Self::decode_external_pack_ref(blob)? {
+                    pack_groups.entry(pack_ref.name).or_default().push((
+                        pack_ref.offset,
+                        pack_ref.len,
+                        *hash,
+                    ));
+                } else if hashtree_core::sha256(blob) != *hash {
+                    return Ok(VerifyBatchOutcome::Corrupt);
+                }
+            }
+        }
+
+        if !pack_groups.is_empty() {
+            let config = self.external_blobs.as_ref().ok_or_else(|| {
+                StoreError::Other(
+                    "external LMDB pack marker found but external blobs are disabled".into(),
+                )
+            })?;
+            let mut buf = Vec::new();
+            for (pack_name, mut entries) in pack_groups {
+                entries.sort_unstable_by_key(|(offset, _, _)| *offset);
+                let file =
+                    config.open_relative(&ExternalBlobConfig::relative_pack_path(&pack_name))?;
+                for (offset, len, hash) in entries {
+                    let read_len = usize::try_from(len).map_err(|_| {
+                        StoreError::Other("external pack blob is too large to read".to_string())
+                    })?;
+                    buf.resize(read_len, 0);
+                    read_exact_at_offset(&file, &mut buf, offset)?;
+                    if hashtree_core::sha256(&buf) != hash {
+                        return Ok(VerifyBatchOutcome::Corrupt);
+                    }
+                }
+            }
+        }
+
+        for (hash, expected_size) in loose_external {
+            let data = self.read_external_blob(&hash, expected_size)?;
+            if hashtree_core::sha256(&data) != hash {
+                return Ok(VerifyBatchOutcome::Corrupt);
+            }
+        }
+        Ok(VerifyBatchOutcome::Verified)
     }
 
     pub fn get_range_sync(
@@ -3626,14 +3792,6 @@ impl LmdbBlobStore {
     fn external_blob_ref(hash: &Hash) -> Vec<u8> {
         let mut marker = Vec::with_capacity(EXTERNAL_BLOB_MARKER_PREFIX.len() + hash.len());
         marker.extend_from_slice(EXTERNAL_BLOB_MARKER_PREFIX);
-        marker.extend_from_slice(hash);
-        marker
-    }
-
-    fn external_pack_reserved_ref(hash: &Hash) -> Vec<u8> {
-        let mut marker =
-            Vec::with_capacity(EXTERNAL_PACK_RESERVED_MARKER_PREFIX.len() + hash.len());
-        marker.extend_from_slice(EXTERNAL_PACK_RESERVED_MARKER_PREFIX);
         marker.extend_from_slice(hash);
         marker
     }

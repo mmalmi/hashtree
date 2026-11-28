@@ -6,6 +6,7 @@ use hashtree_cli::{
 };
 use hashtree_core::{Cid, LinkKeyBytes, LinkSecretRef};
 use hashtree_updater::UpdateRef;
+use std::borrow::Cow;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -28,17 +29,40 @@ pub(crate) fn parse_published_target(input: &str) -> Option<UpdateRef> {
     UpdateRef::parse(input).ok()
 }
 
-/// Splits a read target from its link secret (`#k=`, local `?k=` or `--link-key`).
-/// Only the returned reference is resolved or fetched; the secret stays local.
+/// Interpret a Git share link as one published tree, even when its repository
+/// name contains slashes. Legacy short/query links keep normal resource paths.
+pub(super) fn parse_resource_link<'a>(
+    input: &'a str,
+    link_key: Option<&str>,
+) -> Result<(Cow<'a, str>, LinkSecretRef<'a>)> {
+    let (target, repo) = LinkSecretRef::parse_with_repository_name(input)?;
+    let target = target.with_link_key(link_key)?;
+    let reference = match repo {
+        Some(repo) => {
+            let prefix = target
+                .reference
+                .strip_suffix(repo)
+                .expect("repository suffix from parsed reference");
+            Cow::Owned(format!(
+                "{prefix}{}",
+                super::add::encode_hash_route_segment(repo)
+            ))
+        }
+        None => Cow::Borrowed(target.reference),
+    };
+    Ok((reference, target))
+}
+
+/// Only the resource reference is resolved or fetched; the link secret stays local.
 pub(crate) fn split_link_key<'a>(
     input: &'a str,
     link_key: Option<&str>,
-) -> Result<(&'a str, Option<LinkKeyBytes>)> {
-    let target = LinkSecretRef::parse(input)?.with_link_key(link_key)?;
+) -> Result<(Cow<'a, str>, Option<LinkKeyBytes>)> {
+    let (reference, target) = parse_resource_link(input, link_key)?;
     if target.fragment.is_some() {
         anyhow::bail!("Unsupported URL fragment; use #k=<link key>");
     }
-    Ok((target.reference, target.link_key))
+    Ok((reference, target.link_key))
 }
 
 /// Resolve a CID input which can be:

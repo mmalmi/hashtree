@@ -597,6 +597,7 @@ pub mod test_relay {
 
 /// Local blossom server for testing
 pub struct TestServer {
+    writer: nostr::Keys,
     _data_dir: TempDir,
     _home_dir: TempDir,
     process: Child,
@@ -605,6 +606,10 @@ pub struct TestServer {
 
 impl TestServer {
     pub fn new() -> Option<Self> {
+        Self::with_additional_writers(&[])
+    }
+
+    pub fn with_additional_writers(additional: &[nostr::PublicKey]) -> Option<Self> {
         let htree_bin = find_htree_binary()?;
         let data_dir = TempDir::new().expect("Failed to create temp dir");
         let home_dir = TempDir::new().expect("Failed to create home dir");
@@ -613,8 +618,14 @@ impl TestServer {
         let config_dir = home_dir.path().join(".hashtree");
         std::fs::create_dir_all(&config_dir).expect("Failed to create config dir");
 
-        // Server config - no auth for testing
-        let config_content = r#"
+        let writer = nostr::Keys::generate();
+        let allowed = std::iter::once(writer.public_key())
+            .chain(additional.iter().copied())
+            .map(|pk| pk.to_bech32().expect("encode fixture writer"))
+            .collect::<Vec<_>>();
+        let allowed = serde_json::to_string(&allowed).unwrap();
+        let config_content = format!(
+            r#"
 [server]
 bind_address = "127.0.0.1:0"
 enable_auth = false
@@ -623,7 +634,10 @@ enable_fips = false
 
 [nostr]
 relays = []
-"#;
+allowed_npubs = {allowed}
+social_graph_crawl_depth = 0
+"#
+        );
         std::fs::write(config_dir.join("config.toml"), config_content)
             .expect("Failed to write config");
 
@@ -654,11 +668,24 @@ relays = []
         }
 
         Some(TestServer {
+            writer,
             _data_dir: data_dir,
             _home_dir: home_dir,
             process,
             port,
         })
+    }
+
+    pub fn writer_env(&self, relay_url: &str) -> TestEnv {
+        TestEnv::with_nsec(
+            Some(&self.base_url()),
+            Some(relay_url),
+            &self
+                .writer
+                .secret_key()
+                .to_bech32()
+                .expect("encode fixture writer"),
+        )
     }
 
     pub fn base_url(&self) -> String {
@@ -711,7 +738,7 @@ impl Drop for TestServer {
     }
 }
 
-fn find_htree_binary() -> Option<PathBuf> {
+pub(crate) fn find_htree_binary() -> Option<PathBuf> {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let workspace_root = PathBuf::from(manifest_dir)
         .parent()?

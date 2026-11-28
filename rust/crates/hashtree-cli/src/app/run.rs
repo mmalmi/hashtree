@@ -351,6 +351,7 @@ pub(crate) fn should_spawn_background_update(cli: &Cli) -> bool {
                 NostrIndexCommands::RepairBulkProjectionProfiles { .. }
                     | NostrIndexCommands::RepairBulkProjectionEventBlobs { .. }
                     | NostrIndexCommands::RepairId { .. }
+                    | NostrIndexCommands::AppendForward { .. }
             )
     ) && !matches!(
         &cli.command,
@@ -1059,7 +1060,8 @@ fn run_command(
 
             // Resolve to Cid (raw bytes, no hex conversion needed for nhash)
             let (input, link_key) = split_link_key(&cid_input, link_key.as_deref())?;
-            let target = super::discovery::target(input, false, non_interactive, &data_dir).await?;
+            let target =
+                super::discovery::target(&input, false, non_interactive, &data_dir).await?;
             let resolved = super::resolve::resolve_get_input(&target, link_key).await?;
             let cid = resolved.cid.clone();
 
@@ -1148,7 +1150,7 @@ fn run_command(
                     .map(|config| config.nostr.active_relays()),
                 ..ResolveOptions::default()
             };
-            let resolved = resolve_cid_input_with_opts(input, &opts).await?;
+            let resolved = resolve_cid_input_with_opts(&input, &opts).await?;
 
             let store = Arc::new(HashtreeStore::new(&data_dir)?);
             let fetcher = Fetcher::new(FetchConfig::default());
@@ -1238,6 +1240,9 @@ fn run_command(
             }
         }),
         Commands::NostrIndex { command } => command_future!(match *command.0 {
+            NostrIndexCommands::AppendForward { options } => {
+                super::nostr_index::catchup::forward::run(data_dir, options).await?;
+            }
             NostrIndexCommands::RepairId { options } => {
                 super::nostr_index::repair_id::run(data_dir, options).await?;
             }

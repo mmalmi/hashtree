@@ -16,10 +16,13 @@ use super::{cid_to_nhash, parse_root_text, persist_json_atomic, CrawlStateLock, 
 
 mod append_checkpoint;
 mod coverage;
+pub(crate) mod forward;
 mod pipeline;
+mod progress;
 mod pubsub;
 mod read_cache;
 mod relay;
+mod repair_witness;
 
 #[derive(clap::Args, Debug)]
 pub(crate) struct CatchupArgs {
@@ -69,12 +72,25 @@ pub(crate) struct CatchupArgs {
     /// Runtime tuning only; every event commit still flushes before checkpointing.
     #[arg(long, default_value_t = 8, value_parser = clap::value_parser!(u16).range(0..=64))]
     index_write_buffer_mib: u16,
+    /// Log content-free append phase starts and batch counts to stderr.
+    /// Diagnostic only; batch completion is not an author checkpoint.
+    /// At most 40 rows per event batch, plus six rows per author.
+    /// At most 16 MiB per invocation, including one budget-exhausted marker.
+    #[arg(long)]
+    trace_append: bool,
+    /// Explicit pinned projection-repair lineage for an immutable old coverage head.
+    #[arg(long, requires = "repair_witness_sha256")]
+    repair_witness: Option<PathBuf>,
+    #[arg(long, requires = "repair_witness")]
+    repair_witness_sha256: Option<String>,
     /// Physical free-space floor checked at each local write (not resume policy).
     #[arg(long, default_value_t = 10 * 1024 * 1024 * 1024u64)]
     min_free_bytes: u64,
 }
 
 pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
+    let trace_append = args.trace_append;
+    let trace_budget = progress::TraceBudget::default();
     if args.max_authors_per_run == Some(0) {
         anyhow::bail!("--max-authors-per-run must be greater than zero");
     }
@@ -148,17 +164,45 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
     }
     // Share the existing writer lock while preserving the original crawl state.
     let _lock = CrawlStateLock::acquire(&data_dir)?;
+    // A forward transaction may have synced its blocks and replaced the root
+    // before the process stopped. Finish its durable acknowledgement before
+    // reading or advancing the historical checkpoint.
+    forward::recover_if_pending(&data_dir, &author_bytes, args.min_free_bytes).await?;
     let state_file = data_dir.join(INDEX_DIR).join("catchup-state.json");
+    let mut saved_bytes = Vec::new();
     let saved = match std::fs::read(&state_file) {
-        Ok(bytes) => Some(
-            serde_json::from_slice::<CatchupState>(&bytes).context("read catchup checkpoint")?,
-        ),
+        Ok(bytes) => {
+            let saved = serde_json::from_slice::<CatchupState>(&bytes)
+                .context("read catchup checkpoint")?;
+            saved_bytes = bytes;
+            Some(saved)
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).context("read catchup checkpoint"),
     };
     let coverage_directory = data_dir.join(INDEX_DIR).join("catchup-coverage");
+    let repair_witness = args
+        .repair_witness
+        .as_ref()
+        .map(|path| {
+            repair_witness::RepairWitness::load(
+                path,
+                args.repair_witness_sha256
+                    .as_deref()
+                    .context("missing repair witness digest")?,
+            )
+        })
+        .transpose()?;
+    let mut repair_bridge_active = false;
     if let Some(saved) = &saved {
-        coverage::validate_head(&coverage_directory, saved, &authors)?;
+        if let Err(original_error) = coverage::validate_head(&coverage_directory, saved, &authors) {
+            let Some(witness) = &repair_witness else {
+                return Err(original_error);
+            };
+            let before = witness.original_state(saved, &saved_bytes)?;
+            coverage::validate_head(&coverage_directory, before, &authors)?;
+            repair_bridge_active = true;
+        }
     }
     let append_checkpoint_file = data_dir.join(INDEX_DIR).join("catchup-append.json");
     let append_checkpoint =
@@ -179,14 +223,26 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         store.store_arc(),
         usize::from(args.read_cache_mib) * 1024 * 1024,
     ));
+    let local_only = config.storage.s3.is_none();
     let event_store = NostrEventStore::with_options(
         read_cache.clone(),
         NostrEventStoreOptions {
             index_commit_batch_size: Some(state.policy.index_commit_batch_size),
+            btree_update_concurrency: Some(if local_only { 8 } else { 4 }),
             ..Default::default()
         },
     )
+    // The local router performs synchronous reads. Eight bounded workers won
+    // the cold-Pool sweep; keep optional remote storage on its existing path.
+    .with_index_read_concurrency(if local_only { 8 } else { 1 })
     .with_index_write_buffer_bytes(usize::from(args.index_write_buffer_mib) * 1024 * 1024);
+    if repair_bridge_active {
+        repair_witness
+            .as_ref()
+            .expect("active repair witness")
+            .validate_archive(store.store_arc())
+            .await?;
+    }
     // An unreadable supplied root is fatal. Never silently start an empty index.
     event_store
         .validate_index_root(Some(&base_root))
@@ -197,8 +253,13 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
         .validate_index_root(Some(&root))
         .await
         .context("validate catchup checkpoint root")?;
-    store.admit_checkpoint_write(&state_file, serde_json::to_vec(&state)?.len() + 1)?;
-    persist_json_atomic(&state_file, &state, "Nostr catchup checkpoint")?;
+    // The witness binds exact repaired checkpoint bytes. Keep those bytes
+    // untouched until the first new coverage/checkpoint pair commits, so a
+    // source failure (or crash after preparing a new pass) remains resumable.
+    if !repair_bridge_active {
+        store.admit_checkpoint_write(&state_file, serde_json::to_vec(&state)?.len() + 1)?;
+        persist_json_atomic(&state_file, &state, "Nostr catchup checkpoint")?;
+    }
     let end = args
         .max_authors_per_run
         .map(|count| state.next_author.saturating_add(count).min(authors.len()))
@@ -208,7 +269,9 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
     let pass_since = state.pass_since;
     let pass_until = state.pass_until;
     let run_sources = CatchupRunSources::default();
-    let sources = std::array::from_fn(|_| {
+    // Four total authors includes the writer and buffered results, and fits the
+    // existing four-subscription P2P budget without shortening observations.
+    let sources: [_; 4] = std::array::from_fn(|_| {
         relay::RelaySource::new(policy.fetch_timeout_secs, policy.max_bytes_per_author)
     });
     let pubsub_timeout =
@@ -272,6 +335,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
             let state_file = &state_file;
             let coverage_directory = &coverage_directory;
             let author_count = authors.len();
+            let trace_budget = &trace_budget;
             let append_checkpoint = &append_checkpoint;
             let append_checkpoint_file = &append_checkpoint_file;
             async move {
@@ -281,6 +345,7 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                 let received = fetched.events.len() as u64;
                 let events = prepare_append_events(fetched.events);
                 let append_started = Instant::now();
+                let trace = progress::AppendTrace::new(trace_append, ordinal, trace_budget);
                 let resumed = append_checkpoint.as_ref().filter(|_| ordinal == resume_author);
                 let resumed = match resumed {
                     Some(cursor) if cursor.matches(&state, &events, received)? => Some(cursor.clone()),
@@ -290,22 +355,36 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                     }
                     None => None,
                 };
-                let mut cursor = if let Some(cursor) = resumed {
-                    eprintln!("Nostr catchup resume: completed_events={}", cursor.next_event);
-                    cursor
+                let (mut cursor, ids_scanned, ids_restored) = if let Some(cursor) = resumed {
+                    (cursor, 0, 0)
                 } else {
+                    trace.phase(progress::AuthorPhase::Reconcile, read_cache);
+                    let reconciliation = event_store
+                        .reconcile_author_note_ids_for_append(&root, author, &events)
+                        .await
+                        .with_context(|| format!("reconcile retained note IDs for author {author}"))?;
                     let cursor = append_checkpoint::AppendCheckpoint::new(
-                        &state, &events, received, cid_to_nhash(&root)?)?;
+                        &state, &events, received, cid_to_nhash(&reconciliation.root)?)?;
                     cursor.save(store, append_checkpoint_file)?;
-                    cursor
+                    (cursor, reconciliation.entries_scanned, reconciliation.ids_restored)
                 };
                 let mut next_root = parse_root_text(&cursor.root)?;
                 event_store.validate_index_root(Some(&next_root)).await?;
                 let batch_size = state.policy.index_commit_batch_size;
+                let batches = events.len().div_ceil(batch_size);
+                trace.phase(progress::AuthorPhase::Append, read_cache);
                 while cursor.next_event < events.len() {
                     let end = cursor.next_event.saturating_add(batch_size).min(events.len());
-                    let report = event_store.build_with_superseded_nodes(
+                    let completed = cursor.next_event / batch_size;
+                    let observer = |mut row: hashtree_nostr::NostrAppendProgress| {
+                        row.batch += completed;
+                        row.completed_batches += completed;
+                        row.batches = batches;
+                        trace.batch(row, read_cache);
+                    };
+                    let report = event_store.build_with_superseded_nodes_and_observer(
                         Some(&next_root), events[cursor.next_event..end].to_vec(),
+                        trace_append.then_some(&observer),
                     ).await.with_context(|| format!("append catchup author {}; {}", ordinal, store.physical_space_status()))?;
                     next_root = report.root.context("catchup writer discarded its nonempty base root")?;
                     cursor.root = cid_to_nhash(&next_root)?;
@@ -313,12 +392,15 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                     cursor.save(store, append_checkpoint_file)?;
                 }
                 let append_ms = append_started.elapsed().as_millis();
+                trace.phase(progress::AuthorPhase::Validate, read_cache);
                 let validate_started = Instant::now();
                 event_store.validate_index_root(Some(&next_root)).await?;
                 let validate_ms = validate_started.elapsed().as_millis();
+                trace.phase(progress::AuthorPhase::Sync, read_cache);
                 let sync_started = Instant::now();
                 store.force_sync().context("force-sync catchup blocks")?;
                 let sync_ms = sync_started.elapsed().as_millis();
+                trace.phase(progress::AuthorPhase::Checkpoint, read_cache);
                 let checkpoint_started = Instant::now();
                 let mut next = state.clone();
                 next.root = cid_to_nhash(&next_root)?;
@@ -330,18 +412,21 @@ pub(crate) async fn run(data_dir: PathBuf, args: CatchupArgs) -> Result<()> {
                 )?;
                 append_checkpoint::AppendCheckpoint::retire(append_checkpoint_file)?;
                 let state = next;
+                trace.phase(progress::AuthorPhase::Saved, read_cache);
                 // Do not delete superseded nodes: published roots and rollback readers
                 // may still depend on them. Publication owns eventual root-aware GC.
                 let (read_hits, read_misses, cache_bytes, cache_entries) = read_cache.read_stats();
                 let (write_calls, submitted_write_bytes) = read_cache.write_stats();
                 eprintln!(
-                    "Nostr catchup checkpoint: authors={}/{} interval={}..{} events_received={} author_events={} fetch_ms={} append_ms={} validate_ms={} sync_ms={} checkpoint_ms={} elapsed_ms={} read_cache_hits={} read_cache_misses={} read_cache_bytes={} read_cache_entries={} store_write_calls={} store_submitted_write_bytes={}",
+                    "Nostr catchup checkpoint: authors={}/{} interval={}..{} events_received={} author_events={} ids_scanned={} ids_restored={} fetch_ms={} append_ms={} validate_ms={} sync_ms={} checkpoint_ms={} elapsed_ms={} read_cache_hits={} read_cache_misses={} read_cache_bytes={} read_cache_entries={} store_write_calls={} store_submitted_write_bytes={}",
                     state.next_author,
                     author_count,
                     state.pass_since,
                     state.pass_until,
                     state.events_received,
                     received,
+                    ids_scanned,
+                    ids_restored,
                     fetch_ms,
                     append_ms,
                     validate_ms,

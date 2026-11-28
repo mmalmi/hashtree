@@ -7,6 +7,7 @@ struct History {
     bus: InMemoryEventBus,
     witness: Event,
     requests: AtomicUsize,
+    completed: AtomicUsize,
     delay: Duration,
 }
 
@@ -31,7 +32,9 @@ impl EventBus for History {
             self.requests.fetch_add(1, Ordering::SeqCst);
             tokio::time::sleep(self.delay).await;
         }
-        self.bus.query(filters, options).await
+        let report = self.bus.query(filters, options).await;
+        self.completed.fetch_add(1, Ordering::SeqCst);
+        report
     }
 }
 
@@ -73,6 +76,7 @@ async fn peer(
         bus: InMemoryEventBus::new(),
         witness: events[0].clone(),
         requests: AtomicUsize::new(0),
+        completed: AtomicUsize::new(0),
         delay,
     });
     for event in events {
@@ -168,7 +172,11 @@ async fn discovers_multiple_fips_peers_without_a_provider_roster() {
         );
         ensure!(
             report.events.len() == 3,
-            "peer events must be merged and deduplicated"
+            "peer events must be merged and deduplicated: received={:?}; first requests={} completed={} stats={:?}; second requests={} completed={} stats={:?}; runtime stats={:?}",
+            report.events.iter().map(|entry| entry.event.as_event().content.as_str()).collect::<Vec<_>>(),
+            first_history.requests.load(Ordering::SeqCst), first_history.completed.load(Ordering::SeqCst), first.delivery_snapshot(),
+            other_history.requests.load(Ordering::SeqCst), other_history.completed.load(Ordering::SeqCst), other.delivery_snapshot(),
+            runtime.client.delivery_snapshot()
         );
         for expected in [shared.id, first_only.id, second_only.id] {
             ensure!(

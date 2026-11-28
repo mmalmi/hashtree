@@ -1,4 +1,4 @@
-//! Two supervised author slots, including the author currently being committed.
+//! Bounded supervised author slots, including the author being committed.
 //!
 //! Network jobs own reusable sources and run independently of synchronous store
 //! writes. No source is recycled until its author's durable commit finishes.
@@ -27,8 +27,8 @@ async fn fetch_one<S, T>(
     (ordinal, source, result)
 }
 
-pub(super) async fn run<S, T, W, Fetch, FetchFuture, Commit, CommitFuture>(
-    sources: [S; 2],
+pub(super) async fn run<S, T, W, Fetch, FetchFuture, Commit, CommitFuture, const N: usize>(
+    sources: [S; N],
     authors: Range<usize>,
     mut fetch: Fetch,
     mut writer: W,
@@ -42,6 +42,7 @@ where
     Commit: FnMut(W, usize, T) -> CommitFuture,
     CommitFuture: Future<Output = Result<W>>,
 {
+    assert!((1..=4).contains(&N), "one to four owned author slots");
     let mut next_to_fetch = authors.clone();
     let mut fetching = JoinSet::new();
     let mut ready = BTreeMap::new();
@@ -77,7 +78,7 @@ where
                 }
             };
             // The writer, buffered results and network jobs together occupy at
-            // most two slots. A failed future author stops further admission,
+            // most N slots. A failed future author stops further admission,
             // while earlier successful authors still reach durable checkpoints.
             if !failed.load(Ordering::Acquire) {
                 if let Some(index) = next_to_fetch.next() {

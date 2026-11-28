@@ -6,7 +6,7 @@
 
 mod common;
 
-use common::{create_test_repo, skip_if_no_binary, test_relay::TestRelay, TestEnv, TestServer};
+use common::{create_test_repo, skip_if_no_binary, test_relay::TestRelay, TestServer};
 use std::process::Command;
 use tempfile::TempDir;
 
@@ -39,12 +39,12 @@ fn test_link_visible_push_and_clone_with_secret() {
 
     println!("\n=== Link-Visible Repo Test: Push and Clone with Secret ===\n");
 
-    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let test_env = server.writer_env(&relay.url());
     let env_vars: Vec<_> = test_env.env();
 
     let repo = create_test_repo();
     let secret = random_secret();
-    let remote_url = format!("htree://self/link-visible-test#k={}", secret);
+    let remote_url = format!("htree://self/team/link-visible-test#k={}", secret);
 
     println!("Using secret: {}...", &secret[..16]);
     println!("Remote URL: {}", remote_url);
@@ -81,7 +81,7 @@ fn test_link_visible_push_and_clone_with_secret() {
         .unwrap();
     assert_eq!(
         clone_url,
-        format!("htree://{npub}/link-visible-test#k={secret}/link-visible-test")
+        format!("htree://{npub}/team/link-visible-test#k={secret}/link-visible-test")
     );
     let clone_dir = TempDir::new().unwrap();
     let clone_path = clone_dir.path().join("link-visible-test");
@@ -108,6 +108,24 @@ fn test_link_visible_push_and_clone_with_secret() {
         "Files should match"
     );
 
+    // Open the exact string from the helper as a resource, using a fresh store.
+    let fetched = TempDir::new().unwrap();
+    let output = fetched.path().join("files");
+    let read = Command::new(common::find_htree_binary().expect("htree used by TestServer"))
+        .arg("--data-dir")
+        .arg(fetched.path().join("data"))
+        .args(["get", clone_url, "--output"])
+        .arg(&output)
+        .envs(env_vars.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .output()
+        .unwrap();
+    assert!(
+        read.status.success(),
+        "{}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    assert!(output.join(".git/objects").is_dir());
+
     println!("\n=== SUCCESS: Link-visible repo with secret works! ===");
 }
 
@@ -129,7 +147,7 @@ fn test_link_visible_cannot_clone_without_secret() {
 
     println!("\n=== Link-Visible Repo Test: Cannot Clone Without Secret ===\n");
 
-    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let test_env = server.writer_env(&relay.url());
     let env_vars: Vec<_> = test_env.env();
 
     let repo = create_test_repo();
@@ -213,7 +231,7 @@ fn test_link_visible_cannot_clone_with_wrong_secret() {
 
     println!("\n=== Link-Visible Repo Test: Cannot Clone With Wrong Secret ===\n");
 
-    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let test_env = server.writer_env(&relay.url());
     let env_vars: Vec<_> = test_env.env();
 
     let repo = create_test_repo();
@@ -302,7 +320,7 @@ fn test_private_push_and_clone_as_author() {
 
     println!("\n=== Private Repo Test: Push and Clone as Author ===\n");
 
-    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let test_env = server.writer_env(&relay.url());
     let env_vars: Vec<_> = test_env.env();
 
     let repo = create_test_repo();
@@ -378,7 +396,7 @@ fn test_private_cannot_clone_without_private_flag() {
 
     println!("\n=== Private Repo Test: Cannot Clone Without #private ===\n");
 
-    let test_env = TestEnv::new(Some(&server.base_url()), Some(&relay.url()));
+    let test_env = server.writer_env(&relay.url());
     let env_vars: Vec<_> = test_env.env();
 
     let repo = create_test_repo();

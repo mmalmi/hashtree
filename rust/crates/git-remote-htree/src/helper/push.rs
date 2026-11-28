@@ -3,11 +3,10 @@ use super::storage_support::{build_repo_viewer_url, get_hashtree_data_dir};
 use super::{fetch_progress_interval, AncestorCheck, PeriodicReporter, PushSpec, RemoteHelper};
 use crate::git::progress::RepoTreeBuildProgress;
 use crate::git::refs::Ref;
-use crate::git::storage::GIT_TREE_CHUNK_SIZE;
 use crate::nostr_client::{
     resolve_identity, BlossomResult, PullRequestStateFilter, RepoAnnouncementOptions,
 };
-use crate::runtime::{block_on, block_on_result};
+use crate::runtime::block_on_result;
 use anyhow::{bail, Context, Result};
 use flate2::{write::ZlibEncoder, Compression};
 use hashtree_core::{HashTree, LinkType, Store};
@@ -23,8 +22,6 @@ use std::thread;
 use std::time::Duration;
 use tracing::{debug, info, warn};
 
-const SERVER_COVERAGE_SAMPLE_SIZE: usize = 32;
-const UPLOAD_CHECK_BATCH_SIZE: usize = 10_000;
 const PENDING_UPLOAD_FLUSH_BYTES: usize = 16 * 1024 * 1024;
 const DEFAULT_GIT_BATCH_UPLOAD_TARGET_BYTES: usize = 4 * 1024 * 1024;
 const GIT_BATCH_UPLOAD_TARGET_BYTES_ENV: &str = "HTREE_GIT_BATCH_UPLOAD_TARGET_BYTES";
@@ -82,73 +79,10 @@ impl Write for ByteCountWriter {
     }
 }
 
-struct ServerUploadPresence {
-    present: HashSet<[u8; 32]>,
-    complete: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct UploadQueueItem {
-    pub(super) hash: [u8; 32],
-    pub(super) key: Option<hashtree_core::ObjectKey>,
-    pub(super) link_type: Option<LinkType>,
-    pub(super) size: u64,
-}
-
-impl UploadQueueItem {
-    fn root(hash: [u8; 32], key: Option<hashtree_core::ObjectKey>) -> Self {
-        Self {
-            hash,
-            key,
-            link_type: None,
-            size: 0,
-        }
-    }
-
-    fn from_link(link: &hashtree_core::Link) -> Self {
-        Self {
-            hash: link.hash,
-            key: link.key,
-            link_type: Some(link.link_type),
-            size: link.size,
-        }
-    }
-
-    pub(super) fn needs_tree_decode(&self) -> bool {
-        match self.link_type {
-            None | Some(LinkType::File | LinkType::Dir | LinkType::Fanout) => true,
-            // Size 0 is ambiguous in older trees that may not have recorded sizes.
-            // GitStorage uses smaller chunks than the core default. Its larger
-            // Blob entries are file roots whose descendants must be uploaded.
-            Some(LinkType::Blob) => self.size == 0 || self.size > GIT_TREE_CHUNK_SIZE as u64,
-        }
-    }
-}
-
-fn queue_upload_item_if_new(
-    queue: &mut Vec<UploadQueueItem>,
-    queued: &mut HashSet<[u8; 32]>,
-    item: UploadQueueItem,
-) -> bool {
-    if queued.insert(item.hash) {
-        queue.push(item);
-        true
-    } else {
-        false
-    }
-}
-
 #[derive(Clone)]
 struct PendingUpload {
     hash: [u8; 32],
     data: Vec<u8>,
-    from_old_tree: bool,
-    force_all_servers: bool,
-}
-
-struct IndividualUpload {
-    item: PendingUpload,
-    head_fallback: bool,
 }
 
 enum BatchUploadOutcome {
@@ -163,7 +97,7 @@ struct ForkSourceRepo {
     canonical_url: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 struct UploadCounters {
     uploaded: Arc<AtomicUsize>,
     skipped_diff: Arc<AtomicUsize>,
@@ -171,16 +105,6 @@ struct UploadCounters {
     failed: Arc<AtomicUsize>,
     completed: Arc<AtomicUsize>,
     discovered_total: Arc<AtomicUsize>,
-}
-
-struct PendingUploadPipeline<'a> {
-    blossom: &'a hashtree_blossom::BlossomClient,
-    all_servers: &'a [String],
-    use_upload_check: bool,
-    repairing_server_tree: bool,
-    tx: &'a tokio::sync::mpsc::Sender<IndividualUpload>,
-    counters: &'a UploadCounters,
-    batch_upload_concurrency: usize,
 }
 
 pub(super) struct GitPackCheckpointPlan {
@@ -291,32 +215,19 @@ pub(super) fn ensure_blossom_publish_ready(result: &BlossomResult) -> Result<()>
         );
     }
 
-    if result.degraded {
+    if result.degraded || result.succeeded.is_empty() {
         let failed = if result.failed.is_empty() {
             "unknown write server(s)".to_string()
         } else {
             result.failed.join(", ")
         };
         bail!(
-            "Remote Blossom replication incomplete ({}); not publishing root that clients may not be able to read",
+            "no Blossom write server confirmed ownership of the complete repository ({}); not publishing root",
             failed
         );
     }
 
     Ok(())
-}
-
-fn root_availability_error(root_hash: &str, unavailable: &[String]) -> anyhow::Error {
-    let servers = if unavailable.is_empty() {
-        "no configured write server".to_string()
-    } else {
-        unavailable.join(", ")
-    };
-    anyhow::anyhow!(
-        "Uploaded repo root {} is not readable from configured Blossom write server(s): {}; not publishing root",
-        &root_hash[..12.min(root_hash.len())],
-        servers
-    )
 }
 
 fn git_pack_checkpoint_min_objects() -> usize {
@@ -339,26 +250,6 @@ fn unique_git_pack_temp_dir() -> std::path::PathBuf {
         .unwrap_or_default()
         .as_nanos();
     std::env::temp_dir().join(format!("htree-git-pack-{}-{}", std::process::id(), nanos))
-}
-
-pub(super) fn queue_links_for_diff_upload(
-    queue: &mut Vec<UploadQueueItem>,
-    queued: &mut HashSet<[u8; 32]>,
-    links: &[hashtree_core::Link],
-    old_hashes: &HashSet<[u8; 32]>,
-    prune_known_subtrees: bool,
-    discovered_total: &std::sync::atomic::AtomicUsize,
-) {
-    use std::sync::atomic::Ordering;
-
-    for link in links {
-        if prune_known_subtrees && old_hashes.contains(&link.hash) {
-            continue;
-        }
-        if queue_upload_item_if_new(queue, queued, UploadQueueItem::from_link(link)) {
-            discovered_total.fetch_add(1, Ordering::Relaxed);
-        }
-    }
 }
 
 pub(super) async fn collect_complete_hashes<S: Store>(
@@ -392,57 +283,6 @@ pub(super) async fn collect_complete_hashes<S: Store>(
     Ok(hashes)
 }
 
-async fn check_upload_presence_on_servers(
-    blossom: &hashtree_blossom::BlossomClient,
-    servers: &[String],
-    hashes: &HashSet<[u8; 32]>,
-) -> Option<ServerUploadPresence> {
-    if servers.is_empty() || hashes.is_empty() {
-        return None;
-    }
-
-    let mut sorted_hashes: Vec<[u8; 32]> = hashes.iter().copied().collect();
-    sorted_hashes.sort_unstable();
-    let hash_hexes: Vec<String> = sorted_hashes.iter().map(hex::encode).collect();
-    let mut present = HashSet::new();
-    let mut checked_servers = 0usize;
-
-    for server in servers {
-        let Some(server_present) = blossom.check_uploads_on_server(&hash_hexes, server).await
-        else {
-            debug!("Blossom upload check unavailable for {}", server);
-            continue;
-        };
-        checked_servers += 1;
-        for hash_hex in server_present {
-            let Ok(bytes) = hex::decode(&hash_hex) else {
-                continue;
-            };
-            if bytes.len() != 32 {
-                continue;
-            }
-            let mut hash = [0u8; 32];
-            hash.copy_from_slice(&bytes);
-            present.insert(hash);
-        }
-    }
-
-    (checked_servers > 0).then_some(ServerUploadPresence {
-        present,
-        complete: checked_servers == servers.len(),
-    })
-}
-
-fn record_skipped_candidate(counters: &UploadCounters, from_old_tree: bool) {
-    if from_old_tree {
-        counters.skipped_diff.fetch_add(1, Ordering::Relaxed);
-    } else {
-        counters.skipped_server.fetch_add(1, Ordering::Relaxed);
-    }
-
-    counters.completed.fetch_add(1, Ordering::Relaxed);
-}
-
 fn record_batch_upload_result(counters: &UploadCounters, attempted: usize, uploaded: usize) {
     let uploaded = uploaded.min(attempted);
     let existing = attempted.saturating_sub(uploaded);
@@ -451,11 +291,6 @@ fn record_batch_upload_result(counters: &UploadCounters, attempted: usize, uploa
         .skipped_server
         .fetch_add(existing, Ordering::Relaxed);
 
-    counters.completed.fetch_add(attempted, Ordering::Relaxed);
-}
-
-fn record_batch_upload_failure(counters: &UploadCounters, attempted: usize) {
-    counters.failed.fetch_add(attempted, Ordering::Relaxed);
     counters.completed.fetch_add(attempted, Ordering::Relaxed);
 }
 
@@ -491,19 +326,6 @@ fn spawn_periodic_upload_progress(
             has_old_tree,
         ));
     })
-}
-
-async fn enqueue_pending_upload(
-    tx: &tokio::sync::mpsc::Sender<IndividualUpload>,
-    item: PendingUpload,
-    head_fallback: bool,
-) -> bool {
-    tx.send(IndividualUpload {
-        item,
-        head_fallback,
-    })
-    .await
-    .is_ok()
 }
 
 async fn upload_one_pending_batch_to_server(
@@ -665,251 +487,166 @@ fn split_pending_upload_batches(
     batches
 }
 
-async fn upload_pending_with_server_batches(
+async fn archive_hashes<S: Store>(
+    tree: &HashTree<S>,
+    root: hashtree_core::Cid,
+) -> Result<HashSet<[u8; 32]>> {
+    use hashtree_core::tree_walk::{child_cid, WalkContext};
+
+    let store = tree.get_store();
+    let mut hashes = HashSet::new();
+    let mut visited = HashSet::new();
+    let mut pending = vec![(root, WalkContext::Directory)];
+    while let Some((cid, context)) = pending.pop() {
+        if !visited.insert((cid.hash, cid.key, context)) {
+            continue;
+        }
+        let data = store.get(&cid.hash).await?.with_context(|| {
+            format!(
+                "required archive block {} is unavailable",
+                hex::encode(cid.hash)
+            )
+        })?;
+        hashes.insert(cid.hash);
+        if let Some(node) = context.decode(&cid, data.into())? {
+            let inner = if context.is_wrapped_directory(&node) {
+                Some(tree.read_wrapped_directory(&cid, &node).await?)
+            } else {
+                None
+            };
+            for node in std::iter::once(node).chain(inner) {
+                for link in &node.links {
+                    pending.push((
+                        child_cid(&cid, link),
+                        WalkContext::for_link(node.node_type, link),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(hashes)
+}
+
+async fn upload_archive_to_writer<S: Store>(
+    store: &S,
+    hashes: &HashSet<[u8; 32]>,
+    root_hash: &str,
+    blossom: &hashtree_blossom::BlossomClient,
+    server: &str,
+    counters: &UploadCounters,
+    concurrency: usize,
+) -> Result<()> {
+    // A repeat need not be paced: submitting an already owned blob does
+    // not create another dated owner record. The signed writes and the final
+    // ownership check still run for the entire tree.
+    let (unconfirmed, mut new_claims) = blossom.owner_claim_window(server, hashes).await?;
+    let mut batch_supported = true;
+    let mut window = Vec::new();
+    let mut bytes = 0usize;
+    for &hash in hashes {
+        if unconfirmed.contains(&hash) {
+            if new_claims == hashtree_blossom::OWNER_LIST_PAGE_SIZE {
+                upload_window_to_writer(
+                    std::mem::take(&mut window),
+                    blossom,
+                    server,
+                    counters,
+                    concurrency,
+                    &mut batch_supported,
+                )
+                .await?;
+                bytes = 0;
+                // BUD-02 can only page by timestamp. Separate a full wave
+                // of new owner claims from the next by one server second.
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                new_claims = 0;
+            }
+            new_claims += 1;
+        }
+        let data = store.get(&hash).await?.with_context(|| {
+            format!(
+                "required archive block {} disappeared before upload",
+                hex::encode(hash)
+            )
+        })?;
+        bytes = bytes.saturating_add(data.len());
+        window.push(PendingUpload { hash, data });
+        if bytes >= PENDING_UPLOAD_FLUSH_BYTES
+            || window.len() >= hashtree_blossom::BATCH_UPLOAD_MAX_BLOBS
+        {
+            upload_window_to_writer(
+                std::mem::take(&mut window),
+                blossom,
+                server,
+                counters,
+                concurrency,
+                &mut batch_supported,
+            )
+            .await?;
+            bytes = 0;
+        }
+    }
+    upload_window_to_writer(
+        window,
+        blossom,
+        server,
+        counters,
+        concurrency,
+        &mut batch_supported,
+    )
+    .await?;
+    let missing = blossom.unconfirmed_owners_on_server(server, hashes).await?;
+    anyhow::ensure!(
+        missing.is_empty(),
+        "owner list did not confirm {} required blobs",
+        missing.len()
+    );
+    if blossom.check_on_server(root_hash, server).await
+        != hashtree_blossom::BlobAvailability::Present
+    {
+        anyhow::bail!("confirmed repository root is not readable on its writer");
+    }
+    Ok(())
+}
+
+async fn upload_window_to_writer(
     items: Vec<PendingUpload>,
     blossom: &hashtree_blossom::BlossomClient,
-    servers: &[String],
+    server: &str,
     counters: &UploadCounters,
-    batch_upload_concurrency: usize,
-) -> Result<Vec<PendingUpload>> {
-    if items.is_empty() {
-        return Ok(Vec::new());
-    }
+    concurrency: usize,
+    batch_supported: &mut bool,
+) -> Result<()> {
+    use futures::stream::{self, StreamExt, TryStreamExt};
 
-    let mut fallback = Vec::new();
-    let batch_target_bytes = git_batch_upload_target_bytes();
-    let mut batches = split_pending_upload_batches(items, batch_target_bytes).into_iter();
-
-    let Some(mut first_batch) = batches.next() else {
-        return Ok(Vec::new());
-    };
-    let first_batch_len = first_batch.len();
-
-    let mut selected_server = None;
-    let mut last_error = None;
-    let mut saw_unsupported = false;
-    for (idx, server) in servers.iter().enumerate() {
-        let probe_batch = if idx + 1 == servers.len() && !saw_unsupported {
-            std::mem::take(&mut first_batch)
-        } else {
-            first_batch.clone()
-        };
-        match upload_pending_batch_adaptive_to_server(probe_batch, blossom, server, counters).await
-        {
-            Ok(BatchUploadOutcome::Uploaded) => {
-                selected_server = Some(server.clone());
-                break;
-            }
-            Ok(BatchUploadOutcome::Unsupported(mut unsupported)) => {
-                saw_unsupported = true;
-                first_batch = Vec::new();
-                first_batch.append(&mut unsupported);
-            }
-            Err(err) => {
-                last_error = Some(err);
-            }
+    let (batchable, mut singles): (Vec<_>, Vec<_>) = items.into_iter().partition(|item| {
+        *batch_supported && item.data.len() <= hashtree_blossom::BATCH_UPLOAD_MAX_BYTES
+    });
+    let batches = split_pending_upload_batches(batchable, git_batch_upload_target_bytes());
+    let mut uploads =
+        stream::iter(batches.into_iter().map(|batch| {
+            upload_pending_batch_adaptive_to_server(batch, blossom, server, counters)
+        }))
+        .buffer_unordered(concurrency);
+    while let Some(result) = uploads.next().await {
+        if let BatchUploadOutcome::Unsupported(mut fallback) = result? {
+            *batch_supported = false;
+            singles.append(&mut fallback);
         }
     }
 
-    let Some(server) = selected_server else {
-        if saw_unsupported {
-            fallback.append(&mut first_batch);
-            for mut batch in batches {
-                fallback.append(&mut batch);
-            }
-            return Ok(fallback);
-        }
-        if let Some(err) = last_error {
-            record_batch_upload_failure(counters, first_batch_len);
-            eprintln!(
-                "\n  Batch upload failed ({} blobs): {}",
-                first_batch_len, err
-            );
-            return Err(err);
-        }
-        fallback.append(&mut first_batch);
-        for mut batch in batches {
-            fallback.append(&mut batch);
-        }
-        return Ok(fallback);
-    };
-
-    use futures::stream::{self, StreamExt};
-
-    let concurrency = batch_upload_concurrency.max(1);
-    let mut upload_stream = stream::iter(batches.map(|batch| {
-        let blossom = blossom.clone();
-        let counters = counters.clone();
-        let server = server.clone();
-        let batch_len = batch.len();
-        async move {
-            let result =
-                upload_pending_batch_adaptive_to_server(batch, &blossom, &server, &counters).await;
-            (batch_len, result)
-        }
-    }))
-    .buffer_unordered(concurrency);
-
-    while let Some((batch_len, result)) = upload_stream.next().await {
-        match result {
-            Ok(BatchUploadOutcome::Uploaded) => {}
-            Ok(BatchUploadOutcome::Unsupported(mut batch)) => fallback.append(&mut batch),
-            Err(err) => {
-                record_batch_upload_failure(counters, batch_len);
-                eprintln!("\n  Batch upload failed ({} blobs): {}", batch_len, err);
-                return Err(err);
-            }
-        }
-    }
-
-    Ok(fallback)
-}
-
-impl PendingUploadPipeline<'_> {
-    async fn flush(
-        &self,
-        pending: &mut Vec<PendingUpload>,
-        pending_bytes: &mut usize,
-        upload_check_supported: &mut bool,
-        batch_upload_supported: &mut bool,
-    ) -> bool {
-        if pending.is_empty() {
-            return true;
-        }
-        *pending_bytes = 0;
-
-        let mut present = HashSet::new();
-        let mut checked_all_servers = false;
-        if self.use_upload_check && *upload_check_supported {
-            let hashes: HashSet<[u8; 32]> = pending.iter().map(|item| item.hash).collect();
-            match check_upload_presence_on_servers(self.blossom, self.all_servers, &hashes).await {
-                Some(presence) => {
-                    checked_all_servers = presence.complete;
-                    present = presence.present;
-                }
-                None => {
-                    *upload_check_supported = false;
-                    // Plain Blossom servers returning 404 on `/upload/check` also
-                    // do not implement `/upload/batch*`; avoid wasting bandwidth on 404s.
-                    *batch_upload_supported = false;
-                }
-            }
-        }
-
-        let head_fallback =
-            self.use_upload_check && !checked_all_servers && !self.repairing_server_tree;
-        let mut to_upload = Vec::new();
-        for item in pending.drain(..) {
-            if present.contains(&item.hash) {
-                record_skipped_candidate(self.counters, item.from_old_tree);
-                continue;
-            }
-
-            to_upload.push(item);
-        }
-
-        let batch_servers = if *batch_upload_supported
-            && (self.all_servers.len() == 1 || !self.repairing_server_tree)
-        {
-            Some(self.all_servers)
-        } else {
-            None
-        };
-
-        if !to_upload.is_empty() && batch_servers.is_some_and(|servers| !servers.is_empty()) {
-            let batch_servers = batch_servers.unwrap();
-            let mut batchable = Vec::new();
-            let mut fallback_to_individual = Vec::new();
-            for item in to_upload {
-                if item.force_all_servers
-                    || item.data.len() > hashtree_blossom::BATCH_UPLOAD_MAX_BYTES
-                {
-                    fallback_to_individual.push(item);
-                } else {
-                    batchable.push(item);
-                }
-            }
-
-            match upload_pending_with_server_batches(
-                batchable,
-                self.blossom,
-                batch_servers,
-                self.counters,
-                self.batch_upload_concurrency,
-            )
-            .await
-            {
-                Ok(fallback) => {
-                    if !fallback.is_empty() {
-                        *batch_upload_supported = false;
-                    }
-                    to_upload = fallback;
-                    to_upload.extend(fallback_to_individual);
-                }
-                Err(_) => return false,
-            }
-        }
-
-        for item in to_upload {
-            if !enqueue_pending_upload(self.tx, item, head_fallback).await {
-                return false;
-            }
-        }
-
-        true
-    }
-}
-
-async fn upload_block_to_file_servers(
-    blossom: &hashtree_blossom::BlossomClient,
-    data: &[u8],
-    from_old_tree: bool,
-    force_all_servers: bool,
-    servers_needing_full: &[String],
-) -> std::result::Result<(String, bool), hashtree_blossom::BlossomError> {
-    let write_server_count = blossom.write_servers().len();
-    if force_all_servers || (!from_old_tree && write_server_count > 1) {
-        if write_server_count <= 1 {
-            blossom.upload_if_missing(data).await
-        } else {
-            blossom
-                .upload_to_any_selected_server(data, blossom.write_servers())
-                .await
-        }
-    } else if from_old_tree && !servers_needing_full.is_empty() {
-        blossom
-            .upload_to_any_selected_server(data, servers_needing_full)
-            .await
-    } else {
-        blossom.upload_if_missing(data).await
-    }
+    stream::iter(singles.into_iter().map(Ok::<_, anyhow::Error>))
+        .try_for_each_concurrent(concurrency, |item| async move {
+            let (_, inserted) = blossom.upload_if_missing(&item.data).await?;
+            record_batch_upload_result(counters, 1, usize::from(inserted));
+            Ok(())
+        })
+        .await
 }
 
 impl RemoteHelper {
     fn upload_concurrency(&self, server_count: usize) -> usize {
         effective_upload_concurrency(server_count, self.config.blossom.upload_concurrency)
-    }
-
-    pub(super) fn verify_root_available_on_write_server(&self, root_hash: &str) -> Result<()> {
-        let blossom = self.nostr.blossom().clone();
-        let write_servers = blossom.write_servers().to_vec();
-        if write_servers.is_empty() {
-            return Err(root_availability_error(root_hash, &[]));
-        }
-
-        block_on_result(async {
-            let mut unavailable = Vec::new();
-            for server in &write_servers {
-                match blossom.check_on_server(root_hash, server).await {
-                    hashtree_blossom::BlobAvailability::Present => return Ok(()),
-                    hashtree_blossom::BlobAvailability::Missing
-                    | hashtree_blossom::BlobAvailability::Unknown => {
-                        unavailable.push(server.clone());
-                    }
-                }
-            }
-            Err(root_availability_error(root_hash, &unavailable))
-        })
     }
 
     pub(super) fn reupload_cached_remote_root_after_missing_download(
@@ -933,15 +670,8 @@ impl RemoteHelper {
             short_root
         );
 
-        let result = self.push_to_file_servers_with_diff(
-            &root_hash,
-            encryption_key.as_ref(),
-            None,
-            None,
-            false,
-        );
+        let result = self.push_to_file_servers(&root_hash, encryption_key.as_ref());
         ensure_blossom_publish_ready(&result)?;
-        self.verify_root_available_on_write_server(&root_hash)?;
         eprintln!("  Reuploaded existing htree root {}", short_root);
 
         Ok(true)
@@ -1926,7 +1656,7 @@ impl RemoteHelper {
                 .validate_root_contains_direct_refs(&root_cid)
                 .context("rebuilt repo tree is still missing ref objects")?;
         }
-        self.publish_built_root(root_cid, sha, rebuild)
+        self.publish_built_root(root_cid, sha)
     }
 
     /// Push multiple updated refs in one tree build, one Blossom diff upload,
@@ -2083,15 +1813,10 @@ impl RemoteHelper {
                 .context("rebuilt repo tree is still missing ref objects")?;
         }
 
-        self.publish_built_root(root_cid, head_sha, false)
+        self.publish_built_root(root_cid, head_sha)
     }
 
-    fn publish_built_root(
-        &self,
-        root_cid: hashtree_core::Cid,
-        sha: &str,
-        rebuild: bool,
-    ) -> Result<()> {
+    fn publish_built_root(&self, root_cid: hashtree_core::Cid, sha: &str) -> Result<()> {
         let root_hash_hex = hex::encode(root_cid.hash);
         let chk_key = root_cid.key;
         let is_link_visible = self.url_secret.is_some();
@@ -2110,20 +1835,8 @@ impl RemoteHelper {
             chk_key.map(|k| k.as_bytes().to_vec())
         };
 
-        let old_root_hash = self.nostr.get_cached_root_hash(&self.repo_name).cloned();
-        let old_encryption_key = self
-            .nostr
-            .get_cached_encryption_key(&self.repo_name)
-            .copied();
-        let blossom_result = self.push_to_file_servers_with_diff(
-            &root_hash_hex,
-            chk_key.as_ref(),
-            old_root_hash.as_deref().filter(|_| !rebuild),
-            old_encryption_key.as_ref().filter(|_| !rebuild),
-            !rebuild,
-        );
+        let blossom_result = self.push_to_file_servers(&root_hash_hex, chk_key.as_ref());
         ensure_blossom_publish_ready(&blossom_result)?;
-        self.verify_root_available_on_write_server(&root_hash_hex)?;
 
         let key_with_privacy = key_to_publish
             .as_ref()
@@ -3206,540 +2919,85 @@ impl RemoteHelper {
         }
     }
 
-    /// Push content to file servers (blossom) with efficient diff-based upload
-    pub(super) fn push_to_file_servers_with_diff(
+    /// Prepare each reachable block and require one writer to confirm the entire tree.
+    pub(super) fn push_to_file_servers(
         &self,
         root_hash: &str,
         encryption_key: Option<&hashtree_core::ObjectKey>,
-        old_root_hash: Option<&str>,
-        old_encryption_key: Option<&hashtree_core::ObjectKey>,
-        trust_server_old_tree_coverage: bool,
     ) -> BlossomResult {
-        use hashtree_core::decrypt_object;
-        use hashtree_core::try_decode_tree_node;
-
-        let store = self.storage.store();
         let blossom = self.nostr.blossom();
-        let configured: Vec<String> = blossom.write_servers().to_vec();
-
-        let root_bytes = match hex::decode(root_hash) {
-            Ok(b) if b.len() == 32 => {
-                let mut arr = [0u8; 32];
-                arr.copy_from_slice(&b);
-                arr
-            }
-            _ => {
-                warn!("Invalid root hash: {}", root_hash);
-                return BlossomResult {
-                    configured: configured.clone(),
-                    succeeded: vec![],
-                    failed: configured,
-                    local_complete: false,
-                    degraded: true,
-                };
-            }
+        let configured = blossom.write_servers().to_vec();
+        let mut result = BlossomResult {
+            configured: configured.clone(),
+            succeeded: Vec::new(),
+            failed: Vec::new(),
+            local_complete: false,
+            degraded: true,
         };
-
-        let force_upload = self.config.blossom.force_upload;
-        let old_root_bytes: Option<[u8; 32]> = if force_upload {
-            None
-        } else {
-            old_root_hash.and_then(|h| {
-                hex::decode(h).ok().and_then(|b| {
-                    if b.len() == 32 {
-                        let mut arr = [0u8; 32];
-                        arr.copy_from_slice(&b);
-                        Some(arr)
-                    } else {
-                        None
-                    }
-                })
-            })
-        };
-
-        let verbose = self.is_slow();
-        let trust_server_old_tree_coverage = trust_server_old_tree_coverage && !force_upload;
-        let (local_complete, degraded_replication) = match block_on(async {
-            use hashtree_core::{Cid, HashTree, HashTreeConfig};
-            use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-            use std::sync::Arc;
-            use tokio::sync::mpsc;
-
-            let uploaded = Arc::new(AtomicUsize::new(0));
-            let skipped_diff = Arc::new(AtomicUsize::new(0));
-            let skipped_server = Arc::new(AtomicUsize::new(0));
-            let failed = Arc::new(AtomicUsize::new(0));
-            let local_failed = Arc::new(AtomicUsize::new(0));
-            let completed = Arc::new(AtomicUsize::new(0));
-            let discovered_total = Arc::new(AtomicUsize::new(1));
-            let discovery_complete = Arc::new(AtomicBool::new(false));
-            let counters = UploadCounters {
-                uploaded: Arc::clone(&uploaded),
-                skipped_diff: Arc::clone(&skipped_diff),
-                skipped_server: Arc::clone(&skipped_server),
-                failed: Arc::clone(&failed),
-                completed: Arc::clone(&completed),
-                discovered_total: Arc::clone(&discovered_total),
+        let outcome = block_on_result(async {
+            let root = hashtree_core::Cid {
+                hash: hashtree_core::from_hex(root_hash)?,
+                key: encryption_key.copied(),
             };
-
-            let old_hashes: HashSet<[u8; 32]> = if let Some(old_root) = old_root_bytes {
-                if old_root == root_bytes {
-                    if verbose {
-                        eprintln!("  No changes detected (same root hash)");
-                    }
-                    return (true, false);
-                }
-
-                if verbose {
-                    eprintln!("  Computing diff from previous tree...");
-                }
-
-                let tree = HashTree::new(HashTreeConfig::new(store.clone()));
-                let old_cid = Cid {
-                    hash: old_root,
-                    key: old_encryption_key.copied(),
-                };
-
-                match collect_complete_hashes(&tree, &old_cid, 32).await {
-                    Ok(hashes) => {
-                        if verbose {
-                            eprintln!(" {} hashes in old tree", hashes.len());
-                        }
-                        hashes
-                    }
-                    Err(local_err) => match self.build_cached_fetch_tree() {
-                        Ok((cached_tree, _)) => {
-                            match collect_complete_hashes(&cached_tree, &old_cid, 32).await {
-                                Ok(hashes) => {
-                                    if verbose {
-                                        eprintln!(
-                                            " {} hashes in old tree (via cached fetch tree after local miss: {})",
-                                            hashes.len(),
-                                            local_err
-                                        );
-                                    }
-                                    hashes
-                                }
-                                Err(cached_err) => {
-                                    if verbose {
-                                        eprintln!(" failed locally: {}", local_err);
-                                        eprintln!(
-                                            "  Cached old-tree walk failed too: {}",
-                                            cached_err
-                                        );
-                                        eprintln!("  Falling back to full upload");
-                                    }
-                                    HashSet::new()
-                                }
-                            }
-                        }
-                        Err(build_err) => {
-                            if verbose {
-                                eprintln!(" failed locally: {}", local_err);
-                                eprintln!("  Could not build cached fetch tree: {}", build_err);
-                                eprintln!("  Falling back to full upload");
-                            }
-                            HashSet::new()
-                        }
-                    },
-                }
-            } else {
-                HashSet::new()
-            };
-
-            let has_old_tree = !old_hashes.is_empty();
-            let old_tree_unavailable = old_root_bytes.is_some() && !has_old_tree;
-            let all_servers: Vec<String> = blossom.write_servers().to_vec();
-            let servers_needing_full: Arc<Vec<String>> = if has_old_tree && all_servers.len() == 1 {
-                let old_root = old_root_bytes.unwrap();
-                let sample_hashes: Vec<String> = old_hashes
-                    .iter()
-                    .filter(|h| **h != old_root)
-                    .take(SERVER_COVERAGE_SAMPLE_SIZE)
-                    .map(hex::encode)
-                    .collect();
-                if sample_hashes.is_empty() {
-                    Arc::new(Vec::new())
-                } else {
-                    // Prefer a single `POST /upload/check` probe over 32 parallel
-                    // `HEAD` requests when supported; fall back to `HEAD` sampling
-                    // on plain Blossom servers.
-                    let coverage = match blossom
-                        .check_uploads_on_server(&sample_hashes, &all_servers[0])
-                        .await
-                    {
-                        Some(present) => {
-                            if present.len() == sample_hashes.len() {
-                                hashtree_blossom::BlobAvailability::Present
-                            } else {
-                                hashtree_blossom::BlobAvailability::Missing
-                            }
-                        }
-                        None => {
-                            let sample_refs: Vec<&str> =
-                                sample_hashes.iter().map(|s| s.as_str()).collect();
-                            blossom
-                                .server_tree_sample_coverage(
-                                    &all_servers[0],
-                                    &sample_refs,
-                                    SERVER_COVERAGE_SAMPLE_SIZE,
-                                )
-                                .await
-                        }
-                    };
-                    match coverage {
-                        hashtree_blossom::BlobAvailability::Missing => {
-                            if verbose {
-                                let server_name = all_servers[0]
-                                    .trim_start_matches("https://")
-                                    .trim_start_matches("http://")
-                                    .split('/')
-                                    .next()
-                                    .unwrap_or(&all_servers[0]);
-                                eprintln!(
-                                    "  Full upload needed: {} (missing old tree)",
-                                    server_name
-                                );
-                            }
-                            Arc::new(all_servers.clone())
-                        }
-                        hashtree_blossom::BlobAvailability::Unknown => {
-                            if verbose {
-                                let server_name = all_servers[0]
-                                    .trim_start_matches("https://")
-                                    .trim_start_matches("http://")
-                                    .split('/')
-                                    .next()
-                                    .unwrap_or(&all_servers[0]);
-                                eprintln!(
-                                    "  Old-tree coverage probe inconclusive: {}",
-                                    server_name
-                                );
-                            }
-                            Arc::new(Vec::new())
-                        }
-                        hashtree_blossom::BlobAvailability::Present => Arc::new(Vec::new()),
-                    }
-                }
-            } else {
-                Arc::new(Vec::new())
-            };
-            let prune_known_subtrees =
-                has_old_tree && trust_server_old_tree_coverage && servers_needing_full.is_empty();
-            let use_upload_check = !force_upload && (old_tree_unavailable || !prune_known_subtrees);
-            if verbose && use_upload_check {
-                eprintln!("  Checking server blob inventory in upload batches");
-            }
-
-            const CHANNEL_SIZE: usize = 100;
-            let upload_concurrency = self.upload_concurrency(all_servers.len());
-            let (tx, rx) = mpsc::channel::<IndividualUpload>(CHANNEL_SIZE);
-
-            let upload_handle = {
-                let blossom = blossom.clone();
-                let uploaded = Arc::clone(&uploaded);
-                let skipped_server = Arc::clone(&skipped_server);
-                let failed = Arc::clone(&failed);
-                let completed = Arc::clone(&completed);
-                let servers_needing_full = Arc::clone(&servers_needing_full);
-
-                tokio::spawn(async move {
-                    use futures::stream::StreamExt;
-                    use tokio_stream::wrappers::ReceiverStream;
-
-                    let stream = ReceiverStream::new(rx);
-                    stream
-                        .map(
-                            |IndividualUpload {
-                                 item,
-                                 head_fallback,
-                             }| {
-                                let PendingUpload {
-                                    hash,
-                                    data,
-                                    from_old_tree,
-                                    force_all_servers,
-                                } = item;
-                                let blossom = blossom.clone();
-                                let uploaded = Arc::clone(&uploaded);
-                                let skipped_server = Arc::clone(&skipped_server);
-                                let failed = Arc::clone(&failed);
-                                let completed = Arc::clone(&completed);
-                                let servers_needing_full = Arc::clone(&servers_needing_full);
-                                async move {
-                                    let result = if head_fallback {
-                                        let hash_hex = hex::encode(hash);
-                                        if blossom.exists(&hash_hex).await {
-                                            Ok((hash_hex, false))
-                                        } else {
-                                            upload_block_to_file_servers(
-                                                &blossom,
-                                                &data,
-                                                from_old_tree,
-                                                force_all_servers,
-                                                servers_needing_full.as_ref().as_slice(),
-                                            )
-                                            .await
-                                        }
-                                    } else {
-                                        upload_block_to_file_servers(
-                                            &blossom,
-                                            &data,
-                                            from_old_tree,
-                                            force_all_servers,
-                                            servers_needing_full.as_ref().as_slice(),
-                                        )
-                                        .await
-                                    };
-                                    match result {
-                                        Ok((_, true)) => {
-                                            uploaded.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                        Ok((_, false)) => {
-                                            skipped_server.fetch_add(1, Ordering::Relaxed);
-                                        }
-                                        Err(e) => {
-                                            failed.fetch_add(1, Ordering::Relaxed);
-                                            eprintln!(
-                                                "\n  Upload failed ({} bytes): {}",
-                                                data.len(),
-                                                e
-                                            );
-                                        }
-                                    }
-                                    completed.fetch_add(1, Ordering::Relaxed);
-                                }
-                            },
-                        )
-                        .buffer_unordered(upload_concurrency)
-                        .for_each(|_| async {})
-                        .await;
-                })
-            };
-
-            let mut visited: HashSet<[u8; 32]> = HashSet::new();
-            let mut queued: HashSet<[u8; 32]> = HashSet::new();
-            let mut queue: Vec<UploadQueueItem> = Vec::new();
-            let mut pending_uploads = Vec::with_capacity(UPLOAD_CHECK_BATCH_SIZE.min(1024));
-            let mut pending_bytes = 0usize;
-            let mut upload_check_supported = true;
-            let mut batch_upload_supported = true;
-            let upload_pipeline = PendingUploadPipeline {
-                blossom,
-                all_servers: &all_servers,
-                use_upload_check,
-                repairing_server_tree: !servers_needing_full.is_empty(),
-                tx: &tx,
-                counters: &counters,
-                batch_upload_concurrency: upload_concurrency,
-            };
-            let _ = queue_upload_item_if_new(
-                &mut queue,
-                &mut queued,
-                UploadQueueItem::root(root_bytes, encryption_key.copied()),
+            let (tree, _) = self.build_cached_fetch_tree()?;
+            let store = tree.get_store();
+            let hashes = archive_hashes(&tree, root).await?;
+            result.local_complete = true;
+            anyhow::ensure!(
+                self.nostr.can_sign()
+                    && blossom
+                        .signer_public_key()
+                        .to_hex()
+                        .eq_ignore_ascii_case(&self.pubkey),
+                "no matching signing identity for this repository"
             );
-
-            let progress_reporter = spawn_periodic_upload_progress(
-                counters.clone(),
-                Arc::clone(&discovery_complete),
-                has_old_tree,
-            );
-            emit_upload_progress(upload_progress_from_counters(
-                &counters,
-                &discovery_complete,
-                has_old_tree,
-            ));
-
-            while let Some(item) = queue.pop() {
-                let hash = item.hash;
-                if visited.contains(&hash) {
-                    continue;
-                }
-                visited.insert(hash);
-                let from_old_tree = old_hashes.contains(&hash);
-
-                let mut force_all_servers_for_hash = false;
-                if from_old_tree {
-                    if prune_known_subtrees {
-                        skipped_diff.fetch_add(1, Ordering::Relaxed);
-                        completed.fetch_add(1, Ordering::Relaxed);
-                        continue;
-                    } else {
-                        force_all_servers_for_hash = true;
-                    }
-                }
-
-                let data = match store.get_sync(&hash) {
-                    Ok(Some(data)) => data,
-                    Ok(None) => {
-                        failed.fetch_add(1, Ordering::Relaxed);
-                        local_failed.fetch_add(1, Ordering::Relaxed);
-                        completed.fetch_add(1, Ordering::Relaxed);
-                        eprintln!("\n  Missing from local store: {}", hex::encode(hash));
-                        continue;
-                    }
-                    Err(e) => {
-                        failed.fetch_add(1, Ordering::Relaxed);
-                        local_failed.fetch_add(1, Ordering::Relaxed);
-                        completed.fetch_add(1, Ordering::Relaxed);
-                        eprintln!("\n  Store read error for {}: {}", hex::encode(hash), e);
-                        continue;
-                    }
-                };
-
-                if item.needs_tree_decode() {
-                    let plaintext = if let Some(k) = item.key {
-                        match decrypt_object(&data, &k) {
-                            Ok(p) => p,
-                            Err(_)
-                                if k.mode() == hashtree_core::EncryptionMode::LegacyChk
-                                    && try_decode_tree_node(&data).is_some() =>
-                            {
-                                data.clone()
-                            }
-                            Err(error) => {
-                                failed.fetch_add(1, Ordering::Relaxed);
-                                local_failed.fetch_add(1, Ordering::Relaxed);
-                                completed.fetch_add(1, Ordering::Relaxed);
-                                eprintln!(
-                                    "\n  Cannot decrypt object {}: {}",
-                                    hex::encode(hash),
-                                    error
-                                );
-                                continue;
-                            }
-                        }
-                    } else {
-                        data.clone()
-                    };
-
-                    if let Some(node) = try_decode_tree_node(&plaintext) {
-                        queue_links_for_diff_upload(
-                            &mut queue,
-                            &mut queued,
-                            &node.links,
-                            &old_hashes,
-                            prune_known_subtrees,
-                            &discovered_total,
-                        );
-                    }
-                }
-
-                pending_bytes = pending_bytes.saturating_add(data.len());
-                pending_uploads.push(PendingUpload {
-                    hash,
-                    data,
-                    from_old_tree,
-                    force_all_servers: force_all_servers_for_hash,
-                });
-                if (pending_uploads.len() >= UPLOAD_CHECK_BATCH_SIZE
-                    || pending_bytes >= PENDING_UPLOAD_FLUSH_BYTES)
-                    && !upload_pipeline
-                        .flush(
-                            &mut pending_uploads,
-                            &mut pending_bytes,
-                            &mut upload_check_supported,
-                            &mut batch_upload_supported,
-                        )
-                        .await
-                {
-                    break;
-                }
-            }
-
-            let _ = upload_pipeline
-                .flush(
-                    &mut pending_uploads,
-                    &mut pending_bytes,
-                    &mut upload_check_supported,
-                    &mut batch_upload_supported,
+            let concurrency = self.upload_concurrency(configured.len());
+            for server in &configured {
+                let writer = blossom
+                    .clone()
+                    .with_write_servers(vec![server.clone()])
+                    .with_confirmed_upload_receipts();
+                let counters = UploadCounters::default();
+                counters
+                    .discovered_total
+                    .store(hashes.len(), Ordering::Relaxed);
+                let complete = Arc::new(AtomicBool::new(true));
+                let progress =
+                    spawn_periodic_upload_progress(counters.clone(), complete.clone(), false);
+                emit_upload_progress(upload_progress_from_counters(&counters, &complete, false));
+                let upload = upload_archive_to_writer(
+                    &*store,
+                    &hashes,
+                    root_hash,
+                    &writer,
+                    server,
+                    &counters,
+                    concurrency,
                 )
                 .await;
-
-            discovery_complete.store(true, Ordering::Relaxed);
-
-            let final_total_seen = discovered_total.load(Ordering::Relaxed);
-            emit_upload_progress(UploadProgress {
-                processed: completed.load(Ordering::Relaxed),
-                discovered: final_total_seen,
-                total: Some(final_total_seen),
-                uploaded: uploaded.load(Ordering::Relaxed),
-                skipped_diff: skipped_diff.load(Ordering::Relaxed),
-                skipped_server: skipped_server.load(Ordering::Relaxed),
-                failed: failed.load(Ordering::Relaxed),
-                has_old_tree,
-            });
-
-            drop(tx);
-            let _ = upload_handle.await;
-            progress_reporter.finish().await;
-
-            let final_uploaded = uploaded.load(Ordering::Relaxed);
-            let final_skipped_diff = skipped_diff.load(Ordering::Relaxed);
-            let final_skipped_server = skipped_server.load(Ordering::Relaxed);
-            let final_failed = failed.load(Ordering::Relaxed);
-            let final_local_failed = local_failed.load(Ordering::Relaxed);
-            let final_completed = completed.load(Ordering::Relaxed);
-
-            emit_upload_progress(UploadProgress {
-                processed: final_completed,
-                discovered: final_total_seen,
-                total: Some(final_total_seen),
-                uploaded: final_uploaded,
-                skipped_diff: final_skipped_diff,
-                skipped_server: final_skipped_server,
-                failed: final_failed,
-                has_old_tree,
-            });
-            eprintln!();
-
-            info!(
-                "Blossom upload complete: {} uploaded, {} unchanged (diff), {} already on server, {} failed",
-                final_uploaded, final_skipped_diff, final_skipped_server, final_failed
-            );
-
-            let local_complete = final_local_failed == 0 && final_completed == final_total_seen;
-            let degraded_replication = final_failed > final_local_failed;
-            (local_complete, degraded_replication)
-        }) {
-            Ok(outcome) => outcome,
-            Err(e) => {
-                warn!("Failed to run blossom upload on tokio runtime: {}", e);
-                return BlossomResult {
-                    configured: configured.clone(),
-                    succeeded: vec![],
-                    failed: configured,
-                    local_complete: false,
-                    degraded: true,
-                };
+                progress.finish().await;
+                emit_upload_progress(upload_progress_from_counters(&counters, &complete, false));
+                match upload {
+                    Ok(()) => {
+                        result.succeeded.push(server.clone());
+                        result.degraded = false;
+                        break;
+                    }
+                    Err(error) => {
+                        eprintln!(
+                            "  Blossom writer {} could not confirm this repository: {:#}",
+                            server, error
+                        );
+                        result.failed.push(server.clone());
+                    }
+                }
             }
-        };
-
-        if local_complete {
-            BlossomResult {
-                configured: configured.clone(),
-                succeeded: if degraded_replication {
-                    vec![]
-                } else {
-                    configured.clone()
-                },
-                failed: if degraded_replication {
-                    configured
-                } else {
-                    vec![]
-                },
-                local_complete: true,
-                degraded: degraded_replication,
-            }
-        } else {
-            BlossomResult {
-                configured: configured.clone(),
-                succeeded: vec![],
-                failed: configured,
-                local_complete: false,
-                degraded: true,
-            }
+            Ok(())
+        });
+        if let Err(error) = outcome {
+            eprintln!("  Failed to prepare confirmed repository upload: {error:#}");
         }
+        result
     }
 
     /// Collect all hashes reachable from a root hash by walking the merkle tree
@@ -4056,8 +3314,6 @@ mod tests {
         PendingUpload {
             hash: [0; 32],
             data: vec![0; len],
-            from_old_tree: false,
-            force_all_servers: false,
         }
     }
 

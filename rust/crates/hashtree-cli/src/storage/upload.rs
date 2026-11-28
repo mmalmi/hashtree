@@ -4,6 +4,11 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+mod batch;
+#[cfg(test)]
+mod batch_tests;
+use batch::DirectoryWriteBatch;
+
 #[derive(Debug, Default)]
 pub struct AddProgress {
     bytes_processed: AtomicU64,
@@ -439,25 +444,15 @@ impl HashtreeStore {
     fn buffered_upload_tree(
         &self,
         options: &UploadOptions<'_>,
-    ) -> (
-        Arc<hashtree_core::BufferedStore<StorageRouter>>,
-        HashTree<hashtree_core::BufferedStore<StorageRouter>>,
-    ) {
-        let buffered = Arc::new(
-            hashtree_core::BufferedStore::new_optimistic(self.store_arc())
-                .with_flush_threshold(DIR_UPLOAD_WRITE_BATCH_BYTES),
-        );
+    ) -> (Arc<DirectoryWriteBatch>, HashTree<DirectoryWriteBatch>) {
+        let buffered = Arc::new(DirectoryWriteBatch::new(self.store_arc()));
         let tree = Self::upload_tree_with_store(Arc::clone(&buffered), options);
         (buffered, tree)
     }
 
-    async fn finish_buffered_dir(
-        buffered: &hashtree_core::BufferedStore<StorageRouter>,
-        result: Result<Cid>,
-    ) -> Result<Cid> {
+    fn finish_buffered_dir(buffered: &DirectoryWriteBatch, result: Result<Cid>) -> Result<Cid> {
         let flush = buffered
             .flush()
-            .await
             .map_err(|e| anyhow::anyhow!("Failed to flush directory writes: {e}"));
         match (result, flush) {
             (Ok(root), Ok(_)) => Ok(root),
@@ -482,7 +477,7 @@ impl HashtreeStore {
                 options.progress,
             )
             .await;
-            Self::finish_buffered_dir(&buffered, result).await
+            Self::finish_buffered_dir(&buffered, result)
         })
         .context("Failed to upload directory")?;
         self.pin_upload_root(&root)?;
@@ -698,7 +693,7 @@ impl HashtreeStore {
                 Some(&mut cache),
             )
             .await;
-            let root = Self::finish_buffered_dir(&buffered, result).await?;
+            let root = Self::finish_buffered_dir(&buffered, result)?;
             cache.save(&root)?;
             Ok::<_, anyhow::Error>(root)
         })?;
